@@ -10,7 +10,7 @@ from importlib.util import find_spec
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
-from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
+from pydantic import ConfigDict, Field, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 
@@ -120,7 +120,7 @@ class ModelConfig:
     """Convert the model using adapters defined in
     [vllm.model_executor.models.adapters][]. The most common use case is to
     adapt a text generation model to be used for pooling tasks."""
-    task: TaskOption | None = None
+    task: TaskOption = Field(default=None)
     """[DEPRECATED] The task to use the model for. If the model supports more
     than one model runner, this is used to select which model runner to run.
 
@@ -147,37 +147,37 @@ class ModelConfig:
     - "bfloat16" for a balance between precision and range.\n
     - "float" is shorthand for FP32 precision.\n
     - "float32" for FP32 precision."""
-    seed: int | None = None
+    seed: int = Field(default=None)
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
     hf_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the model."""
     hf_text_config: PretrainedConfig = field(init=False)
     """The Hugging Face config of the text model (same as hf_config for text models)."""
-    hf_config_path: str | None = None
+    hf_config_path: str = Field(default=None)
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
     allowed_local_media_path: str = ""
     """Allowing API requests to read local images or videos from directories
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
-    allowed_media_domains: list[str] | None = None
+    allowed_media_domains: list[str] = Field(default=None)
     """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
-    revision: str | None = None
+    revision: str = Field(default=None)
     """The specific model version to use. It can be a branch name, a tag name,
     or a commit id. If unspecified, will use the default version."""
-    code_revision: str | None = None
+    code_revision: str = Field(default=None)
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
     rope_scaling: dict[str, Any] = field(default_factory=dict)
     """RoPE scaling configuration. For example,
     `{"rope_type":"dynamic","factor":2.0}`."""
-    rope_theta: float | None = None
+    rope_theta: float = Field(default=None)
     """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
     theta improves the performance of the scaled model."""
-    tokenizer_revision: str | None = None
+    tokenizer_revision: str = Field(default=None)
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
@@ -190,7 +190,7 @@ class ModelConfig:
     - 1k -> 1000\n
     - 1K -> 1024\n
     - 25.6k -> 25,600"""
-    spec_target_max_model_len: int | None = None
+    spec_target_max_model_len: int = Field(default=None)
     """Specify the maximum length for spec decoding draft models."""
     quantization: SkipValidation[QuantizationMethods | None] = None
     """Method used to quantize the weights. If `None`, we first check the
@@ -235,7 +235,7 @@ class ModelConfig:
 
     WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
     Only enable this flag for trusted users!"""
-    served_model_name: str | list[str] | None = None
+    served_model_name: str | list[str] = Field(default=None)
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
     model field of a response will be the first name in this list. If not
@@ -249,14 +249,14 @@ class ModelConfig:
     will try to load in mistral format.\n
     - "hf" will load the config in hf format.\n
     - "mistral" will load the config in mistral format."""
-    hf_token: bool | str | None = None
+    hf_token: bool | str = Field(default=None)
     """The token to use as HTTP bearer authorization for remote files . If
     `True`, will use the token generated when running `huggingface-cli login`
     (stored in `~/.huggingface`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
-    logits_processor_pattern: str | None = None
+    logits_processor_pattern: str = Field(default=None)
     """Optional regex pattern specifying valid logits processor qualified names
     that can be passed with the `logits_processors` extra completion argument.
     Defaults to `None`, which allows no processors."""
@@ -283,24 +283,24 @@ class ModelConfig:
     - "transformers" will use the Transformers model implementation.\n
     - "terratorch" will use the TerraTorch model implementation.
     """
-    override_attention_dtype: str | None = None
+    override_attention_dtype: str = Field(default=None)
     """Override dtype for attention"""
-    logits_processors: list[str | type[LogitsProcessor]] | None = None
+    logits_processors: list[str | type[LogitsProcessor]] = Field(default=None)
     """One or more logits processors' fully-qualified class names or class
     definitions"""
-    io_processor_plugin: str | None = None
+    io_processor_plugin: str = Field(default=None)
     """IOProcessor plugin name to load at model startup"""
 
     # Pooler config
-    pooler_config: PoolerConfig | None = None
+    pooler_config: PoolerConfig = Field(default=None)
     """Pooler config which controls the behaviour of output pooling in pooling
     models."""
-    override_pooler_config: dict | PoolerConfig | None = None
+    override_pooler_config: dict | PoolerConfig = Field(default=None)
     """[DEPRECATED] Use `pooler_config` instead. This field will be removed in
     v0.12.0 or v1.0.0, whichever is sooner."""
 
     # Multimodal config and init vars
-    multimodal_config: MultiModalConfig | None = None
+    multimodal_config: MultiModalConfig = Field(default=None)
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None

@@ -191,9 +191,9 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
-    lora_config: LoRAConfig | None = None
+    lora_config: LoRAConfig = Field(default=None)
     """LoRA configuration."""
-    speculative_config: SpeculativeConfig | None = None
+    speculative_config: SpeculativeConfig = Field(default=None)
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
@@ -203,7 +203,7 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
-    quant_config: QuantizationConfig | None = None
+    quant_config: QuantizationConfig = Field(default=None)
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
@@ -214,9 +214,9 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
-    kv_transfer_config: KVTransferConfig | None = None
+    kv_transfer_config: KVTransferConfig = Field(default=None)
     """The configurations for distributed KV cache transfer."""
-    kv_events_config: KVEventsConfig | None = None
+    kv_events_config: KVEventsConfig = Field(default=None)
     """The configurations for event publishing."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of

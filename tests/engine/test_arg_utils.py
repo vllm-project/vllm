@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
 import pytest
+from pydantic import Field
 
 from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (
@@ -115,9 +116,9 @@ class NestedConfig:
 class DummyConfig:
     regular_bool: bool = True
     """Regular bool with default True"""
-    optional_bool: bool | None = None
+    optional_bool: bool = Field(default=None)
     """Optional bool with default None"""
-    optional_literal: Literal["x", "y"] | None = None
+    optional_literal: Literal["x", "y"] = Field(default=None)
     """Optional literal with default None"""
     tuple_n: tuple[int, ...] = field(default_factory=lambda: (1, 2, 3))
     """Tuple with variable length"""

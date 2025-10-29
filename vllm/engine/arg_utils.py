@@ -27,7 +27,7 @@ from typing import (
 import huggingface_hub
 import regex as re
 import torch
-from pydantic import TypeAdapter, ValidationError
+from pydantic import Field, TypeAdapter, ValidationError
 from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
@@ -382,11 +382,11 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
-    data_parallel_rank: int | None = None
-    data_parallel_start_rank: int | None = None
-    data_parallel_size_local: int | None = None
-    data_parallel_address: str | None = None
-    data_parallel_rpc_port: int | None = None
+    data_parallel_rank: int = Field(default=None)
+    data_parallel_start_rank: int = Field(default=None)
+    data_parallel_size_local: int = Field(default=None)
+    data_parallel_address: str = Field(default=None)
+    data_parallel_rpc_port: int = Field(default=None)
     data_parallel_hybrid_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
@@ -462,7 +462,7 @@ class EngineArgs:
     mm_encoder_attn_backend: _Backend | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
-    io_processor_plugin: str | None = None
+    io_processor_plugin: str = Field(default=None)
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
     # LoRA fields
@@ -494,14 +494,14 @@ class EngineArgs:
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
 
     # Deprecated guided decoding fields
-    guided_decoding_backend: str | None = None
-    guided_decoding_disable_fallback: bool | None = None
-    guided_decoding_disable_any_whitespace: bool | None = None
-    guided_decoding_disable_additional_properties: bool | None = None
+    guided_decoding_backend: str = Field(default=None)
+    guided_decoding_disable_fallback: bool = Field(default=None)
+    guided_decoding_disable_any_whitespace: bool = Field(default=None)
+    guided_decoding_disable_additional_properties: bool = Field(default=None)
 
     logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
 
-    speculative_config: dict[str, Any] | None = None
+    speculative_config: dict[str, Any] = Field(default=None)
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -521,8 +521,8 @@ class EngineArgs:
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
-    kv_transfer_config: KVTransferConfig | None = None
-    kv_events_config: KVEventsConfig | None = None
+    kv_transfer_config: KVTransferConfig = Field(default=None)
+    kv_events_config: KVEventsConfig = Field(default=None)
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode

@@ -9,7 +9,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -98,17 +98,17 @@ class PassConfig:
     don't all have access to full configuration - that would create a cycle as
     the `PassManager` is set as a property of config."""
 
-    enable_fusion: bool | None = None
+    enable_fusion: bool = Field(default=None)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool | None = None
+    enable_attn_fusion: bool = Field(default=None)
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool | None = None
+    enable_noop: bool = Field(default=None)
     """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool | None = None
+    enable_sequence_parallelism: bool = Field(default=None)
     """Whether to enable sequence parallelism."""
-    enable_async_tp: bool | None = None
+    enable_async_tp: bool = Field(default=None)
     """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool | None = None
+    enable_fi_allreduce_fusion: bool = Field(default=None)
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
@@ -181,14 +181,14 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int | None = None
+    level: int = Field(default=None)
     """
     Level is deprecated and will be removed in the next release,
     either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: int | None = None
+    mode: int = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -202,7 +202,7 @@ class CompilationConfig:
          Requires no dynamic-shape-dependent control-flow.
     - 3: VLLM_COMPILE: Custom vLLM Inductor-based backend with caching,
          piecewise compilation, shape specialization, and custom passes."""
-    debug_dump_path: Path | None = None
+    debug_dump_path: Path = Field(default=None)
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -239,7 +239,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: list[str] | None = None
+    splitting_ops: list[str] = Field(default=None)
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
     The behavior depends on use_inductor_graph_partition:
@@ -259,7 +259,7 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
-    use_inductor: bool | None = None
+    use_inductor: bool = Field(default=None)
     """
     Whether to use inductor compilation.
 
@@ -277,7 +277,7 @@ class CompilationConfig:
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
     """
-    compile_sizes: list[int | str] | None = None
+    compile_sizes: list[int | str] = Field(default=None)
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
@@ -292,7 +292,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode | None = None
+    cudagraph_mode: CUDAGraphMode = Field(default=None)
     """
     The mode of the cudagraph:
 
@@ -345,7 +345,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: list[int] | None = None
+    cudagraph_capture_sizes: list[int] = Field(default=None)
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
@@ -375,7 +375,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool | None = None
+    use_inductor_graph_partition: bool = Field(default=None)
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
