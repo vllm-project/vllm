@@ -81,7 +81,7 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_s3
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -535,6 +535,7 @@ class EngineArgs:
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
+    mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -892,6 +893,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-ssm-cache-dtype", **cache_kwargs["mamba_ssm_cache_dtype"]
+        )
+        cache_group.add_argument(
+            "--mamba-block-size", **cache_kwargs["mamba_block_size"]
         )
 
         # Multimodal related configs
@@ -1301,19 +1305,25 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
+        # Check if the model is a speculator and override model/tokenizer/config
+        # BEFORE creating ModelConfig, so the config is created with the target model
+        # Skip speculator detection for S3 models since HuggingFace cannot load
+        # configs directly from S3 URLs. S3 models can still use speculators with
+        # explicit --speculative-config.
+        if not is_s3(self.model):
+            (self.model, self.tokenizer, self.speculative_config) = (
+                maybe_override_with_speculators(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    revision=self.revision,
+                    trust_remote_code=self.trust_remote_code,
+                    vllm_speculative_config=self.speculative_config,
+                )
+            )
+
         model_config = self.create_model_config()
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
-
-        (self.model, self.tokenizer, self.speculative_config) = (
-            maybe_override_with_speculators(
-                model=self.model,
-                tokenizer=self.tokenizer,
-                revision=self.revision,
-                trust_remote_code=self.trust_remote_code,
-                vllm_speculative_config=self.speculative_config,
-            )
-        )
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
@@ -1390,6 +1400,7 @@ class EngineArgs:
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
+            mamba_block_size=self.mamba_block_size,
         )
 
         ray_runtime_env = None
@@ -1548,11 +1559,12 @@ class EngineArgs:
         )
 
         if self.async_scheduling and (
-            parallel_config.distributed_executor_backend not in ("mp", "uni")
+            parallel_config.distributed_executor_backend
+            not in ("mp", "uni", "external_launcher")
         ):
             raise ValueError(
-                "Currently, async scheduling only supports `mp` or `uni` "
-                "distributed executor backend, but you choose "
+                "Currently, async scheduling only supports `mp`, `uni` or "
+                "`external_launcher` distributed executor backend, but you choose "
                 f"`{parallel_config.distributed_executor_backend}`."
             )
 
