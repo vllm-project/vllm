@@ -135,16 +135,9 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def create_new_topk_data(
         self,
-        expert_x,
         topk_ids,
         topk_weights,
-    ):  # -> tuple[torch.Tensor,torch.Tensor]:
-        if self.do_permute:
-            # TODO: this is wrong
-            M_sum, K = expert_x.shape
-            # Are these interleaved?
-            return topk_ids.view(-1, 1)[:M_sum], topk_weights.view(-1, 1)[:M_sum]
-
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # TODO: use all_gatherv
         all_topk_ids = get_dp_group().all_gather(topk_ids, dim=0)
         all_topk_weights = get_dp_group().all_gather(topk_weights, dim=0)
@@ -230,80 +223,47 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         self.pp("A1Q", a1q)
 
-        if not self.do_permute:
-            (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
-                hidden=a1q,
-                scaling_factor=a1q_scale,
-                topk_idx=topk_ids,
-                topk_weights=topk_weights,
-                routing_map=routing_map,
-                probs=probs,
-                handle=handle,
-                num_dispatched_tokens=None,
-                num_of_experts=num_experts,
-            )
+        (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
+            hidden=a1q,
+            scaling_factor=a1q_scale,
+            topk_idx=topk_ids,
+            topk_weights=topk_weights,
+            routing_map=routing_map,
+            probs=probs,
+            handle=handle,
+            num_dispatched_tokens=None,
+            num_of_experts=num_experts,
+        )
 
-            self.pp("EXPERT_X", expert_x)
+        self.pp("EXPERT_X", expert_x)
 
-            (
-                sparse_to_dense_map,
-                rdma_to_attn_map,
-                attn_to_rdma_map,
-                num_of_tokens_for_experts,
-                local_expert_routing_map,  #
-                num_tokens,
-                config,
-            ) = handle
-
-            self.p(
-                f"NUM_TOK_PER_EXPERT[{self.rank_expert_offset}]={num_of_tokens_for_experts.item()}"
-            )
-        else:
-            (expert_x, expert_probs, expert_x_scale, tokens_per_expert, handle) = (
-                self.buffer.dispatch_with_permute(
-                    hidden=a1q,
-                    scaling_factor=a1q_scale,
-                    topk_idx=topk_ids,
-                    topk_weights=topk_weights,
-                    routing_map=routing_map,
-                    probs=probs,
-                    handle=handle,
-                    num_dispatched_tokens=None,
-                    num_of_experts=num_experts,
-                    # pad_multiple=topk_ids.shape[1],
-                )
-            )
-
-            self.pp("TOKENS_PER_EXPERT", tokens_per_expert)
-
-            (
-                sparse_to_dense_map,
-                rdma_to_attn_map,
-                attn_to_rdma_map,
-                num_dispatched_tokens_tensor,
-                local_expert_routing_map,
-                row_id_map,
-                num_tokens,
-                config,
-            ) = handle
-
-            self.p(f"NUM_TOKENS = {num_tokens}")
-            # self.pp("ROW_ID_MAP", row_id_map)
+        # (
+        #     sparse_to_dense_map,
+        #     rdma_to_attn_map,
+        #     attn_to_rdma_map,
+        #     num_of_tokens_for_experts,
+        #     local_expert_routing_map,  #
+        #     num_tokens,
+        #     config,
+        # ) = handle
+        # self.pp("S2D", sparse_to_dense_map)
+        # self.p(
+        #     f"NUM_TOK_PER_EXPERT[{self.rank_expert_offset}]"
+        #     f"={num_of_tokens_for_experts.item()}"
+        # )
+        # self.pp("LERM", local_expert_routing_map)
 
         self.handle = handle
-        self.expert_probs = expert_probs
+        self.expert_probs = expert_probs  # TODO
         assert self.handle is not None
 
         self.pp("PROBS", self.expert_probs)
-        self.pp("S2D", sparse_to_dense_map)
         self.p(
             f"DISPATCH END[{self.rank_expert_offset}], x={expert_x.shape} "
             f"x_s={expert_x_scale.shape if expert_x_scale is not None else None}"
         )
-        self.pp("LERM", local_expert_routing_map)
 
         new_topk_ids, new_topk_weights = self.create_new_topk_data(
-            expert_x,
             topk_ids,
             topk_weights,
         )
@@ -318,7 +278,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self.pp("NEW_TOPK_IDS", new_topk_ids)
         self.pp("NEW_TOPK_WEIGHTS", new_topk_weights)
 
-        # N/A
+        # Unused
         expert_tokens_meta = None
 
         if not quant_config.is_block_quantized and quant_config.quant_dtype is not None:
@@ -358,21 +318,13 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # self.pp("FUSED_EXPERT_OUTPUT", fused_expert_output, True)
 
-        if not self.do_permute:
-            combined_x, combined_probs = self.buffer.combine(
-                hidden=fused_expert_output,
-                # TODO: when weight_and_reduce_impl is delegate
-                probs=None,  # self.expert_probs,
-                handle=self.handle,
-            )
-        else:
-            combined_x, combined_probs = self.buffer.combine_with_unpermute(
-                hidden=fused_expert_output,
-                # TODO: when weight_and_reduce_impl is delegate
-                probs=None,  # self.expert_probs,
-                handle=self.handle,
-                # pad_multiple=topk_ids.shape[1],
-            )
+        combined_x, combined_probs = self.buffer.combine(
+            hidden=fused_expert_output,
+            # TODO: when weight_and_reduce_impl is delegate
+            probs=None,  # self.expert_probs,
+            handle=self.handle,
+        )
+
         self.p(
             f"COMBINE END[{self.rank_expert_offset}] {combined_x.shape} "
             f"{combined_probs.shape if combined_probs is not None else None}"
