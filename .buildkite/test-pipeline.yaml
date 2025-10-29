@@ -498,6 +498,8 @@ steps:
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
   - vllm/distributed/device_communicators/
+  - vllm/envs.py
+  - vllm/config
   commands:
     - pytest -v -s kernels/moe --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   parallelism: 2
