@@ -10,6 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
+from vllm.platforms.rocm import on_gfx950
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
@@ -20,7 +21,7 @@ from vllm.v1.attention.backends.mla.common import (
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
-from vllm.platforms.rocm import on_gfx950
+
 
 def is_aiter_mla_enabled() -> bool:
     return envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MLA
@@ -223,29 +224,30 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             )
 
         from aiter import flash_attn_varlen_func as aiter_flash_attn_varlen_func
-        from aiter.ops.triton.mha import flash_attn_varlen_func as triton_flash_attn_varlen_func
+        from aiter.ops.triton.mha import (
+            flash_attn_varlen_func as triton_flash_attn_varlen_func,
+        )
+
         self.triton_flash_attn_varlen_func = triton_flash_attn_varlen_func
         self.aiter_flash_attn_varlen_func = aiter_flash_attn_varlen_func
-
 
     def _use_triton_mha(self, q, k, **kwargs) -> bool:
         # TODO: refine dispatch logic on other non-GFX950 GPUs
         if not on_gfx950():
             return False
 
-        cu_seqlens_q = kwargs.get("cu_seqlens_q", None)
+        cu_seqlens_q = kwargs.get("cu_seqlens_q")
         max_seqlen_q = kwargs.get("max_seqlen_q", q.size(0))
         max_seqlen_k = kwargs.get("max_seqlen_k", k.size(0))
 
         bs = cu_seqlens_q.shape[0] - 1 if cu_seqlens_q is not None else 1
 
         # TODO: consider more comprehensive conditions here
-        use_triton_mha = (bs <= 32)
+        use_triton_mha = bs <= 32
         use_triton_mha = use_triton_mha and (max_seqlen_q <= 1024)
         use_triton_mha = use_triton_mha and (max_seqlen_k <= 1024)
 
         return use_triton_mha
-        
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
