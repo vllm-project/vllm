@@ -11,6 +11,7 @@ from transformers import AutoModelForCausalLM
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
@@ -22,6 +23,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     gguf_quant_weights_iterator,
 )
 from vllm.utils.torch_utils import set_default_torch_dtype
+
+logger = init_logger(__name__)
 
 
 class GGUFModelLoader(BaseModelLoader):
@@ -129,10 +132,147 @@ class GGUFModelLoader(BaseModelLoader):
             gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
         return gguf_to_hf_name_map
 
+    def _create_mmproj_tensor_mapping(self) -> dict[str, str]:
+        """
+        Create mapping from GGUF mmproj tensor names to HuggingFace parameter names
+        for Gemma3 multimodal models.
+
+        Returns:
+            Dictionary mapping GGUF names to vLLM parameter names
+        """
+        mapping = {}
+
+        # Multimodal Projector Mappings
+        mapping["mm.input_projection.weight"] = (
+            "multi_modal_projector.mm_input_projection_weight"
+        )
+        mapping["mm.soft_emb_norm.weight"] = (
+            "multi_modal_projector.mm_soft_emb_norm.weight"
+        )
+
+        # Vision Tower - Patch and position embeddings
+        mapping["v.patch_embd.weight"] = (
+            "vision_tower.vision_model.embeddings.patch_embedding.weight"
+        )
+        mapping["v.patch_embd.bias"] = (
+            "vision_tower.vision_model.embeddings.patch_embedding.bias"
+        )
+        mapping["v.position_embd.weight"] = (
+            "vision_tower.vision_model.embeddings.position_embedding.weight"
+        )
+
+        # SigLIP-So400m: 27 transformer layers
+        for layer_idx in range(27):
+            # Layer norms
+            ln_base = f"vision_tower.vision_model.encoder.layers.{layer_idx}"
+            mapping[f"v.blk.{layer_idx}.ln1.weight"] = f"{ln_base}.layer_norm1.weight"
+            mapping[f"v.blk.{layer_idx}.ln1.bias"] = f"{ln_base}.layer_norm1.bias"
+            mapping[f"v.blk.{layer_idx}.ln2.weight"] = f"{ln_base}.layer_norm2.weight"
+            mapping[f"v.blk.{layer_idx}.ln2.bias"] = f"{ln_base}.layer_norm2.bias"
+
+            # Attention with bias support
+            attn_base = f"{ln_base}.self_attn"
+            mapping[f"v.blk.{layer_idx}.attn_q.weight"] = f"{attn_base}.q_proj.weight"
+            mapping[f"v.blk.{layer_idx}.attn_q.bias"] = f"{attn_base}.q_proj.bias"
+            mapping[f"v.blk.{layer_idx}.attn_k.weight"] = f"{attn_base}.k_proj.weight"
+            mapping[f"v.blk.{layer_idx}.attn_k.bias"] = f"{attn_base}.k_proj.bias"
+            mapping[f"v.blk.{layer_idx}.attn_v.weight"] = f"{attn_base}.v_proj.weight"
+            mapping[f"v.blk.{layer_idx}.attn_v.bias"] = f"{attn_base}.v_proj.bias"
+            mapping[f"v.blk.{layer_idx}.attn_out.weight"] = (
+                f"{attn_base}.out_proj.weight"
+            )
+            mapping[f"v.blk.{layer_idx}.attn_out.bias"] = f"{attn_base}.out_proj.bias"
+
+            # FFN (swapped naming + bias)
+            mlp_base = f"{ln_base}.mlp"
+            mapping[f"v.blk.{layer_idx}.ffn_down.weight"] = f"{mlp_base}.fc1.weight"
+            mapping[f"v.blk.{layer_idx}.ffn_up.weight"] = f"{mlp_base}.fc2.weight"
+            mapping[f"v.blk.{layer_idx}.ffn_down.bias"] = f"{mlp_base}.fc1.bias"
+            mapping[f"v.blk.{layer_idx}.ffn_up.bias"] = f"{mlp_base}.fc2.bias"
+
+        # Post layer normalization
+        mapping["v.post_ln.weight"] = "vision_tower.vision_model.post_layernorm.weight"
+        mapping["v.post_ln.bias"] = "vision_tower.vision_model.post_layernorm.bias"
+
+        return mapping
+
     def _get_weights_iterator(
         self, model_name_or_path: str, gguf_to_hf_name_map: dict[str, str]
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
-        return gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
+        """
+        Iterate over GGUF model weights, loading from both main model file and
+        mmproj.gguf for multimodal Gemma3 models.
+
+        For Gemma3 multimodal GGUF models:
+        - Main file (gemma-3-*.gguf): Language model weights (model.*)
+        - mmproj file (mmproj*.gguf): Vision tower + projector weights (v.*, mm.*)
+
+        Yields:
+            Tuples of (parameter_name, tensor) for all model weights
+        """
+        from pathlib import Path
+
+        model_dir = Path(model_name_or_path).parent
+
+        # Detect companion mmproj.gguf file for multimodal models
+        mmproj_files = list(model_dir.glob("mmproj*.gguf"))
+        has_mmproj = len(mmproj_files) > 0
+
+        # Verify this is a Gemma3 model before applying multimodal logic.
+        # Safety guard: Only Gemma3 models should use this dual-file loading.
+        # Other multimodal models (Phi3V, LLaVA, etc.) have different weight
+        # structures and should not be affected.
+        is_gemma3_multimodal = False
+        if has_mmproj:
+            try:
+                reader = gguf.GGUFReader(model_name_or_path)
+                arch_field = reader.get_field("general.architecture")
+                if arch_field:
+                    arch = arch_field.parts[-1].tobytes().decode("utf-8")
+                    is_gemma3_multimodal = arch == "gemma3"
+                    if is_gemma3_multimodal:
+                        logger.info(
+                            f"Detected Gemma3 multimodal GGUF model with mmproj file: "
+                            f"{mmproj_files[0].name}"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to detect model architecture from GGUF: {e}. "
+                    f"Skipping mmproj loading."
+                )
+
+        if is_gemma3_multimodal:
+            # Gemma3 Multimodal: Load weights from TWO GGUF files
+
+            # 1. Load language model weights from main GGUF file
+            # Remap "model.*" → "language_model.model.*" to match
+            # Gemma3ForConditionalGeneration hierarchy
+            logger.info("Loading language model weights from main GGUF file...")
+            for name, tensor in gguf_quant_weights_iterator(
+                model_name_or_path, gguf_to_hf_name_map
+            ):
+                # Remap to language_model.* hierarchy
+                if name.startswith("model."):
+                    name = name.replace("model.", "language_model.model.", 1)
+                yield (name, tensor)
+
+            # 2. Load vision tower + projector weights from mmproj.gguf
+            mmproj_path = str(mmproj_files[0])
+            mmproj_mapping = self._create_mmproj_tensor_mapping()
+
+            logger.info(
+                f"Loading vision tower and projector weights from "
+                f"{mmproj_files[0].name}..."
+            )
+            for name, tensor in gguf_quant_weights_iterator(
+                mmproj_path, mmproj_mapping
+            ):
+                yield (name, tensor)
+        else:
+            # Standard GGUF loading (text-only or non-Gemma3)
+            yield from gguf_quant_weights_iterator(
+                model_name_or_path, gguf_to_hf_name_map
+            )
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model)

@@ -53,6 +53,7 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
+    merge_multimodal_embeddings,
 )
 
 logger = init_logger(__name__)
@@ -464,10 +465,11 @@ class Gemma3MultiModalProjector(nn.Module):
     def __init__(self, config: Gemma3Config):
         super().__init__()
 
+        # GGUF compatibility: handle text-only configs
+        text_hidden_size = getattr(config, "text_config", config).hidden_size
+
         self.mm_input_projection_weight = nn.Parameter(
-            torch.zeros(
-                config.vision_config.hidden_size, config.text_config.hidden_size
-            )
+            torch.zeros(config.vision_config.hidden_size, text_hidden_size)
         )
 
         self.mm_soft_emb_norm = GemmaRMSNorm(
@@ -552,16 +554,50 @@ class Gemma3ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
+        # Detect GGUF model format
+        model_path = vllm_config.model_config.model
+        self._is_gguf = (
+            quant_config is not None
+            and getattr(quant_config, "quant_method", "") == "gguf"
+        ) or (model_path and model_path.endswith(".gguf"))
+
+        # GGUF models: initialize vision_config if missing (text-only GGUF files)
+        if not hasattr(config, "vision_config") or config.vision_config is None:
+            from transformers import SiglipVisionConfig
+
+            config.vision_config = SiglipVisionConfig(
+                hidden_size=1152,
+                intermediate_size=4304,
+                num_hidden_layers=27,
+                num_attention_heads=16,
+                num_channels=3,
+                image_size=896,
+                patch_size=14,
+                layer_norm_eps=1e-6,
+                attention_dropout=0.0,
+                num_image_tokens=256,
+                vision_use_head=False,  # Disable pooling head for Gemma3
+            )
+            config.mm_tokens_per_image = 256
+            config.image_token_index = 262144
+            logger.info("Created default vision_config for GGUF model")
+
+        # GGUF models: vision tower is always unquantized (F16 from mmproj.gguf).
+        # HF models: pass through quant_config normally
+        vision_quant_config = None if self._is_gguf else quant_config
         self.vision_tower = SiglipVisionModel(
             config.vision_config,
-            quant_config,
+            quant_config=vision_quant_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
         self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
+        # GGUF compatibility: use config directly if text-only
+        text_config = getattr(config, "text_config", config)
+
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=config.text_config,
+            hf_config=text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Gemma3ForCausalLM"],
         )
@@ -623,7 +659,6 @@ class Gemma3ForConditionalGeneration(
             pixel_values,
         )
         image_embeds = self.multi_modal_projector(image_features)
-
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
 
     def get_language_model(self) -> torch.nn.Module:
@@ -633,8 +668,41 @@ class Gemma3ForConditionalGeneration(
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
-
         return self._process_image_input(image_input)
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        is_multimodal: bool = False,
+    ) -> torch.Tensor:
+        # GGUF vocab size is 262144 (indices 0-262143). Remap image_token_index
+        # from 262144 to 262143 to avoid out-of-bounds embedding lookup.
+        if self._is_gguf and self.config.image_token_index == 262144:
+            input_ids = torch.where(
+                input_ids == 262144,
+                torch.tensor(262143, dtype=input_ids.dtype, device=input_ids.device),
+                input_ids,
+            )
+            placeholder_token_id = (
+                self.config.boi_token_index
+                if hasattr(self.config, "boi_token_index")
+                else 262143
+            )
+        else:
+            placeholder_token_id = self.config.image_token_index
+
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+
+        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids,
+                inputs_embeds,
+                multimodal_embeddings,
+                placeholder_token_id,
+            )
+
+        return inputs_embeds
 
     def forward(
         self,
@@ -647,6 +715,19 @@ class Gemma3ForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
+        # V0 compatibility: generate inputs_embeds if not provided
+        elif inputs_embeds is None:
+            multimodal_embeddings = self.embed_multimodal(**kwargs)
+            inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeddings)
+            if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
+                kwargs = self.prepare_attn_masks(
+                    input_ids,
+                    positions,
+                    mask_dtype=self.dtype,
+                    **kwargs,
+                )
+            input_ids = None
+
         hidden_states = self.language_model.model(
             input_ids,
             positions,
@@ -656,6 +737,82 @@ class Gemma3ForConditionalGeneration(
         )
 
         return hidden_states
+
+    def generate_attention_masks(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        mask_dtype: torch.dtype,
+    ) -> dict[str, Any]:
+        """Generate custom attention masks for Gemma3 multimodal inputs.
+
+        This is called by V1 engine's gpu_model_runner during preprocessing
+        to generate attention masks that allow bidirectional attention between
+        image tokens while maintaining causal attention for text.
+        """
+        # NOTE(woosuk): Here, we distinguish the sequences by the position id 0.
+        # This is a HACK. Fix this.
+        start_indices = (positions == 0).cpu().nonzero()
+        num_seqs = len(start_indices)
+        seq_lens = []
+        for i in range(num_seqs):
+            start_idx = start_indices[i]
+            if i < num_seqs - 1:
+                end_idx = start_indices[i + 1]
+            else:
+                end_idx = len(input_ids)
+            seq_lens.append(end_idx - start_idx)
+
+        global_attn_masks = []
+        local_attn_masks = []
+        start_idx = 0
+        for seq_idx, seq_len in enumerate(seq_lens):
+            end_idx = start_idx + seq_len
+            input_token_ids = input_ids[start_idx:end_idx]
+
+            # Find image token positions
+            img_pos = input_token_ids == self.config.image_token_index
+
+            start_idx = end_idx
+
+            # Create a global causal mask
+            global_attn_mask = torch.empty(
+                1,
+                1,
+                seq_len,
+                seq_len,
+                dtype=mask_dtype,
+                device=input_ids.device,
+            )
+            global_attn_mask.fill_(float("-inf"))
+            # Fill the lower triangle with 0 (causal attention)
+            global_attn_mask = global_attn_mask.triu(diagonal=1)
+
+            # Enable bidirectional attention between image tokens
+            img_mask = torch.zeros_like(global_attn_mask)
+            img_mask[:, :, :, img_pos] += 1
+            img_mask[:, :, img_pos, :] += 1
+            global_attn_mask = torch.where(img_mask == 2, 0, global_attn_mask)
+            global_attn_masks.append(global_attn_mask)
+
+            # GGUF compatibility: config might be Gemma3TextConfig directly
+            text_config = getattr(self.config, "text_config", self.config)
+            sliding_window = text_config.sliding_window
+            if sliding_window is not None:
+                # Create a local causal mask with sliding window (1024)
+                local_attn_mask = torch.ones_like(global_attn_mask)
+                local_attn_mask = torch.tril(local_attn_mask, diagonal=-sliding_window)
+                local_attn_mask = torch.where(
+                    local_attn_mask == 0, global_attn_mask, float("-inf")
+                )
+                local_attn_masks.append(local_attn_mask)
+
+        return {
+            "has_images": True,
+            "seq_lens": seq_lens,
+            "global_attn_masks": global_attn_masks,
+            "local_attn_masks": local_attn_masks,
+        }
 
     def prepare_attn_masks(
         self,

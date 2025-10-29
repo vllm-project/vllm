@@ -65,6 +65,36 @@ else:
 
 logger = init_logger(__name__)
 
+
+def _detect_gguf_multimodal_gemma3(model: str) -> bool:
+    """Check if GGUF model has multimodal projector file for Gemma3.
+
+    Args:
+        model: Model path string
+
+    Returns:
+        True if this is a Gemma3 GGUF model with mmproj file, False otherwise
+    """
+    if not model.endswith(".gguf"):
+        return False
+
+    try:
+        from pathlib import Path
+
+        model_path = Path(model)
+        if not model_path.is_file():
+            return False
+
+        model_dir = model_path.parent
+        mmproj_patterns = ["mmproj.gguf", "mmproj-*.gguf", "*mmproj*.gguf"]
+        for pattern in mmproj_patterns:
+            if list(model_dir.glob(pattern)):
+                return True
+        return False
+    except Exception:
+        return False
+
+
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
@@ -523,6 +553,46 @@ class ModelConfig:
 
         architectures = self.architectures
         registry = self.registry
+
+        # GGUF multimodal: Force Gemma3ForConditionalGeneration architecture
+        # when mmproj file is present, before model resolution
+        if _detect_gguf_multimodal_gemma3(self.model):
+            is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
+            if is_gemma3:
+                architectures = ["Gemma3ForConditionalGeneration"]
+                self.hf_config.architectures = architectures
+                logger.info(
+                    "Detected Gemma3 GGUF with mmproj.gguf, "
+                    "forcing Gemma3ForConditionalGeneration"
+                )
+
+                # Initialize vision_config if not present
+                if (
+                    not hasattr(self.hf_config, "vision_config")
+                    or self.hf_config.vision_config is None
+                ):
+                    from transformers import SiglipVisionConfig
+
+                    self.hf_config.vision_config = SiglipVisionConfig(
+                        hidden_size=1152,
+                        intermediate_size=4304,
+                        num_hidden_layers=27,
+                        num_attention_heads=16,
+                        num_channels=3,
+                        image_size=896,
+                        patch_size=14,
+                        layer_norm_eps=1e-6,
+                        attention_dropout=0.0,
+                        num_image_tokens=256,
+                        # Disable pooling head for Gemma3
+                        vision_use_head=False,
+                    )
+                    self.hf_config.mm_tokens_per_image = 256
+                    self.hf_config.image_token_index = 262144
+                    # DO NOT set boi_token_index - let
+                    # gemma3_mm.py fall back to 262143
+                    self.hf_config.eoi_token_index = 256000
+
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
@@ -668,8 +738,24 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+
+        # GGUF multimodal: Set flag to initialize multimodal_config
+        # when Gemma3 mmproj file is present
+        is_gguf_multimodal = False
+        if _detect_gguf_multimodal_gemma3(self.model):
+            is_gemma3 = any(
+                "gemma3" in str(arch).lower() for arch in self.architectures
+            )
+            if is_gemma3:
+                is_gguf_multimodal = True
+                logger.info(
+                    "Detected Gemma3 GGUF multimodal model "
+                    "with mmproj.gguf, initializing "
+                    "multimodal_config"
+                )
+
         # Init multimodal config if needed
-        if self._model_info.supports_multimodal:
+        if self._model_info.supports_multimodal or is_gguf_multimodal:
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
@@ -854,8 +940,6 @@ class ModelConfig:
             if match:
                 _, (runner_type, _) = match
                 return runner_type
-
-        return "generate"
 
     def _get_runner_type(
         self,
