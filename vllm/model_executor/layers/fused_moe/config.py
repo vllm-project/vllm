@@ -752,6 +752,10 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
+    @property
+    def use_deepep_hybrid_kernels(self):
+        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid"
+
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
         tp_size: int, dp_size: int, dp_rank: int, pcp_size: int, pcp_rank: int
@@ -762,10 +766,6 @@ class FusedMoEParallelConfig:
         flatten_tp_size = dp_size * pcp_size * tp_size
         flatten_tp_rank = dp_rank * pcp_size * tp_size + pcp_rank * tp_size + tp_rank
         return flatten_tp_size, flatten_tp_rank
-
-    @property
-    def use_deepep_hybrid_kernels(self):
-        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid"
 
     @staticmethod
     def make(

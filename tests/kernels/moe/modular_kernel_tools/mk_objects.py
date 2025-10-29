@@ -37,7 +37,12 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx, has_hybrid_deep_ep
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_deep_gemm,
+    has_hybrid_deep_ep,
+    has_pplx,
+)
 
 
 @dataclass
@@ -195,24 +200,29 @@ register_experts(
 )
 
 # Disable on blackwell for now
-if has_deep_ep() and not current_platform.has_device_capability(100):
-    pass
+if False and has_deep_ep() and not current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+        DeepEPHTPrepareAndFinalize,
+    )
+    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+        DeepEPLLPrepareAndFinalize,
+    )
 
-    # register_prepare_and_finalize(
-    #     DeepEPHTPrepareAndFinalize,
-    #     standard_format,
-    #     common_float_types,
-    #     blocked_quantization_support=True,
-    #     backend="deepep_high_throughput",
-    # )
+    register_prepare_and_finalize(
+        DeepEPHTPrepareAndFinalize,
+        standard_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_high_throughput",
+    )
 
-    # register_prepare_and_finalize(
-    #     DeepEPLLPrepareAndFinalize,
-    #     batched_format,
-    #     common_float_types,
-    #     blocked_quantization_support=True,
-    #     backend="deepep_low_latency",
-    # )
+    register_prepare_and_finalize(
+        DeepEPLLPrepareAndFinalize,
+        batched_format,
+        common_float_types,
+        blocked_quantization_support=True,
+        backend="deepep_low_latency",
+    )
 
 if has_hybrid_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_hybrid_prepare_finalize import (

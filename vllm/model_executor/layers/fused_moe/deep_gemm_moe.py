@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceContiguous,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
@@ -29,10 +30,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
     m_grouped_fp8_gemm_nt_contiguous,
-    is_deep_gemm_e8m0_used
 )
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -278,14 +280,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             topk_weights = torch.ones_like(topk_weights)
 
         if self.skip_permute_unpermute:
-            # Skip unpermutation, but still apply topk_weights and reduce
-            # mm2_out shape: (M * topk, K)
-            # Reshape to (M, topk, K) and apply weights
-            mm2_out_reshaped = mm2_out[: M * topk].view(M, topk, -1)
-            # Apply topk_weights: (M, topk, 1) * (M, topk, K) -> (M, topk, K)
-            weighted = mm2_out_reshaped * topk_weights.unsqueeze(-1)
-            # Sum over topk dimension: (M, topk, K) -> (M, K)
-            output.copy_(weighted.sum(dim=1))
+            TopKWeightAndReduceContiguous().apply(
+                output,
+                mm2_out,
+                topk_weights,
+                topk_ids,
+                apply_router_weight_on_input,
+            )
         else:
             # Perform unpermutation and reduction
             deepgemm_unpermute_and_reduce(

@@ -674,7 +674,7 @@ class MarlinExperts(MarlinExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
-    ) -> None:
+    ):
         assert self.w1_scale is not None
         assert self.w2_scale is not None
         return fused_marlin_moe(

@@ -421,8 +421,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
         if a1.dim() == 2:
             # Make sure we are using the correct a1 (pre-permute).
-            # TODO: FIX ME
-            # assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
+            assert topk_ids.size(0) == a1.size(0), f"{topk_ids.size(0)} != {a1.size(0)}"
             M = a1.size(0)
         else:
             assert a1.dim() == 3
@@ -1050,7 +1049,9 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_weights if _expert_topk_weights is None else _expert_topk_weights
         )
 
-        assert topk_ids.shape == topk_weights.shape, f"{topk_ids.shape} == {topk_weights.shape}"
+        assert topk_ids.shape == topk_weights.shape, (
+            f"{topk_ids.shape} == {topk_weights.shape}"
+        )
 
         return a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights
 

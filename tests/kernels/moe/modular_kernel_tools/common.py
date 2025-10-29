@@ -147,7 +147,6 @@ class Config:
         vllm_config.parallel_config.all2all_backend = backend
         if backend is not None:
             env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
-            vllm_config.parallel_config.all2all_backend = backend
 
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
@@ -418,6 +417,7 @@ class RankTensors:
         score = torch.randn((m, global_num_experts), device="cuda", dtype=dtype)
         topk_weights, topk_ids, _ = fused_topk(hidden_states, score, topk, False)
 
+        # TODO(bnell): force all ids to a single rank to test edge cases.
         # distribute topk_ids evenly
         for mi in range(m):
             topk_ids[mi] = torch.randperm(config.E)[:topk]
@@ -580,7 +580,7 @@ def make_modular_kernel(
         num_local_experts=config.num_local_experts,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
-        # 128 for hybrid DeepEP. TODO(bnell): make this smarter
+        # 128 needed for hybrid DeepEP. TODO(bnell): make this smarter
         max_num_tokens=max(128, next_power_of_2(config.M)),
     )
 
