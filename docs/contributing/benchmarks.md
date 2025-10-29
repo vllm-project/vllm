@@ -6,9 +6,10 @@ toc_depth: 4
 
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
-- **[Benchmark CLI]**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Performance benchmarks][performance-benchmarks]**: Automated CI benchmarks for development
-- **[Nightly benchmarks][nightly-benchmarks]**: Comparative benchmarks against alternatives
+- **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
+- **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
+- **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
+- **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
 [Benchmark CLI]: #benchmark-cli
 
@@ -29,12 +30,13 @@ th {
 | Dataset | Online | Offline | Data Path |
 |---------|--------|---------|-----------|
 | ShareGPT | ✅ | ✅ | `wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json` |
-| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/blob/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
+| ShareGPT4V (Image) | ✅ | ✅ | `wget https://huggingface.co/datasets/Lin-Chen/ShareGPT4V/resolve/main/sharegpt4v_instruct_gpt4-vision_cap100k.json`<br>Note that the images need to be downloaded separately. For example, to download COCO's 2017 Train images:<br>`wget http://images.cocodataset.org/zips/train2017.zip` |
 | ShareGPT4Video (Video) | ✅ | ✅ | `git clone https://huggingface.co/datasets/ShareGPT4Video/ShareGPT4Video` |
 | BurstGPT | ✅ | ✅ | `wget https://github.com/HPMLL/BurstGPT/releases/download/v1.1/BurstGPT_without_fails_2.csv` |
 | Sonnet (deprecated) | ✅ | ✅ | Local file: `benchmarks/sonnet.txt` |
 | Random | ✅ | ✅ | `synthetic` |
 | RandomMultiModal (Image/Video) | 🟡 | 🚧 | `synthetic` |
+| RandomForReranking | ✅ | ✅ | `synthetic` |
 | Prefix Repetition | ✅ | ✅ | `synthetic` |
 | HuggingFace-VisionArena | ✅ | ✅ | `lmarena-ai/VisionArena-Chat` |
 | HuggingFace-MMVU | ✅ | ✅ | `yale-nlp/MMVU` |
@@ -67,13 +69,13 @@ Legend:
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
-First start serving your model
+First start serving your model:
 
 ```bash
 vllm serve NousResearch/Hermes-3-Llama-3.1-8B
 ```
 
-Then run the benchmarking script
+Then run the benchmarking script:
 
 ```bash
 # download dataset
@@ -87,7 +89,7 @@ vllm bench serve \
   --num-prompts 10
 ```
 
-If successful, you will see the following output
+If successful, you will see the following output:
 
 ```text
 ============ Serving Benchmark Result ============
@@ -125,7 +127,7 @@ If the dataset you want to benchmark is not supported yet in vLLM, even then you
 
 ```bash
 # start server
-VLLM_USE_V1=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
+vllm serve meta-llama/Llama-3.1-8B-Instruct
 ```
 
 ```bash
@@ -167,7 +169,7 @@ vllm bench serve \
 ##### InstructCoder Benchmark with Speculative Decoding
 
 ``` bash
-VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     --speculative-config $'{"method": "ngram",
     "num_speculative_tokens": 5, "prompt_lookup_max": 5,
     "prompt_lookup_min": 2}'
@@ -184,7 +186,7 @@ vllm bench serve \
 ##### Spec Bench Benchmark with Speculative Decoding
 
 ``` bash
-VLLM_USE_V1=1 vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct \
     --speculative-config $'{"method": "ngram",
     "num_speculative_tokens": 5, "prompt_lookup_max": 5,
     "prompt_lookup_min": 2}'
@@ -319,6 +321,73 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
 
+##### Load Pattern Configuration
+
+vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:
+
+###### Load Pattern Control Parameters
+
+- `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
+- `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
+- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure.
+
+These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
+
+The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
+
+- Shape parameter: `burstiness` value
+- Coefficient of Variation (CV): $\frac{1}{\sqrt{burstiness}}$
+- Traffic characteristics:
+    - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
+    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
+    - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
+
+![Load Pattern Examples](../assets/contributing/load-pattern-examples.png)
+
+*Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
+
+Load Pattern Recommendations by Use Case:
+
+| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
+| ---                | ---          | ---             | ---             | ---                                                       |
+| Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
+| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
+| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
+| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
+| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
+| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+
+These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
+
+The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
+
+- Users send requests as fast as they can (infinite rate)
+- A load balancer or API gateway controls the maximum concurrent connections
+- The system operates at its concurrency limit, revealing true throughput capacity
+- `--burstiness` has no effect since request timing is not controlled when rate is infinite
+
+This pattern helps determine optimal concurrency settings for your production load balancer configuration.
+
+To effectively configure load patterns, especially for **Capacity Planning** and **SLA Validation** use cases, you need to understand your system's resource limits. During startup, vLLM reports KV cache configuration that directly impacts your load testing parameters:
+
+```text
+GPU KV cache size: 15,728,640 tokens
+Maximum concurrency for 8,192 tokens per request: 1920
+```
+
+Where:
+
+- GPU KV cache size: Total tokens that can be cached across all concurrent requests
+- Maximum concurrency: Theoretical maximum concurrent requests for the given `max_model_len`
+- Calculation: `max_concurrency = kv_cache_size / max_model_len`
+
+Using KV cache metrics for load pattern configuration:
+
+- For Capacity Planning: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
+- For SLA Validation: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
+- For Realistic Testing: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
+- Request rate guidance: Use the KV cache size to estimate sustainable request rates for your specific workload and sequence lengths
+
 </details>
 
 #### 📈 Offline Throughput Benchmark
@@ -366,7 +435,6 @@ Total num output tokens:  1280
 
 ``` bash
 VLLM_WORKER_MULTIPROC_METHOD=spawn \
-VLLM_USE_V1=1 \
 vllm bench throughput \
     --dataset-name=hf \
     --dataset-path=likaixin/InstructCoder \
@@ -661,8 +729,7 @@ Benchmark the performance of multi-modal requests in vLLM.
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"image": 1}' \
   --allowed-local-media-path /path/to/sharegpt4v/images
@@ -680,7 +747,7 @@ vllm bench serve \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
   --save-detailed \
-  --endpoint /v1/chat/completion
+  --endpoint /v1/chat/completions
 ```
 
 ##### Videos (ShareGPT4Video)
@@ -688,8 +755,7 @@ vllm bench serve \
 Start vLLM:
 
 ```bash
-python -m vllm.entrypoints.openai.api_server \
-  --model Qwen/Qwen2.5-VL-7B-Instruct \
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
   --dtype bfloat16 \
   --limit-mm-per-prompt '{"video": 1}' \
   --allowed-local-media-path /path/to/sharegpt4video/videos
@@ -707,7 +773,7 @@ vllm bench serve \
   --save-result \
   --result-dir ~/vllm_benchmark_results \
   --save-detailed \
-  --endpoint /v1/chat/completion
+  --endpoint /v1/chat/completions
 ```
 
 ##### Synthetic Random Images (random-mm)
@@ -716,7 +782,7 @@ Generate synthetic image inputs alongside random text prompts to stress-test vis
 
 Notes:
 
-- Works only with online benchmark via the OpenAI  backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
+- Works only with online benchmark via the OpenAI backend (`--backend openai-chat`) and endpoint `/v1/chat/completions`.
 - Video sampling is not yet implemented.
 
 Start the server (example):
@@ -783,7 +849,305 @@ This should be seen as an edge case, and if this behavior can be avoided by sett
 
 </details>
 
-[](){ #performance-benchmarks }
+#### Embedding Benchmark
+
+Benchmark the performance of embedding requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+##### Text Embeddings
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend openai-embeddings` and `--endpoint /v1/embeddings` to use the Embeddings API.
+
+You can use any text dataset to benchmark the model, such as ShareGPT.
+
+Start the server:
+
+```bash
+vllm serve jinaai/jina-embeddings-v3 --trust-remote-code
+```
+
+Run the benchmark:
+
+```bash
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+vllm bench serve \
+  --model jinaai/jina-embeddings-v3 \
+  --backend openai-embeddings \
+  --endpoint /v1/embeddings \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+```
+
+##### Multi-modal Embeddings
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--endpoint /v1/embeddings` to use the Embeddings API. The backend to use depends on the model:
+
+- CLIP: `--backend openai-embeddings-clip`
+- VLM2Vec: `--backend openai-embeddings-vlm2vec`
+
+For other models, please add your own implementation inside [vllm/benchmarks/lib/endpoint_request_func.py](../../vllm/benchmarks/lib/endpoint_request_func.py) to match the expected instruction format.
+
+You can use any text or multi-modal dataset to benchmark the model, as long as the model supports it.
+For example, you can use ShareGPT and VisionArena to benchmark vision-language embeddings.
+
+Serve and benchmark CLIP:
+
+```bash
+# Run this in another process
+vllm serve openai/clip-vit-base-patch32
+
+# Run these one by one after the server is up
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+vllm bench serve \
+  --model openai/clip-vit-base-patch32 \
+  --backend openai-embeddings-clip \
+  --endpoint /v1/embeddings \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+
+vllm bench serve \
+  --model openai/clip-vit-base-patch32 \
+  --backend openai-embeddings-clip \
+  --endpoint /v1/embeddings \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat
+```
+
+Serve and benchmark VLM2Vec:
+
+```bash
+# Run this in another process
+vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
+  --trust-remote-code \
+  --chat-template examples/template_vlm2vec_phi3v.jinja
+
+# Run these one by one after the server is up
+# download dataset
+# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+vllm bench serve \
+  --model TIGER-Lab/VLM2Vec-Full \
+  --backend openai-embeddings-vlm2vec \
+  --endpoint /v1/embeddings \
+  --dataset-name sharegpt \
+  --dataset-path <your data path>/ShareGPT_V3_unfiltered_cleaned_split.json
+
+vllm bench serve \
+  --model TIGER-Lab/VLM2Vec-Full \
+  --backend openai-embeddings-vlm2vec \
+  --endpoint /v1/embeddings \
+  --dataset-name hf \
+  --dataset-path lmarena-ai/VisionArena-Chat
+```
+
+</details>
+
+#### Reranker Benchmark
+
+Benchmark the performance of rerank requests in vLLM.
+
+<details class="admonition abstract" markdown="1">
+<summary>Show more</summary>
+
+Unlike generative models which use Completions API or Chat Completions API,
+you should set `--backend vllm-rerank` and `--endpoint /v1/rerank` to use the Reranker API.
+
+For reranking, the only supported dataset is `--dataset-name random-rerank`
+
+Start the server:
+
+```bash
+vllm serve BAAI/bge-reranker-v2-m3
+```
+
+Run the benchmark:
+
+```bash
+vllm bench serve \
+  --model BAAI/bge-reranker-v2-m3 \
+  --backend vllm-rerank \
+  --endpoint /v1/rerank \
+  --dataset-name random-rerank \
+  --tokenizer BAAI/bge-reranker-v2-m3 \
+  --random-input-len 512 \
+  --num-prompts 10 \
+  --random-batch-size 5
+```
+
+For reranker models, this will create `num_prompts / random_batch_size` requests with
+`random_batch_size` "documents" where each one has close to `random_input_len` tokens.
+In the example above, this results in 2 rerank requests with 5 "documents" each where
+each document has close to 512 tokens.
+
+Please note that the `/v1/rerank` is also supported by embedding models. So if you're running
+with an embedding model, also set `--no_reranker`. Because in this case the query is
+treated as a individual prompt by the server, here we send `random_batch_size - 1` documents
+to account for the extra prompt which is the query. The token accounting to report the
+throughput numbers correctly is also adjusted.
+
+</details>
+
+## Parameter Sweeps
+
+### Online Benchmark
+
+[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
+
+Follow these steps to run the script:
+
+1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
+2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
+3. (Optional) If you would like to vary the settings of `vllm serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--serve-params`.
+
+    - Example: Tuning `--max-num-seqs` and `--max-num-batched-tokens`:
+
+    ```json
+    [
+        {
+            "max_num_seqs": 32,
+            "max_num_batched_tokens": 1024
+        },
+        {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 1024
+        },
+        {
+            "max_num_seqs": 64,
+            "max_num_batched_tokens": 2048
+        },
+        {
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 2048
+        },
+        {
+            "max_num_seqs": 128,
+            "max_num_batched_tokens": 4096
+        },
+        {
+            "max_num_seqs": 256,
+            "max_num_batched_tokens": 4096
+        }
+    ]
+    ```
+
+4. (Optional) If you would like to vary the settings of `vllm bench serve`, create a new JSON file and populate it with the parameter combinations you want to test. Pass the file path to `--bench-params`.
+
+    - Example: Using different input/output lengths for random dataset:
+
+    ```json
+    [
+        {
+            "random_input_len": 128,
+            "random_output_len": 32
+        },
+        {
+            "random_input_len": 256,
+            "random_output_len": 64
+        },
+        {
+            "random_input_len": 512,
+            "random_output_len": 128
+        }
+    ]
+    ```
+
+5. Determine where you want to save the results, and pass that to `--output-dir`.
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.serve \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --serve-params benchmarks/serve_hparams.json \
+    --bench-params benchmarks/bench_hparams.json \
+    -o benchmarks/results
+```
+
+!!! important
+    If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
+    You can use `--dry-run` to preview the commands to be run.
+
+    We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
+    Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.
+    In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
+
+!!! note
+    By default, each parameter combination is run 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+
+!!! tip
+    You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
+  
+### SLA Auto-Tuner
+
+[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
+
+For example, to ensure E2E latency within different target values for 99% of requests:
+
+```json
+[
+    {
+        "p99_e2el_ms": "<=200"
+    },
+    {
+        "p99_e2el_ms": "<=500"
+    },
+    {
+        "p99_e2el_ms": "<=1000"
+    },
+    {
+        "p99_e2el_ms": "<=2000"
+    }
+]
+```
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.serve_sla \
+    --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --serve-params benchmarks/serve_hparams.json \
+    --bench-params benchmarks/bench_hparams.json \
+    --sla-params benchmarks/sla_hparams.json \
+    --sla-variable max_concurrency \
+    -o benchmarks/results
+```
+
+The algorithm for adjusting the SLA variable is as follows:
+
+1. Run the benchmark with infinite QPS, and use the corresponding metrics to determine the initial value of the variable.
+    - For example, the initial request rate is set to the concurrency under infinite QPS.
+2. If the SLA is still satisfied, keep doubling the value until the SLA is no longer satisfied. This gives a relatively narrow window that contains the point where the SLA is barely satisfied.
+3. Apply binary search over the window to find the maximum value that still satisfies the SLA.
+
+!!! important
+    SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
+
+    For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
+
+### Visualizer
+
+[`vllm/benchmarks/sweep/plot.py`](../../vllm/benchmarks/sweep/plot.py) can be used to plot performance curves from parameter sweep results.
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
+    --var-x max_concurrency \
+    --row-by random_input_len \
+    --col-by random_output_len \
+    --curve-by api_server_count,max_num_batched_tokens \
+    --filter-by 'max_concurrency<=1024'
+```
+
+!!! tip
+    You can use `--dry-run` to preview the figures to be plotted.
 
 ## Performance Benchmarks
 
@@ -821,9 +1185,31 @@ For more results visualization, check the [visualizing the results](https://gith
 
 The latest performance results are hosted on the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
-More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](gh-file:.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
+More information on the performance benchmarks and their parameters can be found in [Benchmark README](https://github.com/intel-ai-tce/vllm/blob/more_cpu_models/.buildkite/nightly-benchmarks/README.md) and [performance benchmark description](../../.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md).
 
-[](){ #nightly-benchmarks }
+### Continuous Benchmarking
+
+The continuous benchmarking provides automated performance monitoring for vLLM across different models and GPU devices. This helps track vLLM's performance characteristics over time and identify any performance regressions or improvements.
+
+#### How It Works
+
+The continuous benchmarking is triggered via a [GitHub workflow CI](https://github.com/pytorch/pytorch-integration-testing/actions/workflows/vllm-benchmark.yml) in the PyTorch infrastructure repository, which runs automatically every 4 hours. The workflow executes three types of performance tests:
+
+- **Serving tests**: Measure request handling and API performance
+- **Throughput tests**: Evaluate token generation rates
+- **Latency tests**: Assess response time characteristics
+
+#### Benchmark Configuration
+
+The benchmarking currently runs on a predefined set of models configured in the [vllm-benchmarks directory](https://github.com/pytorch/pytorch-integration-testing/tree/main/vllm-benchmarks/benchmarks). To add new models for benchmarking:
+
+1. Navigate to the appropriate GPU directory in the benchmarks configuration
+2. Add your model specifications to the corresponding configuration files
+3. The new models will be included in the next scheduled benchmark run
+
+#### Viewing Results
+
+All continuous benchmarking results are automatically published to the public [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm).
 
 ## Nightly Benchmarks
 
@@ -831,4 +1217,4 @@ These compare vLLM's performance against alternatives (`tgi`, `trt-llm`, and `lm
 
 The latest nightly benchmark results are shared in major release blog posts such as [vLLM v0.6.0](https://blog.vllm.ai/2024/09/05/perf-update.html).
 
-More information on the nightly benchmarks and their parameters can be found [here](gh-file:.buildkite/nightly-benchmarks/nightly-descriptions.md).
+More information on the nightly benchmarks and their parameters can be found [here](../../.buildkite/nightly-benchmarks/nightly-descriptions.md).

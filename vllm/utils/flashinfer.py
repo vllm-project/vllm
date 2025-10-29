@@ -4,14 +4,15 @@
 
 Users of vLLM should always import **only** these wrappers.
 """
-from __future__ import annotations
 
 import contextlib
 import functools
 import importlib
 import importlib.util
 import os
-from typing import Any, Callable, NoReturn, Optional
+import shutil
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import requests
 import torch
@@ -33,10 +34,17 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
 
 @functools.cache
 def has_flashinfer() -> bool:
-    """Return ``True`` if FlashInfer is available."""
+    """Return `True` if FlashInfer is available."""
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
-    return importlib.util.find_spec("flashinfer") is not None
+    if importlib.util.find_spec("flashinfer") is None:
+        logger.debug_once("FlashInfer unavailable since package was not found")
+        return False
+    # Also check if nvcc is available since it's required to JIT compile flashinfer
+    if shutil.which("nvcc") is None:
+        logger.debug_once("FlashInfer unavailable since nvcc was not found")
+        return False
+    return True
 
 
 def _missing(*_: Any, **__: Any) -> NoReturn:
@@ -44,7 +52,8 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     raise RuntimeError(
         "FlashInfer backend is not available. Please install the package "
         "to enable FlashInfer kernels: "
-        "https://github.com/flashinfer-ai/flashinfer")
+        "https://github.com/flashinfer-ai/flashinfer"
+    )
 
 
 def _get_submodule(module_name: str) -> Any | None:
@@ -56,9 +65,9 @@ def _get_submodule(module_name: str) -> Any | None:
 
 
 # General lazy import wrapper
-def _lazy_import_wrapper(module_name: str,
-                         attr_name: str,
-                         fallback_fn: Callable[..., Any] = _missing):
+def _lazy_import_wrapper(
+    module_name: str, attr_name: str, fallback_fn: Callable[..., Any] = _missing
+):
     """Create a lazy import wrapper for a specific function."""
 
     @functools.cache
@@ -79,34 +88,69 @@ def _lazy_import_wrapper(module_name: str,
 
 # Create lazy wrappers for each function
 flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
-    "flashinfer.fused_moe", "trtllm_fp8_block_scale_moe")
+    "flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"
+)
 flashinfer_trtllm_fp8_per_tensor_scale_moe = _lazy_import_wrapper(
-    "flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe")
-flashinfer_cutlass_fused_moe = _lazy_import_wrapper("flashinfer.fused_moe",
-                                                    "cutlass_fused_moe")
-fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
+    "flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"
+)
+flashinfer_cutlass_fused_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "cutlass_fused_moe"
+)
+flashinfer_fp4_quantize = _lazy_import_wrapper("flashinfer", "fp4_quantize")
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
-    "flashinfer", "nvfp4_block_scale_interleave")
+    "flashinfer", "nvfp4_block_scale_interleave"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
-    "flashinfer", "trtllm_fp4_block_scale_moe")
+    "flashinfer", "trtllm_fp4_block_scale_moe"
+)
 
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
     "autotune",
-    fallback_fn=lambda *args, **kwargs: contextlib.nullcontext())
+    fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
+)
+
+
+@functools.cache
+def has_flashinfer_comm() -> bool:
+    """Return `True` if FlashInfer comm module is available."""
+    return has_flashinfer() and importlib.util.find_spec("flashinfer.comm") is not None
+
+
+@functools.cache
+def has_flashinfer_all2all() -> bool:
+    """Return `True` if FlashInfer mnnvl all2all is available."""
+    if not has_flashinfer_comm():
+        return False
+
+    # Check if all required functions are available
+    required_functions = [
+        ("flashinfer.comm", "Mapping"),
+        ("flashinfer.comm.mnnvl", "MnnvlMemory"),
+        ("flashinfer.comm.trtllm_alltoall", "MnnvlMoe"),
+        ("flashinfer.comm.trtllm_alltoall", "MoEAlltoallInfo"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 @functools.cache
 def has_flashinfer_moe() -> bool:
-    """Return ``True`` if FlashInfer MoE module is available."""
-    return has_flashinfer() and importlib.util.find_spec(
-        "flashinfer.fused_moe") is not None
+    """Return `True` if FlashInfer MoE module is available."""
+    return (
+        has_flashinfer()
+        and importlib.util.find_spec("flashinfer.fused_moe") is not None
+    )
 
 
 @functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
-    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
         return False
 
@@ -127,7 +171,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 @functools.cache
 def has_nvidia_artifactory() -> bool:
-    """Return ``True`` if NVIDIA's artifactory is accessible.
+    """Return `True` if NVIDIA's artifactory is accessible.
 
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
@@ -146,7 +190,8 @@ def has_nvidia_artifactory() -> bool:
         else:
             logger.warning_once(
                 "NVIDIA artifactory returned failed status code: %d",
-                response.status_code)
+                response.status_code,
+            )
         return accessible
     except Exception as e:
         logger.warning_once("Failed to connect to NVIDIA artifactory: %s", e)
@@ -160,25 +205,32 @@ def supports_trtllm_attention() -> bool:
     NVIDIA artifactory is accessible
     """
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return current_platform.is_device_capability(
-        100) and has_nvidia_artifactory()
+    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
 
 @functools.cache
-def _force_use_trtllm_attention(env_value: Optional[bool]) -> Optional[bool]:
+def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
     """Cache the env value for VLLM_USE_TRTLLM_ATTENTION"""
     if env_value is not None:
         logger.info_once("VLLM_USE_TRTLLM_ATTENTION is set to %s", env_value)
     return env_value
 
 
-def force_use_trtllm_attention() -> Optional[bool]:
+def force_use_trtllm_attention() -> bool | None:
     """
-    Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
-    return ``True`` if TRTLLM attention is forced to be used,
-    return ``False`` if TRTLLM attention is forced to be not used.
+    Return `None` if VLLM_USE_TRTLLM_ATTENTION is not set,
+    return `True` if TRTLLM attention is forced to be used,
+    return `False` if TRTLLM attention is forced to be not used.
     """
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
+
+
+def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
+    """Check if the current configuration supports TRTLLM attention."""
+    if force_use_trtllm_attention() is False:
+        return False
+    has_trtllm = supports_trtllm_attention()
+    return has_trtllm and (num_qo_heads % num_kv_heads == 0)
 
 
 def use_trtllm_attention(
@@ -188,9 +240,11 @@ def use_trtllm_attention(
     max_seq_len: int,
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
+    is_prefill: bool,
     has_sinks: bool = False,
+    has_spec: bool = False,
 ) -> bool:
-    """Return ``True`` if TRTLLM attention is used."""
+    """Return `True` if TRTLLM attention is used."""
     force_use_trtllm = force_use_trtllm_attention()
 
     # Environment variable is set to 0 - respect it
@@ -202,7 +256,8 @@ def use_trtllm_attention(
         if force_use_trtllm:
             logger.warning_once(
                 "TRTLLM attention is not supported on this platform, "
-                "but VLLM_USE_TRTLLM_ATTENTION is set to 1")
+                "but VLLM_USE_TRTLLM_ATTENTION is set to 1"
+            )
         return False
 
     # The combination of query and key heads is not supported
@@ -214,33 +269,40 @@ def use_trtllm_attention(
             )
         return False
 
+    if has_spec and not is_prefill:
+        # Speculative decoding requires TRTLLM attention for decodes
+        logger.info_once("Using TRTLLM attention (enabled for speculative decoding).")
+        return True
+
     # Must use TRTLLM attention if query is FP8 quantized
     if q_dtype == current_platform.fp8_dtype():
-        if has_sinks:
-            raise RuntimeError(
-                "TRTLLM FP8-qkv kernel is not supported for attention sinks. "
-                "Use kv_cache_dtype=auto for now.")
         logger.info_once("Using TRTLLM attention (query is quantized).")
         return True
 
     # If sinks are being used, we must use TRTLLM attention as it's
     # the only backend that supports them
     if has_sinks:
-        logger.info_once(
-            "Using TRTLLM attention (required for attention sinks).")
+        logger.info_once("Using TRTLLM attention (required for attention sinks).")
         return True
 
     if force_use_trtllm is None:
         # Environment variable not set - use auto-detection
-        use_trtllm = (num_tokens <= 256 and max_seq_len <= 131072
-                      and kv_cache_dtype == "auto")
-        if use_trtllm:
-            logger.warning_once("Using TRTLLM attention (auto-detected).")
+        if is_prefill:
+            # Prefill auto-detection
+            use_trtllm = max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
+        else:
+            # Decode auto-detection
+            use_trtllm = (
+                num_tokens <= 256 and max_seq_len <= 131072 and kv_cache_dtype == "auto"
+            )
+            if use_trtllm:
+                logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm
 
     # Environment variable is set to 1 - respect it
-    logger.info_once(
-        "Using TRTLLM attention (VLLM_USE_TRTLLM_ATTENTION is set to 1)")
+    logger.info_once("Using TRTLLM attention (VLLM_USE_TRTLLM_ATTENTION is set to 1)")
     return True
 
 
@@ -261,16 +323,14 @@ if has_flashinfer():
         backend: str,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
-        return flashinfer_mm_fp4_(A,
-                                  B,
-                                  A_scale,
-                                  B_scale,
-                                  g_scale,
-                                  dtype,
-                                  block_size=16,
-                                  backend=backend)
 
-    @torch.library.register_fake("vllm::flashinfer_mm_fp4", )
+        return flashinfer_mm_fp4_(
+            A, B, A_scale, B_scale, g_scale, dtype, block_size=16, backend=backend
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mm_fp4",
+    )
     def flashinfer_mm_fp4_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -280,10 +340,7 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
-        return torch.empty(A.shape[0],
-                           B.shape[1],
-                           dtype=dtype,
-                           device=A.device)
+        return torch.empty(A.shape[0], B.shape[1], dtype=dtype, device=A.device)
 
     @torch.library.custom_op(
         "vllm::bmm_fp8",
@@ -299,9 +356,12 @@ if has_flashinfer():
         backend: str,
     ) -> torch.Tensor:
         from flashinfer import bmm_fp8 as bmm_fp8_
+
         return bmm_fp8_(A, B, A_scale, B_scale, dtype, None, backend)
 
-    @torch.library.register_fake("vllm::bmm_fp8", )
+    @torch.library.register_fake(
+        "vllm::bmm_fp8",
+    )
     def bmm_fp8_fake(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -310,24 +370,24 @@ if has_flashinfer():
         dtype: torch.dtype,
         backend: str,
     ) -> torch.Tensor:
-        return torch.empty(A.shape[0],
-                           A.shape[1],
-                           B.shape[2],
-                           dtype=dtype,
-                           device=A.device)
+        return torch.empty(
+            A.shape[0], A.shape[1], B.shape[2], dtype=dtype, device=A.device
+        )
 
 
-def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
-                             block_scale_a: torch.Tensor,
-                             block_scale_b: torch.Tensor, alpha: torch.Tensor,
-                             out_dtype: torch.dtype,
-                             backend: str) -> torch.Tensor:
+def flashinfer_scaled_fp4_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    alpha: torch.Tensor,
+    out_dtype: torch.dtype,
+    backend: str,
+) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
-    assert block_scale_a.shape[1] == a.shape[1] // 8
-    assert block_scale_b.shape[1] == b.shape[1] // 8
 
     if backend == "cutlass":
         block_scale_a = block_scale_a.view(torch.uint8)
@@ -345,12 +405,13 @@ def flashinfer_scaled_fp4_mm(a: torch.Tensor, b: torch.Tensor,
 
 
 def flashinfer_scaled_fp8_mm(
-        a: torch.Tensor,
-        b: torch.Tensor,
-        scale_a: torch.Tensor,
-        scale_b: torch.Tensor,
-        out_dtype: torch.dtype,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    a: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[0]
     assert scale_a.numel() == 1 and scale_b.numel() == 1
@@ -383,14 +444,17 @@ __all__ = [
     "has_flashinfer",
     "flashinfer_trtllm_fp8_block_scale_moe",
     "flashinfer_cutlass_fused_moe",
-    "fp4_quantize",
+    "flashinfer_fp4_quantize",
     "nvfp4_block_scale_interleave",
     "trtllm_fp4_block_scale_moe",
     "autotune",
     "has_flashinfer_moe",
+    "has_flashinfer_comm",
+    "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
+    "can_use_trtllm_attention",
     "use_trtllm_attention",
     "flashinfer_disable_q_quantization",
     "flashinfer_scaled_fp4_mm",
