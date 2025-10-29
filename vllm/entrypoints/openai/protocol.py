@@ -2034,7 +2034,7 @@ class ChatMessage(OpenAIBaseModel):
     reasoning: str | None = None
     reasoning_content: str | None = None
 
-    @model_validator
+    @model_validator(mode="after")
     def handle_deprecated_reasoning_content(self):
         if self.reasoning_content is not None:
             self.reasoning = self.reasoning_content
@@ -2096,7 +2096,7 @@ class DeltaMessage(OpenAIBaseModel):
     reasoning_content: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
-    @model_validator
+    @model_validator(mode="after")
     def handle_deprecated_reasoning_content(self):
         if self.reasoning_content is not None:
             self.reasoning = self.reasoning_content
