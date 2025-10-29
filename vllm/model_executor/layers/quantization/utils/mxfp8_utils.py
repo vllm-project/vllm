@@ -18,4 +18,7 @@ def mxfp8_e4m3_quantize(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
             "`pip install flashinfer`"
         ) from err
 
-    return mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
+    x_q, x_scales = mxfp8_e4m3_quantize(x, is_sf_swizzled_layout=False)
+    if x_scales.ndim == 1:
+        x_scales = x_scales.view(x.size(0), -1)
+    return x_q, x_scales

@@ -14,18 +14,22 @@ from typing_extensions import Self
 import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless, get_open_ports_list
+from vllm.utils.network_utils import get_open_ports_list
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
-    from vllm.executor.executor_base import ExecutorBase
+    from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
     PlacementGroup = Any
-    ExecutorBase = Any
+    Executor = Any
 
 logger = init_logger(__name__)
 
@@ -185,7 +189,7 @@ class ParallelConfig:
     """ray distributed model workers placement group."""
 
     distributed_executor_backend: (
-        str | DistributedExecutorBackend | type[ExecutorBase] | None
+        str | DistributedExecutorBackend | type[Executor] | None
     ) = None
     """Backend to use for distributed model
     workers, either "ray" or "mp" (multiprocessing). If the product
@@ -334,7 +338,7 @@ class ParallelConfig:
                     self.get_next_dp_init_port(),
                     self.data_parallel_rank,
                     self.data_parallel_size,
-                    backend="gloo",
+                    backend=current_platform.dist_backend,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
@@ -507,7 +511,7 @@ class ParallelConfig:
             # We use multiprocessing by default if world_size fits on the
             # current node and we aren't in a ray placement group.
 
-            from vllm.executor import ray_utils
+            from vllm.v1.executor import ray_utils
 
             backend: DistributedExecutorBackend = "mp"
             ray_found = ray_utils.ray_is_available()
@@ -549,6 +553,12 @@ class ParallelConfig:
         if self.distributed_executor_backend is None and self.world_size == 1:
             self.distributed_executor_backend = "uni"
 
+        if self.max_parallel_loading_workers is not None:
+            logger.warning(
+                "max_parallel_loading_workers is currently "
+                "not supported and will be ignored."
+            )
+
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
@@ -559,25 +569,28 @@ class ParallelConfig:
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         # Lazy import to avoid circular import
-        from vllm.executor.executor_base import ExecutorBase
-        from vllm.platforms import current_platform
+        from vllm.v1.executor import Executor
+
+        # Enable batch invariance settings if requested
+        if vllm_is_batch_invariant():
+            self.disable_custom_all_reduce = True
 
         if (
             self.distributed_executor_backend is not None
             and not isinstance(self.distributed_executor_backend, str)
             and not (
                 isinstance(self.distributed_executor_backend, type)
-                and issubclass(self.distributed_executor_backend, ExecutorBase)
+                and issubclass(self.distributed_executor_backend, Executor)
             )
         ):
             raise ValueError(
                 "Unrecognized distributed executor backend "
                 f"{self.distributed_executor_backend}. Supported "
                 "values are 'ray', 'mp' 'uni', 'external_launcher', "
-                " custom ExecutorBase subclass or its import path."
+                " custom Executor subclass or its import path."
             )
         if self.use_ray:
-            from vllm.executor import ray_utils
+            from vllm.v1.executor import ray_utils
 
             ray_utils.assert_ray_available()
 

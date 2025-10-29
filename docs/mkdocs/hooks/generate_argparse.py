@@ -22,6 +22,11 @@ sys.modules["vllm._C"] = MagicMock()
 class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
+    def __init__(self, *args, **kwargs):
+        name = kwargs.pop("name", None)
+        super().__init__(*args, **kwargs)
+        self.__spec__ = importlib.machinery.ModuleSpec(name, None)
+
     def __get_pydantic_core_schema__(self, source_type, handler):
         return core_schema.any_schema()
 
@@ -42,23 +47,32 @@ def auto_mock(module, attr, max_mocks=50):
             raise e
         except ModuleNotFoundError as e:
             logger.info("Mocking %s for argparse doc generation", e.name)
-            sys.modules[e.name] = PydanticMagicMock()
+            sys.modules[e.name] = PydanticMagicMock(name=e.name)
+        except Exception as e:
+            logger.warning("Failed to import %s.%s: %s", module, attr, e)
 
     raise ImportError(
         f"Failed to import {module}.{attr} after mocking {max_mocks} imports"
     )
 
 
-latency = auto_mock("vllm.benchmarks", "latency")
-serve = auto_mock("vllm.benchmarks", "serve")
-throughput = auto_mock("vllm.benchmarks", "throughput")
+bench_latency = auto_mock("vllm.benchmarks", "latency")
+bench_serve = auto_mock("vllm.benchmarks", "serve")
+bench_sweep_plot = auto_mock("vllm.benchmarks.sweep.plot", "SweepPlotArgs")
+bench_sweep_serve = auto_mock("vllm.benchmarks.sweep.serve", "SweepServeArgs")
+bench_sweep_serve_sla = auto_mock(
+    "vllm.benchmarks.sweep.serve_sla", "SweepServeSLAArgs"
+)
+bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
 ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
-cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
-run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
-FlexibleArgumentParser = auto_mock("vllm.utils", "FlexibleArgumentParser")
+openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
+openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
+FlexibleArgumentParser = auto_mock(
+    "vllm.utils.argparse_utils", "FlexibleArgumentParser"
+)
 
 
 class MarkdownFormatter(HelpFormatter):
@@ -105,6 +119,9 @@ class MarkdownFormatter(HelpFormatter):
                 self._markdown_output.append(f"{action.help}\n\n")
 
             if (default := action.default) != SUPPRESS:
+                # Make empty string defaults visible
+                if default == "":
+                    default = '""'
                 self._markdown_output.append(f"Default: `{default}`\n\n")
 
     def format_help(self):
@@ -141,17 +158,23 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
 
     # Create parsers to document
     parsers = {
+        # Engine args
         "engine_args": create_parser(EngineArgs.add_cli_args),
         "async_engine_args": create_parser(
             AsyncEngineArgs.add_cli_args, async_args_only=True
         ),
-        "serve": create_parser(cli_args.make_arg_parser),
+        # CLI
+        "serve": create_parser(openai_cli_args.make_arg_parser),
         "chat": create_parser(ChatCommand.add_cli_args),
         "complete": create_parser(CompleteCommand.add_cli_args),
-        "bench_latency": create_parser(latency.add_cli_args),
-        "bench_throughput": create_parser(throughput.add_cli_args),
-        "bench_serve": create_parser(serve.add_cli_args),
-        "run-batch": create_parser(run_batch.make_arg_parser),
+        "run-batch": create_parser(openai_run_batch.make_arg_parser),
+        # Benchmark CLI
+        "bench_latency": create_parser(bench_latency.add_cli_args),
+        "bench_serve": create_parser(bench_serve.add_cli_args),
+        "bench_sweep_plot": create_parser(bench_sweep_plot.add_cli_args),
+        "bench_sweep_serve": create_parser(bench_sweep_serve.add_cli_args),
+        "bench_sweep_serve_sla": create_parser(bench_sweep_serve_sla.add_cli_args),
+        "bench_throughput": create_parser(bench_throughput.add_cli_args),
     }
 
     # Generate documentation for each parser

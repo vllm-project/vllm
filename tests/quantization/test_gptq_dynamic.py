@@ -40,7 +40,9 @@ def test_gptq_with_dynamic(
         GPTQMarlinLinearMethod if use_marlin_kernel else (GPTQLinearMethod)
     )
 
-    with vllm_runner(model_id, dtype=torch.float16, max_model_len=2048) as llm:
+    with vllm_runner(
+        model_id, dtype=torch.float16, max_model_len=2048, enforce_eager=True
+    ) as llm:
 
         def check_model(model):
             for name, submodule in model.named_modules():
