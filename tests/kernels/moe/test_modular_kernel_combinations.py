@@ -295,6 +295,8 @@ def test_modular_kernel_combinations_singlegpu(
     world_size: int,
     pytestconfig,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     config = Config(
         Ms=Ms,
         K=k,

@@ -94,7 +94,6 @@ class BatchedMMTensors:
         return BatchedMMTensors(A, B, C, num_expert_tokens)
 
 
-# float8_e4m3fn not supported on cuda arch < 89s, skipped inside the function
 @pytest.mark.parametrize("num_experts", [8, 32])
 @pytest.mark.parametrize("max_tokens_per_expert", [32, 224, 512])
 @pytest.mark.parametrize("K", [128, 1024])
@@ -111,6 +110,8 @@ def test_batched_mm(
     block_shape: list[int] | None,
     per_act_token_quant: bool,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
@@ -227,7 +228,6 @@ def test_batched_mm(
     torch.testing.assert_close(test_output, q_ref_output, atol=atol, rtol=rtol)
 
 
-# float8_e4m3fn not supported on cuda arch < 89s, skipped inside the function
 @pytest.mark.parametrize(("m", "n", "k"), MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
@@ -246,6 +246,8 @@ def test_fused_moe_batched_experts(
     block_shape: list[int] | None,
     input_scales: bool,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     current_platform.seed_everything(7)
 
     use_fp8_w8a8 = dtype == torch.float8_e4m3fn
