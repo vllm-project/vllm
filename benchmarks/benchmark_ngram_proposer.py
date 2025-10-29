@@ -5,9 +5,9 @@ import time
 from unittest import mock
 
 import numpy as np
+from benchmark_utils import TimeCollector
 from tabulate import tabulate
 
-from benchmark_utils import TimeCollector
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -19,7 +19,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -164,7 +164,7 @@ def invoke_main() -> None:
     )
     parser.add_argument(
         "--batched", action="store_true", help="consider time to prepare batch"
-    )  # noqa: E501
+    )
     parser.add_argument(
         "--num-iteration",
         type=int,
