@@ -410,6 +410,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
+            attn_block_size = next_power_of_2(attn_block_size)
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size
@@ -421,12 +422,12 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_block_size = kernel_block_alignment_size * cdiv(
                 mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
+            attn_block_size = next_power_of_2(attn_block_size)
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
         # too small.
         if cache_config.block_size is None or cache_config.block_size < attn_block_size:
-            attn_block_size = next_power_of_2(attn_block_size)
             cache_config.block_size = attn_block_size
             logger.info(
                 "Setting attention block size to %d tokens "
