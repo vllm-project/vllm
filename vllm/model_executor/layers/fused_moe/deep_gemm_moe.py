@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceContiguous,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
@@ -34,7 +33,6 @@ from vllm.utils.deep_gemm import (
 )
 from vllm.utils.func_utils import run_once
 from vllm.utils.import_utils import has_deep_gemm
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -179,17 +177,12 @@ def warmup_deepgemm_gg_contiguous_kernels(
 
 
 class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(
-        self,
-        quant_config: FusedMoEQuantConfig,
-        skip_permute_unpermute: bool = False,
-    ):
+    def __init__(self, quant_config: FusedMoEQuantConfig):
         super().__init__(quant_config)
         assert quant_config.block_shape == get_mk_alignment_for_contiguous_layout()
         assert quant_config.quant_dtype == torch.float8_e4m3fn
         assert not quant_config.per_act_token_quant
         assert not quant_config.per_out_ch_quant
-        self.skip_permute_unpermute = skip_permute_unpermute
 
     @property
     def activation_formats(
@@ -264,16 +257,13 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         assert w2.size(1) == K
 
-        if not self.skip_permute_unpermute:
-            M_sum = compute_aligned_M(
-                M=topk_ids.size(0),
-                num_topk=topk_ids.size(1),
-                local_num_experts=local_num_experts,
-                alignment=get_mk_alignment_for_contiguous_layout()[0],
-                expert_tokens_meta=expert_tokens_meta,
-            )
-        else:
-            M_sum = round_up(a1q.shape[0], get_mk_alignment_for_contiguous_layout()[0])
+        M_sum = compute_aligned_M(
+            M=topk_ids.size(0),
+            num_topk=topk_ids.size(1),
+            local_num_experts=local_num_experts,
+            alignment=get_mk_alignment_for_contiguous_layout()[0],
+            expert_tokens_meta=expert_tokens_meta,
+        )
 
         a1q_perm = _resize_cache(workspace2.view(dtype=torch.float8_e4m3fn), (M_sum, K))
         mm1_out = _resize_cache(workspace13, (M_sum, N))
@@ -283,24 +273,16 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
         mm2_out = _resize_cache(workspace2, (M_sum, K))
 
-        if self.skip_permute_unpermute:
-            topk_ids = topk_ids.flatten()
-            expert_ids = topk_ids if expert_map is None else expert_map[topk_ids]
-            inv_perm = None
-            assert expert_ids.shape[0] == a1q.shape[0], (
-                f"{expert_ids.shape[0]} == {a1q.shape[0]}"
-            )
-        else:
-            a1q, a1q_scale, expert_ids, inv_perm = deepgemm_moe_permute(
-                aq=a1q,
-                aq_scale=a1q_scale,
-                topk_ids=topk_ids,
-                local_num_experts=local_num_experts,
-                expert_map=expert_map,
-                expert_tokens_meta=expert_tokens_meta,
-                aq_out=a1q_perm,
-            )
-            assert a1q.size(0) == M_sum
+        a1q, a1q_scale, expert_ids, inv_perm = deepgemm_moe_permute(
+            aq=a1q,
+            aq_scale=a1q_scale,
+            topk_ids=topk_ids,
+            local_num_experts=local_num_experts,
+            expert_map=expert_map,
+            expert_tokens_meta=expert_tokens_meta,
+            aq_out=a1q_perm,
+        )
+        assert a1q.size(0) == M_sum
 
         m_grouped_fp8_gemm_nt_contiguous(
             (a1q, a1q_scale), (w1, self.w1_scale), mm1_out, expert_ids
@@ -320,24 +302,14 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if apply_router_weight_on_input:
             topk_weights = torch.ones_like(topk_weights)
 
-        if self.skip_permute_unpermute:
-            TopKWeightAndReduceContiguous().apply(
-                output,
-                mm2_out,
-                topk_weights,
-                topk_ids,
-                apply_router_weight_on_input,
-            )
-        else:
-            # Perform unpermutation and reduction
-            deepgemm_unpermute_and_reduce(
-                a=mm2_out,
-                topk_ids=topk_ids,
-                topk_weights=topk_weights,
-                inv_perm=inv_perm,
-                expert_map=expert_map,
-                output=output,
-            )
+        deepgemm_unpermute_and_reduce(
+            a=mm2_out,
+            topk_ids=topk_ids,
+            topk_weights=topk_weights,
+            inv_perm=inv_perm,
+            expert_map=expert_map,
+            output=output,
+        )
 
 
 def deep_gemm_moe_fp8(
