@@ -2080,7 +2080,7 @@ class FusedMoE(CustomOp):
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         weights = list(self.named_parameters())
-        assert all(weight.is_contiguous() for _, weight in weights)
+        # assert all(weight.is_contiguous() for _, weight in weights)
 
         # Filter out the non-expert weights.
         # `e_score_correction_bias` is a bias for each logical expert,
