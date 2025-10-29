@@ -112,6 +112,15 @@ from vllm.utils.async_utils import (
 from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
+
+class GenerationError(Exception):
+    """raised when finish_reason indicates internal server error (500)"""
+
+    def __init__(self, message: str = "Internal server error"):
+        super().__init__(message)
+        self.status_code = HTTPStatus.INTERNAL_SERVER_ERROR
+
+
 logger = init_logger(__name__)
 
 CompletionLikeRequest: TypeAlias = (
@@ -802,38 +811,36 @@ class OpenAIServing:
         )
         return json_str
 
-    def _handle_streaming_error_finish_reason(
-        self, finish_reason: str | None, request_id: str
-    ) -> str | None:
-        """handle error finish reason in streaming mode by logging and
-        returning error data if found"""
-        if finish_reason == "error":
-            logger.error(
-                "Request %s failed with an internal error during generation",
-                request_id,
-            )
-            return self.create_streaming_error_response(
-                "Internal server error",
-                err_type="InternalServerError",
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-        return None
-
     def _handle_error_finish_reason(
         self, finish_reason: str | None, request_id: str
-    ) -> ErrorResponse | None:
-        """handle error finish reason by logging and returning 500 if found"""
+    ) -> None:
+        """handle error finish reason by logging and raising exception if found"""
         if finish_reason == "error":
             logger.error(
                 "Request %s failed with an internal error during generation",
                 request_id,
             )
-            return self.create_error_response(
-                "Internal server error",
-                err_type="InternalServerError",
-                status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
-            )
-        return None
+            raise GenerationError("Internal server error")
+
+    def _convert_generation_error_to_response(
+        self, e: GenerationError
+    ) -> ErrorResponse:
+        """convert GenerationError to ErrorResponse"""
+        return self.create_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
+
+    def _convert_generation_error_to_streaming_response(
+        self, e: GenerationError
+    ) -> str:
+        """convert GenerationError to streaming error response"""
+        return self.create_streaming_error_response(
+            str(e),
+            err_type="InternalServerError",
+            status_code=e.status_code,
+        )
 
     async def _check_model(
         self,
