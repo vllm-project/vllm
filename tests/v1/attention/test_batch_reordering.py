@@ -116,9 +116,6 @@ def test_reorder_batch_to_split_decodes_and_prefills(test_case: ReorderTestCase)
         input_batch, scheduler_output, decode_threshold=test_case.decode_threshold
     )
 
-    print(f"input_batch.req_ids: {input_batch.req_ids}")
-    print(f"test_case.expected_order: {test_case.expected_order}")
-
     expected_req_ids = [f"r{i}" for i in test_case.expected_order]
 
     assert modified == test_case.expected_modified, (
