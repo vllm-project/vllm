@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -13,33 +14,105 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class PrefixCacheStats:
+class BaseCacheStats:
+    """Stores cache hit statistics."""
+
+    reset: bool = False
+    """Whether the cache was reset."""
+
+    requests: int = 0
+    """The number of requests in this update."""
+
+    queries: int = 0
+    """The number of queries in these requests."""
+
+    hits: int = 0
+    """The number of hits in these requests."""
+
+
+class CachingMetrics:
+    """Metrics for caching with a hit rate of the most recent N requests."""
+
+    def __init__(self, max_recent_requests: int = 1000) -> None:
+        super().__init__()
+
+        self.max_recent_requests = max_recent_requests
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        self.query_queue = deque[tuple[int, int, int]]()
+
+    def observe(self, stats: BaseCacheStats):
+        if stats.reset:
+            self.reset()
+
+        if stats.requests == 0:
+            return
+
+        self.query_queue.append((stats.requests, stats.queries, stats.hits))
+        self.aggregated_requests += stats.requests
+        self.aggregated_query_total += stats.queries
+        self.aggregated_query_hit += stats.hits
+
+        while (
+            len(self.query_queue) > 1
+            and self.aggregated_requests > self.max_recent_requests
+        ):
+            old_requests, old_queries, old_hits = self.query_queue.popleft()
+            self.aggregated_requests -= old_requests
+            self.aggregated_query_total -= old_queries
+            self.aggregated_query_hit -= old_hits
+
+    def reset(self):
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        self.query_queue.clear()
+
+    @property
+    def empty(self) -> bool:
+        return self.aggregated_requests == 0
+
+    @property
+    def hit_rate(self) -> float:
+        if self.aggregated_query_total == 0:
+            return 0.0
+        return self.aggregated_query_hit / self.aggregated_query_total
+
+
+@dataclass
+class PrefixCacheStats(BaseCacheStats):
     """Stores prefix cache hit statistics."""
 
-    # Whether reset_prefix_cache was invoked.
-    reset: bool = False
-    # The number of requests in this update.
-    requests: int = 0
-    # The number of queries in these requests. Note that "queries" here
-    # means the number of tokens that were queried from the cache.
-    queries: int = 0
-    # The number of hits in these requests.
-    hits: int = 0
+    preempted_requests: int = 0
+    preempted_queries: int = 0
+    preempted_hits: int = 0
+
+    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
+        if preempted:
+            self.preempted_requests += 1
+            self.preempted_queries += num_tokens
+            self.preempted_hits += num_hits
+        else:
+            self.requests += 1
+            self.queries += num_tokens
+            self.hits += num_hits
+
+
+@dataclass
+class MultiModalCacheStats(BaseCacheStats):
+    """Stores multi-modal cache hit statistics."""
 
 
 @dataclass
 class KVCacheLifetimeStats:
     """Stores KV cache block lifetime statistics."""
 
-    # Total number of blocks that have been freed
     total_blocks_freed: int = 0
-    # Sum of all block lifetimes (in seconds)
     total_lifetime_seconds: float = 0.0
-    # Average lifetime of freed blocks (in seconds)
     average_lifetime_seconds: float = 0.0
 
     def add_block_lifetime(self, lifetime_seconds: float) -> None:
-        """Add a new block lifetime to the statistics."""
         self.total_blocks_freed += 1
         self.total_lifetime_seconds += lifetime_seconds
         self.average_lifetime_seconds = (
@@ -47,7 +120,6 @@ class KVCacheLifetimeStats:
         )
 
     def reset(self) -> None:
-        """Reset all lifetime statistics."""
         self.total_blocks_freed = 0
         self.total_lifetime_seconds = 0.0
         self.average_lifetime_seconds = 0.0
@@ -60,13 +132,13 @@ class SchedulerStats:
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
 
-    # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
+    connector_prefix_cache_stats: PrefixCacheStats | None = None
 
     kv_cache_lifetime_stats: KVCacheLifetimeStats = field(
         default_factory=KVCacheLifetimeStats
@@ -90,17 +162,11 @@ class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
     num_generation_tokens: int = 0
-
-    # This is an engine frontend timestamp (wall-clock)
     arrival_time: float = 0.0
-
-    # These are engine core timestamps (monotonic)
     queued_ts: float = 0.0
     scheduled_ts: float = 0.0
     first_token_ts: float = 0.0
     last_token_ts: float = 0.0
-
-    # first token latency
     first_token_latency: float = 0.0
 
 
@@ -137,7 +203,6 @@ class IterationStats:
         self.running_lora_adapters: dict[str, int] = {}
 
     def _time_since(self, start: float) -> float:
-        """Calculate an interval relative to this iteration's timestamp."""
         return self.iteration_timestamp - start
 
     def update_from_output(
@@ -161,13 +226,11 @@ class IterationStats:
 
         req_stats.num_generation_tokens += num_new_generation_tokens
 
-        # Process request-level engine core events
         if output.events is not None:
             self.update_from_events(
                 output.request_id, output.events, is_prefilling, req_stats, lora_stats
             )
 
-        # Process the batch-level "new tokens" engine core event
         if is_prefilling:
             req_stats.first_token_ts = engine_core_timestamp
         else:
@@ -184,7 +247,6 @@ class IterationStats:
         req_stats: RequestStateStats,
         lora_stats: LoRAStats | None,
     ):
-        # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
 
         for event in events:
@@ -193,12 +255,16 @@ class IterationStats:
                 if lora_stats is not None:
                     lora_stats.waiting_requests.add(req_id)
             elif event.type == EngineCoreEventType.SCHEDULED:
-                if req_stats.scheduled_ts == 0.0:  # ignore preemptions
+                if req_stats.scheduled_ts == 0.0:
                     req_stats.scheduled_ts = event.timestamp
                 LoRARequestStates.scheduled_request(lora_stats, req_id)
             elif event.type == EngineCoreEventType.PREEMPTED:
                 self.num_preempted_reqs += 1
-                LoRARequestStates.preempted_request(lora_stats, req_id)
+            elif event.type == EngineCoreEventType.SPEC_TOKEN_APPENDED:
+                if is_prefilling:
+                    req_stats.first_token_ts = event.timestamp
+                else:
+                    req_stats.last_token_ts = event.timestamp
 
     def update_from_finished_request(
         self,
@@ -208,23 +274,10 @@ class IterationStats:
         req_stats: RequestStateStats,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
-
-        # Queued interval is from first QUEUED event to first SCHEDULED
         queued_time = req_stats.scheduled_ts - req_stats.queued_ts
-
-        # Prefill interval is from first SCHEDULED to first NEW_TOKEN
-        # Any preemptions during prefill is included in the interval
         prefill_time = req_stats.first_token_ts - req_stats.scheduled_ts
-
-        # Decode interval is from first NEW_TOKEN to last NEW_TOKEN
-        # Any preemptions during decode are included
         decode_time = req_stats.last_token_ts - req_stats.first_token_ts
-
-        # Inference interval is from first SCHEDULED to last NEW_TOKEN
-        # Any preemptions during prefill or decode are included
         inference_time = req_stats.last_token_ts - req_stats.scheduled_ts
-
-        # Do not count the token generated by the prefill phase
         mean_time_per_output_token = (
             decode_time / (req_stats.num_generation_tokens - 1)
             if req_stats.num_generation_tokens - 1 > 0
@@ -276,8 +329,6 @@ class LoRARequestStates:
         lora_stats.waiting_requests.discard(req_state.request_id)
         lora_stats.running_requests.discard(req_state.request_id)
 
-    # Break the pattern for this lifecycle methods so we can
-    # call this from IterationStats.update_from_events()
     @staticmethod
     def scheduled_request(lora_stats: LoRAStats | None, request_id: str):
         if lora_stats is None:
