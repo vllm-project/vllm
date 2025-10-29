@@ -116,8 +116,6 @@ def _quantize_dequantize_fp8_ds_mla(
 def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
-    if torch.cuda.get_device_capability()[0] != 10:
-        pytest.skip("Sparse MLA only supported on SM 10 devices")
 
     device = torch.device("cuda")
     dtype = torch.bfloat16
