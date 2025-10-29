@@ -5,10 +5,10 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import set_env_var
+from vllm.utils.system_utils import set_env_var
 
 from .post_cleanup import PostCleanupPass
 from .vllm_inductor_pass import VllmInductorPass
@@ -88,27 +88,30 @@ class PostGradPassManager(CustomGraphPass):
 
     def configure(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
-        if self.pass_config.enable_noop:
-            self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_sequence_parallelism:
-            self.passes += [SequenceParallelismPass(config)]
-            if self.pass_config.enable_async_tp:
-                self.passes += [AsyncTPPass(config)]
+        # Set the current vllm config to allow tracing CustomOp instances
+        with set_current_vllm_config(config, check_compile=False):
+            if self.pass_config.enable_noop:
+                self.passes += [NoOpEliminationPass(config)]
 
-        if self.pass_config.enable_fi_allreduce_fusion:
-            self.passes += [AllReduceFusionPass(config)]
+            if self.pass_config.enable_sequence_parallelism:
+                self.passes += [SequenceParallelismPass(config)]
+                if self.pass_config.enable_async_tp:
+                    self.passes += [AsyncTPPass(config)]
 
-        if self.pass_config.enable_fusion:
-            self.passes += [RMSNormQuantFusionPass(config)]
-            self.passes += [ActivationQuantFusionPass(config)]
+            if self.pass_config.enable_fi_allreduce_fusion:
+                self.passes += [AllReduceFusionPass(config)]
 
-        if self.pass_config.enable_attn_fusion:
-            self.passes += [AttnFusionPass(config)]
+            if self.pass_config.enable_fusion:
+                self.passes += [RMSNormQuantFusionPass(config)]
+                self.passes += [ActivationQuantFusionPass(config)]
 
-        # needs a functional graph
-        self.post_cleanup = PostCleanupPass(config)
-        self.fix_functionalization = FixFunctionalizationPass(config)
+            if self.pass_config.enable_attn_fusion:
+                self.passes += [AttnFusionPass(config)]
+
+            # needs a functional graph
+            self.post_cleanup = PostCleanupPass(config)
+            self.fix_functionalization = FixFunctionalizationPass(config)
 
         # [HACK: Bug with Inductor graph partition and torch.compile cache]
         # In PyTorch 2.9, torch.compile has a bug where the graph

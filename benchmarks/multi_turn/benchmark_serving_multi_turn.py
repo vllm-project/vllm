@@ -1251,7 +1251,7 @@ async def main() -> None:
         default=None,
         help="The model name used in the API. "
         "If not specified, the model name will be the "
-        "same as the ``--model`` argument. ",
+        "same as the `--model` argument. ",
     )
 
     parser.add_argument(
