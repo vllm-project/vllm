@@ -105,6 +105,9 @@ def rank_worker(
         config.Ms = m
         config.topks = topk
 
+        ref_out = None
+        mk_out = None
+
         try:
             print(f"Running[{pgi.rank}]: m={m}, topk={topk} ...")
             count = count + 1
@@ -131,6 +134,9 @@ def rank_worker(
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
         except Exception as ex:
+            print(f"REF = {ref_out}")
+            print(f"OUT = {mk_out}")
+
             format_result(verbose, config.describe(), ex)
             if exit_first:
                 raise ex
