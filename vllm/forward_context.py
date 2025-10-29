@@ -37,12 +37,17 @@ class BatchDescriptor(NamedTuple):
     num_tokens: int
     uniform_decode: bool = False
     """
-    False can also be used for an uniform decode batch to dispatch to the 
+    False can also be used for an uniform decode batch to dispatch to the
     cudagraph supporting non-uniform batches.
     """
     has_lora: bool = False
     """
     Whether this batch has active LoRA adapters.
+    """
+    draft_length: int = 0
+    """
+    Number of draft tokens for speculative decoding. 0 means not using
+    variable draft lengths (uses default num_speculative_tokens).
     """
 
     @property
@@ -51,7 +56,10 @@ class BatchDescriptor(NamedTuple):
         Return a non-uniform version of current batch descriptor.
         """
         return BatchDescriptor(
-            self.num_tokens, uniform_decode=False, has_lora=self.has_lora
+            self.num_tokens,
+            uniform_decode=False,
+            has_lora=self.has_lora,
+            draft_length=self.draft_length,
         )
 
 
