@@ -6,7 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
-# from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -91,18 +91,6 @@ def balanced_indices_to_map(
     )
 
     return routing_map, probs, topk_idx
-
-
-def do_some_shit(routing_map, probs):
-    num_tokens, num_experts = routing_map.shape
-    routing_map = routing_map.bool().T.contiguous()
-    token_indices = (
-        torch.arange(num_tokens, device=routing_map.device)
-        .unsqueeze(0)
-        .expand(num_experts, -1)
-    )
-    sorted_indices = token_indices.masked_select(routing_map)
-    print(f"SORTED_INDICES = {sorted_indices.shape, sorted_indices}")
 
 
 class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
@@ -199,8 +187,16 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             config,
         )
 
-    def pp(self, msg, t):
-        if False:
+    def p(self, msg, force=False):
+        if force:
+            print(msg)
+
+    def pp(self, msg, t, force=False):
+        if force:
+            print(
+                f"{msg}[{self.rank_expert_offset}] = {t.shape if t is not None else None}"
+            )
+        elif False:
             print(
                 f"{msg}[{self.rank_expert_offset}] = {t.shape if t is not None else None}\n{t}"
             )
@@ -213,23 +209,37 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_probs,
         topk_ids,
         topk_weights,
-        num_dispatched,
     ):  # -> tuple[torch.Tensor,torch.Tensor]:
         if self.do_permute:
             M_sum, K = expert_x.shape
             # Are these interleaved?
             return topk_ids.view(-1, 1)[:M_sum], topk_weights.view(-1, 1)[:M_sum]
 
+        # TODO: use all_gatherv
+        all_topk_ids = get_dp_group().all_gather(topk_ids, dim=0)
+        all_topk_weights = get_dp_group().all_gather(topk_weights, dim=0)
+
+        #self.pp("ALL_TOPK_IDS", all_topk_ids)
+
         start = self.rank_expert_offset
         end = self.rank_expert_offset + self.num_local_experts
 
         # subtract? use oob expert idx?
         oob_idx = self.num_local_experts if self.rank_expert_offset == 0 else 0
-        assert (topk_ids == oob_idx).all() == False
-        new_topk_ids = torch.where((topk_ids >= start) & (topk_ids < end), topk_ids, oob_idx)
-        new_topk_weights = torch.where(topk_ids != oob_idx, topk_weights, 0.0)
+        assert (all_topk_ids == oob_idx).all() == False
+        new_topk_ids = torch.where((all_topk_ids >= start) & (all_topk_ids < end), all_topk_ids, oob_idx)
+        new_topk_weights = torch.where(all_topk_ids != oob_idx, all_topk_weights, 0.0)
 
-        return new_topk_ids[:num_dispatched], new_topk_weights[:num_dispatched]
+        mask = ~torch.all(new_topk_ids == oob_idx, dim=1)
+        #self.pp("MASK", mask)
+        new_topk_ids = new_topk_ids[mask]
+        new_topk_weights = new_topk_weights[mask]
+
+        #self.pp("NEW_TOPK_IDS_PRE", new_topk_ids)
+
+        assert new_topk_ids.shape[0] == expert_x.shape[0], f"{new_topk_ids.shape} == {expert_x.shape}"
+
+        return new_topk_ids, new_topk_weights
 
     def prepare(
         self,
@@ -279,13 +289,13 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             else:
                 a1q_scale = None
 
-        print(
+        self.p(
             f"DISPATCH BEGIN[{self.rank_expert_offset}], a1q={a1q.shape} a1q_s={a1q_scale.shape if a1q_scale is not None else None}"
         )
         self.pp("TOPK_IDS", topk_ids)
-        print(f"M, K [{self.rank_expert_offset}] = {M, K}")
+        self.p(f"M, K [{self.rank_expert_offset}] = {M, K}")
 
-        # print(f"TOPK_WEIGHTS[{self.rank_expert_offset}] = {topk_weights.shape}\n{topk_weights}")
+        # self.p(f"TOPK_WEIGHTS[{self.rank_expert_offset}] = {topk_weights.shape}\n{topk_weights}")
 
         assert num_experts > 0
 
@@ -306,6 +316,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         else:
             handle = None
 
+        self.pp("A1Q", a1q)
+
         if not self.do_permute:
             (expert_x, expert_probs, expert_x_scale, handle) = self.buffer.dispatch(
                 hidden=a1q,
@@ -319,9 +331,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 num_of_experts=num_experts,
             )
 
-            self.handle = handle
-            self.expert_probs = expert_probs
-            assert self.handle is not None
+            self.pp("EXPERT_X", expert_x)
 
             (
                 sparse_to_dense_map,
@@ -331,9 +341,9 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 local_expert_routing_map,  #
                 num_tokens,
                 config,
-            ) = self.handle
+            ) = handle
 
-            print(
+            self.p(
                 f"NUM_TOK_PER_EXPERT[{self.rank_expert_offset}]={num_of_tokens_for_experts.item()}"
             )
             num_dispatched = num_of_tokens_for_experts.item()
@@ -356,10 +366,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
             self.pp("TOKENS_PER_EXPERT", tokens_per_expert)
 
-            self.handle = handle
-            self.expert_probs = expert_probs
-            assert self.handle is not None
-
             (
                 sparse_to_dense_map,
                 rdma_to_attn_map,
@@ -369,27 +375,28 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 row_id_map,
                 num_tokens,
                 config,
-            ) = self.handle
+            ) = handle
 
             num_dispatched = num_dispatched_tokens_tensor.item()
 
-            print(f"NUM_TOKENS = {num_tokens}")
+            self.p(f"NUM_TOKENS = {num_tokens}")
             self.pp("NUM_DISPATCHED_TOKENS_TENSOR", num_dispatched_tokens_tensor)
             # self.pp("ROW_ID_MAP", row_id_map)
 
-        self.pp("PROBS", expert_probs)
+        self.handle = handle
+        self.expert_probs = expert_probs
+        assert self.handle is not None
+
+        self.pp("PROBS", self.expert_probs)
         self.pp("S2D", sparse_to_dense_map)
 
-        print(
+        self.p(
             f"DISPATCH END[{self.rank_expert_offset}], x={expert_x.shape} x_s={expert_x_scale.shape if expert_x_scale is not None else None}"
         )
 
         #assert num_dispatched == local_expert_routing_map.shape[0]
 
         self.pp("LERM", local_expert_routing_map)
-
-        # Trim local_expert_routing_map to actual number of dispatched tokens
-        local_expert_routing_map = local_expert_routing_map[:num_dispatched]
 
         new_topk_ids, new_topk_weights = self.create_new_topk_data(
             expert_x,
@@ -398,7 +405,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_probs,
             topk_ids,
             topk_weights,
-            num_dispatched,
         )
 
         self.pp("NEW_TOPK_IDS", new_topk_ids)
@@ -424,7 +430,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 )
 
         # TODO
-        # assert new_topk_ids.shape[0] == expert_x.shape[0], f"{topk_ids.shape[0]} == {expert_x.shape[0]}"
+        assert new_topk_ids.shape[0] == expert_x.shape[0], f"{topk_ids.shape[0]} == {expert_x.shape[0]}"
+        assert new_topk_weights.shape[0] == expert_x.shape[0], f"{topk_weights.shape[0]} == {expert_x.shape[0]}"
 
         return (
             expert_x,
@@ -446,32 +453,34 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # fused_expert_output can have 0 tokens - This happens when none of the
         # tokens from the all2all reach this EP rank.
         # TODO(bnell): check if this is still needed
-        print(f"M, K [{self.rank_expert_offset}] = {output.shape}")
+        self.p(f"M, K [{self.rank_expert_offset}] = {output.shape}")
 
-        if True or fused_expert_output.numel() != 0:
-            print(
-                f"COMBINE BEGIN[{self.rank_expert_offset}] {fused_expert_output.dtype} out={output.shape} fe_out={fused_expert_output.shape}"
+        if False and fused_expert_output.numel() == 0:
+            fused_expert_output = torch.empty((1, fused_expert_output.shape[1]), device=fused_expert_output.device, dtype=fused_expert_output.dtype)
+        self.p(
+            f"COMBINE BEGIN[{self.rank_expert_offset}] {fused_expert_output.dtype} out={output.shape} fe_out={fused_expert_output.shape}"
+        )
+
+        #assert self.expert_probs.numel() > 0
+        if self.expert_probs.numel() == 0:
+            print(f"PROBS NUMEL == 0 {self.expert_probs.shape}")
+
+
+        if not self.do_permute:
+            combined_x, combined_probs = self.buffer.combine(
+                hidden=fused_expert_output,
+                probs=None, #self.expert_probs,  # None?
+                handle=self.handle,
             )
-            if not self.do_permute:
-                combined_x, combined_probs = self.buffer.combine(
-                    hidden=fused_expert_output,
-                    probs=self.expert_probs,  # None?
-                    handle=self.handle,
-                )
-            else:
-                topk = topk_ids.shape[1]
-                combined_x, combined_probs = self.buffer.combine_with_unpermute(
-                    hidden=fused_expert_output,
-                    probs=self.expert_probs,  # None?
-                    handle=self.handle,
-                    # pad_multiple=topk,
-                )
-            print(f"COMBINE END[{self.rank_expert_offset}] {combined_x.shape}")
         else:
-            combined_x = None
-            combined_probs = topk_weights
-            output = fused_expert_output
-            print(f"COMBINE EMPTY END [{self.rank_expert_offset}]")
+            topk = topk_ids.shape[1]
+            combined_x, combined_probs = self.buffer.combine_with_unpermute(
+                hidden=fused_expert_output,
+                probs=self.expert_probs,  # None?
+                handle=self.handle,
+                # pad_multiple=topk,
+            )
+        self.p(f"COMBINE END[{self.rank_expert_offset}] {combined_x.shape} {combined_probs.shape if combined_probs is not None else None}")
 
         # TODO(bnell): Double check this
         # top_k = topk_ids.shape[1]
@@ -480,10 +489,12 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
+        self.p(f"REDUCDER = {weight_and_reduce_impl}")
+
         weight_and_reduce_impl.apply(
             output=combined_x,
             fused_expert_output=output,
-            topk_weights=combined_probs,
+            topk_weights=topk_weights,
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
