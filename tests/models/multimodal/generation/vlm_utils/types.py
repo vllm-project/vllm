@@ -154,7 +154,7 @@ class VLMTestInfo(NamedTuple):
     dtype: str = "auto"
     distributed_executor_backend: str | None = None
     # Only expanded in video tests
-    num_video_frames: Union[int, tuple[int]] = 16
+    num_video_frames: int | tuple[int] = 16
     needs_video_metadata: bool = False
 
     # Fixed image sizes / image size factors; most tests use image_size_factors
@@ -212,7 +212,7 @@ class ExpandableVLMTestArgs(NamedTuple):
     # Sizes are used for everything except for custom input tests
     size_wrapper: ImageSizeWrapper | None = None
     # Video only
-    num_video_frames: Optional[int] = None
+    num_video_frames: int | None = None
     needs_video_metadata: bool = False
     # Custom inputs only
     custom_test_opts: CustomTestOptions | None = None
