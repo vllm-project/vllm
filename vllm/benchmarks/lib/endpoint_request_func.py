@@ -135,7 +135,8 @@ def _update_headers_common(
     if request_func_input.extra_headers:
         headers |= request_func_input.extra_headers
     if request_func_input.request_id:
-        headers["x-request-id"] = request_func_input.request_id
+        # Ensure unique request IDs across benchmark clients
+        headers["x-request-id"] = f"{os.getpid()}-{request_func_input.request_id}"
 
 
 async def async_request_openai_completions(
