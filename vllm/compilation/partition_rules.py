@@ -60,11 +60,9 @@ def inductor_partition_rule_context(splitting_ops: list[str]):
     Inductor scheduler to partition the graph at these operators. The rules
     are automatically restored to their previous state on exit.
 
-    Note: Callers should use resolve_defined_ops() to convert operator names
-    to OpOverload objects before calling this function.
-
     Args:
-        overloads: List of resolved operator overload objects.
+        splitting_ops: List of operator names to partition on. The format should
+        be `namespace::op_name` (e.g., `silly::attention`).
     """
     if not splitting_ops:
         logger.debug("No partition ops provided; skipping rule registration.")
