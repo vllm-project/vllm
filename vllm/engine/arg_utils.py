@@ -83,7 +83,7 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.utils import check_gguf_file
+from vllm.transformers_utils.utils import check_gguf_file, is_s3
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -1311,19 +1311,25 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 
+        # Check if the model is a speculator and override model/tokenizer/config
+        # BEFORE creating ModelConfig, so the config is created with the target model
+        # Skip speculator detection for S3 models since HuggingFace cannot load
+        # configs directly from S3 URLs. S3 models can still use speculators with
+        # explicit --speculative-config.
+        if not is_s3(self.model):
+            (self.model, self.tokenizer, self.speculative_config) = (
+                maybe_override_with_speculators(
+                    model=self.model,
+                    tokenizer=self.tokenizer,
+                    revision=self.revision,
+                    trust_remote_code=self.trust_remote_code,
+                    vllm_speculative_config=self.speculative_config,
+                )
+            )
+
         model_config = self.create_model_config()
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
-
-        (self.model, self.tokenizer, self.speculative_config) = (
-            maybe_override_with_speculators(
-                model=self.model,
-                tokenizer=self.tokenizer,
-                revision=self.revision,
-                trust_remote_code=self.trust_remote_code,
-                vllm_speculative_config=self.speculative_config,
-            )
-        )
 
         # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
         #   and fall back to V0 for experimental or unsupported features.
