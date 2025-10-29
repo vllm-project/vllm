@@ -5,7 +5,7 @@ import asyncio
 import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 import pybase64
 import torch
@@ -321,6 +321,9 @@ class CompletionRenderer(BaseRenderer):
         # Using a sync tokenizer is faster than using an async_tokenizer.
         tokenizer = self.tokenizer
 
+        if self.tokenizer is None:
+            raise ValueError("No tokenizer available for text input processing")
+
         # Handle encoder-specific preprocessing
         if (
             self.model_config.encoder_config is not None
@@ -328,15 +331,19 @@ class CompletionRenderer(BaseRenderer):
         ):
             text = text.lower()
 
+        tokenization_kwargs: dict[str, Any] = {}
+        if add_special_tokens is not None:
+            tokenization_kwargs["add_special_tokens"] = add_special_tokens
+
         # Tokenize texts
         if truncate_prompt_tokens is None:
-            encoded = tokenizer(text, add_special_tokens=add_special_tokens)
+            encoded = tokenizer(text, **tokenization_kwargs)
         else:
             encoded = tokenizer(
                 text,
-                add_special_tokens=add_special_tokens,
                 truncation=True,
                 max_length=truncate_prompt_tokens,
+                **tokenization_kwargs,
             )
 
         return self._create_tokens_prompt(
