@@ -290,9 +290,20 @@ def _support_torch_compile(
             return
 
         compilation_counter.num_models_seen += 1
-        TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_mode=vllm_config.compilation_config.mode
-        )
+        if not hasattr(self.__class__, "compiled_callable"):
+            # only compile the same model once
+            # NOTE: this is probably not right, since parameters can change
+            # and cause us to fall over
+            TorchCompileWrapperWithCustomDispatcher.__init__(
+                self, compilation_mode=vllm_config.compilation_config.mode
+            )
+            self.__class__.compiled_callable = self.compiled_callable
+        else:
+            TorchCompileWrapperWithCustomDispatcher.__init__(
+                self,
+                self.__class__.compiled_callable,
+                compilation_mode=vllm_config.compilation_config.mode,
+            )
 
     cls.__init__ = __init__
 
@@ -363,7 +374,7 @@ def _support_torch_compile(
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
-        if len(self.compiled_codes) < 1:
+        if len(self.__class__.compiled_codes) < 1:
             sig = inspect.signature(self.__class__.forward)
             bound_args = sig.bind(self, *args, **kwargs)
             bound_args.apply_defaults()
@@ -403,7 +414,7 @@ def _support_torch_compile(
         # if we don't use custom dispatcher, we can directly call the
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
-        if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
+        if len(self.__class__.compiled_codes) < 1 or not self.use_custom_dispatcher:
             # it seems Dynamo reuse the compilation across instances,
             # while we need to make sure the compiled code is not reused.
             # we need to control all the compilation of the model.
@@ -451,13 +462,16 @@ def _support_torch_compile(
                 _torch27_patch_tensor_subclasses(),
             ):
                 if envs.VLLM_USE_AOT_COMPILE:
-                    self.aot_compiled_fn = self.aot_compile(*args, **kwargs)
-                    output = self.aot_compiled_fn(self, *args, **kwargs)
+                    if not hasattr(self.__class__, "aot_compiled_fn"):
+                        self.__class__.aot_compiled_fn = self.aot_compile(
+                            *args, **kwargs
+                        )
+                    output = self.__class__.aot_compiled_fn(self, *args, **kwargs)
                     assert aot_compilation_path is not None
                     assert cache_dir is not None
                     try:
                         os.makedirs(cache_dir, exist_ok=True)
-                        self.aot_compiled_fn.save_compiled_function(
+                        self.__class__.aot_compiled_fn.save_compiled_function(
                             aot_compilation_path
                         )
                     except Exception as e:
