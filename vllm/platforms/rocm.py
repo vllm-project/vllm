@@ -72,6 +72,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
     "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
+    "0x74a2": "AMD_Instinct_MI308X",
     "0x74a5": "AMD_Instinct_MI325X",
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
