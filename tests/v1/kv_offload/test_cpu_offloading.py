@@ -12,6 +12,7 @@ from tqdm import tqdm
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
+from vllm.platforms import current_platform
 
 CPU_BLOCK_SIZES = [16, 48]
 
@@ -63,6 +64,9 @@ class MockSubscriber:
         self.sub.close()
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="CPU offloading only supported on CUDA"
+)
 @pytest.mark.parametrize("cpu_block_size", CPU_BLOCK_SIZES)
 def test_cpu_offloading(cpu_block_size: int) -> None:
     """
