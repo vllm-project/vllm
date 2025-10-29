@@ -13,6 +13,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
@@ -204,6 +205,23 @@ def build_logitsprocs(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes
         )
     )
+
+
+def validate_logits_processors_parameters(
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
+    sampling_params: SamplingParams,
+):
+    if logits_processors is None:
+        return None
+
+    # we don't expect any CUDA initialization when loading custom logitsprocs,
+    # hide all visible GPUs here to guarantee process.
+    # TODO(Isotr0py): Make the error message more informative if CUDA is
+    # attempted to be initialized here. Currently, only an internal server
+    # error is raised.
+    with guard_cuda_initialization():
+        for logits_procs in _load_custom_logitsprocs(logits_processors):
+            logits_procs.validate_params(sampling_params)
 
 
 class AdapterLogitsProcessor(LogitsProcessor):

@@ -32,9 +32,6 @@ from vllm.entrypoints.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.logits_processors import (
-    validate_logits_processors_parameters,
-)
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -74,6 +71,7 @@ from vllm.transformers_utils.tokenizers import (
     validate_request_params,
 )
 from vllm.utils.collection_utils import as_list
+from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
