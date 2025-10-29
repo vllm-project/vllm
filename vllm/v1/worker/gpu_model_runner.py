@@ -400,9 +400,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Cache the device properties.
         self._init_device_properties()
 
+        if self.pcp_world_size > 1:
+            max_num_padded_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size 
+        else:
+            max_num_padded_tokens = self.max_num_tokens
         # Persistent buffers for CUDA graphs.
-        self.input_ids = self._make_buffer(self.max_num_tokens, dtype=torch.int32)
-        self.positions = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
+        self.input_ids = self._make_buffer(max_num_padded_tokens, dtype=torch.int32)
+        self.positions = self._make_buffer(max_num_padded_tokens, dtype=torch.int64)
         self.query_start_loc = self._make_buffer(
             self.max_num_reqs + 1, dtype=torch.int32
         )
@@ -417,7 +421,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.inputs_embeds = self._make_buffer(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, numpy=False
         )
-        self.is_token_ids = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
+        self.is_token_ids = self._make_buffer(max_num_padded_tokens, dtype=torch.bool)
         self.discard_request_indices = self._make_buffer(
             self.max_num_reqs, dtype=torch.int64
         )
@@ -435,7 +439,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
 
         # Persistent buffers for Context Parallism
-        max_num_padded_tokens = self.max_num_tokens + self.max_num_reqs * 2 * self.pcp_world_size 
         self.pcp_allgather_restore_idx = self._make_buffer(
             max_num_padded_tokens,
             dtype=torch.int64
@@ -476,7 +479,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         # Keep in int64 to avoid overflow with long context
         self.arange_np = np.arange(
-            max(self.max_num_reqs + 1, self.max_model_len, self.max_num_tokens),
+            max(self.max_num_reqs + 1, self.max_model_len, max_num_padded_tokens),
             dtype=np.int64,
         )
 
@@ -490,7 +493,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.kv_sharing_fast_prefill_logits_indices = None
         if self.cache_config.kv_sharing_fast_prefill:
             self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
-                self.max_num_tokens, dtype=torch.int32, device=self.device
+                max_num_padded_tokens, dtype=torch.int32, device=self.device
             )
 
         self.uniform_decode_query_len = (
