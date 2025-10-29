@@ -223,6 +223,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLATTEN_LOGPROBS: bool = False
+    VLLM_EPLB_STATE_PATH: str | None = None
 
 
 def get_default_cache_root():
@@ -1481,6 +1482,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
     # FlattenLogprobs.
     "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
+    # Path to saved EPLB state file. If set, vLLM will attempt to load
+    # the EPLB state from this path during model initialization.
+    "VLLM_EPLB_STATE_PATH": lambda: os.getenv("VLLM_EPLB_STATE_PATH", None),
 }
 
 # --8<-- [end:env-vars-definition]
