@@ -998,20 +998,17 @@ class EagleProposer:
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
 
-            # Check if shapes match and we found the embedding
-            eagle_shape = self.model.model.embed_tokens.weight.shape
-            target_shape = target_embed_tokens.weight.shape
-            if eagle_shape == target_shape:
+            if not self.model.model.has_own_embed_tokens:
                 logger.info(
-                    "Assuming the EAGLE head shares the same vocab embedding"
-                    " with the target model."
+                    "Draft model embed_tokens are uninitialized. "
+                    "Sharing vocab embedding with the target model."
                 )
                 del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
             else:
                 logger.info(
-                    "The EAGLE head's vocab embedding will be loaded separately"
-                    " from the target model."
+                    "Draft model embed_tokens are already initialized. "
+                    "Keeping separate vocab embedding from the target model."
                 )
         else:
             logger.info(
@@ -1028,21 +1025,20 @@ class EagleProposer:
                 self.model.lm_head = target_language_model.lm_head
         else:
             if (
-                hasattr(self.model, "lm_head")
-                and hasattr(target_language_model, "lm_head")
-                and self.model.lm_head.weight.shape
-                == target_language_model.lm_head.weight.shape
+                hasattr(target_language_model, "lm_head")
+                and hasattr(self.model, "lm_head")
+                and not self.model.has_own_lm_head
             ):
                 logger.info(
-                    "Assuming the EAGLE head shares the same lm_head"
-                    " with the target model."
+                    "Draft model lm_head is uninitialized. "
+                    "Sharing lm_head with the target model."
                 )
                 del self.model.lm_head
                 self.model.lm_head = target_language_model.lm_head
             else:
                 logger.info(
-                    "The EAGLE head's lm_head will be loaded separately"
-                    " from the target model."
+                    "Draft model lm_head is already initialized. "
+                    "Keeping separate lm_head from the target model."
                 )
 
     @torch.inference_mode()
