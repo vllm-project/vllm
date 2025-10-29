@@ -132,3 +132,94 @@ def test_extract_tool_calls_multiple_json_with_surrounding_text(parser):
     assert result.tool_calls[0].function.name == "searchTool"
     assert result.tool_calls[1].function.name == "getOpenIncidentsTool"
     assert result.tool_calls[2].function.name == "searchTool"
+
+
+def test_extract_tool_calls_deeply_nested_json(parser):
+    # Test with deeply nested JSON parameters (5 levels)
+    model_output = (
+        '{"name": "complexTool", '
+        '"parameters": {'
+        '"level1": {'
+        '"level2": {'
+        '"level3": {'
+        '"level4": {'
+        '"value": "deep"'
+        "}"
+        "}"
+        "}"
+        "}"
+        "}}"
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "complexTool"
+    # Verify the nested structure is preserved in the arguments
+    assert '"level1"' in result.tool_calls[0].function.arguments
+    assert '"level2"' in result.tool_calls[0].function.arguments
+    assert '"level3"' in result.tool_calls[0].function.arguments
+    assert '"level4"' in result.tool_calls[0].function.arguments
+    assert '"value": "deep"' in result.tool_calls[0].function.arguments
+
+
+def test_extract_tool_calls_multiple_with_deep_nesting(parser):
+    # Test with multiple tool calls where some have deeply nested parameters
+    model_output = (
+        '{"name": "simpleTool", "parameters": {"value": "test"}}; '
+        '{"name": "complexTool", "parameters": '
+        '{"config": {"database": {"connection": {"pool": {"size": 10}}}}}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 2
+
+    # Check first tool call
+    assert result.tool_calls[0].function.name == "simpleTool"
+    assert '"value": "test"' in result.tool_calls[0].function.arguments
+
+    # Check second tool call with deep nesting
+    assert result.tool_calls[1].function.name == "complexTool"
+    assert '"config"' in result.tool_calls[1].function.arguments
+    assert '"database"' in result.tool_calls[1].function.arguments
+    assert '"connection"' in result.tool_calls[1].function.arguments
+    assert '"pool"' in result.tool_calls[1].function.arguments
+    assert '"size": 10' in result.tool_calls[1].function.arguments
+
+
+def test_extract_tool_calls_with_quotes_and_brackets_in_string(parser):
+    # Test with quotes and brackets inside quoted string values
+    model_output = (
+        '{"name": "searchTool", '
+        '"parameters": {'
+        '"query": "test {value} [complex]",'
+        '"nested": {"inner": "more {brackets}"}'
+        "}}"
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "searchTool"
+    # Verify the string values are preserved including brackets and quotes
+    assert (
+        '"query": "test {value} [complex]"' in result.tool_calls[0].function.arguments
+    )
+    assert '"nested"' in result.tool_calls[0].function.arguments
+    assert '"inner": "more {brackets}"' in result.tool_calls[0].function.arguments
+
+
+def test_extract_tool_calls_with_escaped_quotes_in_nested_json(parser):
+    # Test with escaped quotes in deeply nested JSON
+    model_output = (
+        '{"name": "parserTool", "parameters": {"text": "He said \\"Hello {world}\\""}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "parserTool"
+    # Verify escaped quotes are preserved
+    assert '"text"' in result.tool_calls[0].function.arguments
+    assert '"He said \\"Hello {world}\\""' in result.tool_calls[0].function.arguments
