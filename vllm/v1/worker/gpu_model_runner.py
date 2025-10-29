@@ -133,6 +133,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
+    check_cudagraph_threshold,
     check_ubatch_thresholds,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
@@ -3903,8 +3904,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # to non-DBO execution. To avoid running without cudagraphs in these mixed
             # cases, we preemptively compile cudagraphs for both microbatching modes.
             microbatching_modes = [microbatching_enabled]
-            compile_both_modes = (
-                num_tokens <= self.parallel_config.dbo_decode_token_threshold * 1.5
+            compile_both_modes = check_cudagraph_threshold(
+                self.parallel_config, num_tokens, uniform_decode
             )
             if microbatching_enabled and compile_both_modes:
                 microbatching_modes = [False, True]  # Compile both modes

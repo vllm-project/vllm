@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.v1.worker.ubatch_utils import check_cudagraph_threshold
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -380,6 +381,26 @@ class UBatchWrapper:
 
         # If there's no ubatching, just run the runnable object
         if ubatch_slices is None:
+            # This is to account for the case where ubatching was aborted.
+            # When we capture full graphs we only capture one graph per shape,
+            # meaning that if we have a ubatched  cudagraph for the current
+            # num_tokens, we don't have a non-ubatched one. Without this
+            # check, the cudagraph wrapper will try to capture a cudagraph
+            # for this shape during a normal run.
+            if cudagraph_runtime_mode is CUDAGraphMode.FULL:
+                assert batch_descriptor is not None
+                num_tokens = batch_descriptor.num_tokens
+                uniform_decode = (
+                    cudagraph_runtime_mode.decode_mode() == CUDAGraphMode.FULL
+                    and cudagraph_runtime_mode.separate_routine()
+                )
+                # Check if the model runner made a non-dbo cudagraph for this shape
+                cudagraph_exists = check_cudagraph_threshold(
+                    self.vllm_config.parallel_config, num_tokens, uniform_decode
+                )
+                if num_tokens in self.cudagraphs and not cudagraph_exists:
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
                 return self.runnable(*args, **kwargs)
             else:
