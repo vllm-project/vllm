@@ -9,9 +9,15 @@ import pytest
 from transformers import BitsAndBytesConfig
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.platforms import current_platform
 
 from ...utils import compare_two_settings, multi_gpu_test
 from ..utils import check_embeddings_close, check_logprobs_close
+
+pytestmark = pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="bitsandbytes quantization not supported on ROCm (CUDA-only kernels)",
+)
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
