@@ -310,6 +310,7 @@ class CudaPlatformBase(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        device_capability: "DeviceCapability | None" = None,
     ) -> str:
         if not use_v1:
             raise RuntimeError(
@@ -319,7 +320,9 @@ class CudaPlatformBase(Platform):
 
         from vllm.attention.backends.registry import backend_to_class_str
 
-        device_capability = cls.get_device_capability()
+        # Don't get device capability here to avoid early CUDA init.
+        # The validation functions can handle None for device_capability,
+        # and it will be retrieved later when actually needed.
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
