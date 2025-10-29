@@ -5,5 +5,4 @@ nav:
   - complete.md
   - run-batch.md
   - vllm bench:
-    - bench/*.md
-    - vllm bench sweep: bench/sweep/*.md
+    - bench/**/*.md
