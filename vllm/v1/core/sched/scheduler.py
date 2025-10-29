@@ -1164,8 +1164,12 @@ class Scheduler(SchedulerInterface):
         return len(self.running), len(self.waiting)
 
     def add_request(self, request: Request) -> None:
+        request_id = request.request_id
+        if request_id in self.requests:
+            raise ValueError(f"Request id {request_id} already exists.")
+
         self.waiting.add_request(request)
-        self.requests[request.request_id] = request
+        self.requests[request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
 
