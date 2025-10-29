@@ -452,6 +452,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
+# (FIXME): Enable this after dynamic slicing is fixed
+# See https://github.com/vllm-project/vllm/pull/27760
 # @support_torch_compile(
 #     dynamic_arg_dims={
 #         "x": 0,
