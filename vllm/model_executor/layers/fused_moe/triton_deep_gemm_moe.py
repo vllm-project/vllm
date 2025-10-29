@@ -15,6 +15,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
 )
 
+
 class TritonOrDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
