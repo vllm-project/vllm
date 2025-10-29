@@ -273,7 +273,7 @@ if False and (
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
 
-if False and has_deep_gemm() and is_deep_gemm_supported():
+if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
         BatchedDeepGemmExperts,
         batched_format,

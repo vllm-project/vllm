@@ -61,6 +61,8 @@ class Config:
 
     fused_moe_chunk_size: int | None
     world_size: int
+    verbose: bool = False
+    exit_first: bool = False
 
     torch_trace_dir_path: str | None = None
 
