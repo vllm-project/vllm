@@ -605,6 +605,9 @@ class GraniteMoeHybridForCausalLM(
             "k_proj",
             "v_proj",
         ],
+        "conv1d": ["conv1d"],
+        "in_proj": ["in_proj"],
+        "input_linear": ["input_linear"],
     }
     embedding_modules = {
         "embed_tokens": "input_embeddings",
