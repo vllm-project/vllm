@@ -120,21 +120,27 @@ class TestPreemptAndAsyncScheduling:
                             if not outputs and len(results) > 1:
                                 # First check that the different parameter configs
                                 # actually result in different output.
-                                for other_test, params in zip(
+                                for (
+                                    other_test_outs,
+                                    other_test_logprobs,
+                                ), params in zip(
                                     results[1:], self.sampling_param_tests[1:]
                                 ):
                                     with pytest.raises(AssertionError):
                                         check_outputs_equal(
-                                            outputs_0_lst=results[0],
-                                            outputs_1_lst=other_test,
+                                            outputs_0_lst=results[0][0],
+                                            outputs_1_lst=other_test_outs,
                                             name_0=f"baseline params={params}",
                                             name_1=f"other params={params}",
                                         )
+                                        assert _all_logprobs_match(
+                                            results[0][1], other_test_logprobs
+                                        )
 
                             outputs.append((test_config, results))
-    
+
         baseline_config, baseline_tests = outputs[0]
-        
+
         for test_config, test_outputs in outputs[1:]:
             for (base_outs, base_logprobs), (test_outs, test_logprobs), params in zip(
                 baseline_tests, test_outputs, sampling_param_tests
@@ -145,7 +151,7 @@ class TestPreemptAndAsyncScheduling:
                     name_0=f"baseline=[{baseline_config}], params={params}",
                     name_1=f"config=[{test_config}], params={params}",
                 )
-                # NOTE(Ronald1995): logprobs with speculative decoding need to 
+                # NOTE(Ronald1995): logprobs with speculative decoding need to
                 # be updated.
                 if not spec_decoding:
                     assert _all_logprobs_match(base_logprobs, test_logprobs)
