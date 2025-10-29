@@ -340,7 +340,24 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
-        browser_call = json.loads(content.text)
+        # We do not need to check the VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY
+        # env variable since if it is not set, we are certain the json is valid
+        # The use of Actions for web search will be removed entirely in
+        # the future, so this is only necessary temporarily
+        try:
+            browser_call = json.loads(content.text)
+        except json.JSONDecodeError:
+            # If the content is not valid JSON, then it was
+            # caught and retried by vLLM, which means we
+            # need to make note of that so the user is aware
+            json_retry_output_message = (
+                f"Invalid JSON args, caught and retried: {content.text}"
+            )
+            browser_call = {
+                "query": json_retry_output_message,
+                "url": json_retry_output_message,
+                "pattern": json_retry_output_message,
+            }
         # TODO: translate to url properly!
         if recipient == "browser.search":
             action = ActionSearch(
