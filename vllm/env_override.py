@@ -282,13 +282,13 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # Allow users to manually specify if a node should be partitioned
     # Can only do this for FallbackKernels
     ir_node = node.node
-    if isinstance(ir_node, torch._inductor.ir.FallbackKernel):
-        operator = ir_node.op_overload
+    if isinstance(ir_node, ir.FallbackKernel):
+        op = ir_node.op_overload
         if (
-            operator is not None
-            and operator.name() in torch._inductor.config.custom_should_partition_ops
+            op is not None
+            and op.name() in torch._inductor.config.custom_should_partition_ops
         ):
-            assert isinstance(operator, torch._ops.OpOverload)
+            assert isinstance(op, torch._ops.OpOverload)
             return True
 
     # When not using cudagraphs, keep all kernels in the `call` function
@@ -359,7 +359,8 @@ if is_torch_equal("2.9.0"):
     from torch._inductor.codegen.wrapper import PythonWrapperCodegen
     from torch._inductor.graph import GraphLowering
 
-    torch._inductor.config.custom_should_partition_ops: list[str] = []
+    if not hasattr(torch._inductor.config, "custom_should_partition_ops"):
+        torch._inductor.config.custom_should_partition_ops: list[str] = []
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
     GraphLowering._update_scheduler = _update_scheduler_patched
