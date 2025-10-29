@@ -96,7 +96,12 @@ class PassConfig:
 
     This is separate from general `CompilationConfig` so that inductor passes
     don't all have access to full configuration - that would create a cycle as
-    the `PassManager` is set as a property of config."""
+    the `PassManager` is set as a property of config.
+
+    This dataclass is only meant to be within the vllm config.
+    If used outside of the vllm config, some fields may be left in an
+    improper state.
+    """
 
     enable_fusion: bool = Field(default=None)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
@@ -140,7 +145,13 @@ class PassConfig:
 @config
 @dataclass
 class CompilationConfig:
-    """Configuration for compilation. It has three parts:
+    """Configuration for compilation.
+
+    This dataclass is only meant to be within the vllm config.
+    If used outside of the vllm config, some fields will be left in
+    an improper state.
+
+    It has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]

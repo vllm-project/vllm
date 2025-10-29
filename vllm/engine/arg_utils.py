@@ -341,7 +341,12 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
 
 @dataclass
 class EngineArgs:
-    """Arguments for vLLM engine."""
+    """Arguments for vLLM engine.
+
+    This dataclass is only meant to be within the vllm config.
+    If used outside of the vllm config, some fields may be left in an
+    improper state.
+    """
 
     model: str = ModelConfig.model
     served_model_name: str | list[str] | None = ModelConfig.served_model_name

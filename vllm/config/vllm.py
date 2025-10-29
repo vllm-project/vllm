@@ -175,6 +175,10 @@ def build_defaults(
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
+
+    This dataclass is only meant to be within the vllm config.
+    If used outside of the vllm config, some fields may be left in an
+    improper state.
     """
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
