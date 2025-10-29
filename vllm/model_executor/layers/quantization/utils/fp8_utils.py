@@ -33,6 +33,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
+    transform_sf_into_required_layout,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -877,6 +878,22 @@ def w8a8_triton_block_scaled_mm(
 
     return C
 
+def deepgemm_transform_sf_into_required_layout(xq: torch.Tensor,
+                                               xs: torch.Tensor,
+                                               is_weights: bool) -> torch.Tensor:
+    if xq.dtype != torch.float8_e4m3fn:
+        raise ValueError(
+            f"Expected tensor dtype to be torch.float8_e4m3fn, got {xq.dtype} instead."
+        )
+
+    # TODO (varun) : port get default recipe from here
+    # https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
+    recipe = (1, 128, 128)
+
+    # is the scale factors for A in ( Refers to the argument A in A @ B)
+    is_sfa = not is_weights
+    dg_xs = transform_sf_into_required_layout(sf = xs, mn= xq.size(1), k=xq.size(2), recipe = recipe, num_groups = xq.size(0), is_sfa = is_sfa) 
+    return dg_xs
 
 def requant_weight_ue8m0_inplace(
     weight: torch.Tensor,

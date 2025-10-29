@@ -77,6 +77,7 @@ _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
+_transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
@@ -86,6 +87,7 @@ def _lazy_init() -> None:
     global _get_paged_mqa_logits_metadata_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
+    global _transform_sf_into_required_layout_impl
     # fast path
     if (
         _fp8_gemm_nt_impl is not None
@@ -95,6 +97,7 @@ def _lazy_init() -> None:
         or _fp8_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
+        or _transform_sf_into_required_layout_impl is not None
     ):
         return
 
@@ -124,7 +127,7 @@ def _lazy_init() -> None:
     _get_mk_alignment_for_contiguous_layout_impl = getattr(
         _dg, "get_mk_alignment_for_contiguous_layout", None
     )
-
+    _transform_sf_into_required_layout_impl = getattr(_dg, "transform_sf_into_required_layout", None)
 
 def get_num_sms() -> int:
     _lazy_init()
@@ -177,6 +180,12 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     return _grouped_masked_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
+
+def transform_sf_into_required_layout(*args, **kwargs):
+    _lazy_init()
+    if _transform_sf_into_required_layout_impl is None:
+        return _missing(*args, **kwargs)
+    return _transform_sf_into_required_layout_impl(*args, disable_ue8m0_cast = not is_deep_gemm_e8m0_used(), **kwargs)
 
 
 def fp8_mqa_logits(
