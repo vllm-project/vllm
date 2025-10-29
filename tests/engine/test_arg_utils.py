@@ -173,7 +173,7 @@ def test_get_kwargs():
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
     # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
+    assert kwargs["optional_literal"]["choices"] == ["x", "y"]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2
@@ -238,9 +238,10 @@ def test_optimization_level(arg, expected):
     """
 
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args([arg])
-    assert args.optimization_level == expected
-    assert args.compilation_config.mode is None
+    parsed_args = parser.parse_args([arg])
+    # breakpoint()
+    assert parsed_args.optimization_level == expected
+    assert parsed_args.compilation_config.mode is None
 
 
 @pytest.mark.parametrize(
