@@ -24,7 +24,11 @@ from vllm.entrypoints.openai.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -289,13 +293,14 @@ class OpenAIServingCompletion(OpenAIServing):
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 
-            for final_res in final_res_batch_checked:
-                for output in final_res.outputs:
-                    error_response = self._handle_error_finish_reason(
-                        output.finish_reason, request_id
-                    )
-                    if error_response:
-                        return error_response
+            try:
+                for final_res in final_res_batch_checked:
+                    for output in final_res.outputs:
+                        self._handle_error_finish_reason(
+                            output.finish_reason, request_id
+                        )
+            except GenerationError as e:
+                return self._convert_generation_error_to_response(e)
 
             response = self.request_output_to_completion_response(
                 final_res_batch_checked,
@@ -445,13 +450,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
-                    error_data = self._handle_streaming_error_finish_reason(
-                        finish_reason, request_id
-                    )
-                    if error_data:
-                        yield f"data: {error_data}\n\n"
-                        yield "data: [DONE]\n\n"
-                        return
+                    self._handle_error_finish_reason(finish_reason, request_id)
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -514,8 +513,12 @@ class OpenAIServingCompletion(OpenAIServing):
             # report to FastAPI middleware aggregate usage across all choices
             request_metadata.final_usage_info = final_usage_info
 
+        except GenerationError as e:
+            logger.exception("Error in completion stream generator.")
+            yield f"data: {self._convert_generation_error_to_streaming_response(e)}\n\n"
         except Exception as e:
             # TODO: Use a vllm-specific Validation Error
+            logger.exception("Error in completion stream generator.")
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
