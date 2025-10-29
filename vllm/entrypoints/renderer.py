@@ -318,8 +318,8 @@ class CompletionRenderer(BaseRenderer):
         add_special_tokens: bool | None,
         cache_salt: str | None,
     ) -> EngineTokensPrompt:
-        """Tokenize text input asynchronously."""
-        async_tokenizer = self._get_async_tokenizer()
+        # Using a sync tokenizer is faster than using an async_tokenizer.
+        tokenizer = self.tokenizer
 
         # Handle encoder-specific preprocessing
         if (
@@ -330,9 +330,9 @@ class CompletionRenderer(BaseRenderer):
 
         # Tokenize texts
         if truncate_prompt_tokens is None:
-            encoded = await async_tokenizer(text, add_special_tokens=add_special_tokens)
+            encoded = tokenizer(text, add_special_tokens=add_special_tokens)
         else:
-            encoded = await async_tokenizer(
+            encoded = tokenizer(
                 text,
                 add_special_tokens=add_special_tokens,
                 truncation=True,
