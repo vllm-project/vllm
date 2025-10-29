@@ -643,6 +643,10 @@ def test_compressed_tensors_2of4_sparse_compressed(vllm_runner, args_2of4):
         assert output
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="NVFP4 quantization uses Marlin kernels (NVIDIA CUTLASS-based, CUDA-only)",
+)
 @pytest.mark.parametrize(
     "args",
     [
@@ -761,7 +765,17 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
 
             input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
             assert isinstance(input_quant_op, QuantFP8)
-            assert input_quant_op._forward_method == input_quant_op.forward_cuda
+
+            if current_platform.is_rocm():
+                expected_forward_method = input_quant_op.forward_hip
+            else:
+                expected_forward_method = input_quant_op.forward_cuda
+
+            assert input_quant_op._forward_method == expected_forward_method, (
+                f"Expected forward method to be "
+                f"{'forward_hip' if current_platform.is_rocm() else 'forward_cuda'}, "
+                f"but got {input_quant_op._forward_method.__name__}"
+            )
 
         llm.apply_model(check_model)
 
