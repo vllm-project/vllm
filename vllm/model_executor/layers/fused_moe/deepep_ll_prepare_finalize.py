@@ -206,6 +206,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
+            round_scale=True,
+            use_ue8m0=True,
             async_finish=False,
             return_recv_hook=True,
         )

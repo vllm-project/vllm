@@ -1084,8 +1084,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 )
             if expert_weight_is_col_major(layer.w2_weight_scale_inv):
                 layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                    layer.w2_weight_scale_inv
+                    layer.w2_weight_scale_ine
                 )
+
+        print (f"w13 {layer.w13_weight_scale_inv.data.dtype} {layer.w13_weight_scale_inv.data.size()}")
+        print (f"w2 {layer.w2_weight_scale_inv.data.dtype} {layer.w2_weight_scale_inv.data.size()}")
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
