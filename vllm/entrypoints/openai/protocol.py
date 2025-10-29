@@ -2033,11 +2033,12 @@ class ChatMessage(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
     reasoning_content: str | None = None
+    """Deprecated: use `reasoning` instead."""
 
     @model_validator(mode="after")
     def handle_deprecated_reasoning_content(self):
-        if self.reasoning_content is not None:
-            self.reasoning = self.reasoning_content
+        """Copy reasoning to reasoning_content for backward compatibility."""
+        self.reasoning_content = self.reasoning
         return self
 
 
@@ -2094,12 +2095,13 @@ class DeltaMessage(OpenAIBaseModel):
     content: str | None = None
     reasoning: str | None = None
     reasoning_content: str | None = None
+    """Deprecated: use `reasoning` instead."""
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def handle_deprecated_reasoning_content(self):
-        if self.reasoning_content is not None:
-            self.reasoning = self.reasoning_content
+        """Copy reasoning to reasoning_content for backward compatibility."""
+        self.reasoning_content = self.reasoning
         return self
 
 
