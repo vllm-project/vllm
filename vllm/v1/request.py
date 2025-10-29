@@ -118,7 +118,7 @@ class Request:
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
 
-        # The number of requests being preempted by the scheduler.
+        # The number of times the request was preempted by the scheduler.
         self.num_preemptions = 0
 
         # The number of tokens that have been computed remotely.
