@@ -199,7 +199,6 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
-    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
@@ -210,6 +209,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
+    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -1332,13 +1332,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": lambda: bool(
         int(os.getenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "0"))
     ),
-    # Valid values are container,code_interpreter,web_search_preview
-    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
-    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_list_with_choices(
-        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        [],
-        ["container", "code_interpreter", "web_search_preview"],
-    ),
     # Enable automatic retry when tool call JSON parsing fails
     # If enabled, returns an error message to the model to retry
     # If disabled (default), raises an exception and fails the request
@@ -1386,6 +1379,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The number of SMs to allocate for communication kernels when running DBO
     # the rest of the SMs on the device will be allocated to compute
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
+    # Valid values are container,code_interpreter,web_search_preview
+    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
+    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_list_with_choices(
+        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
+        [],
+        ["container", "code_interpreter", "web_search_preview"],
+    ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)
