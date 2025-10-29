@@ -1491,9 +1491,12 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
-                total_affected_tokens += (
+                num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
+                total_affected_tokens += num_affected_tokens
+                # Prefill is to be recomputed locally, track its performance.
+                request.num_external_computed_tokens -= num_affected_tokens
 
             if is_affected:
                 if not marked_invalid_block:
@@ -1506,8 +1509,6 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - request.num_cached_tokens
                     )
                     request.num_computed_tokens = request.num_cached_tokens
-                # Prefill is to be recomputed locally.
-                request.num_external_computed_tokens = 0
 
                 affected_req_ids.add(request.request_id)
 
