@@ -282,11 +282,19 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # Allow users to manually specify if a node should be partitioned
     # Can only do this for FallbackKernels
     ir_node = node.node
-    if isinstance(ir_node, ir.FallbackKernel):
-        op = ir_node.op_overload
+    if isinstance(ir_node, torch._inductor.ir.FallbackKernel) and (
+        op := ir_node.op_overload
+    ):
+        op_overload_packet_name = op.name()
+        op_overload_name = (
+            f"{op_overload_packet_name}.{op._overloadname}"
+            if isinstance(op, torch._ops.OpOverload)
+            else op_overload_packet_name
+        )
         if (
-            op is not None
-            and op.name() in torch._inductor.config.custom_should_partition_ops
+            op_overload_packet_name
+            in torch._inductor.config.custom_should_partition_ops
+            or op_overload_name in torch._inductor.config.custom_should_partition_ops
         ):
             assert isinstance(op, torch._ops.OpOverload)
             return True
