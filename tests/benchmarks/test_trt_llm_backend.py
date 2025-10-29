@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from vllm.benchmarks.backend_request_func import (
+# Import from the top-level benchmarks module in the repo
+from benchmarks.backend_request_func import (
     RequestFuncInput,
     async_request_trt_llm,
 )
@@ -92,7 +93,7 @@ async def test_trt_llm_streaming_content(monkeypatch):
     fake = _FakeSession(responses=[(200, sse_chunks, None)])
 
     # Patch ClientSession in module under test
-    import vllm.benchmarks.backend_request_func as mod
+    import benchmarks.backend_request_func as mod
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     req = RequestFuncInput(
@@ -134,7 +135,7 @@ async def test_trt_llm_role_only_deltas_fallback(monkeypatch):
 
     fake = _FakeSession(responses=[(200, sse_chunks, None), (200, [], fallback_json)])
 
-    import vllm.benchmarks.backend_request_func as mod
+    import benchmarks.backend_request_func as mod
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     req = RequestFuncInput(
@@ -161,7 +162,7 @@ async def test_trt_llm_headers_auth_optional(monkeypatch):
     sse_done = [b"data: [DONE]"]
     fake = _FakeSession(responses=[(200, sse_done, None)])
 
-    import vllm.benchmarks.backend_request_func as mod
+    import benchmarks.backend_request_func as mod
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     req = RequestFuncInput(
@@ -200,7 +201,7 @@ async def test_trt_llm_headers_auth_optional(monkeypatch):
 async def test_trt_llm_payload_shapes_chat_vs_completions(monkeypatch):
     sse_done = [b"data: [DONE]"]
     fake = _FakeSession(responses=[(200, sse_done, None)])
-    import vllm.benchmarks.backend_request_func as mod
+    import benchmarks.backend_request_func as mod
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     # Chat
