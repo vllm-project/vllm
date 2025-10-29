@@ -1061,7 +1061,7 @@ Follow these steps to run the script:
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.serve \
+vllm bench sweep serve \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1109,7 +1109,7 @@ For example, to ensure E2E latency within different target values for 99% of req
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.serve_sla \
+vllm bench sweep serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1138,7 +1138,7 @@ The algorithm for adjusting the SLA variable is as follows:
 Example command:
 
 ```bash
-python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
+vllm bench sweep plot benchmarks/results/<timestamp> \
     --var-x max_concurrency \
     --row-by random_input_len \
     --col-by random_output_len \
