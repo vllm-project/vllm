@@ -336,8 +336,8 @@ def run_attention_backend(
         "spec_decode_medium",
     ],
 )
-@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2-Lite-Chat"])
-@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-R1"])
+@pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 def test_backend_correctness(
     dist_init, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
