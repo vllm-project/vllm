@@ -32,7 +32,7 @@ def create_llm_with_lifetime_tracking():
         max_model_len=512,
         gpu_memory_utilization=0.3,
         enable_prefix_caching=True,  # Enable caching to see lifetime tracking
-        log_stats=True,  # Enable statistics logging
+        disable_log_stats=False,  # Enable statistics logging
     )
 
     return llm
@@ -40,22 +40,17 @@ def create_llm_with_lifetime_tracking():
 
 def run_inference_workload(llm: LLM, prompts: list[str]) -> None:
     """Run inference to generate KV cache activity."""
-    print(f"Running inference on {len(prompts)} prompts...")
-
     sampling_params = SamplingParams(temperature=0.1, top_p=0.9, max_tokens=50)
 
     # Generate responses - this will create and free KV cache blocks
     outputs = llm.generate(prompts, sampling_params)
-
-    print("Inference completed. KV cache blocks have been allocated and freed.")
     return outputs
 
 
 def demonstrate_lifetime_stats():
     """Demonstrate the KV cache lifetime tracking feature."""
-    print("=" * 60)
     print("KV Cache Lifetime Tracking Demonstration")
-    print("=" * 60)
+    print("-" * 50)
 
     # Create LLM instance
     llm = create_llm_with_lifetime_tracking()
@@ -69,123 +64,49 @@ def demonstrate_lifetime_stats():
         "The importance of education in society is",
     ]
 
-    print(
-        f"\nStarting with {len(prompts)} diverse prompts to create KV cache activity..."
-    )
-
-    # Run initial inference
-    print("\n1. Running first batch of inference...")
+    # Run inference
+    print("Running inference with prefix caching enabled...")
     run_inference_workload(llm, prompts[:3])
+    time.sleep(0.5)
+    run_inference_workload(llm, prompts[3:])
 
-    # Get lifetime stats from the engine
-    try:
-        # Access the engine's metrics
-        engine = llm.llm_engine
+    # Get lifetime stats via public API
+    print("\nKV Cache Lifetime Statistics:")
+    print("-" * 50)
 
-        # Try to access lifetime statistics if available
-        if hasattr(engine, "scheduler") and hasattr(
-            engine.scheduler, "kv_cache_manager"
-        ):
-            kv_manager = engine.scheduler.kv_cache_manager
-            if hasattr(kv_manager, "get_kv_cache_lifetime_stats"):
-                stats = kv_manager.get_kv_cache_lifetime_stats()
-                print("\nLifetime Statistics after first batch:")
-                print(f"  Total blocks freed: {stats.total_blocks_freed}")
-                print(f"  Total lifetime: {stats.total_lifetime_seconds:.4f} seconds")
-                print(
-                    f"  Average lifetime: {stats.average_lifetime_seconds:.4f} seconds"
-                )
+    from vllm.v1.metrics.reader import Histogram
 
-        print("\n2. Running second batch of inference...")
-        time.sleep(1)  # Small delay to show time progression
-        run_inference_workload(llm, prompts[3:])
+    for metric in llm.get_metrics():
+        if isinstance(metric, Histogram) and "lifetime" in metric.name:
+            print(f"{metric.name}:")
+            print(f"  Total lifetime (sum): {metric.sum:.4f} seconds")
+            print(f"  Total blocks freed (count): {metric.count}")
+            if metric.count > 0:
+                avg = metric.sum / metric.count
+                print(f"  Average lifetime: {avg:.4f} seconds")
+            print("\n  Buckets:")
+            for bucket_le, value in metric.buckets.items():
+                print(f"    le {bucket_le}: {value}")
+            break
 
-        # Get updated stats
-        if hasattr(engine, "scheduler") and hasattr(
-            engine.scheduler, "kv_cache_manager"
-        ):
-            kv_manager = engine.scheduler.kv_cache_manager
-            if hasattr(kv_manager, "get_kv_cache_lifetime_stats"):
-                stats = kv_manager.get_kv_cache_lifetime_stats()
-                print("\nLifetime Statistics after second batch:")
-                print(f"  Total blocks freed: {stats.total_blocks_freed}")
-                print(f"  Total lifetime: {stats.total_lifetime_seconds:.4f} seconds")
-                print(
-                    f"  Average lifetime: {stats.average_lifetime_seconds:.4f} seconds"
-                )
+    print("\n" + "-" * 50)
+    print("Demonstration completed!")
+    print("-" * 50)
 
-    except Exception as e:
-        print(
-            f"Note: Could not access detailed lifetime stats in this environment: {e}"
-        )
-        print(
-            "This is expected in some configurations - the feature is "
-            "still working internally."
-        )
 
-    print("\n3. Demonstrating Prometheus metric integration...")
-
-    # Show how the metric would appear in Prometheus
-    print("\nPrometheus Metric Information:")
-    print("Metric Names:")
-    print("  - vllm:kv_cache_block_lifetime_seconds (Histogram)")
-    print(
-        "Description: Histogram capturing individual KV cache block "
-        "lifetimes; Prometheus also exposes _sum and _count for averages"
-    )
-    print("Labels: model_name, engine")
-    print("\nExample PromQL to derive average lifetime:")
+def show_promql_examples():
+    """Show PromQL query examples."""
+    print("\nPromQL Query Examples:")
+    print("-" * 50)
+    print("Average lifetime over 5m:")
     print("  rate(vllm:kv_cache_block_lifetime_seconds_sum[5m]) /")
     print("  rate(vllm:kv_cache_block_lifetime_seconds_count[5m])")
-    print("\nExample PromQL for percentile:")
-    print(
-        "  histogram_quantile(0.9, rate("
-        "vllm:kv_cache_block_lifetime_seconds_bucket[5m]))"
-    )
-
-    print("\n" + "=" * 60)
-    print("Demonstration completed successfully!")
-    print("The KV cache lifetime tracking feature is working correctly.")
-    print("=" * 60)
-
-
-def show_implementation_details():
-    """Show key implementation details for understanding."""
-    print("\nImplementation Details:")
-    print("-" * 40)
-    print("1. Block Allocation Tracking:")
-    print("   - Each KVCacheBlock gets allocation_time set when allocated")
-    print("   - Uses time.monotonic() for accurate measurements")
-
-    print("\n2. Lifetime Calculation:")
-    print("   - Calculated when blocks are freed: free_time - allocation_time")
-    print("   - Only tracks blocks that were actually used (ref_cnt > 0)")
-    print("   - Ignores null blocks to avoid skewing statistics")
-
-    print("\n3. Statistics Aggregation:")
-    print("   - KVCacheLifetimeStats tracks total blocks freed and total lifetime")
-    print("   - Average calculated as: total_lifetime / total_blocks_freed")
-    print("   - Statistics can be reset independently")
-
-    print("\n4. Prometheus Integration:")
-    print("   - Exposes counters for total lifetime seconds and blocks freed")
-    print("   - Average lifetime is derived via PromQL rate() division")
-    print("   - Supports multi-engine labeling for distributed setups")
+    print("\n90th percentile lifetime:")
+    print("  histogram_quantile(0.9,")
+    print("    rate(vllm:kv_cache_block_lifetime_seconds_bucket[5m]))")
+    print("-" * 50)
 
 
 if __name__ == "__main__":
-    try:
-        demonstrate_lifetime_stats()
-        show_implementation_details()
-
-    except ImportError as e:
-        print(f"Import error: {e}")
-        print("This demo requires vLLM to be properly installed.")
-        print("Please install vLLM and try again.")
-
-    except Exception as e:
-        print(f"Demo encountered an error: {e}")
-        print(
-            "This may be due to environment constraints, but the feature "
-            "implementation is correct."
-        )
+    demonstrate_lifetime_stats()
+    show_promql_examples()

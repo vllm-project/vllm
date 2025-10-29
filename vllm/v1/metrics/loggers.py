@@ -12,10 +12,14 @@ import prometheus_client
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import PrefixCachingMetrics
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    CachingMetrics,
+    IterationStats,
+    MultiModalCacheStats,
+    SchedulerStats,
+)
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -57,7 +61,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_scheduler_stats = SchedulerStats()
         # Prefix cache metrics. This cannot be reset.
         # TODO: Make the interval configurable.
-        self.prefix_caching_metrics = PrefixCachingMetrics()
+        self.prefix_caching_metrics = CachingMetrics()
         self.spec_decoding_logging = SpecDecodingLogging()
         kv_tranfer_config = self.vllm_config.kv_transfer_config
         self.kv_transfer_logging = KVConnectorLogging(kv_tranfer_config)
@@ -88,6 +92,8 @@ class LoggingStatLogger(StatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         engine_idx: int = 0,
+        *,
+        mm_cache_stats: MultiModalCacheStats | None = None,
     ):
         """Log Stats to standard output."""
         if iteration_stats:
@@ -316,6 +322,54 @@ class PrometheusStatLogger(StatLoggerBase):
         )
         self.counter_prefix_cache_hits = make_per_engine(
             counter_prefix_cache_hits, engine_indexes, model_name
+        )
+
+        # External prefix cache metrics (KV connector)
+        counter_connector_prefix_cache_queries = self._counter_cls(
+            name="vllm:external_prefix_cache_queries",
+            documentation=(
+                "External prefix cache queries from KV connector "
+                "cross-instance cache sharing, in terms of number of queried tokens."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_connector_prefix_cache_queries = make_per_engine(
+            counter_connector_prefix_cache_queries, engine_indexes, model_name
+        )
+
+        counter_connector_prefix_cache_hits = self._counter_cls(
+            name="vllm:external_prefix_cache_hits",
+            documentation=(
+                "External prefix cache hits from KV connector "
+                "cross-instance cache sharing, in terms of number of cached tokens."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_connector_prefix_cache_hits = make_per_engine(
+            counter_connector_prefix_cache_hits, engine_indexes, model_name
+        )
+
+        # Multi-modal cache metrics
+        counter_mm_cache_queries = self._counter_cls(
+            name="vllm:mm_cache_queries",
+            documentation=(
+                "Multi-modal cache queries, in terms of number of queried items."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_mm_cache_queries = make_per_engine(
+            counter_mm_cache_queries, engine_indexes, model_name
+        )
+
+        counter_mm_cache_hits = self._counter_cls(
+            name="vllm:mm_cache_hits",
+            documentation=(
+                "Multi-modal cache hits, in terms of number of cached items."
+            ),
+            labelnames=labelnames,
+        )
+        self.counter_mm_cache_hits = make_per_engine(
+            counter_mm_cache_hits, engine_indexes, model_name
         )
 
         #
@@ -688,6 +742,8 @@ class PrometheusStatLogger(StatLoggerBase):
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         engine_idx: int = 0,
+        *,
+        mm_cache_stats: MultiModalCacheStats | None = None,
     ):
         """Log to prometheus."""
         if scheduler_stats is not None:
@@ -719,6 +775,14 @@ class PrometheusStatLogger(StatLoggerBase):
                 scheduler_stats.prefix_cache_stats.hits
             )
 
+            if scheduler_stats.connector_prefix_cache_stats is not None:
+                self.counter_connector_prefix_cache_queries[engine_idx].inc(
+                    scheduler_stats.connector_prefix_cache_stats.queries
+                )
+                self.counter_connector_prefix_cache_hits[engine_idx].inc(
+                    scheduler_stats.connector_prefix_cache_stats.hits
+                )
+
             # Update KV cache lifetime metric
             for lifetime in scheduler_stats.kv_cache_block_lifetimes:
                 self.histogram_kv_cache_lifetime_seconds[engine_idx].observe(lifetime)
@@ -727,6 +791,10 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.spec_decoding_prom.observe(
                     scheduler_stats.spec_decoding_stats, engine_idx
                 )
+
+        if mm_cache_stats is not None:
+            self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
+            self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
 
         if iteration_stats is None:
             return
@@ -902,6 +970,7 @@ class StatLoggerManager:
         scheduler_stats: SchedulerStats | None,
         iteration_stats: IterationStats | None,
         engine_idx: int | None = None,
+        mm_cache_stats: MultiModalCacheStats | None = None,
     ):
         if engine_idx is None:
             engine_idx = 0
@@ -910,7 +979,12 @@ class StatLoggerManager:
         for logger in per_engine_loggers:
             logger.record(scheduler_stats, iteration_stats, engine_idx)
 
-        self.prometheus_logger.record(scheduler_stats, iteration_stats, engine_idx)
+        self.prometheus_logger.record(
+            scheduler_stats,
+            iteration_stats,
+            engine_idx,
+            mm_cache_stats=mm_cache_stats,
+        )
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
