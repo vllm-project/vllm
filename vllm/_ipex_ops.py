@@ -174,7 +174,7 @@ class ipex_ops:
         input: torch.Tensor, weight: torch.Tensor, epsilon: float
     ) -> torch.Tensor:
         out = torch.empty_like(input)
-        torch.ops.torch_ipex.rms_norm_vllm(out, input, weight, epsilon)
+        torch.ops.torch_ipex.rms_norm_vllm(out, input.contiguous(), weight, epsilon)
         return out
 
     @staticmethod
