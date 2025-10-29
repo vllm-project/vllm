@@ -77,7 +77,6 @@ from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
 from vllm.reasoning import ReasoningParserManager
-from vllm.test_utils import MODEL_WEIGHTS_S3_BUCKET, MODELS_ON_S3
 from vllm.transformers_utils.config import (
     get_model_path,
     is_interleaved,
@@ -1131,15 +1130,6 @@ class EngineArgs:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
-
-        # NOTE: This is to allow model loading from S3 in CI
-        if (
-            not isinstance(self, AsyncEngineArgs)
-            and envs.VLLM_CI_USE_S3
-            and self.model in MODELS_ON_S3
-            and self.load_format == "auto"
-        ):
-            self.model = f"{MODEL_WEIGHTS_S3_BUCKET}/{self.model}"
 
         if self.disable_mm_preprocessor_cache:
             logger.warning(
