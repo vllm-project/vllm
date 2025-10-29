@@ -49,6 +49,7 @@ from vllm.attention.layer import (
 )
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
+    vit_torch_sdpa_wrapper,
     vit_xformers_attn_wrapper,
 )
 from vllm.compilation.decorators import support_torch_compile
@@ -436,23 +437,12 @@ class Qwen2_5_VisionAttention(nn.Module):
                 q = q.contiguous()
                 k = k.contiguous()
                 v = v.contiguous()
-            outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (
-                    einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-                )
-                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=1)
-            context_layer = einops.rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
+            context_layer = vit_torch_sdpa_wrapper(
+                q,
+                k,
+                v,
+                cu_seqlens,
+            )
         elif self.attn_backend == _Backend.XFORMERS:
             context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
