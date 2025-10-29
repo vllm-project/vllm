@@ -945,6 +945,8 @@ class VllmConfig:
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":
+        if self.model_config is None:
+            return self
         mamba_block_size_is_set = (
             self.cache_config.mamba_block_size is not None
             and self.cache_config.mamba_block_size != self.model_config.max_model_len
