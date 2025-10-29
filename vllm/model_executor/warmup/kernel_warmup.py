@@ -37,7 +37,9 @@ def flashinfer_autotune_supported(vllm_config: VllmConfig) -> bool:
         envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
         or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
-    )
+    ) or current_platform.is_device_capability(
+        100
+    )  # on >sm100, default mxfp4 backend is flashinfer
     is_eager = vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
 
     return not (is_tp_or_dp and is_fi_mxfp4_backend and is_eager)
