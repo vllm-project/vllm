@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
@@ -30,14 +30,17 @@ def flashinfer_autotune_supported(vllm_config: VllmConfig) -> bool:
     Record known issues with vllm + flashinfer autotune here. Return True if
     and only if flashinfer autotune will run through without issues.
     """
-    return not (
-        vllm_config.parallel_config.data_parallel_size > 1
-        and envs.VLLM_ALL2ALL_BACKEND == "deepep_high_throughput"
-        and (
-            envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-            or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-        )
+    is_tp_or_dp = (vllm_config.parallel_config.data_parallel_size > 1) or (
+        vllm_config.parallel_config.tensor_parallel_size > 1
     )
+    is_fi_mxfp4_backend = (
+        envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
+        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
+        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
+    )
+    is_eager = vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+    return not (is_tp_or_dp and is_fi_mxfp4_backend and is_eager)
 
 
 def kernel_warmup(worker: "Worker"):
