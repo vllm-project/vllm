@@ -32,9 +32,11 @@ from transformers.models.llama4.image_processing_llama4_fast import (
 )
 
 from vllm.attention.layer import MultiHeadAttention
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -333,7 +335,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = Llama4VisionAttention(
-            config,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             use_data_parallel=use_data_parallel,
@@ -385,7 +387,7 @@ class Llama4VisionEncoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 Llama4VisionEncoderLayer(
-                    config,
+                    config=config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     use_data_parallel=use_data_parallel,
@@ -445,6 +447,7 @@ class Llama4UnfoldConvolution(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(dynamic_arg_dims={"images_flattened": 0})
 class Llama4VisionModel(nn.Module):
     def __init__(
         self,
@@ -481,14 +484,14 @@ class Llama4VisionModel(nn.Module):
 
         # encoders
         self.model = Llama4VisionEncoder(
-            config,
+            config=config,
             quant_config=quant_config,
             prefix=f"{prefix}.model",
             use_data_parallel=use_data_parallel,
         )
         self.vision_adapter = Llama4VisionPixelShuffleMLP(
-            config,
-            quant_config,
+            config=config,
+            quant_config=quant_config,
             prefix=f"{prefix}.vision_adapter",
             use_data_parallel=use_data_parallel,
         )
@@ -498,6 +501,7 @@ class Llama4VisionModel(nn.Module):
         images_flattened: torch.Tensor,
     ) -> torch.Tensor:
         # Patch embedding
+        # print(f"Images flattened looks like: {images_flattened.shape}")
         hidden_state = self.patch_embedding(images_flattened)
         num_tiles, num_patches, hidden_dim = hidden_state.shape
 
@@ -747,19 +751,24 @@ class Llama4ForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-
+        self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         if multimodal_config.get_limit_per_prompt("image"):
-            self.vision_model = Llama4VisionModel(
-                config.vision_config,
-                None,
-                prefix=maybe_prefix(prefix, "vision_model"),
-                use_data_parallel=self.use_data_parallel,
-            )
+            from vllm.compilation.backends import set_model_tag
+
+            with set_model_tag("Llama4VisionModel"):
+                self.vision_model = Llama4VisionModel(
+                    config=config.vision_config,
+                    quant_config=None,
+                    prefix=maybe_prefix(prefix, "vision_model"),
+                    use_data_parallel=self.use_data_parallel,
+                )
             self.multi_modal_projector = Llama4MultiModalProjector(
-                self.config, None, prefix=maybe_prefix(prefix, "multi_modal_projector")
+                config=self.config,
+                quant_config=None,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
         else:
             self.vision_model = None
@@ -839,8 +848,8 @@ class Llama4ForConditionalGeneration(
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
-
-        return self._process_image_input(image_input)
+        with set_forward_context(None, self.vllm_config):
+            return self._process_image_input(image_input)
 
     def forward(
         self,
