@@ -336,15 +336,14 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
+            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+            if not resumed_from_preemption:
+                continue
+
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             new_block_ids = cached_reqs.new_block_ids[i]
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
 
-            # NOTE(rob): here we rely on the resumed requests being
-            # the first N requests in the list scheduled_cache_reqs.
-            if not resumed_from_preemption:
-                break
             if req_id in self._requests_need_load:
                 # NOTE(rob): cached_req_data does not have the full
                 # list of token ids (only new tokens). So we look it
