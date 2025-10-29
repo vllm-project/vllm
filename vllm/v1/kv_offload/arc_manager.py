@@ -158,14 +158,14 @@ class ARCOffloadingManager(OffloadingManager):
                 else:
                     # cannot evict enough blocks, cache is full of in-use items
                     return None
-        
+
             block_hash, block = block_to_evict
             del eviction_t[block_hash]
             eviction_b[block_hash] = None
             to_evict.append(block_hash)
             self.backend.free(block)
             num_blocks_to_evict -= 1
-        
+
         for b in [self.b1, self.b2]:
             for i in range(len(b) - self.cache_capacity):
                 b.popitem(last=False)
