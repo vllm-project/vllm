@@ -291,6 +291,17 @@ full_cg_backend_configs = {
         },
         specific_gpu_arch=(10, 0),
     ),
+    # FlashInfer MLA on Blackwell
+    "FlashInferMLA": BackendConfig(
+        name="FlashInferMLA",
+        env_vars={
+            "VLLM_ATTENTION_BACKEND": "FLASHINFER_MLA",
+        },
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+        specific_gpu_arch=(10, 0),
+    ),
     # FlashAttention MLA on Hopper
     "FlashAttentionMLA": BackendConfig(
         name="FlashAttentionMLA",
