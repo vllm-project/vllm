@@ -1318,8 +1318,8 @@ class FusedMoE(CustomOp):
                 )
 
         if self.enable_eplb:
-            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (
-                CompressedTensorsW8A8Fp8MoEMethod,
+            from vllm.model_executor.layers.quantization.compressed_tensors import (
+                compressed_tensors_moe,
             )
             from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
 
@@ -1328,7 +1328,7 @@ class FusedMoE(CustomOp):
                 (
                     Fp8MoEMethod,
                     UnquantizedFusedMoEMethod,
-                    CompressedTensorsW8A8Fp8MoEMethod,
+                    compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod,
                 ),
             ):
                 # TODO: Add support for additional quantization methods.
@@ -1954,22 +1954,27 @@ class FusedMoE(CustomOp):
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         weights = list(self.named_parameters())
+        assert all(
+            weight.is_contiguous()
+            for name, weight in weights
+            if not name.startswith("_shared_experts.")
+        )
 
-        ROUTED_EXPERT_WEIGHTS = {
-            "w13_weight",
-            "w13_weight_scale",
-            "w2_weight",
-            "w2_weight_scale",
+        # Filter out the non-expert weights.
+        # `e_score_correction_bias` is a bias for each logical expert,
+        # with shape (num_logical_experts,), not an expert weight.
+        NON_EXPERT_WEIGHTS = {
+            "e_score_correction_bias",
         }
-        
-        assert all(weight.is_contiguous()
-                   for name, weight in weights
-                   if name in ROUTED_EXPERT_WEIGHTS)
 
         return [
             weight.view(self.local_num_experts, -1)
             for name, weight in weights
-            if name in ROUTED_EXPERT_WEIGHTS
+            if name not in NON_EXPERT_WEIGHTS
+            and weight.shape != torch.Size([])
+            and not name.startswith("_shared_experts.")
+            # exclude parameters from non-expert submodules (e.g. gate/shared)
+            and not name.startswith("_gate.")
         ]
 
     def set_eplb_state(
