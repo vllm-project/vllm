@@ -399,7 +399,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         # has_echoed[i] is reused here to indicate whether
                         # we have already returned the prompt token IDs.
-                        if not has_echoed[i]:
+                        if not has_echoed[i] and request.return_token_ids:
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 

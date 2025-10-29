@@ -11,6 +11,7 @@ from .gptoss_reasoning_parser import GptOssReasoningParser
 from .granite_reasoning_parser import GraniteReasoningParser
 from .hunyuan_a13b_reasoning_parser import HunyuanA13BReasoningParser
 from .identity_reasoning_parser import IdentityReasoningParser
+from .minimax_m2_reasoning_parser import MiniMaxM2ReasoningParser
 from .mistral_reasoning_parser import MistralReasoningParser
 from .olmo3_reasoning_parser import Olmo3ReasoningParser
 from .qwen3_reasoning_parser import Qwen3ReasoningParser
@@ -34,4 +35,5 @@ __all__ = [
     "Step3ReasoningParser",
     "GptOssReasoningParser",
     "SeedOSSReasoningParser",
+    "MiniMaxM2ReasoningParser",
 ]

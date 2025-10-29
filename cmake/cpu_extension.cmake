@@ -212,11 +212,24 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         # Build ACL with scons
         include(ProcessorCount)
         ProcessorCount(_NPROC)
+        set(_scons_cmd
+        scons -j${_NPROC}
+            Werror=0 debug=0 neon=1 examples=0 embed_kernels=0 os=linux
+            arch=armv8.2-a build=native benchmark_examples=0 fixed_format_kernels=1
+            multi_isa=1 openmp=1 cppthreads=0
+        )
+
+        # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
+        # and create a local shim dir with it
+        include("${CMAKE_CURRENT_LIST_DIR}/utils.cmake")
+        vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
+
+        if(NOT VLLM_TORCH_GOMP_SHIM_DIR STREQUAL "")
+            list(APPEND _scons_cmd extra_link_flags=-L${VLLM_TORCH_GOMP_SHIM_DIR})
+        endif()
+
         execute_process(
-            COMMAND scons -j${_NPROC}
-                    Werror=0 debug=0 neon=1 examples=0 embed_kernels=0 os=linux
-                    arch=armv8.2-a build=native benchmark_examples=0 fixed_format_kernels=1
-                    multi_isa=1 openmp=1 cppthreads=0
+            COMMAND ${_scons_cmd}
             WORKING_DIRECTORY "$ENV{ACL_ROOT_DIR}"
             RESULT_VARIABLE _acl_rc
         )
