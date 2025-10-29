@@ -33,7 +33,7 @@ def config(cls: ConfigT) -> ConfigT:
     `pydantic.TypeAdapter(ConfigT).validate_json(cli_arg)` which treats the
     `cli_arg` as a JSON string which gets validated by `pydantic`.
 
-    Config validation is performed by the tools/validate_config.py
+    Config validation is performed by the tools/pre_commit/validate_config.py
     script, which is invoked during the pre-commit checks.
     """
     return cls

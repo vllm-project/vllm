@@ -14,7 +14,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import Device, EngineClient
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
@@ -29,10 +29,10 @@ from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device, cdiv
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.utils.func_utils import deprecate_kwargs
+from vllm.utils.math_utils import cdiv
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -689,8 +689,14 @@ class AsyncLLM(EngineClient):
         await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, level)
+
     async def wake_up(self, tags: list[str] | None = None) -> None:
         await self.engine_core.wake_up_async(tags)
+
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(0, 0)
 
     async def is_sleeping(self) -> bool:
         return await self.engine_core.is_sleeping_async()

@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,

@@ -113,14 +113,12 @@ class Scheduler(SchedulerInterface):
         # req_id -> Request
         self.requests: dict[str, Request] = {}
         # Scheduling policy
-        if self.scheduler_config.policy == "priority":
-            self.policy = SchedulingPolicy.PRIORITY
-        elif self.scheduler_config.policy == "fcfs":
-            self.policy = SchedulingPolicy.FCFS
-        else:
+        try:
+            self.policy = SchedulingPolicy(self.scheduler_config.policy)
+        except ValueError as e:
             raise ValueError(
                 f"Unknown scheduling policy: {self.scheduler_config.policy}"
-            )
+            ) from e
         # Priority queues for requests.
         self.waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
@@ -648,23 +646,6 @@ class Scheduler(SchedulerInterface):
             meta = self.connector.build_connector_meta(scheduler_output)
             scheduler_output.kv_connector_metadata = meta
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
-
         self._update_after_schedule(scheduler_output)
         return scheduler_output
 
@@ -1058,6 +1039,23 @@ class Scheduler(SchedulerInterface):
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
             self._update_from_kv_xfer_finished(kv_connector_output)
+
+        # collect KV cache events from KV cache manager
+        events = self.kv_cache_manager.take_events()
+
+        # collect KV cache events from connector
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        # publish collected KV cache events
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
