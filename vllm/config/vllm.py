@@ -653,6 +653,15 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        # Handle the KV connector configs
+        from vllm.distributed.kv_transfer.kv_connector.config_parser import (
+            apply_extra_kv_connector_config,
+        )
+
+        self.kv_transfer_config = apply_extra_kv_connector_config(
+            self, self.kv_transfer_config
+        )
+
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism

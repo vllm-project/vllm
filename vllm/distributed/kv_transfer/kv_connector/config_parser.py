@@ -6,75 +6,76 @@
 This module provides a flexible interface for configuring KV cache offloading
 to CPU or other tier-2 storage backends. Contributors can add new offloading
 backends by implementing KVOffloadingConfigParser and adding them to the
-_OFFLOADING_BACKEND_REGISTRY.
+_CONFIG_PARSER_REGISTRY.
 """
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config.cache import CacheConfig
-    from vllm.config.kv_transfer import KVTransferConfig
-    from vllm.config.parallel import ParallelConfig
+    from vllm.config.vllm import VllmConfig
 
 logger = init_logger(__name__)
 
 
-class KVOffloadingConfigParser(ABC):
-    """Abstract base class for KV offloading backend handlers.
+class KVConnectorConfigParser(ABC):
+    """Abstract base class to parse update the KVTransferConfig based
+    on the VllmConfig.
 
     Contributors can implement this interface to add support for new
-    offloading backends. The handler is responsible for configuring
-    the KVTransferConfig based on the offloading size and any additional
-    backend-specific parameters.
+    connector backends. The handler is responsible for configuring
+    the KVTransferConfig based on the other configurations in the
+    VllmConfig.
     """
 
     @abstractmethod
     def configure_kv_transfer(
         self,
         kv_transfer_config: "KVTransferConfig",
-        offloading_size_gib: float,
-        cache_config: "CacheConfig",
-        parallel_config: "ParallelConfig",
+        vllm_config: "VllmConfig",
     ) -> None:
         """Configure the KVTransferConfig for this offloading backend.
 
         Args:
             kv_transfer_config: The KVTransferConfig to modify.
-            offloading_size_gib: The total offloading buffer size in GiB
-                (summed across all TP ranks when TP > 1).
-            cache_config: The CacheConfig containing additional cache settings.
-            parallel_config: The ParallelConfig containing parallelism settings.
+            vllm_config: The VllmConfig containing overall configuration.
+
+        Note:
+            This method should modify the kv_transfer_config in place.
         """
         raise NotImplementedError
 
-    def get_num_kv_ranks(self, parallel_config: "ParallelConfig"):
+    # Helper functions
+    def get_num_kv_ranks(self, vllm_config: "VllmConfig"):
         """
         Get number of worker processes that will 'split' the KV caches
         """
+        parallel_config = vllm_config.parallel_config
         return (
             parallel_config.tensor_parallel_size
             * parallel_config.pipeline_parallel_size
         )
 
 
-class NativeOffloadingParser(KVOffloadingConfigParser):
+class NativeOffloadingParser(KVConnectorConfigParser):
     """Handler for vLLM native CPU offloading backend."""
 
     def configure_kv_transfer(
         self,
         kv_transfer_config: "KVTransferConfig",
-        offloading_size_gib: float,
-        cache_config: "CacheConfig",
-        parallel_config: "ParallelConfig",
+        vllm_config: "VllmConfig",
     ) -> None:
+        assert vllm_config.cache_config.kv_offloading_size is not None
+        offloading_size_gib = vllm_config.cache_config.kv_offloading_size
+
         kv_transfer_config.kv_connector = "OffloadingConnector"
         kv_transfer_config.kv_role = "kv_both"
 
         # Parse the rank information
-        num_kv_ranks = super().get_num_kv_ranks(parallel_config)
+        num_kv_ranks = super().get_num_kv_ranks(vllm_config)
         kv_bytes_per_rank = offloading_size_gib * (1 << 30) / num_kv_ranks
 
         if kv_transfer_config.kv_connector_extra_config is None:
@@ -88,7 +89,7 @@ class NativeOffloadingParser(KVOffloadingConfigParser):
         kv_transfer_config.kv_connector_extra_config["num_cpu_blocks"] = 0
 
 
-class LMCacheOffloadingParser(KVOffloadingConfigParser):
+class LMCacheOffloadingParser(KVConnectorConfigParser):
     """Handler for LMCache CPU offloading backend"""
 
     def _get_lmcache_config_dict(self, offloading_gib: float):
@@ -97,14 +98,15 @@ class LMCacheOffloadingParser(KVOffloadingConfigParser):
     def configure_kv_transfer(
         self,
         kv_transfer_config: "KVTransferConfig",
-        offloading_size_gib: float,
-        cache_config: "CacheConfig",
-        parallel_config: "ParallelConfig",
+        vllm_config: "VllmConfig",
     ) -> None:
+        assert vllm_config.cache_config.kv_offloading_size is not None
+        offloading_size_gib = vllm_config.cache_config.kv_offloading_size
+
         kv_transfer_config.kv_connector = "LMCacheConnectorV1"
         kv_transfer_config.kv_role = "kv_both"
 
-        num_kv_ranks = super().get_num_kv_ranks(parallel_config)
+        num_kv_ranks = super().get_num_kv_ranks(vllm_config)
         kv_gb_per_rank = offloading_size_gib / num_kv_ranks
 
         kv_transfer_config.kv_connector_extra_config = self._get_lmcache_config_dict(
@@ -113,18 +115,52 @@ class LMCacheOffloadingParser(KVOffloadingConfigParser):
 
 
 # Registry for offloading backend handlers
-# Contributors can add new handlers here by implementing KVOffloadingConfigParser
-_OFFLOADING_BACKEND_REGISTRY: dict[str, KVOffloadingConfigParser] = {
+_CONFIG_PARSER_REGISTRY: dict[str, KVConnectorConfigParser] = {
     "native": NativeOffloadingParser(),
     "lmcache": LMCacheOffloadingParser(),
 }
 
 
-def apply_kv_offloading_config(
-    cache_config: "CacheConfig",
-    kv_transfer_config: "KVTransferConfig",
-    parallel_config: "ParallelConfig",
-) -> None:
+def get_connector_config_parser(
+    vllm_config: "VllmConfig",
+) -> KVConnectorConfigParser | None:
+    """Get the KVConnectorConfigParser based on the VllmConfig.
+
+    Right now, this function only looks at
+    `vllm_config.cache_config.kv_offloading_backend` to determine
+    which connector to use for CPU offloading.
+    We can extend it for more general purposes in the future.
+
+    Args:
+        vllm_config: The VllmConfig containing overall configuration.
+
+    Returns:
+        The KVConnectorConfigParser for the specified backend.
+        If no backend is specified, returns None.
+
+    Raises:
+        ValueError: If the specified backend is not registered.
+    """
+    cache_config = vllm_config.cache_config
+    backend_name = cache_config.kv_offloading_backend
+
+    if backend_name is None:
+        return None
+
+    if backend_name not in _CONFIG_PARSER_REGISTRY:
+        available_backends = ", ".join(_CONFIG_PARSER_REGISTRY.keys())
+        raise ValueError(
+            f"Unknown offloading backend: '{backend_name}'. "
+            f"Available backends: {available_backends}"
+        )
+
+    return _CONFIG_PARSER_REGISTRY[backend_name]
+
+
+def apply_extra_kv_connector_config(
+    vllm_config: "VllmConfig",
+    kv_transfer_config: "KVTransferConfig" | None,
+) -> KVTransferConfig:
     """Apply KV offloading configuration to KVTransferConfig.
 
     This function reads the offloading settings from CacheConfig and
@@ -136,51 +172,31 @@ def apply_kv_offloading_config(
         kv_transfer_config: The KVTransferConfig to modify.
         parallel_config: The ParallelConfig containing parallelism settings.
 
+    Returns:
+        The modified KVTransferConfig with offloading settings applied.
+
     Raises:
         ValueError: If offloading configuration is invalid or backend
             is not registered.
     """
-    # Check if offloading is enabled
-    if cache_config.kv_offloading_size is None:
-        # No offloading configured
+    config_parser = get_connector_config_parser(vllm_config)
+    if config_parser is None:
+        # No connector is configured
         return
 
-    # Validate configuration
-    if cache_config.kv_offloading_backend is None:
-        available_backends = ", ".join(_OFFLOADING_BACKEND_REGISTRY.keys())
-        raise ValueError(
-            "kv_offloading_backend must be specified when "
-            f"kv_offloading_size is set. Available backends: {available_backends}"
-        )
-
-    if cache_config.kv_offloading_size <= 0:
-        raise ValueError(
-            f"kv_offloading_size must be positive, got "
-            f"{cache_config.kv_offloading_size}"
-        )
-
-    backend_name = cache_config.kv_offloading_backend
-
-    # Get the handler for this backend
-    if backend_name not in _OFFLOADING_BACKEND_REGISTRY:
-        available_backends = ", ".join(_OFFLOADING_BACKEND_REGISTRY.keys())
-        raise ValueError(
-            f"Unknown offloading backend: '{backend_name}'. "
-            f"Available backends: {available_backends}"
-        )
-
-    handler = _OFFLOADING_BACKEND_REGISTRY[backend_name]
+    if kv_transfer_config is None:
+        kv_transfer_config = KVTransferConfig()
 
     # Apply the configuration
-    handler.configure_kv_transfer(
+    config_parser.configure_kv_transfer(
         kv_transfer_config=kv_transfer_config,
-        offloading_size_gib=cache_config.kv_offloading_size,
-        cache_config=cache_config,
-        parallel_config=parallel_config,
+        vllm_config=vllm_config,
     )
 
+    backend_name = vllm_config.cache_config.kv_offloading_backend
     logger.info(
-        "KV offloading configured: backend=%s, size=%.2f GiB",
+        "KV connector configured with backend: %s",
         backend_name,
-        cache_config.kv_offloading_size,
     )
+
+    return kv_transfer_config
