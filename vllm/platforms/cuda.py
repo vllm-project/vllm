@@ -155,18 +155,22 @@ class CudaPlatformBase(Platform):
 
             from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 
+            def round_up_block_size(size):
+                cache_config.block_size = (
+                        (cache_config.block_size + size - 1) // size * size)
+
             if (
                 use_flashmla
                 and is_flashmla_dense_supported()[0]
                 and cache_config.block_size % 64 != 0
             ):
-                cache_config.block_size = 64
-                logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
+                round_up_block_size(64)
+                logger.info("Forcing kv cache block size to 64*N for FlashMLA backend.")
 
             if use_cutlass_mla and cache_config.block_size % 128 != 0:
-                cache_config.block_size = 128
+                round_up_block_size(128)
                 logger.info(
-                    "Forcing kv cache block size to 128 for CUTLASS_MLA backend."
+                    "Forcing kv cache block size to 128*N for CUTLASS_MLA backend."
                 )
 
             if (
@@ -174,16 +178,16 @@ class CudaPlatformBase(Platform):
                 and cache_config.block_size != 32
                 and cache_config.block_size % 64 != 0
             ):
-                cache_config.block_size = 64
+                round_up_block_size(64)
                 logger.info(
-                    "Forcing kv cache block size to 64 for FlashInferMLA backend."
+                    "Forcing kv cache block size to 64*N for FlashInferMLA backend."
                 )
 
             # TODO(Chen): remove this hacky code
-            if use_sparse and cache_config.block_size != 64:
-                cache_config.block_size = 64
+            if use_sparse and cache_config.block_size % 64 != 0:
+                round_up_block_size(64)
                 logger.info(
-                    "Forcing kv cache block size to 64 for FlashMLASparse backend."
+                    "Forcing kv cache block size to 64*N for FlashMLASparse backend."
                 )
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
@@ -314,7 +318,7 @@ class CudaPlatformBase(Platform):
                 if block_size % 64 != 0:
                     logger.warning(
                         "FlashMLA backend is not supported for block size %d"
-                        " (currently only supports block size 64).",
+                        " (currently only supports block size 64*N).",
                         block_size,
                     )
                 else:
