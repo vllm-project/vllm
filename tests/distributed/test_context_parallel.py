@@ -64,7 +64,7 @@ class CPTestSettings:
         for eager_mode_val in [False]:
             for pp_multiplier in [1]:
                 # TODO(qcs): Test the effect of mixed activation
-                # when CP and DCP are compatible.
+                # when PCP and DCP are compatible.
                 for pcp_multiplier, dcp_multiplier in zip([1, 2, 1], [0.5, 1, 1]):
                     for chunked_prefill_val in [True]:
                         parallel_setups.append(

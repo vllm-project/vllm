@@ -2348,6 +2348,9 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
 
+            # NOTE: Similar with DP, PCP also needs dispatch and combine. For
+            # simplicity, AgRsAll2All was added separately for PCP here. Maybe
+            # we should modify All2AllManager abstract to better support PCP.
             if self.pcp_size > 1:
                 hidden_states = get_pcp_group().all_gather(
                     hidden_states,

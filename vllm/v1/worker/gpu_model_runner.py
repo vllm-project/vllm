@@ -438,7 +438,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.supports_mm_inputs:
             self.is_mm_embed = self._make_buffer(self.max_num_tokens, dtype=torch.bool)
 
-        # Persistent buffers for Context Parallism
+        # Persistent buffers for Prefill Context Parallism
         self.pcp_allgather_restore_idx = self._make_buffer(
             max_num_padded_tokens,
             dtype=torch.int64
@@ -1489,7 +1489,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ]
 
             if self.pcp_world_size > 1:
-                # After cp allgather and restore, there are padded tokens in
+                # After pcp allgather and restore, there are padded tokens in
                 # kv, so we need pad slotmapping for alignment.
                 pcp_padded_slot_mapping = self.pcp_padded_slot_mapping[
                     : total_num_scheduled_tokens * self.pcp_world_size
