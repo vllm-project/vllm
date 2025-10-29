@@ -160,7 +160,8 @@ def test_sparse_backend_decode_correctness(
     )
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads, model_config
+        lambda self, parallel_config: num_heads // parallel_config.tensor_parallel_size,
+        model_config,
     )
     model_config.get_num_kv_heads = MethodType(
         lambda self, parallel_config: 1, model_config
