@@ -72,7 +72,6 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
     "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
-    "0x74a2": "AMD_Instinct_MI308X",
     "0x74a5": "AMD_Instinct_MI325X",
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
@@ -206,6 +205,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        import os
         from importlib.util import find_spec
 
         from vllm.attention.backends.registry import _Backend
@@ -216,6 +216,16 @@ class RocmPlatform(Platform):
         if on_gfx9() and find_spec("flash_attn") is not None:
             return _Backend.FLASH_ATTN
 
+        if (
+            os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") == "TRUE"
+            and os.environ.get("GPU_ARCHS") == "gfx1100"
+            and find_spec("flash_attn") is not None
+            and on_gfx1x()
+        ):
+            logger.info("Using Vit FLASH_ATTN upstream V1 engine on gfx1x rdna3")
+            return _Backend.FLASH_ATTN
+
+        logger.info("Using Vit TORCH_SDPA V1 engine")
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -414,7 +424,7 @@ class RocmPlatform(Platform):
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                 " is not set, enabling VLLM_USE_TRITON_AWQ."
             )
-        os.environ["VLLM_USE_TRITON_AWQ"] = "1"
+        envs.VLLM_USE_TRITON_AWQ = True
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
