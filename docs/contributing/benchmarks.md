@@ -7,7 +7,7 @@ toc_depth: 4
 vLLM provides comprehensive benchmarking tools for performance testing and evaluation:
 
 - **[Benchmark CLI](#benchmark-cli)**: `vllm bench` CLI tools and specialized benchmark scripts for interactive performance testing
-- **[Batch Scripts](#batch-scripts)**: Run `vllm bench` against multiple configurations conveniently
+- **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
 - **[Nightly benchmarks](#nightly-benchmarks)**: Comparative benchmarks against alternatives
 
@@ -320,6 +320,73 @@ The following arguments can be used to control the ramp-up:
 - `--ramp-up-strategy`: The ramp-up strategy to use (`linear` or `exponential`).
 - `--ramp-up-start-rps`: The request rate at the beginning of the benchmark.
 - `--ramp-up-end-rps`: The request rate at the end of the benchmark.
+
+##### Load Pattern Configuration
+
+vLLM's benchmark serving script provides sophisticated load pattern simulation capabilities through three key parameters that control request generation and concurrency behavior:
+
+###### Load Pattern Control Parameters
+
+- `--request-rate`: Controls the target request generation rate (requests per second). Set to `inf` for maximum throughput testing or finite values for controlled load simulation.
+- `--burstiness`: Controls traffic variability using a Gamma distribution (range: > 0). Lower values create bursty traffic, higher values create uniform traffic.
+- `--max-concurrency`: Limits concurrent outstanding requests. If this argument is not provided, concurrency is unlimited. Set a value to simulate backpressure.
+
+These parameters work together to create realistic load patterns with carefully chosen defaults. The `--request-rate` parameter defaults to `inf` (infinite), which sends all requests immediately for maximum throughput testing. When set to finite values, it uses either a Poisson process (default `--burstiness=1.0`) or Gamma distribution for realistic request timing. The `--burstiness` parameter only takes effect when `--request-rate` is not infinite - a value of 1.0 creates natural Poisson traffic, while lower values (0.1-0.5) create bursty patterns and higher values (2.0-5.0) create uniform spacing. The `--max-concurrency` parameter defaults to `None` (unlimited) but can be set to simulate real-world constraints where a load balancer or API gateway limits concurrent connections. When combined, these parameters allow you to simulate everything from unrestricted stress testing (`--request-rate=inf`) to production-like scenarios with realistic arrival patterns and resource constraints.
+
+The `--burstiness` parameter mathematically controls request arrival patterns using a Gamma distribution where:
+
+- Shape parameter: `burstiness` value
+- Coefficient of Variation (CV): $\frac{1}{\sqrt{burstiness}}$
+- Traffic characteristics:
+    - `burstiness = 0.1`: Highly bursty traffic (CV ≈ 3.16) - stress testing
+    - `burstiness = 1.0`: Natural Poisson traffic (CV = 1.0) - realistic simulation  
+    - `burstiness = 5.0`: Uniform traffic (CV ≈ 0.45) - controlled load testing
+
+![Load Pattern Examples](../assets/contributing/load-pattern-examples.png)
+
+*Figure: Load pattern examples for each use case. Top row: Request arrival timelines showing cumulative requests over time. Bottom row: Inter-arrival time distributions showing traffic variability patterns. Each column represents a different use case with its specific parameter settings and resulting traffic characteristics.*
+
+Load Pattern Recommendations by Use Case:
+
+| Use Case           | Burstiness   | Request Rate    | Max Concurrency | Description                                               |
+| ---                | ---          | ---             | ---             | ---                                                       |
+| Maximum Throughput | N/A          | Infinite        | Limited         | **Most common**: Simulates load balancer/gateway limits with unlimited user demand |
+| Realistic Testing  | 1.0          | Moderate (5-20) | Infinite        | Natural Poisson traffic patterns for baseline performance |
+| Stress Testing     | 0.1-0.5      | High (20-100)   | Infinite        | Challenging burst patterns to test resilience             |
+| Latency Profiling  | 2.0-5.0      | Low (1-10)      | Infinite        | Uniform load for consistent timing analysis               |
+| Capacity Planning  | 1.0          | Variable        | Limited         | Test resource limits with realistic constraints           |
+| SLA Validation     | 1.0          | Target rate     | SLA limit       | Production-like constraints for compliance testing        |
+
+These load patterns help evaluate different aspects of your vLLM deployment, from basic performance characteristics to resilience under challenging traffic conditions.
+
+The **Maximum Throughput** pattern (`--request-rate=inf --max-concurrency=<limit>`) is the most commonly used configuration for production benchmarking. This simulates real-world deployment architectures where:
+
+- Users send requests as fast as they can (infinite rate)
+- A load balancer or API gateway controls the maximum concurrent connections
+- The system operates at its concurrency limit, revealing true throughput capacity
+- `--burstiness` has no effect since request timing is not controlled when rate is infinite
+
+This pattern helps determine optimal concurrency settings for your production load balancer configuration.
+
+To effectively configure load patterns, especially for **Capacity Planning** and **SLA Validation** use cases, you need to understand your system's resource limits. During startup, vLLM reports KV cache configuration that directly impacts your load testing parameters:
+
+```text
+GPU KV cache size: 15,728,640 tokens
+Maximum concurrency for 8,192 tokens per request: 1920
+```
+
+Where:
+
+- GPU KV cache size: Total tokens that can be cached across all concurrent requests
+- Maximum concurrency: Theoretical maximum concurrent requests for the given `max_model_len`
+- Calculation: `max_concurrency = kv_cache_size / max_model_len`
+
+Using KV cache metrics for load pattern configuration:
+
+- For Capacity Planning: Set `--max-concurrency` to 80-90% of the reported maximum to test realistic resource constraints
+- For SLA Validation: Use the reported maximum as your SLA limit to ensure compliance testing matches production capacity
+- For Realistic Testing: Monitor memory usage when approaching theoretical limits to understand sustainable request rates
+- Request rate guidance: Use the KV cache size to estimate sustainable request rates for your specific workload and sequence lengths
 
 </details>
 
@@ -925,15 +992,13 @@ throughput numbers correctly is also adjusted.
 
 </details>
 
-## Batch Scripts
+## Parameter Sweeps
 
-### Batch Serving Script
+### Online Benchmark
 
-[`vllm/benchmarks/serve_multi.py`](../../vllm/benchmarks/serve_multi.py) automatically starts `vllm serve` and runs `vllm bench serve` over multiple configurations.
+[`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
 
-#### Batch Mode
-
-The basic purpose of this script is to evaluate vLLM under different settings. Follows these steps to run the script:
+Follow these steps to run the script:
 
 1. Construct the base command to `vllm serve`, and pass it to the `--serve-cmd` option.
 2. Construct the base command to `vllm bench serve`, and pass it to the `--bench-cmd` option.
@@ -996,7 +1061,7 @@ The basic purpose of this script is to evaluate vLLM under different settings. F
 Example command:
 
 ```bash
-python vllm/benchmarks/serve_multi.py \
+python -m vllm.benchmarks.sweep.serve \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1018,9 +1083,9 @@ python vllm/benchmarks/serve_multi.py \
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
   
-#### SLA Mode
+### SLA Auto-Tuner
 
-By passing SLA constraints via `--sla-params`, you can run this script in SLA mode, causing it to adjust either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints.
+[`vllm/benchmarks/sweep/serve_sla.py`](../../vllm/benchmarks/sweep/serve_sla.py) is a wrapper over [`vllm/benchmarks/sweep/serve.py`](../../vllm/benchmarks/sweep/serve.py) that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
 
 For example, to ensure E2E latency within different target values for 99% of requests:
 
@@ -1044,7 +1109,7 @@ For example, to ensure E2E latency within different target values for 99% of req
 Example command:
 
 ```bash
-python vllm/benchmarks/serve_multi.py \
+python -m vllm.benchmarks.sweep.serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
     --serve-params benchmarks/serve_hparams.json \
@@ -1065,6 +1130,24 @@ The algorithm for adjusting the SLA variable is as follows:
     SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
 
     For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
+
+### Visualizer
+
+[`vllm/benchmarks/sweep/plot.py`](../../vllm/benchmarks/sweep/plot.py) can be used to plot performance curves from parameter sweep results.
+
+Example command:
+
+```bash
+python -m vllm.benchmarks.sweep.plot benchmarks/results/<timestamp> \
+    --var-x max_concurrency \
+    --row-by random_input_len \
+    --col-by random_output_len \
+    --curve-by api_server_count,max_num_batched_tokens \
+    --filter-by 'max_concurrency<=1024'
+```
+
+!!! tip
+    You can use `--dry-run` to preview the figures to be plotted.
 
 ## Performance Benchmarks
 

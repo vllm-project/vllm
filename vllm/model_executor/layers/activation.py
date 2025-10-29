@@ -80,7 +80,8 @@ class SiluAndMul(CustomOp):
         elif current_platform.is_cpu():
             self._forward_method = self.forward_native
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def forward_native(x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
         d = x.shape[-1] // 2
         return F.silu(x[..., :d]) * x[..., d:]

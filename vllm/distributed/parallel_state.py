@@ -1157,7 +1157,7 @@ def init_distributed_environment(
         ip = parallel_config.data_parallel_master_ip
         port = parallel_config.get_next_dp_init_port()
         distributed_init_method = get_distributed_init_method(ip, port)
-        logger.info(
+        logger.debug(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
             world_size,
             rank,
@@ -1322,7 +1322,7 @@ def initialize_model_parallel(
         group_ranks, get_world_group().local_rank, backend, group_name="ep"
     )
 
-    logger.info(
+    logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, TP rank %s, EP rank %s",
         rank,
@@ -1622,6 +1622,29 @@ def is_global_first_rank() -> bool:
 
     except Exception:
         # If anything goes wrong, assume this is the first rank
+        return True
+
+
+def is_local_first_rank() -> bool:
+    """
+    Check if the current process is the first local rank (rank 0 on its node).
+    """
+    try:
+        # prefer the initialized world group if available
+        global _WORLD
+        if _WORLD is not None:
+            return _WORLD.local_rank == 0
+
+        if not torch.distributed.is_initialized():
+            return True
+
+        # fallback to environment-provided local rank if available
+        # note: envs.LOCAL_RANK is set when using env:// launchers (e.g., torchrun)
+        try:
+            return int(envs.LOCAL_RANK) == 0  # type: ignore[arg-type]
+        except Exception:
+            return torch.distributed.get_rank() == 0
+    except Exception:
         return True
 
 

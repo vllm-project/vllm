@@ -56,8 +56,6 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_FUSED_MOE_CHUNK_SIZE: int = 64 * 1024
     VLLM_ENABLE_FUSED_MOE_ACTIVATION_CHUNKING: bool = True
-    VLLM_USE_RAY_SPMD_WORKER: bool = False
-    VLLM_USE_RAY_COMPILED_DAG: bool = False
     VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE: Literal["auto", "nccl", "shm"] = "auto"
     VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM: bool = False
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
@@ -133,7 +131,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
-    VLLM_USE_STANDALONE_COMPILE: bool = False
+    VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -185,6 +183,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB: int | None = None
     VLLM_NIXL_ABORT_REQUEST_TIMEOUT: int = 480
     VLLM_USE_CUDNN_PREFILL: bool = False
+    VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL: bool = False
     VLLM_ENABLE_CUDAGRAPH_GC: bool = False
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
@@ -199,14 +198,18 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
+    VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
+    VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
+    VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
+    VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = True
+    VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
-    GPT_OSS_SYSTEM_TOOL_MCP_LABELS: list[str] = []
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -215,6 +218,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
 
 
 def get_default_cache_root():
@@ -348,6 +352,24 @@ def env_list_with_choices(
         return values
 
     return _get_validated_env_list
+
+
+def env_set_with_choices(
+    env_name: str,
+    default: list[str],
+    choices: list[str] | Callable[[], list[str]],
+    case_sensitive: bool = True,
+) -> Callable[[], set[str]]:
+    """
+    Creates a lambda which that validates environment variable
+    containing comma-separated values against allowed choices which
+    returns choices as a set.
+    """
+
+    def _get_validated_env_set() -> set[str]:
+        return set(env_list_with_choices(env_name, default, choices, case_sensitive)())
+
+    return _get_validated_env_set
 
 
 def get_vllm_port() -> int | None:
@@ -495,10 +517,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_FLASH_ATTN_VERSION", None)
     ),
     # Feature flag to enable/disable Inductor standalone compile.
-    # In torch <= 2.7 we ignore this flag; in torch >= 2.8 this is
-    # disabled by default.
+    # In torch <= 2.7 we ignore this flag; in torch >= 2.9 this is
+    # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: os.environ.get(
-        "VLLM_USE_STANDALONE_COMPILE", "0"
+        "VLLM_USE_STANDALONE_COMPILE", "1"
     )
     == "1",
     # Debug pattern matching inside custom passes.
@@ -623,22 +645,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_CPU_MOE_PREPACK": lambda: bool(int(os.getenv("VLLM_CPU_MOE_PREPACK", "1"))),
     # (CPU backend only) whether to use SGL kernels, optimized for small batch.
     "VLLM_CPU_SGL_KERNEL": lambda: bool(int(os.getenv("VLLM_CPU_SGL_KERNEL", "0"))),
-    # If the env var is set, then all workers will execute as separate
-    # processes from the engine, and we use the same mechanism to trigger
-    # execution on all workers.
-    # Run vLLM with VLLM_USE_RAY_SPMD_WORKER=1 to enable it.
-    "VLLM_USE_RAY_SPMD_WORKER": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_SPMD_WORKER", "0"))
-    ),
-    # If the env var is set, it uses the Ray's Compiled Graph
-    # (previously known as ADAG) API which optimizes the
-    # control plane overhead.
-    # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
-    # Note that this variable is set to 1 in V1 by default
-    # when ray distributed executor is used.
-    "VLLM_USE_RAY_COMPILED_DAG": lambda: bool(
-        int(os.getenv("VLLM_USE_RAY_COMPILED_DAG", "0"))
-    ),
     # If the env var is set, Ray Compiled Graph uses the specified
     # channel type to communicate between workers belonging to
     # different pipeline-parallel stages.
@@ -646,20 +652,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "auto": use the default channel type
     # - "nccl": use NCCL for communication
     # - "shm": use shared memory and gRPC for communication
-    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE": env_with_choices(
         "VLLM_USE_RAY_COMPILED_DAG_CHANNEL_TYPE", "auto", ["auto", "nccl", "shm"]
     ),
     # If the env var is set, it enables GPU communication overlap
-    # (experimental feature) in Ray's Compiled Graph. This flag is ignored if
-    # VLLM_USE_RAY_COMPILED_DAG is not set.
+    # (experimental feature) in Ray's Compiled Graph.
     "VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM", "0"))
     ),
     # If the env var is set, it uses a Ray Communicator wrapping
     # vLLM's pipeline parallelism communicator to interact with Ray's
     # Compiled Graph. Otherwise, it uses Ray's NCCL communicator.
-    # This flag is ignored if VLLM_USE_RAY_COMPILED_DAG is not set.
     "VLLM_USE_RAY_WRAPPED_PP_COMM": lambda: bool(
         int(os.getenv("VLLM_USE_RAY_WRAPPED_PP_COMM", "1"))
     ),
@@ -1270,6 +1273,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_CUDNN_PREFILL": lambda: bool(
         int(os.getenv("VLLM_USE_CUDNN_PREFILL", "0"))
     ),
+    # Controls whether to use TRT-LLM ragged DeepSeek prefill
+    "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL": lambda: bool(
+        int(os.getenv("VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL", "0"))
+    ),
     # If set to 1/True, use the TRTLLM attention backend in flashinfer.
     # If set to 0/False, use the default attention backend in flashinfer.
     # If not set, auto-detect the attention backend in flashinfer.
@@ -1339,9 +1346,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    # Valid values are container,code_interpreter,web_search_preview
+    # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
+    # If the server_label of your mcp tool is not in this list it will
+    # be completely ignored.
+    "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_set_with_choices(
+        "VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
+        default=[],
+        choices=["container", "code_interpreter", "web_search_preview"],
+    ),
     # Allows harmony instructions to be injected on system messages
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": lambda: bool(
         int(os.getenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "0"))
+    ),
+    # Enable automatic retry when tool call JSON parsing fails
+    # If enabled, returns an error message to the model to retry
+    # If disabled (default), raises an exception and fails the request
+    "VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY": lambda: bool(
+        int(os.getenv("VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY", "0"))
     ),
     # Add optional custom scopes for profiling, disable to avoid overheads
     "VLLM_CUSTOM_SCOPES_FOR_PROFILING": lambda: bool(
@@ -1365,16 +1387,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_BUFFER_SIZE_MB": lambda: int(
         os.getenv("VLLM_DEEPEP_BUFFER_SIZE_MB", "1024")
     ),
+    # Force DeepEP to use intranode kernel for inter-node communication in
+    # high throughput mode. This is useful archive higher prefill throuhgput
+    # on system supports multi-node nvlink (e.g GB200).
+    "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE", "0"))
+    ),
+    # Allow DeepEP to use nvlink for internode_ll kernel, turn this on for
+    # better latency on GB200 like system
+    "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK", "1"))
+    ),
+    # Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel,
+    # turn this for better latency on GB200 like system
+    "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
+        int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
+    ),
     # The number of SMs to allocate for communication kernels when running DBO
     # the rest of the SMs on the device will be allocated to compute
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
-    # Valid values are container,code_interpreter,web_search_preview
-    # ex GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
-    "GPT_OSS_SYSTEM_TOOL_MCP_LABELS": env_list_with_choices(
-        "GPT_OSS_SYSTEM_TOOL_MCP_LABELS",
-        [],
-        ["container", "code_interpreter", "web_search_preview"],
-    ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)
@@ -1400,6 +1431,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Disables parallel execution of shared_experts via separate cuda stream
+    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
+        "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1497,6 +1532,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
         "VLLM_USE_CUDNN_PREFILL",
+        "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
         "VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION",
         "VLLM_ROCM_USE_AITER",
@@ -1522,6 +1558,9 @@ def compute_hash() -> str:
         "VLLM_ENABLE_INDUCTOR_COORDINATE_DESCENT_TUNING",
         "VLLM_NVFP4_GEMM_BACKEND",
         "VLLM_USE_FBGEMM",
+        "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE",
+        "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK",
+        "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
@@ -1531,6 +1570,29 @@ def compute_hash() -> str:
         )
 
     factors = [environment_variables[key]() for key in environment_variables_to_hash]
+
+    ray_noset_env_vars = [
+        # Refer to
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/nvidia_gpu.py#L11
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/amd_gpu.py#L11
+        # https://github.com/ray-project/ray/blob/b97d21dab233c2bd8ed7db749a82a1e594222b5c/python/ray/_private/accelerators/amd_gpu.py#L10
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/npu.py#L12
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/hpu.py#L12
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/neuron.py#L14
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/tpu.py#L38
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/intel_gpu.py#L10
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/rbln.py#L10
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
+        "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES",
+        "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",
+        "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
+        "RAY_EXPERIMENTAL_NOSET_RBLN_RT_VISIBLE_DEVICES",
+    ]
+    factors.extend([os.getenv(var) for var in ray_noset_env_vars])
 
     hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
 
