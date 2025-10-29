@@ -15,7 +15,6 @@ from vllm.distributed.parallel_state import (
 from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEQuantConfig,
     _get_config_dtype_str,
     mxfp4_w4a16_moe_quant_config,
@@ -46,19 +45,19 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def _inject_lora_into_fused_moe(self):
         moe_state_dict = {}
         top_k = self.base_layer.top_k
+        moe_has_bias = self.base_layer.moe_config.has_bias
         if self.base_layer.quant_config is None:
-            if self.base_layer.moe_config.has_bias:
-                quant_config = FusedMoEQuantConfig.make(
-                    w1_bias=self.base_layer.w13_bias, w2_bias=self.base_layer.w2_bias
-                )
-            else:
-                quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+            quant_config = FusedMoEQuantConfig.make(
+                w1_bias=self.base_layer.w13_bias if moe_has_bias else None,
+                w2_bias=self.base_layer.w2_bias if moe_has_bias else None,
+            )
+
         elif not isinstance(self.base_layer.quant_config, Mxfp4Config):
             quant_config = self.base_layer.quant_config
         else:
             quant_config = mxfp4_w4a16_moe_quant_config(
-                w1_bias=self.base_layer.w13_bias,
-                w2_bias=self.base_layer.w2_bias,
+                w1_bias=self.base_layer.w13_bias if moe_has_bias else None,
+                w2_bias=self.base_layer.w2_bias if moe_has_bias else None,
                 w1_scale=self.base_layer.w13_weight_scale,
                 w2_scale=self.base_layer.w2_weight_scale,
             )
@@ -78,7 +77,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["hidden_states"] = kwargs["hidden_states"]
                 moe_state_dict["topk_ids"] = kwargs["topk_ids"]
                 moe_state_dict["topk_weights"] = kwargs["topk_weights"]
-                moe_state_dict["local_num_experts"] = kwargs["local_num_experts"]
                 moe_state_dict["expert_map"] = kwargs["expert_map"]
                 moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
@@ -95,7 +93,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 hidden_states = moe_state_dict["hidden_states"]
                 topk_weights = moe_state_dict["topk_weights"]
                 curr_topk_ids = moe_state_dict["topk_ids"]
-                local_num_experts = moe_state_dict["local_num_experts"]
+
                 expert_map = moe_state_dict["expert_map"]
 
                 config_dtype = _get_config_dtype_str(
@@ -127,7 +125,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     curr_topk_ids,
                     num_tokens,
                     config["BLOCK_SIZE_M"],
-                    local_num_experts,
+                    self.base_layer.local_num_experts,
                     max_loras,
                     expert_map,
                 )
