@@ -452,15 +452,15 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "x": 0,
-        "cu_seqlens": 0,
-        "rotary_pos_emb": 0,
-        "seqlens": 0,
-    },
-    mark_unbacked_dims={"seqlens": 0},
-)
+# @support_torch_compile(
+#     dynamic_arg_dims={
+#         "x": 0,
+#         "cu_seqlens": 0,
+#         "rotary_pos_emb": 0,
+#         "seqlens": 0,
+#     },
+#     mark_unbacked_dims={"seqlens": 0},
+# )
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
