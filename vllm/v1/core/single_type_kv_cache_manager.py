@@ -394,7 +394,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # skipped during the attention computation.
         last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
+        if last_useful_block <= 0:
+            # Early return if tokens are not enough to fill the sliding window
+            return
         blocks = self.req_to_blocks[request_id]
+        if blocks[last_useful_block - 1] == self._null_block:
+            # Early return if there are no blocks to remove
+            return
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
             if blocks[i] == self._null_block:
