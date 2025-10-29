@@ -85,7 +85,7 @@ def run_radio_test(
         "nvidia/C-RADIOv2-H",
     ],
 )
-@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 def test_radio(dist_init, image_assets, model_id, dtype: str) -> None:
     run_radio_test(
         image_assets,
