@@ -68,7 +68,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
-    BaseMultiModalProcessor,
     MultiModalPromptUpdates,
     PlaceholderFeaturesInfo,
     PromptReplacement,
@@ -88,7 +87,6 @@ from .qwen2_5_omni_thinker import (
     Qwen2_5OmniConditionalGenerationMixin,
     Qwen2_5OmniThinkerDummyInputsBuilder,
     Qwen2_5OmniThinkerMultiModalProcessor,
-    Qwen2_5OmniThinkerProcessingInfo,
 )
 from .qwen2_5_vl import (
     Qwen2_5_VisionAttention,
@@ -100,7 +98,6 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
-    flatten_bn,
     maybe_prefix,
 )
 from .vision import (
@@ -802,24 +799,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                 else:
                     use_audio_in_video = False
 
-        print(f"=== before reduction {mm_item_counts=}")
-
-        # if use_audio_in_video and "video" in mm_item_counts:
-        #     assert "audio" in mm_item_counts
-        #     mm_item_counts["audio"] -= mm_item_counts["video"]
-
-        # # Special case with `use_audio_in_video=True`
-        # if use_audio_in_video:
-        #     if is_update_applied:
-        #         prompt_ids = self._get_raw_input_ids(prompt_ids, use_audio_in_video)
-        #     (
-        #         prompt_ids,
-        #         mm_placeholders,
-        #     ) = self._apply_prompt_updates(
-        #         prompt_ids,
-        #         mm_prompt_updates,
-        #     )
-        #     self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
         # normal case with `use_audio_in_video=False`
         if is_update_applied:
             mm_placeholders = self._find_mm_placeholders(
@@ -832,12 +811,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             )
         else:
             if use_audio_in_video and "audio" in mm_prompt_updates:
-                print(f"=== {prompt_ids=} {mm_prompt_updates=}")
-
                 filtered_updates = {
                     k: v for k, v in mm_prompt_updates.items() if k != "audio"
                 }
-                print(f"=== {filtered_updates=}")
                 prompt_ids, mm_placeholders = self._apply_prompt_updates(
                     prompt_ids,
                     filtered_updates,
@@ -851,8 +827,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
                     prompt_ids,
                     mm_prompt_updates,
                 )
-
-            print(f"=== {mm_item_counts=}")
 
             self._validate_mm_placeholders(
                 mm_placeholders,
@@ -978,7 +952,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
             nonlocal audio_in_video_item_idx
-            audio_num_features = audio_output_lengths[audio_in_video_item_idx + item_idx]
+            audio_num_features = audio_output_lengths[
+                audio_in_video_item_idx + item_idx
+            ]
             video_grid_thw = out_mm_data["video_grid_thw"][item_idx]
 
             audio_in_video_item_idx += 1
@@ -1068,7 +1044,6 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         result_placeholders["audio"] = audio_placeholders
         return result_placeholders
 
-
     def _get_raw_input_ids(
         self,
         token_ids: list[int],
@@ -1126,14 +1101,9 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
 
-        print(f"=== {audio_feature_lengths=}")
-
-        # audio_feature_lengths = flatten_bn(audio_feature_lengths, concat=True)
-
         audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
             audio_feature_lengths
         )
-        print(f"=== {audio_feat_lengths=} {audio_output_lengths=}")
 
         audio_outputs = self.audio_tower(
             input_features.to(self.audio_tower.dtype),

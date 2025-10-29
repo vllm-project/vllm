@@ -7,7 +7,6 @@ with the correct prompt format on Qwen2.5-Omni (thinker only).
 
 from typing import NamedTuple
 
-import vllm.envs as envs
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -62,7 +61,8 @@ def get_mixed_modalities_query() -> QueryResult:
 
 def get_use_audio_in_video_query() -> QueryResult:
     question = (
-        "Describe the content of the video, then convert what the baby say into text."
+        "Describe the content of the video in details, then convert what the "
+        "baby say into text."
     )
     prompt = (
         f"<|im_start|>system\n{default_system}<|im_end|>\n"
@@ -125,7 +125,7 @@ def main(args):
 
     llm = LLM(
         model=model_name,
-        max_model_len=5632,
+        max_model_len=12800,
         max_num_seqs=5,
         limit_mm_per_prompt=query_result.limit_mm_per_prompt,
         seed=args.seed,
@@ -133,7 +133,7 @@ def main(args):
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(temperature=0.2, max_tokens=64)
+    sampling_params = SamplingParams(temperature=0.2, max_tokens=256)
 
     outputs = llm.generate(query_result.inputs, sampling_params=sampling_params)
 
