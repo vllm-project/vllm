@@ -60,7 +60,7 @@ class OptimizationLevel(Enum):
     """Optimization level enum."""
 
     O0 = 0
-    """00 : No optimization. no compilation, no cudagraphs, no other
+    """O0 : No optimization. no compilation, no cudagraphs, no other
     optimization, just starting up immediately"""
     O1 = 1
     """O1: Quick optimizations. Dynamo+Inductor compilation but no
