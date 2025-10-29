@@ -38,7 +38,7 @@ steps:
 - label: Pytorch Nightly Dependency Override Check # 2min
   # if this test fails, it means the nightly torch version is not compatible with some
   # of the dependencies. Please check the error message and add the package to whitelist
-  # in /vllm/tools/generate_nightly_torch_test.py
+  # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
