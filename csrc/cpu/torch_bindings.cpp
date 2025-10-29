@@ -27,6 +27,8 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
                const std::optional<torch::Tensor>& bias, int64_t handler);
 
+bool is_onednn_acl_supported();
+
 void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& kv_cache, double scale,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
@@ -88,7 +90,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
       "    int blocksparse_head_sliding_step) -> ()");
+
   ops.impl("paged_attention_v1", torch::kCPU, &paged_attention_v1);
+
+  ops.def(
+      "dynamic_4bit_int_moe("
+      "Tensor x, Tensor topk_ids, Tensor topk_weights,"
+      "Tensor w13_packed, Tensor w2_packed, int H, int I, int I2,"
+      "int group_size, bool apply_router_weight_on_input, int activation_kind"
+      ") -> Tensor");
+
+  ops.impl("dynamic_4bit_int_moe", torch::kCPU, &dynamic_4bit_int_moe_cpu);
 
   // PagedAttention V2.
   ops.def(
@@ -170,6 +182,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
       "int handler) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
+
+  // Check if oneDNN was built with ACL backend
+  ops.def("is_onednn_acl_supported() -> bool", &is_onednn_acl_supported);
 
   // Create oneDNN W8A8 handler
   ops.def(

@@ -6,22 +6,28 @@ import pytest
 import torch
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    apply_flashinfer_per_tensor_scale_fp8, flashinfer_cutlass_moe_fp8,
-    register_moe_scaling_factors, rotate_flashinfer_fp8_moe_weights,
-    swap_w13_to_w31)
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    input_to_float8)
+    apply_flashinfer_per_tensor_scale_fp8,
+    flashinfer_cutlass_moe_fp8,
+    register_moe_scaling_factors,
+    rotate_flashinfer_fp8_moe_weights,
+    swap_w13_to_w31,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import input_to_float8
 from vllm.model_executor.models.llama4 import Llama4MoE
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
-if not has_flashinfer_cutlass_fused_moe(
-) or not current_platform.has_device_capability(100):
-    pytest.skip("Requires flashinfer_cutlass_fused_moe and nvfp4 support",
-                allow_module_level=True)
+if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
+    100
+):
+    pytest.skip(
+        "Requires flashinfer_cutlass_fused_moe and nvfp4 support",
+        allow_module_level=True,
+    )
 
 NUM_EXPERTS = [16]
 TOP_KS = [1]
@@ -37,8 +43,7 @@ MNK_FACTORS = [
     (1, 4096, 5120),
 ]
 
-vllm_config = VllmConfig(parallel_config=ParallelConfig(
-    pipeline_parallel_size=1))
+vllm_config = VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
 vllm_config.scheduler_config.max_num_seqs = 128
 vllm_config.scheduler_config.max_model_len = 8192
 
@@ -72,18 +77,17 @@ class TestData:
     layer: torch.nn.Module
 
     @staticmethod
-    def make_moe_tensors_8bit(m: int, k: int, n: int, e: int,
-                              reorder: bool) -> "TestData":
-        hidden_states = torch.randn(
-            (m, k), device="cuda", dtype=torch.bfloat16) / 10
+    def make_moe_tensors_8bit(
+        m: int, k: int, n: int, e: int, reorder: bool
+    ) -> "TestData":
+        hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
         w13 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16)
         w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
 
         # Scale to fp8
         _, a1_scale = input_to_float8(hidden_states)
         a1_scale = 1.0 / a1_scale
-        a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(
-            dtype=torch.float32)
+        a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(dtype=torch.float32)
         w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
         w2_quantized, w2_weight_scale = quant_fp8_per_tensor_batches(w2)
 
@@ -100,8 +104,7 @@ class TestData:
         # flashinfer expects swapped rows for w13
         layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
         if reorder:
-            rotate_flashinfer_fp8_moe_weights(layer.w13_weight,
-                                              layer.w2_weight)
+            rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
         layer.custom_routing_function = Llama4MoE.custom_routing_function
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
@@ -136,14 +139,23 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
         td = TestData.make_moe_tensors_8bit(m, k, n, e, reorder=True)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=td.hidden_states,
             router_logits=score,
             use_grouped_topk=False,
             top_k=topk,
             renormalize=False,
             custom_routing_function=Llama4MoE.custom_routing_function,
-            scoring_func="softmax")
+            scoring_func="softmax",
+        )
+
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=td.w13_weight_scale,
+            w2_scale=td.w2_weight_scale,
+            a1_scale=td.a1_scale,
+            a2_scale=td.a2_scale,
+            per_act_token_quant=False,
+        )
 
         output = fused_experts(
             td.hidden_states,
@@ -153,15 +165,10 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             topk_ids=topk_ids,
             inplace=False,
             activation="silu",
-            use_fp8_w8a8=True,
-            per_channel_quant=False,
             global_num_experts=e,
             expert_map=None,
-            w1_scale=td.w13_weight_scale,
-            w2_scale=td.w2_weight_scale,
-            a1_scale=td.a1_scale,
-            a2_scale=td.a2_scale,
             apply_router_weight_on_input=True,
+            quant_config=quant_config,
         )
 
         flashinfer_output = apply_flashinfer_per_tensor_scale_fp8(
@@ -173,12 +180,10 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             top_k=topk,
             num_expert_group=None,
             topk_group=None,
-            apply_router_weight_on_input=True)
+            apply_router_weight_on_input=True,
+        )
 
-        torch.testing.assert_close(output,
-                                   flashinfer_output,
-                                   atol=5.5e-2,
-                                   rtol=1e-2)
+        torch.testing.assert_close(output, flashinfer_output, atol=5.5e-2, rtol=1e-2)
 
 
 @pytest.mark.skip(
@@ -201,14 +206,23 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         td = TestData.make_moe_tensors_8bit(m, k, n, e, reorder=False)
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=td.hidden_states,
             router_logits=score,
             use_grouped_topk=False,
             top_k=topk,
             renormalize=False,
             custom_routing_function=Llama4MoE.custom_routing_function,
-            scoring_func="softmax")
+            scoring_func="softmax",
+        )
+
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=td.w13_weight_scale,
+            w2_scale=td.w2_weight_scale,
+            a1_scale=td.a1_scale,
+            a2_scale=td.a2_scale,
+            per_act_token_quant=False,
+        )
 
         output = fused_experts(
             td.hidden_states,
@@ -218,15 +232,10 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             topk_ids=topk_ids,
             inplace=False,
             activation="silu",
-            use_fp8_w8a8=True,
-            per_channel_quant=False,
             global_num_experts=e,
             expert_map=None,
-            w1_scale=td.w13_weight_scale,
-            w2_scale=td.w2_weight_scale,
-            a1_scale=td.a1_scale,
-            a2_scale=td.a2_scale,
             apply_router_weight_on_input=True,
+            quant_config=quant_config,
         )
 
         td.layer.dp_size = 1
@@ -242,7 +251,6 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             apply_router_weight_on_input=True,
         )
 
-        torch.testing.assert_close(output,
-                                   flashinfer_cutlass_output,
-                                   atol=5.5e-2,
-                                   rtol=1e-2)
+        torch.testing.assert_close(
+            output, flashinfer_cutlass_output, atol=5.5e-2, rtol=1e-2
+        )

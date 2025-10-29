@@ -55,6 +55,107 @@ output_num_chunks  166.0    99.01   11.80    79.00    90.00    98.00   108.75   
 ----------------------------------------------------------------------------------------------------
 ```
 
+### JSON configuration file for synthetic conversations generation
+
+The input flag `--input-file` is used to determine the input conversations for the benchmark.<br/>
+When the input is a JSON file with the field `"filetype": "generate_conversations"` the tool will generate synthetic multi-turn (questions and answers) conversations.
+
+The file `generate_multi_turn.json` is an example file.
+
+The file must contain the sections `prompt_input` and `prompt_output`.
+
+The `prompt_input` section must contain `num_turns`, `prefix_num_tokens` and `num_tokens`:
+
+* `num_turns` - Number of total turns in the conversation (both user & assistant).<br/>
+The final value will always be rounded to an even number so each user turn has a reply.
+* `prefix_num_tokens` - Tokens added at the start of only the **first user turn** in a conversation (unique per conversation).
+* `num_tokens` - Total token length of each **user** message (one turn).
+
+The `prompt_output` section must contain `num_tokens`:
+
+* `num_tokens` - Total token length of each **assistant** message (one turn).
+
+### Random distributions for synthetic conversations generation
+
+When creating an input JSON file (such as `generate_multi_turn.json`),<br/>
+every numeric field (such as `num_turns` or `num_tokens`) requires a distribution.<br/>
+The distribution determines how to randomly sample values for the field.
+
+The available distributions are listed below.
+
+**Note:** The optional `max` field (for lognormal, zipf, and poisson) can be used to cap sampled values at an upper bound.</br>
+Can be used to make sure that the total number of tokens in every request does not exceed `--max-model-len`.
+
+#### constant
+
+```json
+{
+    "distribution": "constant",
+    "value": 500
+}
+```
+
+* `value` - the fixed integer value (always returns the same number).
+
+#### uniform
+
+```json
+{
+    "distribution": "uniform",
+    "min": 12,
+    "max": 18
+}
+```
+
+* `min` - minimum value (inclusive).
+* `max` - maximum value (inclusive), should be equal or larger than min.
+
+#### lognormal
+
+```json
+{
+    "distribution": "lognormal",
+    "average": 1000,
+    "max": 5000
+}
+```
+
+You can parameterize the lognormal distribution in one of two ways:
+
+Using the average and optional median ratio:
+
+* `average` - target average value of the distribution.
+* `median_ratio` - the ratio of the median to the average; controls the skewness. Must be in the range (0, 1).
+
+Using the parameters of the underlying normal distribution:
+
+* `mean` - mean of the underlying normal distribution.
+* `sigma` - standard deviation of the underlying normal distribution.
+
+#### zipf
+
+```json
+{
+    "distribution": "zipf",
+    "alpha": 1.2,
+    "max": 100
+}
+```
+
+* `alpha` - skew parameter (> 1). Larger values produce stronger skew toward smaller integers.
+
+#### poisson
+
+```json
+{
+    "distribution": "poisson",
+    "alpha": 10,
+    "max": 50
+}
+```
+
+* `alpha` - expected value (λ). Also the variance of the distribution.
+
 ## ShareGPT Conversations
 
 To run with the ShareGPT data, download the following ShareGPT dataset:

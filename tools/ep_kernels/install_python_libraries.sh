@@ -10,8 +10,12 @@ if [ ! -d "$WORKSPACE" ]; then
     mkdir -p $WORKSPACE
 fi
 
+# configurable pip command (default: pip3)
+PIP_CMD=${PIP_CMD:-pip3}
+CUDA_HOME=${CUDA_HOME:-/usr/local/cuda}
+
 # install dependencies if not installed
-pip3 install cmake torch ninja
+$PIP_CMD install cmake torch ninja
 
 # build nvshmem
 pushd $WORKSPACE
@@ -110,15 +114,13 @@ clone_repo() {
 pushd $WORKSPACE
 clone_repo "https://github.com/ppl-ai/pplx-kernels" "pplx-kernels" "setup.py" "c336faf"
 cd pplx-kernels
-# see https://github.com/pypa/pip/issues/9955#issuecomment-838065925
-# PIP_NO_BUILD_ISOLATION=0 disables build isolation
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+$PIP_CMD install --no-build-isolation -vvv -e .
 popd
 
 # build and install deepep, require pytorch installed
 pushd $WORKSPACE
-clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "e3908bf"
+clone_repo "https://github.com/deepseek-ai/DeepEP" "DeepEP" "setup.py" "73b6ea4"
 cd DeepEP
 export NVSHMEM_DIR=$WORKSPACE/nvshmem_install
-PIP_NO_BUILD_ISOLATION=0 pip install -vvv -e  .
+$PIP_CMD install --no-build-isolation -vvv -e .
 popd

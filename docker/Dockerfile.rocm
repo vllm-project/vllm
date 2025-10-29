@@ -12,7 +12,7 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
     apt-transport-https ca-certificates wget curl
-# Remove sccache    
+# Remove sccache
 RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 ARG COMMON_WORKDIR
@@ -29,7 +29,10 @@ ARG VLLM_BRANCH="main"
 ONBUILD RUN git clone ${VLLM_REPO} \
 	    && cd vllm \
 	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
-	    && git checkout FETCH_HEAD
+	    && git checkout FETCH_HEAD \
+        && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
+               git remote add upstream "https://github.com/vllm-project/vllm.git" \
+               && git fetch upstream ; fi
 FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 
 # -----------------------

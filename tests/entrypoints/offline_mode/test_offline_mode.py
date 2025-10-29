@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for HF_HUB_OFFLINE mode"""
+
 import dataclasses
 import importlib
 import sys
@@ -91,12 +92,11 @@ def test_offline_mode(monkeypatch: pytest.MonkeyPatch):
 
 
 def _re_import_modules():
-    hf_hub_module_names = [
-        k for k in sys.modules if k.startswith("huggingface_hub")
-    ]
+    hf_hub_module_names = [k for k in sys.modules if k.startswith("huggingface_hub")]
     transformers_module_names = [
-        k for k in sys.modules if k.startswith("transformers")
-        and not k.startswith("transformers_modules")
+        k
+        for k in sys.modules
+        if k.startswith("transformers") and not k.startswith("transformers_modules")
     ]
 
     reload_exception = None
