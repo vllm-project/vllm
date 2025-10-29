@@ -10,7 +10,7 @@ torchaudio==2.9.0
 # These must be updated alongside torch
 torchvision==0.24.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 # https://github.com/facebookresearch/xformers/releases/tag/v0.0.32.post1
-xformers==0.0.33+5d4b92a5.d20251026; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch >= 2.9
+# xformers==0.0.32.post1; platform_system == 'Linux' and platform_machine == 'x86_64'  # Requires PyTorch >= 2.8
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.4.1
 # Triton Kernels are needed for mxfp4 fused moe. (Should be updated alongside torch)
