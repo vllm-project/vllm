@@ -93,6 +93,11 @@ nvfp4_types = ["nvfp4"]
 fp8_types = [torch.float8_e4m3fn]
 fp8_bf16_types = [torch.float8_e4m3fn, torch.bfloat16]
 
+# Use filters for testing specific classes.
+# None allows all possible object types.
+PREPARE_FINALIZE_FILTER = ["DeepEPHybridPrepareAndFinalize"]
+EXPERTS_FILTER = ["TritonExperts", "DeepGemmExperts"]
+
 
 def register_prepare_and_finalize(
     kind,
@@ -103,11 +108,18 @@ def register_prepare_and_finalize(
     force_multigpu: bool = False,
     supports_apply_weight_on_input: bool = True,
 ):
+    global PREPARE_FINALIZE_FILTER
     global PREPARE_FINALIZE_INFO
     global MK_ALL_PREPARE_FINALIZE_TYPES
     global MK_MULTI_GPU_PREPARE_FINALIZE_TYPES
     global MK_SINGLE_GPU_PREPARE_FINALIZE_TYPES
     assert kind not in PREPARE_FINALIZE_INFO
+
+    if (
+        PREPARE_FINALIZE_FILTER is not None
+        and kind.__name__ not in PREPARE_FINALIZE_FILTER
+    ):
+        return
 
     PREPARE_FINALIZE_INFO[kind] = PrepareFinalizeInfo(
         activation_format,
@@ -133,9 +145,13 @@ def register_experts(
     needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
 ):
+    global EXPERTS_FILTER
     global EXPERT_INFO
     global MK_FUSED_EXPERT_TYPES
     assert kind not in EXPERT_INFO
+
+    if EXPERTS_FILTER is not None and kind.__name__ not in EXPERTS_FILTER:
+        return
 
     EXPERT_INFO[kind] = ExpertInfo(
         activation_format,
@@ -162,13 +178,13 @@ def expert_info(kind) -> ExpertInfo:
     return info
 
 
-# register_prepare_and_finalize(
-#     MoEPrepareAndFinalizeNoEP,
-#     standard_format,
-#     common_float_types,
-#     blocked_quantization_support=True,
-#     backend=None,
-# )
+register_prepare_and_finalize(
+    MoEPrepareAndFinalizeNoEP,
+    standard_format,
+    common_float_types,
+    blocked_quantization_support=True,
+    backend=None,
+)
 
 register_experts(
     BatchedTritonExperts,
@@ -199,8 +215,7 @@ register_experts(
     supports_expert_map=True,
 )
 
-# Disable on blackwell for now
-if False and has_deep_ep() and not current_platform.has_device_capability(100):
+if has_deep_ep():
     from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
         DeepEPHTPrepareAndFinalize,
     )
@@ -237,7 +252,7 @@ if has_hybrid_deep_ep():
         backend="deepep_hybrid",
     )
 
-if False and has_pplx():
+if has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
     )
@@ -250,9 +265,7 @@ if False and has_pplx():
         backend="pplx",
     )
 
-if False and (
-    has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100)
-):
+if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
     )
@@ -280,8 +293,6 @@ if False and (
         # Note: this is a hack to get it to run for now
         supports_expert_map=True,
     )
-else:
-    FlashInferCutlassMoEPrepareAndFinalize = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -315,7 +326,7 @@ if has_deep_gemm() and is_deep_gemm_supported():
         needs_deep_gemm=True,
     )
 
-if False and cutlass_fp8_supported():
+if cutlass_fp8_supported():
     from vllm.model_executor.layers.fused_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
@@ -338,7 +349,7 @@ if False and cutlass_fp8_supported():
         supports_expert_map=False,
     )
 
-if False and cutlass_fp4_supported():
+if cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
 
     register_experts(
@@ -467,7 +478,7 @@ def make_fused_experts(
         experts = BatchedTritonExperts(**kwargs)
     elif fused_experts_type == DeepGemmExperts:
         print(f"Making DeepGemmExperts {quant_config} ...")
-        experts = DeepGemmExperts(quant_config)  # , skip_permute_unpermute=True)
+        experts = DeepGemmExperts(quant_config)
     elif fused_experts_type == TritonExperts:
         kwargs = quant_kwargs
         print(f"Making TritonExperts {kwargs} ...")
