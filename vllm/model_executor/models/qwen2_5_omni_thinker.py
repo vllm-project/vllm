@@ -637,18 +637,18 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         return mm_processed_data
 
-    def _validate_mm_placeholders(
-        self,
-        mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
-        mm_item_counts: Mapping[str, int],
-        use_audio_in_video: bool = False,
-    ) -> None:
-        if use_audio_in_video:
-            mm_item_counts = copy(mm_item_counts)
-            if "video" in mm_item_counts:
-                assert "audio" in mm_item_counts
-                mm_item_counts["audio"] -= mm_item_counts["video"]
-        super()._validate_mm_placeholders(mm_placeholders, mm_item_counts)
+    # def _validate_mm_placeholders(
+    #     self,
+    #     mm_placeholders: Mapping[str, list[PlaceholderFeaturesInfo]],
+    #     mm_item_counts: Mapping[str, int],
+    #     use_audio_in_video: bool = False,
+    # ) -> None:
+    #     if use_audio_in_video:
+    #         mm_item_counts = copy(mm_item_counts)
+    #         if "video" in mm_item_counts:
+    #             assert "audio" in mm_item_counts
+    #             mm_item_counts["audio"] -= mm_item_counts["video"]
+    #     super()._validate_mm_placeholders(mm_placeholders, mm_item_counts)
 
 
 class Qwen2_5OmniConditionalGenerationMixin:

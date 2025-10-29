@@ -118,6 +118,7 @@ def maybe_get_vit_flash_attn_backend(
             return _Backend.TORCH_SDPA, None
 
     elif current_platform.is_cuda():
+        return _Backend.TORCH_SDPA, None
         if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
             torch.get_default_dtype()
         ):

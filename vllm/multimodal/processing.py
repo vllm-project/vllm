@@ -1929,6 +1929,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         # Since it is inefficient to search for all possible tokenizations
         # of the search text in the prompt, we instead perform string-based
         # updates on the decoded token IDs, then encode them back.
+        print(f"=== {match_result=}")
         if not all(
             all(update_idx is not None for update_idx in update_idxs)
             for update_idxs in match_result.values()
