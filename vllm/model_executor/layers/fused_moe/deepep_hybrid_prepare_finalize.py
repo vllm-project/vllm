@@ -122,12 +122,12 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             print(msg)
 
     def pp(self, msg, t, force=False):
-        if force:
+        if False and force:  # noqa: SIM223
             print(
                 f"{msg}[{self.rank_expert_offset}] = "
                 f"{t.shape if t is not None else None}"
             )
-        elif False:
+        elif False or force:
             print(
                 f"{msg}[{self.rank_expert_offset}] = "
                 f"{t.shape if t is not None else None}\n{t}"
@@ -356,6 +356,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"fe_out={fused_expert_output.shape}"
         )
 
+        # self.pp("FUSED_EXPERT_OUTPUT", fused_expert_output, True)
+
         if not self.do_permute:
             combined_x, combined_probs = self.buffer.combine(
                 hidden=fused_expert_output,
@@ -376,14 +378,18 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"{combined_probs.shape if combined_probs is not None else None}"
         )
 
+        # self.pp("COMBINED_X", combined_x, True)
+        # self.pp("TOPK_IDS", topk_ids, True)
+        # self.pp("TOPK_WEIGHTS", topk_weights, True)
+
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
         self.p(f"REDUCDER = {weight_and_reduce_impl}")
 
         weight_and_reduce_impl.apply(
-            output=combined_x,
-            fused_expert_output=output,
+            output=output,
+            fused_expert_output=combined_x,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
