@@ -145,6 +145,7 @@ class Config:
         vllm_config.parallel_config.all2all_backend = backend
         if backend is not None:
             env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
+            vllm_config.parallel_config.all2all_backend = backend
 
         if self.fused_moe_chunk_size is not None:
             env_dict.update(
