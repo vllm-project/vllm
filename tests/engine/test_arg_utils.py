@@ -222,28 +222,69 @@ def test_media_io_kwargs_parser(arg, expected):
     assert args.media_io_kwargs == expected
 
 
+@pytest.mark.parametrize(
+    ("arg", "expected"),
+    [
+        ("-O0", "0"),
+        ("-O1", "1"),
+        ("-O2", "2"),
+        ("-O3", "3"),
+    ],
+)
+def test_optimization_level(arg, expected):
+    """
+    Test optimization levels (-O0, -O1, -O2, -O3) now map to optimization_level.
+    """
+
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([arg])
+    assert args.optimization_level == expected
+    assert args.compilation_config.mode is None
+
+
+@pytest.mark.parametrize(
+    ("arg1", "arg2", "expected"),
+    [
+        ("-O", "1", "1"),
+        ("-O", "2", "2"),
+        ("-O", "3", "3"),
+    ],
+)
+def test_optimization_level_space_separated(arg1, arg2, expected):
+    """
+    Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
+    optimization_level.
+    """
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([arg1, arg2])
+    assert args.optimization_level == expected
+    assert args.compilation_config.mode is None
+
+
+@pytest.mark.parametrize(
+    ("arg", "expected"),
+    [
+        ("-O.mode=0", 0),
+        ("-O.mode=1", 1),
+        ("-O.mode=2", 2),
+        ("-O.mode=3", 3),
+    ],
+)
+def test_mode_parser(arg, expected):
+    """
+    Test compilation config modes (-O.mode=int) map to compilation_config.
+    """
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args([arg])
+    assert args.compilation_config.mode == expected
+
+
 def test_compilation_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
 
     # default value
     args = parser.parse_args([])
     assert args.compilation_config == CompilationConfig()
-
-    # set to O3
-    args = parser.parse_args(["-O0"])
-    assert args.compilation_config.mode == 0
-
-    # set to O 3 (space)
-    args = parser.parse_args(["-O", "1"])
-    assert args.compilation_config.mode == 1
-
-    # set to O 3 (equals)
-    args = parser.parse_args(["-O=2"])
-    assert args.compilation_config.mode == 2
-
-    # set to O.mode 3
-    args = parser.parse_args(["-O.mode", "3"])
-    assert args.compilation_config.mode == 3
 
     # set to string form of a dict
     args = parser.parse_args(
