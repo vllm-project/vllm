@@ -1228,7 +1228,7 @@ async def get_fault_info(
     raw_request: Request,
 ):
     client = engine_client(raw_request)
-    engine_exception_dict = client.exception_reporter()
+    engine_exception_dict = await client.exception_reporter()
     return JSONResponse(content=engine_exception_dict)
 
 

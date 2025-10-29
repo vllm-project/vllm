@@ -61,19 +61,20 @@ if TYPE_CHECKING:
 
 class WorkerGuard:
     def __init__(self, vllm_config: VllmConfig):
-        zmq_ctx = zmq.Context()
+        self.zmq_ctx = zmq.Context()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tp_group().rank_in_group
         self.pp_rank = get_pp_group().rank_in_group
         identity = f"{self.tp_rank}_{self.pp_rank}".encode()
         worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
-            ctx=zmq_ctx,
+            ctx=self.zmq_ctx,
             path=worker_cmd_addr,
             socket_type=zmq.DEALER,
             bind=False,
             identity=identity,
         )
+        self.worker_guard_dead = False
         Thread(target=self.run, daemon=True, name="WorkerGuardCmdReceiver").start()
 
     def _recv_cmd(self) -> tuple[bool, None | str]:
@@ -115,6 +116,9 @@ class WorkerGuard:
         while True:
             # Use blocking receive - will wait until a message arrives
             has_msg, cmd_str = self._recv_cmd()
+            if self.worker_guard_dead:
+                logger.info("worker guard dead, exiting")
+                break
             if has_msg:
                 assert cmd_str is not None
                 method, method_params = deserialize_method_call(cmd_str)
@@ -149,6 +153,11 @@ class WorkerGuard:
 
     def pause(self):
         pass
+
+    def shutdown(self):
+        self.worker_guard_dead = True
+        self.cmd_socket.close()
+        self.zmq_ctx.term()
 
 
 class Worker(WorkerBase):
@@ -869,6 +878,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+        if self.worker_guard is not None:
+            self.worker_guard.shutdown()
 
 
 def init_worker_distributed_environment(

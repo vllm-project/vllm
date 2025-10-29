@@ -1271,8 +1271,8 @@ class FaultHandler:
         )
 
         if instruction == "retry" and execute_result:
-            for engine_id in self.engine_status_dict:
-                self.engine_status_dict[int(engine_id)] = "Healthy"
+            for engine_id, _ in self.engine_status_dict.items():
+                self.engine_status_dict[engine_id] = "Healthy"
         return execute_result
 
     async def send_fault_tolerance_instruction(
