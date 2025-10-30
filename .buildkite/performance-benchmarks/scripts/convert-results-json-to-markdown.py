@@ -392,7 +392,7 @@ if __name__ == "__main__":
     json_file = "benchmark_results.json"
     with open(results_folder / md_file, "w") as f:
         results = read_markdown(
-            "../.buildkite/nightly-benchmarks/"
+            "../.buildkite/performance-benchmarks/"
             + "performance-benchmarks-descriptions.md"
         )
         results = results.format(

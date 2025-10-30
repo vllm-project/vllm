@@ -2,40 +2,23 @@
 
 ## Introduction
 
-This directory contains two sets of benchmark for vllm.
-
-- Performance benchmark: benchmark vllm's performance under various workload, for **developers** to gain clarity on whether their PR improves/degrades vllm's performance
-- Nightly benchmark: compare vllm's performance against alternatives (tgi, trt-llm and lmdeploy), for **the public** to know when to choose vllm.
-
-See [vLLM performance dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm) for the latest performance benchmark results and [vLLM GitHub README](https://github.com/vllm-project/vllm/blob/main/README.md) for latest nightly benchmark results.
+This directory contains a benchmarking suite for **developers** to run locally and gain clarity on whether their PR improves/degrades vllm's performance.
+vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](https://perf.vllm.ai/), hosted under PyTorch CI HUD.
 
 ## Performance benchmark quick overview
 
-**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100 (the support for FP8 benchmark on H100 is coming!) and Intel® Xeon® Processors, with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on B200, A100, H100 and Intel® Xeon® Processors, with different models.
 
 **Benchmarking Duration**: about 1hr.
 
 **For benchmarking developers**: please try your best to constraint the duration of benchmarking to about 1 hr so that it won't take forever to run.
 
-## Nightly benchmark quick overview
-
-**Benchmarking Coverage**: Fix-qps serving on A100 (the support for FP8 benchmark on H100 is coming!) on Llama-3 8B, 70B and Mixtral 8x7B.
-
-**Benchmarking engines**: vllm, TGI, trt-llm and lmdeploy.
-
-**Benchmarking Duration**: about 3.5hrs.
-
 ## Trigger the benchmark
 
-Performance benchmark will be triggered when:
-
-- A PR being merged into vllm.
-- Every commit for those PRs with `perf-benchmarks` label AND `ready` label.
-
-Manually Trigger the benchmark
+The benchmark needs to be triggered manually:
 
 ```bash
-bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 Runtime environment variables:
@@ -46,10 +29,6 @@ Runtime environment variables:
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
 - `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
-
-Nightly benchmark will be triggered when:
-
-- Every commit for those PRs with `perf-benchmarks` label and `nightly-benchmarks` label.
 
 ## Performance benchmark details
 
@@ -152,26 +131,3 @@ Here is an example using the script to compare result_a and result_b with Model,
 A comparison diagram will be generated below the table.
 Here is an example to compare between 96c/results_gnr_96c_091_tp2pp3 and 128c/results_gnr_128c_091_tp2pp3
 <img width="1886" height="828" alt="image" src="https://github.com/user-attachments/assets/c02a43ef-25d0-4fd6-90e5-2169a28682dd" />
-
-## Nightly test details
-
-See [nightly-descriptions.md](nightly-descriptions.md) for the detailed description on test workload, models and docker containers of benchmarking other llm engines.
-
-### Workflow
-
-- The [nightly-pipeline.yaml](nightly-pipeline.yaml) specifies the docker containers for different LLM serving engines.
-- Inside each container, we run [scripts/run-nightly-benchmarks.sh](scripts/run-nightly-benchmarks.sh), which will probe the serving engine of the current container.
-- The `scripts/run-nightly-benchmarks.sh` will parse the workload described in [nightly-tests.json](tests/nightly-tests.json) and launch the right benchmark for the specified serving engine via `scripts/launch-server.sh`.
-- At last, we run [scripts/summary-nightly-results.py](scripts/summary-nightly-results.py) to collect and plot the final benchmarking results, and update the results to buildkite.
-
-### Nightly tests
-
-In [nightly-tests.json](tests/nightly-tests.json), we include the command line arguments for benchmarking commands, together with the benchmarking test cases. The format is highly similar to performance benchmark.
-
-### Docker containers
-
-The docker containers for benchmarking are specified in `nightly-pipeline.yaml`.
-
-WARNING: the docker versions are HARD-CODED and SHOULD BE ALIGNED WITH `nightly-descriptions.md`. The docker versions need to be hard-coded as there are several version-specific bug fixes inside `scripts/run-nightly-benchmarks.sh` and `scripts/launch-server.sh`.
-
-WARNING: populating `trt-llm` to latest version is not easy, as it requires updating several protobuf files in [tensorrt-demo](https://github.com/neuralmagic/tensorrt-demo.git).

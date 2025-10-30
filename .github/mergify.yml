@@ -108,7 +108,7 @@ pull_request_rules:
       - files~=^benchmarks/
       - files~=^vllm/benchmarks/
       - files~=^tests/benchmarks/
-      - files~=^\.buildkite/nightly-benchmarks/
+      - files~=^\.buildkite/performance-benchmarks/
   actions:
     label:
       add:
