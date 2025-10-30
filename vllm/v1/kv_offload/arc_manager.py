@@ -94,7 +94,11 @@ class ARCOffloadingManager(OffloadingManager):
         for block_hash in reversed(list(block_hashes)):
             if block_hash in self.t1:
                 block = self.t1.pop(block_hash)
-                self.t2[block_hash] = block
+                if not block.is_ready:
+                    # block was just prepared to be stored, not really touched twice
+                    self.t1.move_to_end(block_hash)
+                else:
+                    self.t2[block_hash] = block
 
             elif block_hash in self.t2:
                 self.t2.move_to_end(block_hash)
