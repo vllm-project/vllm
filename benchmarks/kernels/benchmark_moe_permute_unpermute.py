@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
 )
 from vllm.model_executor.layers.fused_moe.utils import _fp8_quantize
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 FP8_DTYPE = current_platform.fp8_dtype()
 

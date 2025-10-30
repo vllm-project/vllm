@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import get_dp_group, is_global_first_rank
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (
@@ -132,12 +132,12 @@ def _synchronize_dp_ranks(
     should_ubatch = _post_process_ubatch(tensor)
 
     if should_ubatch and not should_dp_pad:
-        if is_global_first_rank():
-            logger.debug(
-                "Microbatching has been triggered and requires DP padding. "
-                "Enabling DP padding even though it has been explicitly "
-                "disabled."
-            )
+        logger.debug_once(
+            "Microbatching has been triggered and requires DP padding. "
+            "Enabling DP padding even though it has been explicitly "
+            "disabled.",
+            scope="global",
+        )
         should_dp_pad = True
 
     # Pad all DP ranks up to the maximum token count across ranks if

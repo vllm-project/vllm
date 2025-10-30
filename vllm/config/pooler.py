@@ -66,15 +66,15 @@ class PoolerConfig:
     """
     step_tag_id: int | None = None
     """
-    If set, only the score corresponding to the ``step_tag_id`` in the
+    If set, only the score corresponding to the `step_tag_id` in the
     generated sentence should be returned. Otherwise, the scores for all tokens
     are returned.
     """
     returned_token_ids: list[int] | None = None
     """
     A list of indices for the vocabulary dimensions to be extracted,
-    such as the token IDs of ``good_token`` and ``bad_token`` in the
-    ``math-shepherd-mistral-7b-prm`` model.
+    such as the token IDs of `good_token` and `bad_token` in the
+    `math-shepherd-mistral-7b-prm` model.
     """
 
     def compute_hash(self) -> str:

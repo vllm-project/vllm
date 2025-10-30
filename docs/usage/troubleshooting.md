@@ -38,7 +38,7 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export VLLM_LOG_STATS_INTERVAL=1.` to get log statistics more frequently for tracking running queue, waiting queue and cache hit states.
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
-- `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. Do not use this flag unless absolutely needed for debugging, it will cause significant delays in startup time.
+- `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
 
 ## Breakpoints
 
@@ -79,8 +79,6 @@ You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` 
 
 If vLLM crashes and the error trace captures it somewhere around `self.graph.replay()` in `vllm/worker/model_runner.py`, it is a CUDA error inside CUDAGraph.
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the [LLM][vllm.LLM] class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
-
-[](){ #troubleshooting-incorrect-hardware-driver }
 
 ## Incorrect hardware/driver
 
@@ -177,8 +175,6 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
     - In the second node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py`.
 
     Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
-
-[](){ #troubleshooting-python-multiprocessing }
 
 ## Python multiprocessing
 

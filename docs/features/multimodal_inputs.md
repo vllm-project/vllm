@@ -1,6 +1,6 @@
 # Multimodal Inputs
 
-This page teaches you how to pass multi-modal inputs to [multi-modal models][supported-mm-models] in vLLM.
+This page teaches you how to pass multi-modal inputs to [multi-modal models](../models/supported_models.md#list-of-multimodal-language-models) in vLLM.
 
 !!! note
     We are actively iterating on multi-modal support. See [this RFC](https://github.com/vllm-project/vllm/issues/4194) for upcoming changes,
@@ -359,13 +359,19 @@ Full example: [examples/offline_inference/audio_language.py](../../examples/offl
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
 pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
 
+You must enable this feature via `enable_mm_embeds=True`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
+
 ??? code
 
     ```python
     from vllm import LLM
 
     # Inference with image embeddings as input
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf", enable_mm_embeds=True)
 
     # Refer to the HuggingFace repo for the correct format to use
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
@@ -397,7 +403,11 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     image_embeds = torch.load(...)
 
     # Qwen2-VL
-    llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
+    llm = LLM(
+        "Qwen/Qwen2-VL-2B-Instruct",
+        limit_mm_per_prompt={"image": 4},
+        enable_mm_embeds=True,
+    )
     mm_data = {
         "image": {
             "image_embeds": image_embeds,
@@ -407,7 +417,12 @@ For Qwen2-VL and MiniCPM-V, we accept additional parameters alongside the embedd
     }
 
     # MiniCPM-V
-    llm = LLM("openbmb/MiniCPM-V-2_6", trust_remote_code=True, limit_mm_per_prompt={"image": 4})
+    llm = LLM(
+        "openbmb/MiniCPM-V-2_6",
+        trust_remote_code=True,
+        limit_mm_per_prompt={"image": 4},
+        enable_mm_embeds=True,
+    )
     mm_data = {
         "image": {
             "image_embeds": image_embeds,
@@ -732,7 +747,13 @@ Full example: [examples/online_serving/openai_chat_completion_client_for_multimo
 ### Embedding Inputs
 
 To input pre-computed embeddings belonging to a data type (i.e. image, video, or audio) directly to the language model,
-pass a tensor of shape to the corresponding field of the multi-modal dictionary.
+pass a tensor of shape `(num_items, feature_size, hidden_size of LM)` to the corresponding field of the multi-modal dictionary.
+
+You must enable this feature via the `--enable-mm-embeds` flag in `vllm serve`.
+
+!!! warning
+    The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!
 
 #### Image Embedding Inputs
 

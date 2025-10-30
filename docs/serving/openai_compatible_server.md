@@ -44,36 +44,34 @@ To call the server, in your preferred text editor, create a script that uses an 
 
 We currently support the following OpenAI APIs:
 
-- [Completions API][completions-api] (`/v1/completions`)
+- [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
-- [Chat Completions API][chat-api] (`/v1/chat/completions`)
-    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template][chat-template].
+- [Chat Completions API](#chat-api) (`/v1/chat/completions`)
+    - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
     - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
-- [Embeddings API][embeddings-api] (`/v1/embeddings`)
+- [Embeddings API](#embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models.md).
-- [Transcriptions API][transcriptions-api] (`/v1/audio/transcriptions`)
+- [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
-- [Translation API][translations-api] (`/v1/audio/translations`)
+- [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 
 In addition, we have the following custom APIs:
 
-- [Tokenizer API][tokenizer-api] (`/tokenize`, `/detokenize`)
+- [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
-- [Pooling API][pooling-api] (`/pooling`)
+- [Pooling API](#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models.md).
-- [Classification API][classification-api] (`/classify`)
+- [Classification API](#classification-api) (`/classify`)
     - Only applicable to [classification models](../models/pooling_models.md).
-- [Score API][score-api] (`/score`)
+- [Score API](#score-api) (`/score`)
     - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
-- [Re-rank API][rerank-api] (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+- [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
     - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
     - Only applicable to [cross-encoder models](../models/pooling_models.md).
-
-[](){ #chat-template }
 
 ## Chat Template
 
@@ -174,8 +172,6 @@ with `--enable-request-id-headers`.
 
 ## API Reference
 
-[](){ #completions-api }
-
 ### Completions API
 
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
@@ -185,7 +181,7 @@ Code example: [examples/online_serving/openai_completion_client.py](../../exampl
 
 #### Extra parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ??? code
 
@@ -200,8 +196,6 @@ The following extra parameters are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
     ```
-
-[](){ #chat-api }
 
 ### Chat API
 
@@ -218,7 +212,7 @@ Code example: [examples/online_serving/openai_chat_completion_client.py](../../e
 
 #### Extra parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ??? code
 
@@ -234,8 +228,6 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
     ```
 
-[](){ #embeddings-api }
-
 ### Embeddings API
 
 Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
@@ -243,7 +235,7 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
 
 Code example: [examples/online_serving/pooling/openai_embedding_client.py](../../examples/online_serving/pooling/openai_embedding_client.py)
 
-If the model has a [chat template][chat-template], you can replace `inputs` with a list of `messages` (same schema as [Chat API][chat-api])
+If the model has a [chat template](../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
 which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
 
 ??? code
@@ -369,8 +361,6 @@ For chat-like input (i.e. if `messages` is passed), these extra parameters are s
     --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
     ```
 
-[](){ #transcriptions-api }
-
 ### Transcriptions API
 
 Our Transcriptions API is compatible with [OpenAI's Transcriptions API](https://platform.openai.com/docs/api-reference/audio/createTranscription);
@@ -468,7 +458,7 @@ For `verbose_json` response format:
 
 #### Extra Parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ??? code
 
@@ -484,8 +474,6 @@ The following extra parameters are supported:
     --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
     ```
 
-[](){ #translations-api }
-
 ### Translations API
 
 Our Translation API is compatible with [OpenAI's Translations API](https://platform.openai.com/docs/api-reference/audio/createTranslation);
@@ -500,7 +488,7 @@ Code example: [examples/online_serving/openai_translation_client.py](../../examp
 
 #### Extra Parameters
 
-The following [sampling parameters][sampling-params] are supported.
+The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
@@ -512,8 +500,6 @@ The following extra parameters are supported:
 --8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
 ```
 
-[](){ #tokenizer-api }
-
 ### Tokenizer API
 
 Our Tokenizer API is a simple wrapper over [HuggingFace-style tokenizers](https://huggingface.co/docs/transformers/en/main_classes/tokenizer).
@@ -522,17 +508,13 @@ It consists of two endpoints:
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
-[](){ #pooling-api }
-
 ### Pooling API
 
 Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models.md) and returns the corresponding hidden states.
 
-The input format is the same as [Embeddings API][embeddings-api], but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
 
 Code example: [examples/online_serving/pooling/openai_pooling_client.py](../../examples/online_serving/pooling/openai_pooling_client.py)
-
-[](){ #classification-api }
 
 ### Classification API
 
@@ -648,8 +630,6 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
 ```
-
-[](){ #score-api }
 
 ### Score API
 
@@ -855,8 +835,6 @@ The following extra parameters are supported:
 ```python
 --8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
 ```
-
-[](){ #rerank-api }
 
 ### Re-rank API
 

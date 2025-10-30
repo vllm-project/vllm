@@ -25,7 +25,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import HasInnerState, IsAttentionFree
+from vllm.model_executor.models.interfaces import (
+    HasInnerState,
+    IsAttentionFree,
+    SupportsMambaPrefixCaching,
+)
 from vllm.sequence import IntermediateTensors
 
 from .utils import (
@@ -189,7 +193,9 @@ class Mamba2Model(nn.Module):
         return loaded_params
 
 
-class Mamba2ForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
+class Mamba2ForCausalLM(
+    nn.Module, HasInnerState, IsAttentionFree, SupportsMambaPrefixCaching
+):
     @classmethod
     def get_mamba_state_dtype_from_config(
         cls,

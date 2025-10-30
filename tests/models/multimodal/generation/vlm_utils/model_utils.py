@@ -25,7 +25,7 @@ from transformers import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.logprobs import SampleLogprobs
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
