@@ -253,7 +253,8 @@ def wait_for_completion_or_failure(
 
         actor_run_refs = []
         if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
+            for proc_handle in engine_manager.proc_handles:
+                proc = proc_handle.proc
                 sentinel_to_proc[proc.sentinel] = proc
         elif isinstance(engine_manager, CoreEngineActorManager):
             actor_run_refs = engine_manager.get_run_refs()

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import gc
 import os
 import queue
@@ -31,7 +32,7 @@ from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import make_zmq_socket
-from vllm.utils.system_utils import decorate_logs, set_process_title
+from vllm.utils.system_utils import DeathMonitor, decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     generate_scheduler_kv_cache_config,
@@ -735,6 +736,28 @@ class EngineCoreProc(EngineCore):
     @staticmethod
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
+
+        # Pop the death_pipe from kwargs
+        death_pipe = kwargs.pop("death_pipe", None)
+
+        # Start death monitoring thread if death_pipe is provided
+        death_monitor: DeathMonitor | None = None
+        if death_pipe is not None:
+            logger.debug("Starting parent death monitor thread.")
+            try:
+                death_monitor = DeathMonitor(death_pipe, "EngineCoreDeathMonitor")
+                death_monitor.start()
+            except Exception as e:
+                logger.exception("Failed to start DeathMonitor: %s", e)
+                # Close pipe if monitor failed to start
+                with contextlib.suppress(OSError):
+                    death_pipe.close()
+                death_pipe = None
+        else:
+            logger.warning(
+                "No death_pipe provided to EngineCoreProc. "
+                "Parent death may not be detected."
+            )
 
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker

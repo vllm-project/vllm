@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
+from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING
 from unittest.mock import patch
@@ -78,6 +79,17 @@ class EngineHandshakeMetadata:
     parallel_config_hash: str | None = None
 
 
+@dataclass
+class CoreEngineProcHandle:
+    """Handle to hold process and related resources."""
+
+    proc: BaseProcess
+    engine_index: int
+    # Keep the death_writer open in parent - when parent exits,
+    # death_reader in child will get EOFError
+    death_writer: Connection | None = None
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -109,41 +121,91 @@ class CoreEngineProcManager:
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
-        self.processes: list[BaseProcess] = []
+        self.proc_handles: list[CoreEngineProcHandle] = []
         local_dp_ranks = []
+        readers_to_close = {}
         for index in range(local_engine_count):
             local_index = local_start_index + index
             global_index = start_index + index
 
+            # Create death pipe to detect parent process exit
+            death_reader: Connection | None
+            death_writer: Connection | None
+            try:
+                death_reader, death_writer = context.Pipe(duplex=False)
+            except OSError:
+                death_reader, death_writer = None, None
+                logger.exception(
+                    "Failed to create death pipe for EngineCore %d.",
+                    global_index,
+                )
+
+            process_kwargs = common_kwargs | {
+                "dp_rank": global_index,
+                "local_dp_rank": local_index,
+                "death_pipe": death_reader,
+            }
+
+            proc = context.Process(
+                target=target_fn,
+                name=f"EngineCore_DP{global_index}",
+                kwargs=process_kwargs,
+            )
+
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
-            self.processes.append(
-                context.Process(
-                    target=target_fn,
-                    name=f"EngineCore_DP{global_index}",
-                    kwargs=common_kwargs
-                    | {
-                        "dp_rank": global_index,
-                        "local_dp_rank": local_index,
-                    },
+            self.proc_handles.append(
+                CoreEngineProcHandle(
+                    proc=proc,
+                    engine_index=global_index,
+                    death_writer=death_writer,
                 )
             )
 
-        self._finalizer = weakref.finalize(self, shutdown, self.processes)
+            if death_reader:
+                readers_to_close[proc] = death_reader
+
+        self._finalizer = weakref.finalize(
+            self,
+            self._shutdown_internal,
+            [h.proc for h in self.proc_handles],
+            [h.death_writer for h in self.proc_handles],
+        )
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+            for proc_handle, local_dp_rank in zip(self.proc_handles, local_dp_ranks):
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
                     if (data_parallel)
                     else contextlib.nullcontext()
                 ):
-                    proc.start()
+                    proc_handle.proc.start()
+
+                    # Close the reader associated with this process in the parent
+                    reader_to_close = readers_to_close.get(proc_handle.proc)
+                    if reader_to_close:
+                        with contextlib.suppress(OSError):
+                            reader_to_close.close()
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
+                # Ensure remaining readers are closed on failure
+                for reader in readers_to_close.values():
+                    with contextlib.suppress(OSError):
+                        reader.close()
                 self.close()
+
+    @staticmethod
+    def _shutdown_internal(procs: list[BaseProcess], writers: list[Connection | None]):
+        """Internal shutdown helper called by weakref.finalize."""
+        logger.debug("CoreEngineProcManager finalizer called.")
+        # Close death_writers first to signal workers to exit
+        for writer in writers:
+            if writer is not None:
+                with contextlib.suppress(OSError):  # Pipe might already be broken
+                    writer.close()
+        shutdown(procs)
 
     def close(self):
         """Shutdown all procs."""
@@ -151,17 +213,17 @@ class CoreEngineProcManager:
 
     def join_first(self):
         """Wait for any process to exit."""
-        connection.wait(proc.sentinel for proc in self.processes)
+        connection.wait(proc_handle.proc.sentinel for proc_handle in self.proc_handles)
 
     def sentinels(self) -> list:
-        return [proc.sentinel for proc in self.processes]
+        return [proc_handle.proc.sentinel for proc_handle in self.proc_handles]
 
     def finished_procs(self) -> dict[str, int]:
         """Returns dict of proc name -> exit code for any finished procs."""
         return {
-            proc.name: proc.exitcode
-            for proc in self.processes
-            if proc.exitcode is not None
+            proc_handle.proc.name: proc_handle.proc.exitcode
+            for proc_handle in self.proc_handles
+            if proc_handle.proc.exitcode is not None
         }
 
 
