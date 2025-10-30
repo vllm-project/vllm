@@ -45,7 +45,6 @@ from transformers.models.qwen2_vl.video_processing_qwen2_vl import Qwen2VLVideoP
 
 from vllm.attention.backends.registry import _MHA_Backend
 from vllm.attention.layer import (
-    check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
 )
 from vllm.config import VllmConfig
@@ -376,12 +375,9 @@ class Qwen2VisionAttention(nn.Module):
             )
         )
 
-        if self.attn_backend not in {
-            _MHA_Backend.FLASH_ATTN,
-            _MHA_Backend.TORCH_SDPA,
-            _MHA_Backend.XFORMERS,
-            _MHA_Backend.ROCM_AITER_FA,
-        }:
+        from vllm.platforms import current_platform
+
+        if self.attn_backend not in current_platform.get_supported_vit_attn_backends():
             raise RuntimeError(
                 f"Qwen2-VL does not support {self.attn_backend} backend now."
             )
@@ -738,11 +734,6 @@ class Qwen2VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if (
-            self.attn_backend != _MHA_Backend.FLASH_ATTN
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            self.attn_backend = _MHA_Backend.FLASH_ATTN
 
     @property
     def dtype(self) -> torch.dtype:
