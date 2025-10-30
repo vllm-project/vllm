@@ -84,7 +84,9 @@ class VllmConfig:
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
-    observability_config: ObservabilityConfig | None = None
+    observability_config: ObservabilityConfig = Field(
+        default_factory=ObservabilityConfig
+    )
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
@@ -170,10 +172,7 @@ class VllmConfig:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.observability_config:
-            vllm_factors.append(self.observability_config.compute_hash())
-        else:
-            vllm_factors.append("None")
+        vllm_factors.append(self.observability_config.compute_hash())
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
