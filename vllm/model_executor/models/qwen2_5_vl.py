@@ -368,11 +368,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             _MHA_Backend.ROCM_AITER_FA,
         }
 
-        print(f"attn_backend: {self.attn_backend}")
-        print(f"use_upstream_fa: {self.use_upstream_fa}")
-        print(f"is_flash_attn_backend: {self.is_flash_attn_backend}")
-        print(f"flash_attn_varlen_func: {self.flash_attn_varlen_func}")
-
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
         seq_len, bs, _ = qkv.shape
