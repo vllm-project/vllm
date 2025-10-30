@@ -34,6 +34,7 @@ def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
     # with the necessary kernels is released.
     tile_tokens_dim = 8
 
+    # A factor considering tokens are not perfectly balanced among experts.
     imbalance_factor = 1.3
     # Calculate the number of tokens per expert
     # assuming perfect distribution.
