@@ -319,7 +319,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
             k = causal_conv1d_fn(
                 k_proj_states,
                 k_conv_weights,
-                self.q_conv1d.bias,
+                self.k_conv1d.bias,
                 activation="silu",
                 conv_states=conv_state_k,
                 has_initial_state=has_initial_state,
@@ -330,7 +330,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
             v = causal_conv1d_fn(
                 v_proj_states,
                 v_conv_weights,
-                self.q_conv1d.bias,
+                self.v_conv1d.bias,
                 activation="silu",
                 conv_states=conv_state_v,
                 has_initial_state=has_initial_state,
