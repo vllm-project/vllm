@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from itertools import accumulate
-from typing import Callable, Optional
 
 import torch
 from compressed_tensors.transform import (
@@ -16,7 +15,6 @@ from compressed_tensors.utils import is_match
 from vllm.model_executor.layers.linear import (
     WEIGHT_LOADER_V2_SUPPORTED,
     LinearMethodBase,
-    QKVCrossParallelLinear,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensorsScheme,
@@ -39,7 +37,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
     def from_schemes(
         cls,
         quant_method: LinearMethodBase,
-        quant_scheme: Optional[CompressedTensorsScheme],
+        quant_scheme: CompressedTensorsScheme | None,
         input_tfms: dict[int, TransformTuple],
         output_tfms: dict[int, TransformTuple],
     ) -> "CompressedTensorsLinearTransformMethod":
@@ -67,8 +65,8 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         self.input_tfms = input_tfms
         self.output_tfms = output_tfms
 
-        self.input_transform: Optional[HadamardTransform] = None
-        self.output_transform: Optional[HadamardTransform] = None
+        self.input_transform: HadamardTransform | None = None
+        self.output_transform: HadamardTransform | None = None
 
     def create_weights(
         self,
@@ -89,10 +87,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         # hack around this by getting weight loader v1 so ULM can load correctly
         quant_method_name = self.quant_method.__class__.__name__
         if quant_method_name not in WEIGHT_LOADER_V2_SUPPORTED:
-            if isinstance(layer, QKVCrossParallelLinear):
-                weight_loader_v1 = layer.weight_loader_v1
-            else:
-                weight_loader_v1 = layer.weight_loader
+            weight_loader_v1 = layer.weight_loader
             extra_weight_attrs["weight_loader"] = weight_loader_v1
 
         self.quant_method.create_weights(
@@ -155,7 +150,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.input_transform is not None:
             x = self.input_transform(x)
@@ -168,7 +163,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
         if self.output_transform is not None:
             for part_id, (start, length) in enumerate(self.partition_ranges):
                 x[:, start : start + length] = self.output_transform(
-                    x[:, start : start + length].contiguous(), part_id=part_id
+                    x[:, start : start + length].clone(), part_id=part_id
                 )
 
         return x
@@ -198,7 +193,7 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 def get_linear_transform_schemes(
     layer: torch.nn.Module,
     layer_name: str,
-    transform_config: Optional[TransformConfig],
+    transform_config: TransformConfig | None,
     packed_modules_mapping: dict[str, list[str]],
 ) -> tuple[
     dict[int, TransformTuple], dict[int, TransformTuple]
@@ -230,7 +225,7 @@ def get_linear_transform_schemes(
 
 
 def get_schemes_args(
-    transform_config: Optional[TransformConfig],
+    transform_config: TransformConfig | None,
 ) -> Generator[tuple[str, TransformScheme, TransformArgs]]:
     if transform_config is None:
         return

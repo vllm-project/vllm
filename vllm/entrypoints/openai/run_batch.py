@@ -4,17 +4,15 @@
 import asyncio
 import tempfile
 from argparse import Namespace
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from http import HTTPStatus
 from io import StringIO
-from typing import Callable, Optional
 
 import aiohttp
 import torch
 from prometheus_client import start_http_server
 from tqdm import tqdm
 
-from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
@@ -33,7 +31,9 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.reasoning import ReasoningParserManager
+from vllm.utils import random_uuid
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -106,6 +106,13 @@ def make_arg_parser(parser: FlexibleArgumentParser):
         default=False,
         help="If set to True, enable prompt_tokens_details in usage.",
     )
+    parser.add_argument(
+        "--enable-force-include-usage",
+        action="store_true",
+        default=False,
+        help="If set to True, include usage on every request "
+        "(even when stream_options is not specified)",
+    )
 
     return parser
 
@@ -125,7 +132,7 @@ _BAR_FORMAT = "{desc}: {percentage:3.0f}% Completed | {n_fmt}/{total_fmt} [{elap
 class BatchProgressTracker:
     def __init__(self):
         self._total = 0
-        self._pbar: Optional[tqdm] = None
+        self._pbar: tqdm | None = None
 
     def submitted(self):
         self._total += 1
@@ -326,9 +333,19 @@ async def run_request(
     return batch_output
 
 
+def validate_run_batch_args(args):
+    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    if (
+        reasoning_parser := args.structured_outputs_config.reasoning_parser
+    ) and reasoning_parser not in valid_reasoning_parses:
+        raise KeyError(
+            f"invalid reasoning parser: {reasoning_parser} "
+            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+        )
+
+
 async def run_batch(
     engine_client: EngineClient,
-    vllm_config: VllmConfig,
     args: Namespace,
 ) -> None:
     if args.served_model_name is not None:
@@ -345,36 +362,36 @@ async def run_batch(
         BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
-    model_config = vllm_config.model_config
-
+    model_config = engine_client.model_config
     supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported_tasks: %s", supported_tasks)
+    logger.info("Supported tasks: %s", supported_tasks)
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
-        model_config=model_config,
         base_model_paths=base_model_paths,
         lora_modules=None,
     )
+
     openai_serving_chat = (
         OpenAIServingChat(
             engine_client,
-            model_config,
             openai_serving_models,
             args.response_role,
             request_logger=request_logger,
             chat_template=None,
             chat_template_content_format="auto",
+            reasoning_parser=args.structured_outputs_config.reasoning_parser,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "generate" in supported_tasks
         else None
     )
+
     openai_serving_embedding = (
         OpenAIServingEmbedding(
             engine_client,
-            model_config,
             openai_serving_models,
             request_logger=request_logger,
             chat_template=None,
@@ -392,7 +409,6 @@ async def run_batch(
     openai_serving_scores = (
         ServingScores(
             engine_client,
-            model_config,
             openai_serving_models,
             request_logger=request_logger,
         )
@@ -504,14 +520,14 @@ async def main(args: Namespace):
     from vllm.entrypoints.openai.api_server import build_async_engine_client
     from vllm.usage.usage_lib import UsageContext
 
+    validate_run_batch_args(args)
+
     async with build_async_engine_client(
         args,
         usage_context=UsageContext.OPENAI_BATCH_RUNNER,
         disable_frontend_multiprocessing=False,
     ) as engine_client:
-        vllm_config = await engine_client.get_vllm_config()
-
-        await run_batch(engine_client, vllm_config, args)
+        await run_batch(engine_client, args)
 
 
 if __name__ == "__main__":

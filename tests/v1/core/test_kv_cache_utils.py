@@ -1,26 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import pytest
 import torch
 
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalKwargsItem,
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import GiB_bytes, sha256, sha256_cbor
+from vllm.utils.hashing import sha256, sha256_cbor
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
-    PrefixCachingMetrics,
     estimate_max_model_len,
     generate_block_hash_extra_keys,
     generate_scheduler_kv_cache_config,
@@ -31,6 +33,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     is_kv_cache_spec_uniform,
     make_block_hash_with_group_id,
+    tensor_data,
 )
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -42,7 +45,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import CachingMetrics, PrefixCacheStats
 from vllm.v1.request import Request
 
 pytestmark = pytest.mark.cpu_test
@@ -60,12 +63,13 @@ def _auto_init_hash_fn(request):
 
 def make_request(
     request_id: str,
-    prompt_token_ids: list[int],
+    prompt_token_ids: list[int] | None,
     block_size: int = 3,
     hash_fn: Callable = hash,
-    mm_positions: Optional[list[PlaceholderRange]] = None,
-    mm_hashes: Optional[list[str]] = None,
-    cache_salt: Optional[str] = None,
+    mm_positions: list[PlaceholderRange] | None = None,
+    mm_hashes: list[str] | None = None,
+    cache_salt: str | None = None,
+    prompt_embeds: torch.Tensor | None = None,
 ):
     mm_features = []
     if mm_positions is not None:
@@ -89,6 +93,7 @@ def make_request(
         lora_request=None,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
+        prompt_embeds=prompt_embeds,
     )
 
 
@@ -449,6 +454,70 @@ def test_generate_block_hash_extra_keys_cache_salt():
     assert next_mm_idx == 1
 
 
+def test_generate_block_hash_extra_keys_prompt_embeds():
+    prompt_embeds = torch.randn(10, 3)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds,
+    )
+
+    # Test with prompt embeds for the first block
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    expected_embeds = prompt_embeds[0:5]
+    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
+    assert extra_keys == (expected_bytes,)
+
+    # Test with prompt embeds for the second block
+    extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
+    expected_embeds = prompt_embeds[5:10]
+    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
+    assert extra_keys == (expected_bytes,)
+
+
+def test_generate_block_hash_extra_keys_different_prompt_embeds():
+    prompt_embeds1 = torch.randn(10, 3)
+    prompt_embeds2 = torch.randn(10, 3)
+    request1 = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds1,
+    )
+    request2 = make_request(
+        request_id="1",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds2,
+    )
+
+    extra_keys1, _ = generate_block_hash_extra_keys(request1, 0, 5, 0)
+    extra_keys2, _ = generate_block_hash_extra_keys(request2, 0, 5, 0)
+    assert extra_keys1 != extra_keys2
+
+
+def test_generate_block_hash_extra_keys_lora():
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=[_ for _ in range(6)],
+    )
+
+    request.lora_request = LoRARequest(
+        lora_name="test_lora_adapter", lora_int_id=1, lora_path="/path/to/lora"
+    )
+
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys == ("test_lora_adapter",)
+
+    request.lora_request = None
+    extra_keys, _ = generate_block_hash_extra_keys(request, 0, 3, 0)
+    assert extra_keys is None
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_hash_block_tokens(hash_fn):
     parent_block_hash = BlockHash(b"123")
@@ -536,7 +605,7 @@ def test_metrics():
     """
     Test the prefix caching metrics.
     """
-    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics = CachingMetrics(max_recent_requests=5)
     assert metrics.hit_rate == 0.0
 
     metrics.observe(_stats(1, 20, 9))
@@ -568,7 +637,7 @@ def test_metrics_empty_stats():
     """
     Test the prefix caching metrics with empty stats.
     """
-    metrics = PrefixCachingMetrics(max_recent_requests=5)
+    metrics = CachingMetrics(max_recent_requests=5)
     metrics.observe(_stats(0, 0, 0))
     metrics.observe(_stats(1, 20, 9))
     metrics.observe(_stats(0, 0, 0))
@@ -1537,3 +1606,88 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    expected_hash1 = hash_fn(
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(prompt_token_ids[:block_size]),
+            (block1_embeds_bytes,),
+        )
+    )
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    expected_hash2 = hash_fn(
+        (
+            block_hashes[0],
+            tuple(prompt_token_ids[block_size:num_tokens]),
+            (block2_embeds_bytes,),
+        )
+    )
+    assert block_hashes[1] == expected_hash2
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes]):
+    block_size = 3
+    num_tokens = 2 * block_size
+    prompt_token_ids = [_ for _ in range(num_tokens)]
+    hidden_size = 5
+    prompt_embeds = torch.randn((num_tokens, hidden_size))
+
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=prompt_token_ids,
+        block_size=block_size,
+        hash_fn=hash_fn,
+        mm_positions=[
+            PlaceholderRange(offset=0, length=3),
+            PlaceholderRange(offset=3, length=3),
+        ],
+        mm_hashes=["hash1", "hash2"],
+        prompt_embeds=prompt_embeds,
+    )
+
+    block_hashes = request.block_hashes
+    assert len(block_hashes) == 2
+
+    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    expected_hash1 = hash_fn(
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(prompt_token_ids[:block_size]),
+            ("hash1", block1_embeds_bytes),
+        )
+    )
+    assert block_hashes[0] == expected_hash1
+
+    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    expected_hash2 = hash_fn(
+        (
+            block_hashes[0],
+            tuple(prompt_token_ids[block_size:num_tokens]),
+            ("hash2", block2_embeds_bytes),
+        )
+    )
+    assert block_hashes[1] == expected_hash2

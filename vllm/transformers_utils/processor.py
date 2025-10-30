@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from transformers import (
     AutoFeatureExtractor,
@@ -16,7 +16,8 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.utils import get_allowed_kwarg_only_overrides
+from vllm.transformers_utils.utils import convert_model_repo_to_path
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -45,7 +46,7 @@ class HashableList(list):
         return hash(tuple(self))
 
 
-def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
+def _get_processor_factory_fn(processor_cls: type | tuple[type, ...]):
     if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
         return AutoProcessor.from_pretrained
     if hasattr(processor_cls, "from_pretrained"):
@@ -56,7 +57,7 @@ def _get_processor_factory_fn(processor_cls: Union[type, tuple[type, ...]]):
 
 def _merge_mm_kwargs(
     model_config: "ModelConfig",
-    processor_cls: Union[type, tuple[type, ...]],
+    processor_cls: type | tuple[type, ...],
     /,
     **kwargs,
 ):
@@ -86,16 +87,16 @@ def _merge_mm_kwargs(
 def get_processor(
     processor_name: str,
     *args: Any,
-    revision: Optional[str] = None,
+    revision: str | None = None,
     trust_remote_code: bool = False,
-    processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
-
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
             processor = AutoProcessor.from_pretrained(
                 processor_name,
@@ -146,7 +147,7 @@ cached_get_processor = lru_cache(get_processor)
 
 def cached_processor_from_config(
     model_config: "ModelConfig",
-    processor_cls: Union[type[_P], tuple[type[_P], ...]] = ProcessorMixin,
+    processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
     return cached_get_processor(
@@ -161,13 +162,14 @@ def cached_processor_from_config(
 def get_feature_extractor(
     processor_name: str,
     *args: Any,
-    revision: Optional[str] = None,
+    revision: str | None = None,
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
     """Load an audio feature extractor for the given model name
     via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         feature_extractor = AutoFeatureExtractor.from_pretrained(
             processor_name,
             *args,
@@ -211,12 +213,13 @@ def cached_feature_extractor_from_config(
 def get_image_processor(
     processor_name: str,
     *args: Any,
-    revision: Optional[str] = None,
+    revision: str | None = None,
     trust_remote_code: bool = False,
     **kwargs: Any,
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         processor = AutoImageProcessor.from_pretrained(
             processor_name,
             *args,
@@ -261,13 +264,14 @@ def cached_image_processor_from_config(
 def get_video_processor(
     processor_name: str,
     *args: Any,
-    revision: Optional[str] = None,
+    revision: str | None = None,
     trust_remote_code: bool = False,
-    processor_cls_overrides: Optional[type[_V]] = None,
+    processor_cls_overrides: type[_V] | None = None,
     **kwargs: Any,
 ):
     """Load a video processor for the given model name via HuggingFace."""
     try:
+        processor_name = convert_model_repo_to_path(processor_name)
         processor_cls = processor_cls_overrides or AutoVideoProcessor
         processor = processor_cls.from_pretrained(
             processor_name,
@@ -300,7 +304,7 @@ cached_get_video_processor = lru_cache(get_video_processor)
 
 def cached_video_processor_from_config(
     model_config: "ModelConfig",
-    processor_cls: Optional[type[_V]] = None,
+    processor_cls: type[_V] | None = None,
     **kwargs: Any,
 ):
     return cached_get_video_processor(

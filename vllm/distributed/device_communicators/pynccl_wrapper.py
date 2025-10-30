@@ -25,7 +25,7 @@
 import ctypes
 import platform
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch.distributed import ReduceOp
@@ -33,7 +33,7 @@ from torch.distributed import ReduceOp
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import find_nccl_library
+from vllm.utils.nccl import find_nccl_library
 
 logger = init_logger(__name__)
 
@@ -305,7 +305,7 @@ class NCCLLibrary:
     #  to the corresponding dictionary
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
-    def __init__(self, so_file: Optional[str] = None):
+    def __init__(self, so_file: str | None = None):
         so_file = so_file or find_nccl_library()
 
         try:

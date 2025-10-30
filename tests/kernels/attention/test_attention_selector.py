@@ -84,12 +84,12 @@ def test_env(
         m.setenv("VLLM_MLA_DISABLE", "1" if use_mla else "0")
 
         if device == "cpu":
-            with patch("vllm.attention.selector.current_platform", CpuPlatform()):
+            with patch("vllm.platforms.current_platform", CpuPlatform()):
                 backend = get_attn_backend(16, torch.float16, None, block_size)
             assert backend.get_name() == "TORCH_SDPA"
 
         elif device == "hip":
-            with patch("vllm.attention.selector.current_platform", RocmPlatform()):
+            with patch("vllm.platforms.current_platform", RocmPlatform()):
                 if use_mla:
                     # ROCm MLA backend logic:
                     # - TRITON_MLA: supported when block_size != 1
@@ -126,7 +126,7 @@ def test_env(
                     assert backend.get_name() == expected
 
         elif device == "cuda":
-            with patch("vllm.attention.selector.current_platform", CudaPlatform()):
+            with patch("vllm.platforms.current_platform", CudaPlatform()):
                 if use_mla:
                     # CUDA MLA backend logic:
                     # - CUTLASS_MLA: only supported with block_size == 128
@@ -214,12 +214,12 @@ def test_env(
 def test_fp32_fallback(device: str):
     """Test attention backend selection with fp32."""
     if device == "cpu":
-        with patch("vllm.attention.selector.current_platform", CpuPlatform()):
+        with patch("vllm.platforms.current_platform", CpuPlatform()):
             backend = get_attn_backend(16, torch.float32, None, 16)
         assert backend.get_name() == "TORCH_SDPA"
 
     elif device == "cuda":
-        with patch("vllm.attention.selector.current_platform", CudaPlatform()):
+        with patch("vllm.platforms.current_platform", CudaPlatform()):
             backend = get_attn_backend(16, torch.float32, None, 16)
         assert backend.get_name() == "FLEX_ATTENTION"
 
@@ -277,7 +277,7 @@ def test_invalid_env(monkeypatch: pytest.MonkeyPatch):
     """Test that invalid attention backend names raise ValueError."""
     with (
         monkeypatch.context() as m,
-        patch("vllm.attention.selector.current_platform", CudaPlatform()),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
     ):
         m.setenv(STR_BACKEND_ENV_VAR, STR_INVALID_VAL)
 

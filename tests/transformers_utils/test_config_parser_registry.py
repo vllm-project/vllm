@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from pathlib import Path
-from typing import Optional, Union
 
 import pytest
 from transformers import PretrainedConfig
@@ -15,10 +14,10 @@ from vllm.transformers_utils.config_parser_base import ConfigParserBase
 class CustomConfigParser(ConfigParserBase):
     def parse(
         self,
-        model: Union[str, Path],
+        model: str | Path,
         trust_remote_code: bool,
-        revision: Optional[str] = None,
-        code_revision: Optional[str] = None,
+        revision: str | None = None,
+        code_revision: str | None = None,
         **kwargs,
     ) -> tuple[dict, PretrainedConfig]:
         raise NotImplementedError
