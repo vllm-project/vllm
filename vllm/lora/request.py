@@ -5,6 +5,8 @@ import warnings
 
 import msgspec
 
+from vllm.validation.plugins import ModelType, ModelValidationPluginRegistry
+
 
 class LoRARequest(
     msgspec.Struct,
@@ -98,3 +100,9 @@ class LoRARequest(
         identified by their names across engines.
         """
         return hash(self.lora_name)
+
+    def validate(self) -> None:
+        """Validate the LoRA adapter given its path."""
+        ModelValidationPluginRegistry.validate_model(
+            ModelType.MODEL_TYPE_LORA, self.lora_path
+        )
