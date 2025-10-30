@@ -34,6 +34,7 @@ SpeculativeMethod = Literal[
     "ngram",
     "eagle",
     "eagle3",
+    "eagle_dynamic",
     "medusa",
     "mlp_speculator",
     "draft_model",
@@ -118,6 +119,11 @@ class SpeculativeConfig:
     prompt_lookup_min: int | None = Field(default=None, ge=1)
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
+
+    # Dynamic speculative decoding configuration
+    acceptance_rate_threshold: float = 0.3
+    """Target acceptance rate for dynamically adjusting the number of speculative
+    tokens (k). Used when the speculative decoding method is "eagle_dynamic"."""
 
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
@@ -323,7 +329,7 @@ class SpeculativeConfig:
                 )
 
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
@@ -365,7 +371,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3"):
+                if self.method in ("eagle", "eagle3", "eagle_dynamic"):
                     if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
                         raise ValueError(
                             "Chunked prefill and EAGLE are not compatible "
@@ -381,9 +387,10 @@ class SpeculativeConfig:
                     ):
                         pass
                     else:
+                        eagle_method = "eagle3" if self.method == "eagle3" else "eagle"
                         eagle_config = EAGLEConfig(
                             self.draft_model_config.hf_config,
-                            method=self.method,
+                            method=eagle_method,
                             model_type="eagle",
                         )
                         self.draft_model_config.hf_config = eagle_config
@@ -595,7 +602,7 @@ class SpeculativeConfig:
         return self.num_speculative_tokens
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp")
+        return self.method in ("eagle", "eagle3", "eagle_dynamic", "mtp")
 
     def __repr__(self) -> str:
         method = self.method
