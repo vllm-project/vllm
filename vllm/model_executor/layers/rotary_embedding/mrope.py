@@ -5,6 +5,7 @@
 import numpy as np
 import torch
 
+from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import tl, triton
 
 from .base import RotaryEmbedding
@@ -199,6 +200,7 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return x_t
 
 
+@CustomOp.register(name="mrope")
 class MRotaryEmbedding(RotaryEmbedding):
     """Rotary Embedding with Multimodal Sections."""
 
