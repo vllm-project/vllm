@@ -81,8 +81,6 @@ def _fused_moe_lora_kernel(
     GROUP_SIZE_M: tl.constexpr,
     SPLIT_K: tl.constexpr,
 ):
-    """Grid-based split-K: Each thread block processes one K-chunk in parallel with atomic accumulation."""
-
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
@@ -95,7 +93,6 @@ def _fused_moe_lora_kernel(
     pid_sk = pid % SPLIT_K
     pid_m_n = pid // SPLIT_K
 
-    # calculate pid_m,pid_n with swizzling
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid_m_n // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
@@ -136,7 +133,8 @@ def _fused_moe_lora_kernel(
 
     # get a_ptrs,b_ptrs starting at k_start
     a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // top_k * stride_am + (k_start + offs_k[None, :]) * stride_ak
+        offs_token[:, None] // top_k * stride_am
+        + (k_start + offs_k[None, :]) * stride_ak
     )
 
     b_ptrs = (
