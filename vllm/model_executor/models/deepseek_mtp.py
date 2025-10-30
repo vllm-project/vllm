@@ -21,7 +21,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -29,6 +32,7 @@ from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
+
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
