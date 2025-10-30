@@ -698,6 +698,34 @@ def has_noops(
 
 
 @runtime_checkable
+class SupportsMambaPrefixCaching(Protocol):
+    """The interface for models whose mamba layers support prefix caching.
+
+    This is currently experimental.
+    """
+
+    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: type[object],
+) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+
+
+def supports_mamba_prefix_caching(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
+    return getattr(model, "supports_mamba_prefix_caching", False)
+
+
+@runtime_checkable
 class SupportsCrossEncoding(Protocol):
     """The interface required for all models that support cross encoding."""
 

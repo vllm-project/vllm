@@ -31,6 +31,7 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -75,8 +76,8 @@ from vllm.transformers_utils.tokenizer import (
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device
 from vllm.utils.collection_utils import as_iter, is_list_of
+from vllm.utils.counter import Counter
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -286,10 +287,11 @@ class LLM:
             structured_outputs_instance = StructuredOutputsConfig()
 
         # warn about single-process data parallel usage.
-        _dps = int(kwargs.get("data_parallel_size", 1))
-        if _dps > 1:
+        _dp_size = int(kwargs.get("data_parallel_size", 1))
+        _distributed_executor_backend = kwargs.get("distributed_executor_backend")
+        if _dp_size > 1 and not _distributed_executor_backend == "external_launcher":
             raise ValueError(
-                f"LLM(data_parallel_size={_dps}) is not supported for single-"
+                f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
                 "process usage and may hang. Please use "
                 "the explicit multi-process data-parallel example at "
                 "'examples/offline_inference/data_parallel.py'."
@@ -1489,8 +1491,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> bool:
-        return self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self, device: Device | None = None) -> None:
+        self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """
@@ -1562,6 +1564,12 @@ class LLM:
         if isinstance(lora_request, Sequence) and len(lora_request) != num_requests:
             raise ValueError(
                 "The lengths of prompts and lora_request must be the same."
+            )
+        if priority is not None and len(priority) != num_requests:
+            raise ValueError(
+                "The lengths of prompts "
+                f"({num_requests}) and priority ({len(priority)}) "
+                "must be the same."
             )
 
         for sp in params if isinstance(params, Sequence) else (params,):
