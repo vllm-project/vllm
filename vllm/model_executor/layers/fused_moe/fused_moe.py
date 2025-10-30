@@ -1299,7 +1299,7 @@ def eplb_map_to_physical_and_record(
     skip_expert_load_scatter_add = (
         (fused_experts_method is not None)
         and isinstance(fused_experts_method, FusedMoEModularKernel)
-        and fused_experts_method.have_expert_num_tokens()
+        and fused_experts_method.prepare_finalize.have_expert_num_tokens()
     )
     
     if not skip_expert_load_scatter_add:
