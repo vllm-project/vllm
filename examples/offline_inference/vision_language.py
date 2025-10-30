@@ -261,6 +261,33 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+    prompts = [
+        (
+            "<|begin_of_sentence|>User: "
+            f"{question}{placeholder}\nAssistant: <think></think>"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Ernie4.5-VL
 def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
@@ -1785,6 +1812,7 @@ model_example_map = {
     "deepseek_vl_v2": run_deepseek_vl2,
     "deepseek_ocr": run_deepseek_ocr,
     "dots_ocr": run_dots_ocr,
+    "paddleocr_vl": run_paddleocr_vl,
     "ernie45_vl": run_ernie45_vl,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
