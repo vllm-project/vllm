@@ -1299,6 +1299,21 @@ class OpenAIServing:
         return raw_request.headers.get("X-Request-Id", default)
 
     @staticmethod
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
+
+    @staticmethod
     def _get_decoded_token(
         logprob: Logprob,
         token_id: int,
