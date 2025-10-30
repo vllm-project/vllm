@@ -944,6 +944,7 @@ def check_aiter_fp8_linear_support() -> bool:
         current_platform.is_rocm()
         and envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_LINEAR
+        and current_platform.supports_fp8()
     )
 
 
