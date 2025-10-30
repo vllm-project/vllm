@@ -38,10 +38,6 @@ from vllm.distributed.parallel_state import (
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils.system_utils import (
-    _maybe_force_spawn,
-    decorate_logs,
-)
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -486,7 +482,8 @@ class WorkerProc:
                 # we will wait until ready later
                 blocking=False,
             )
-            # driver worker(rank 0 in inner_dp_world_group) will be the only reader of responses for all messages remotely
+            # driver worker(rank 0 in inner_dp_world_group)
+            # will be the only reader of responses for all messages remotely
             self.worker_response_mq, self.rpc_response_handles = (
                 get_inner_dp_world_group().create_single_reader_mq_broadcasters(
                     reader_rank_in_group=0
