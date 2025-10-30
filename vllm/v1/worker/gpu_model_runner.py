@@ -2900,7 +2900,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     target_hidden_states = hidden_states[token_indices]
 
             if self.supports_mm_inputs:
-                mm_embed_inputs, _ = self._gather_mm_embeddings(
+                mm_embed_inputs = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
                 )
