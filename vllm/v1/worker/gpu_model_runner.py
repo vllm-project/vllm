@@ -739,16 +739,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ].tolist()
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
-            resumed_from_preemption = req_data.resumed_from_preemption[i]
-            req_state.resumed_from_preemption = resumed_from_preemption
-            num_computed_tokens = self._update_computed_tokens(
-                valid_sampled_token_count,
-                req_id,
-                req_data.num_computed_tokens[i],
-                req_state.prev_num_draft_len,
-                resumed_from_preemption,
-            )
+            num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
+            resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
 
             # Update the cached states.
@@ -795,27 +788,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
-                # when use async_scheduling and spec_decoding, a request can't
-                # be scheduled because `num_new_tokens == 0` or `new_blocks is None`,
-                # in both case, we will cache the prev_sampled_tokens and
-                # prev_draft_tokens. when a request is resumed from preemption,
-                # all output_token_ids will recover from resumed_token_ids,
-                # it won't need prev_sampled_tokens and prev_draft_tokens.
-                # so reset prev_sampled_tokens, prev_draft_tokens,
-                # prev_num_draft_len.
-                req_state.prev_sampled_tokens = None
-                req_state.prev_draft_tokens = None
-                req_state.prev_num_draft_len = 0
-                if self.use_async_scheduling and num_output_tokens > 0:
-                    # We must recover the output token ids for resumed requests in the
-                    # async scheduling case, so that correct input_ids are obtained.
-                    resumed_token_ids = req_data.resumed_req_token_ids[i]
-                    assert resumed_token_ids is not None
-                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
                 # scheduled in the previous step and needs to be added again.
+
+                if self.use_async_scheduling and num_output_tokens > 0:
+                    # We must recover the output token ids for resumed requests in the
+                    # async scheduling case, so that correct input_ids are obtained.
+                    resumed_token_ids = req_data.all_token_ids[req_id]
+                    req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
+
                 reqs_to_add.append(req_state)
                 continue
 
