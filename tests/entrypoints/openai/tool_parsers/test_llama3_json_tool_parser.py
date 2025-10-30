@@ -220,3 +220,23 @@ def test_extract_tool_calls_with_escaped_quotes_in_nested_json(parser):
 
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["text"] == 'He said "Hello {world}"'
+
+
+def test_extract_tool_calls_missing_name_key(parser):
+    # Test that missing "name" key returns content
+    model_output = '{"parameters": {}}'
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is False
+    assert len(result.tool_calls) == 0
+    assert result.content == model_output
+
+
+def test_extract_tool_calls_missing_parameters_and_arguments_key(parser):
+    # Test that missing both "parameters" and "arguments" keys returns content
+    model_output = '{"name": "toolWithoutParams"}'
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is False
+    assert len(result.tool_calls) == 0
+    assert result.content == model_output
