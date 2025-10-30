@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -138,6 +138,7 @@ class Config:
         }
 
         backend = self.all2all_backend()
+        vllm_config.parallel_config.all2all_backend = backend
         if backend is not None:
             env_dict.update({"VLLM_ALL2ALL_BACKEND": backend})
 
