@@ -1779,8 +1779,6 @@ class FusedMoE(CustomOp):
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
         assert self.batched_router_logits.size(-1) == full_router_logits.size(-1)
 
-        # print(f"CHUNKED {full_hidden_states.shape}")
-
         full_fused_final_hidden_states = torch.empty_like(full_hidden_states)
         if self.shared_experts is not None:
             full_shared_final_hidden_states = torch.empty_like(full_hidden_states)
@@ -1836,7 +1834,6 @@ class FusedMoE(CustomOp):
                     mode="constant",
                     value=0.0,
                 )
-                # print(f"PADDING {num_tokens} {pad} {staged_hidden_states.shape}")
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -1891,20 +1888,6 @@ class FusedMoE(CustomOp):
             )
 
         num_tokens = full_hidden_states.size(0)
-
-        # print(f"MAX_TOKENS_ACROSS_DISPATCHERS = {num_tokens} "
-        #      f"{max_tokens_across_dispatchers}")
-
-        # if False and num_tokens < max_tokens_across_dispatchers:
-        #     pad = max_tokens_across_dispatchers - num_tokens
-        #     full_hidden_states = F.pad(
-        #         full_hidden_states,
-        #         (0, pad),
-        #         mode="constant",
-        #         value=0.0,
-        #     )
-        #     print(f"PADDING {num_tokens} {pad}")
-
         for chunk_idx, chunk_start_ in enumerate(
             range(0, max_tokens_across_dispatchers, moe_dp_chunk_size_per_rank)
         ):
