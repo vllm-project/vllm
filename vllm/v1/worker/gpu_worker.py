@@ -5,9 +5,11 @@
 import copy
 import gc
 import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
-from threading import Thread
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -24,6 +26,8 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_all_model_groups,
     get_pp_group,
     get_tp_group,
 )
@@ -59,7 +63,7 @@ if TYPE_CHECKING:
 
 
 class WorkerGuard:
-    def __init__(self, vllm_config: VllmConfig):
+    def __init__(self, vllm_config: VllmConfig, pause_event: threading.Event):
         self.zmq_ctx = zmq.Context()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tp_group().rank_in_group
@@ -74,7 +78,24 @@ class WorkerGuard:
             identity=identity,
         )
         self.worker_guard_dead = False
-        Thread(target=self.run, daemon=True, name="WorkerGuardCmdReceiver").start()
+        self.pause_event = pause_event
+        self.communicator_aborted = False
+        self.logger = self._make_worker_logger()
+        threading.Thread(
+            target=self.run, daemon=True, name="WorkerGuardCmdReceiver"
+        ).start()
+
+    def _make_worker_logger(self):
+        prefix = f"[WorkerGuard_dp{self.dp_rank}_tp{self.tp_rank}_pp{self.pp_rank}] "
+
+        def log(msg, *args, level="info", **kwargs):
+            """
+            level: "info", "warning", "error", "debug"
+            msg: log message
+            """
+            getattr(logger, level)(prefix + msg, *args, **kwargs)
+
+        return log
 
     def _recv_cmd(self) -> tuple[bool, None | str]:
         """
@@ -104,10 +125,14 @@ class WorkerGuard:
             return (True, message)
 
         except (zmq.ZMQError, UnicodeDecodeError) as e:
-            logger.error("error occurred while receiving message: %s", e)
+            self.logger("error occurred while receiving message: %s", e, level="error")
             return (False, None)
         except Exception as e:
-            logger.error("Unexpected error occurred while receiving message: %s", e)
+            self.logger(
+                "Unexpected error occurred while receiving message: %s",
+                e,
+                level="error",
+            )
             return (False, None)
 
     def run(self):
@@ -116,42 +141,98 @@ class WorkerGuard:
             # Use blocking receive - will wait until a message arrives
             has_msg, cmd_str = self._recv_cmd()
             if self.worker_guard_dead:
-                logger.info("worker guard dead, exiting")
+                self.logger("Worker guard dead, exiting")
                 break
             if has_msg:
                 assert cmd_str is not None
                 method, method_params = deserialize_method_call(cmd_str)
-                logger.info(
-                    "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s] Executing command: %s",
-                    self.dp_rank,
-                    self.tp_rank,
-                    self.pp_rank,
-                    method,
-                )
+                self.logger("Executing command: %s", method)
                 try:
-                    run_method(self, method, args=(), kwargs=method_params)
-                    logger.info(
-                        "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s]"
-                        " Command succeeded: %s",
-                        self.dp_rank,
-                        self.tp_rank,
-                        self.pp_rank,
-                        method,
-                    )
+                    success = run_method(self, method, args=(), kwargs=method_params)
+                    self.logger(" Command (%s) succeeded: %s", method, success)
+
+                    # todo: need to send results back to engine core guard.
 
                 except Exception as e:
-                    logger.error(
-                        "[WorkerGuard_dp_rank%s_tp_rank%s_pp_rank%s]"
+                    self.logger(
                         " Error executing method %s: %s",
-                        self.dp_rank,
-                        self.tp_rank,
-                        self.pp_rank,
                         method,
                         e,
+                        level="error",
                     )
 
-    def pause(self):
-        pass
+    def pause_by_signal(self):
+        self.pause_event.set()
+        return True
+
+    def pause_by_abort_communicators(self, timeout=5):
+        """
+        Abort all NCCL communicators and process groups in parallel using a thread pool.
+        """
+        if self.communicator_aborted:
+            return True
+
+        model_groups = get_all_model_groups()
+        futures = []
+
+        start_time = time.time()
+
+        def _abort_nccl_comm(group: GroupCoordinator):
+            if group.device_communicator is not None:
+                nccl_comm = group.device_communicator.pynccl_comm
+                nccl_comm.available = False
+                nccl_comm.disabled = True
+                nccl_comm.nccl_abort_comm()
+
+        def _abort_process_group(group: GroupCoordinator):
+            device = torch.device("cuda")
+            backend = group.device_group._get_backend(device)
+            backend.abort()
+
+        with ThreadPoolExecutor(max_workers=len(model_groups) * 2) as executor:
+            for group in model_groups:
+                futures.append(executor.submit(_abort_nccl_comm, group))
+                futures.append(executor.submit(_abort_process_group, group))
+
+            done, not_done = [], []
+            for future in as_completed(futures):
+                elapsed = time.time() - start_time
+                remaining = max(timeout - elapsed, 0)
+                if remaining == 0:
+                    self.logger(
+                        "Timeout while waiting for abort operations", level="warning"
+                    )
+                    break
+                try:
+                    # Wait at most 'remaining' seconds for this future
+                    future.result(timeout=remaining)
+                    done.append(future)
+                except TimeoutError:
+                    not_done.append(future)
+                except Exception as e:
+                    self.logger("Abort call raised exception: %s", e, level="warning")
+                    not_done.append(future)
+
+            # Add any futures that were not processed yet
+            not_done.extend([f for f in futures if f not in done and f not in not_done])
+            if not_done:
+                self.logger(
+                    "%d abort calls did not finish in total %s seconds",
+                    len(not_done),
+                    timeout,
+                    level="warning",
+                )
+
+        self.communicator_aborted = True
+        return len(not_done) == 0
+
+    def restart_worker(self):
+        if self.communicator_aborted:
+            raise NotImplementedError(
+                "Retry with recreation of communicators, currently un implemented"
+            )
+        self.pause_event.clear()
+        return True
 
     def shutdown(self):
         self.worker_guard_dead = True
@@ -333,7 +414,9 @@ class Worker(WorkerBase):
             report_usage_stats(self.vllm_config)
 
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            self.worker_guard = WorkerGuard(self.vllm_config)
+            self.worker_guard = WorkerGuard(
+                self.vllm_config, self.model_runner.pause_event
+            )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.

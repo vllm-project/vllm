@@ -1174,6 +1174,7 @@ async def send_fault_tolerance_instruction(raw_request: Request):
 
     fault_tolerance_instruction = body.get("fault_tolerance_instruction")
     fault_tolerance_timeout = body.get("fault_tolerance_timeout")
+    kwargs = body.get("kwargs", {})
 
     if fault_tolerance_instruction is None or fault_tolerance_timeout is None:
         raise HTTPException(
@@ -1199,7 +1200,7 @@ async def send_fault_tolerance_instruction(raw_request: Request):
         )
     try:
         execute_result = await client.handle_fault(
-            fault_tolerance_instruction, fault_tolerance_timeout
+            fault_tolerance_instruction, fault_tolerance_timeout, **kwargs
         )
         if execute_result:
             return JSONResponse(

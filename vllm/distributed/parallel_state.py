@@ -1111,6 +1111,31 @@ def get_pipeline_model_parallel_group():
     return get_pp_group()
 
 
+def get_all_model_groups() -> list[GroupCoordinator]:
+    group_list = []
+    global _TP
+    if _TP:
+        group_list.append(_TP)
+
+    global _PP
+    if _PP:
+        group_list.append(_PP)
+
+    global _DCP
+    if _DCP:
+        group_list.append(_DCP)
+
+    global _DP
+    if _DP:
+        group_list.append(_DP)
+
+    global _EP
+    if _EP:
+        group_list.append(_EP)
+
+    return group_list
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """
@@ -1490,31 +1515,9 @@ def get_node_count() -> int:
 
 def destroy_model_parallel():
     """Set the groups to none and destroy them."""
-    global _TP
-
-    if _TP:
-        _TP.destroy()
-    _TP = None
-
-    global _PP
-    if _PP:
-        _PP.destroy()
-    _PP = None
-
-    global _DCP
-    if _DCP:
-        _DCP.destroy()
-    _DCP = None
-
-    global _DP
-    if _DP:
-        _DP.destroy()
-    _DP = None
-
-    global _EP
-    if _EP:
-        _EP.destroy()
-    _EP = None
+    initialized_group_list = get_all_model_groups()
+    for group in initialized_group_list:
+        group.destroy()
 
 
 def destroy_distributed_environment():

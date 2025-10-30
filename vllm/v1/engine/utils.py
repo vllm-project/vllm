@@ -1237,7 +1237,7 @@ class FaultHandler:
         self.engine_exception_q_lock = engine_exception_q_lock
         self.engine_status_dict = engine_status_dict
 
-    async def handle_fault(self, instruction: str, timeout) -> bool:
+    async def handle_fault(self, instruction: str, timeout, **kwargs) -> bool:
         # TODO: Implement a thread-safe dictionary to mark statuses
         unhealthy_engine_list = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
@@ -1261,7 +1261,7 @@ class FaultHandler:
             ]
 
         await self.send_fault_tolerance_instruction(
-            client_cmd_registry_copy, instruction, timeout
+            client_cmd_registry_copy, instruction, timeout, **kwargs
         )
 
         execute_result = await self.process_instruction_result(
@@ -1274,9 +1274,9 @@ class FaultHandler:
         return execute_result
 
     async def send_fault_tolerance_instruction(
-        self, client_cmd_registry_copy, instruction, timeout
+        self, client_cmd_registry_copy, instruction, timeout, **kwargs
     ):
-        kwargs = {"timeout": timeout}
+        kwargs["timeout"] = timeout
         for identity in client_cmd_registry_copy:
             serialized_instruction = serialize_method_call(instruction, **kwargs)
             self.cmd_socket.send_multipart(
