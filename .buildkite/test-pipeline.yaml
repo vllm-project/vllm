@@ -341,7 +341,7 @@ steps:
     - pytest -v -s v1/attention
 
 - label: Batch Invariance Tests (H100) # 10min
-  timeout_in_minutes: 40
+  timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
     - vllm/
