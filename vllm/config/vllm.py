@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -942,6 +942,20 @@ class VllmConfig:
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
+
+    @model_validator(mode="after")
+    def validate_mamba_block_size(self) -> "VllmConfig":
+        if self.model_config is None:
+            return self
+        mamba_block_size_is_set = (
+            self.cache_config.mamba_block_size is not None
+            and self.cache_config.mamba_block_size != self.model_config.max_model_len
+        )
+        if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
+            raise ValueError(
+                "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
 
 
 _current_vllm_config: VllmConfig | None = None
