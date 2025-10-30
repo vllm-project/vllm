@@ -85,9 +85,10 @@ class BlockTables:
         )
 
     def _make_ptr_tensor(self, x: Iterable[torch.Tensor]) -> torch.Tensor:
+        # NOTE(woosuk): Use uint64 instead of int64 to cover all possible addresses.
         ptrs_tensor_cpu = torch.tensor(
             [t.data_ptr() for t in x],
-            dtype=torch.int64,
+            dtype=torch.uint64,
             device="cpu",
             pin_memory=self.pin_memory,
         )
