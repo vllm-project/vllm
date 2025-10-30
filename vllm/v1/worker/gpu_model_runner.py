@@ -298,6 +298,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.uses_custom_attention_masks = model_config.uses_custom_attention_masks
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -2172,13 +2173,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._extract_mm_kwargs(scheduler_output),
             }
 
-            # GEMMA3 MULTIMODAL: Generate attention masks.
+            # Generate custom attention masks for models that require them.
             # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
             # Check mm_features (mm_embeds is empty during decode).
             has_mm_features = any(
                 req_state.mm_features for req_state in self.requests.values()
             )
-            if hasattr(self.model, "generate_attention_masks") and has_mm_features:
+            if self.uses_custom_attention_masks and has_mm_features:
                 mask_kwargs = self.model.generate_attention_masks(
                     self.input_ids.gpu[:num_scheduled_tokens],
                     self.positions.gpu[:num_scheduled_tokens],
@@ -3421,9 +3422,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
                     seq_lens=self.seq_lens.gpu[:num_reqs],
                     seq_lens_cpu=self.seq_lens.cpu[:num_reqs],
-                    num_computed_tokens_cpu=(
-                        self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
-                    ),
+                    num_computed_tokens_cpu=self.input_batch.num_computed_tokens_cpu_tensor[
+                        :num_reqs
+                    ],
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
                     max_query_len=max_query_len,
@@ -4341,9 +4342,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 kernel_block_sizes=kernel_block_sizes,
                 is_spec_decode=bool(self.vllm_config.speculative_config),
                 logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=(
-                    self.input_batch.logitsprocs_need_output_token_ids
-                ),
+                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 num_speculative_tokens=(
                     self.vllm_config.speculative_config.num_speculative_tokens
