@@ -36,7 +36,7 @@ class _MHA_Backend(enum.Enum):
     XFORMERS = enum.auto()  # CUDA
     ROCM_AITER_FA = enum.auto()  # ROCM-only
     TORCH_SDPA = enum.auto()  # CUDA/ROCm/TPU/XPU/CPU
-    PALLAS = enum.auto()
+    PALLAS = enum.auto()  # TPU only
 
 
 BACKEND_MAP = {
