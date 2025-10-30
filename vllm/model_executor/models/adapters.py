@@ -283,7 +283,6 @@ def as_seq_cls_model(cls: _T) -> _T:
         Pooler,
     )
     from vllm.model_executor.models.interfaces import SupportsCrossEncoding
-    from vllm.sequence import IntermediateTensors
 
     from .utils import maybe_prefix
 
@@ -291,13 +290,13 @@ def as_seq_cls_model(cls: _T) -> _T:
         _create_pooling_model_cls(cls), SupportsCrossEncoding
     ):
         def _init_pooler(self, vllm_config: "VllmConfig", prefix: str = ""):
-            config = vllm_config.model_config.hf_config
+            text_config = vllm_config.model_config.hf_config.get_text_config()
             model_config = vllm_config.model_config
             quant_config = vllm_config.quant_config
 
             self.score = ReplicatedLinear(
                 model_config.hidden_size,
-                config.num_labels,
+                text_config.num_labels,
                 bias=False,
                 params_dtype=vllm_config.model_config.head_dtype,
                 quant_config=quant_config,
@@ -322,20 +321,10 @@ def as_seq_cls_model(cls: _T) -> _T:
                 }
             )
 
-        def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: IntermediateTensors | None = None,
-            inputs_embeds: torch.Tensor | None = None,
-        ) -> torch.Tensor:
-            return super().forward(
-                input_ids, positions, intermediate_tensors, inputs_embeds
-            )
-
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-            tokens = getattr(self.config, "classifier_from_token", None)
-            method = getattr(self.config, "method", None)
+            text_config = self.config.get_text_config()
+            tokens = getattr(text_config, "classifier_from_token", None)
+            method = getattr(text_config, "method", None)
 
             if tokens is None and method is None:
                 return super().load_weights(weights)
@@ -392,9 +381,9 @@ def as_reward_model(cls: _T) -> _T:
 class SequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
-        config = vllm_config.model_config.hf_config
-        method = getattr(config, "method", None)
-        tokens = getattr(config, "classifier_from_token", None)
+        text_config = vllm_config.model_config.hf_config.get_text_config()
+        method = getattr(text_config, "method", None)
+        tokens = getattr(text_config, "classifier_from_token", None)
 
         if method is None:
             return
@@ -404,13 +393,13 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
 
         if method == "from_2_way_softmax":
             assert len(tokens) == 2
-            config.num_labels = 1
+            text_config.num_labels = 1
         else:
-            config.num_labels = len(tokens)
+            text_config.num_labels = len(tokens)
 
         # `llm as reranker` defaults to not using pad_token
-        use_pad_token = getattr(config, "use_pad_token", False)
-        config.use_pad_token = use_pad_token
+        use_pad_token = getattr(text_config, "use_pad_token", False)
+        text_config.use_pad_token = use_pad_token
 
 
 def load_weights_using_from_2_way_softmax(
@@ -419,24 +408,31 @@ def load_weights_using_from_2_way_softmax(
     # refer to https://huggingface.co/Qwen/Qwen3-Reranker-0.6B/discussions/3
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-    from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
+    quant_config = model.vllm_config.quant_config
+    text_config = model.config.get_text_config()
 
-    tokens = getattr(model.config, "classifier_from_token", [])
+    tokens = getattr(text_config, "classifier_from_token", [])
     tokens = cast(list[int], tokens)
     assert len(tokens) == 2
 
-    if model.config.tie_word_embeddings:
-        model.lm_head = model.model.embed_tokens
-    else:
-        quant_config = model.vllm_config.quant_config
-        model.lm_head = ParallelLMHead(
-            model.config.vocab_size, model.config.hidden_size, quant_config=quant_config
+    model.lm_head = ParallelLMHead(
+        text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
+    )
+    if text_config.tie_word_embeddings:
+        # embed_tokens is the assumed name for input embeddings. If the model does not
+        # have this attribute, we fallback to get_input_embeddings(), which is used by
+        # the Transformers backend.
+        embed_tokens = (
+            model.model.embed_tokens
+            if hasattr(model.model, "embed_tokens")
+            else model.model.get_input_embeddings()
         )
+        model.lm_head = model.lm_head.tie_weights(embed_tokens)
 
-    loader = AutoWeightsLoader(model)
-    loaded_weights = loader.load_weights(weights)
+    # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
+    loaded_weights = type(model).__mro__[1].load_weights(model, weights)
 
     from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -466,23 +462,31 @@ def load_weights_using_from_2_way_softmax(
 def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Tensor]]):
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
     from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-    from vllm.model_executor.models.utils import AutoWeightsLoader
 
     model_config = model.vllm_config.model_config
-    tokens = getattr(model.config, "classifier_from_token", [])
+    quant_config = model.vllm_config.quant_config
+    text_config = model.config.get_text_config()
+
+    tokens = getattr(text_config, "classifier_from_token", [])
     tokens = cast(list[int], tokens)
     assert len(tokens) > 0
 
-    if model.config.tie_word_embeddings:
-        model.lm_head = model.model.embed_tokens
-    else:
-        quant_config = model.vllm_config.quant_config
-        model.lm_head = ParallelLMHead(
-            model.config.vocab_size, model.config.hidden_size, quant_config=quant_config
+    model.lm_head = ParallelLMHead(
+        text_config.vocab_size, text_config.hidden_size, quant_config=quant_config
+    )
+    if text_config.tie_word_embeddings:
+        # embed_tokens is the assumed name for input embeddings. If the model does not
+        # have this attribute, we fallback to get_input_embeddings(), which is used by
+        # the Transformers backend.
+        embed_tokens = (
+            model.model.embed_tokens
+            if hasattr(model.model, "embed_tokens")
+            else model.model.get_input_embeddings()
         )
+        model.lm_head = model.lm_head.tie_weights(embed_tokens)
 
-    loader = AutoWeightsLoader(model)
-    loaded_weights = loader.load_weights(weights)
+    # Skip ModelForSequenceClassification in MRO to avoid infinite recursion
+    loaded_weights = type(model).__mro__[1].load_weights(model, weights)
 
     from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -523,7 +527,7 @@ def seq_cls_model_loader(model, weights: Iterable[tuple[str, torch.Tensor]]):
     #   - GemmaForCausalLM
     #     - bge-reranker-v2-gemma
 
-    config = model.vllm_config.model_config.hf_config
-    method = getattr(config, "method", None)
+    text_config = model.vllm_config.model_config.hf_config.get_text_config()
+    method = getattr(text_config, "method", None)
     assert method in SEQ_CLS_LOAD_METHODS, f"method {method} not supported"
     return SEQ_CLS_LOAD_METHODS[method](model, weights)
