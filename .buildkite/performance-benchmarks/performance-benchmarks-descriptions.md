@@ -5,7 +5,7 @@
 - Input length: 32 tokens.
 - Output length: 128 tokens.
 - Batch size: fixed (8).
-- GPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
+- GPU/HPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - CPU Models: llama-3.1 8B.
 - Evaluation metrics: end-to-end latency (mean, median, p99).
 
@@ -16,7 +16,7 @@
 - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
 - Output length: the corresponding output length of these 200 prompts.
 - Batch size: dynamically determined by vllm to achieve maximum throughput.
-- GPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
+- GPU/HPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - CPU Models: llama-3.1 8B.
 - Evaluation metrics: throughput.
 
@@ -28,7 +28,7 @@
 - Output length: the corresponding output length of these 200 prompts.
 - Batch size: dynamically determined by vllm and the arrival pattern of the requests.
 - **Average QPS (query per second)**: 1, 4, 16 and inf. QPS = inf means all requests come at once. For other QPS values, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
-- GPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
+- GPU/HPU Models: llama-3.1 8B, llama-3 70B, mixtral 8x7B.
 - We also added a speculative decoding test for llama-3 70B on GPU, under QPS 2
 - CPU Models: llama-3.1 8B.
 - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
