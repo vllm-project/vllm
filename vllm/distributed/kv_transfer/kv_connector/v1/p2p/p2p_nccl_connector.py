@@ -415,10 +415,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
         for i, req_id in enumerate(cached_reqs.req_ids):
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             new_block_ids = cached_reqs.new_block_ids[i]
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
 
             if self.is_producer:
-                num_scheduled_tokens = (scheduler_output.num_scheduled_tokens)[req_id]
+                num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens = num_scheduled_tokens + num_computed_tokens
                 assert req_id in self.chunked_prefill
                 assert new_block_ids is not None
