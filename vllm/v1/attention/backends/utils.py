@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import abc
-import copy
 import enum
 import functools
 from abc import abstractmethod
@@ -864,7 +863,6 @@ def reorder_batch_to_split_decodes_and_prefills(
     # NOTE for now we loosely use "decode" to mean requests where attention is
     #  likely memory-bound and "prefill" to mean requests where attention is
     #  likely compute-bound,
-
     num_reqs = len(input_batch.req_ids)
     num_scheduled_tokens = [
         scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
@@ -900,22 +898,14 @@ def reorder_batch_to_split_decodes_and_prefills(
 
     src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
 
-    # Then we reorder the swap_indices to dest_indices
-    for i in range(len(swap_indices)):
-        dst = dest_indices[i]
-        src = swap_indices[i]
-        if dst != src:
-            # Get the real index position in input_batch to swap
-            dst_pos = indices_positions[idx_mapping[dst]]
-            src_pos = indices_positions[idx_mapping[src]]
-
-            input_batch.swap_states(dst_pos, src_pos)
-
-            dst_idx = idx_mapping[dst]
-            swap_indices[i] = dst
-            swap_indices[dst_idx] = src
-            idx_mapping[dst] = i
-            idx_mapping[src] = dst_idx
+    for src in src_dest_map:
+        dst = src_dest_map[src]
+        while src != dst:
+            input_batch.swap_states(src, dst)
+            # Mark dst as done by updating its destination to itself
+            next_dst = src_dest_map.get(dst, dst)
+            src_dest_map[dst] = dst
+            dst = next_dst
 
     return True
 
