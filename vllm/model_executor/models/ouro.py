@@ -276,20 +276,21 @@ class OuroDecoderLayer(nn.Module):
         current_ut: int,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = self.self_attn(
             positions=positions, hidden_states=hidden_states, current_ut=current_ut
         )
-        hidden_states, residual = self.input_layernorm_2(hidden_states, residual)
+        hidden_states = self.input_layernorm_2(hidden_states)
 
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        hidden_states, residual = self.post_attention_layernorm_2(
-            hidden_states, residual
-        )
+        hidden_states = self.post_attention_layernorm_2(hidden_states)
 
-        return hidden_states, None
+        return hidden_states, residual
 
 
 @support_torch_compile(
@@ -374,14 +375,14 @@ class OuroModel(nn.Module):
             hidden_states = inputs_embeds
         else:
             hidden_states = self.get_input_embeddings(input_ids)
-        residual = None
 
         for current_ut in range(self.total_ut_steps):
+            residual = None
             for layer in self.layers[self.start_layer : self.end_layer]:
                 hidden_states, residual = layer(
-                    positions, hidden_states, current_ut, None
+                    positions, hidden_states, current_ut, residual
                 )
-            hidden_states = self.norm(hidden_states)
+            hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
