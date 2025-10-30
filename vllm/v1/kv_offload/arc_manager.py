@@ -54,7 +54,7 @@ class ARCOffloadingManager(OffloadingManager):
 
     def __init__(self, backend: Backend, enable_events: bool = False):
         self.backend: Backend = backend
-        self.target_t1_size: int = 0
+        self.target_t1_size: float = 0.0
         self.t1: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
         self.t2: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
         # block_hash -> None (only care about presence)
@@ -143,7 +143,7 @@ class ARCOffloadingManager(OffloadingManager):
         to_evict = []
         while num_blocks_to_evict > 0:
             block_to_evict = None
-            if len(self.t1) >= self.target_t1_size:
+            if len(self.t1) >= int(self.target_t1_size):
                 # try to evict the least recently used (oldest) block from T1
                 for block_hash, block in self.t1.items():
                     if block.ref_cnt == 0:
