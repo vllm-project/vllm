@@ -114,6 +114,10 @@ class ShortConv(MambaBase, CustomOp):
         # since they stay the same and reused for all mamba layers in the same
         # iteration.
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
+        
+        assert self.cache_config is not None
+        mamba_block_size = self.cache_config.mamba_block_size
+        prefix_caching_enabled = self.cache_config.enable_prefix_caching             
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -122,6 +126,10 @@ class ShortConv(MambaBase, CustomOp):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             state_indices_tensor = attn_metadata.state_indices_tensor
             has_initial_states_p = attn_metadata.has_initial_states_p
+            
+            #WILL - check them
+            seq_idx_p = attn_metadata.seq_idx_p
+            query_start_loc_p = attn_metadata.query_start_loc_p
 
         BCx, _ = self.in_proj(hidden_states)
 
@@ -169,16 +177,48 @@ class ShortConv(MambaBase, CustomOp):
             [num_decodes, num_prefills],
             dim=0,
         )
-        query_start_loc_p = (
-            attn_metadata.query_start_loc[-num_prefills - 1 :] - num_decodes
-            if has_prefill
-            else None
-        )
+        
+        
+
+        if prefix_caching_enabled:         
+            block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
+                torch.split(
+                    attn_metadata.block_idx_last_computed_token,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            )
+            block_idx_last_scheduled_token_d, block_idx_last_scheduled_token_p = (
+                torch.split(
+                    attn_metadata.block_idx_last_scheduled_token,
+                    [num_decodes, num_prefills],
+                    dim=0,
+                )
+            )
+            # Prefill-only variables:
+            block_idx_first_scheduled_token_p = (
+                attn_metadata.block_idx_first_scheduled_token_p
+            )
+            
+            #print("\n이값은 메타데이터의 block_idx_first_scheduled_token_p", block_idx_first_scheduled_token_p)
+            
+            num_computed_tokens_p = attn_metadata.num_computed_tokens_p
+            
+        else:
+            block_idx_last_computed_token_d = None
+            block_idx_last_computed_token_p = None
+            block_idx_last_scheduled_token_d = None
+            block_idx_last_scheduled_token_p = None
+            block_idx_first_scheduled_token_p = None
+            num_computed_tokens_p = None
 
         conv_output_list = []
 
         if has_prefill:
             Bx_p = (B_p * x_p).transpose(0, 1)
+            
+            #WILL For Triton
+            state_indices_tensor_p = state_indices_tensor_p.view(-1)
             Bx = causal_conv1d_fn(
                 Bx_p,
                 conv_weights,
@@ -187,6 +227,11 @@ class ShortConv(MambaBase, CustomOp):
                 conv_states=conv_state,
                 has_initial_state=has_initial_states_p,
                 cache_indices=state_indices_tensor_p,
+                block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
+                block_idx_last_scheduled_token=(block_idx_last_scheduled_token_p if block_idx_last_scheduled_token_p is not None else None),
+                initial_state_idx=block_idx_last_computed_token_p,
+                num_computed_tokens=num_computed_tokens_p,
+                block_size_to_align=mamba_block_size,
                 metadata=attn_metadata,
                 query_start_loc=query_start_loc_p,
             ).transpose(0, 1)[:num_prefill_tokens]
@@ -203,7 +248,10 @@ class ShortConv(MambaBase, CustomOp):
                 self.conv.bias,
                 activation=None,
                 conv_state_indices=state_indices_tensor_d,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                initial_state_idx=block_idx_last_computed_token_d,      
             )
+                        
             y = C_d * Bx
             conv_output_list.insert(0, y)
 

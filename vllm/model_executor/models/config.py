@@ -295,12 +295,24 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             "NemotronHForCausalLM",
             "Zamba2ForCausalLM",
         ]
+        
+        SHORTCONV_MODELS = [
+            "Lfm2ForCausalLM"
+        ]
+        
         if cache_config.enable_prefix_caching:
             if model_config.architecture in MAMBA2_MODELS:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
                     "Its support for Mamba2 layers is experimental. "
                     "Please report any issues you may observe."
+                )
+            elif model_config.architecture in SHORTCONV_MODELS:
+                logger.info(
+                    "Warning: Prefix caching is currently enabled. "
+                    "Its support for short convolution models is "
+                    "experimental. Please report any issues you "
+                    "may observe."
                 )
             else:
                 logger.info(
@@ -382,7 +394,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         else:
             kernel_block_alignment_size = 16
 
-        if cache_config.enable_prefix_caching:
+        # TODO Need guidance on where to put those models. DELETE THIS
+        if cache_config.enable_prefix_caching and model_config.model not in ['LiquidAI/LFM2-700M', 'LiquidAI/LFM2-350M', 'LiquidAI/LFM2-1.2B', 'LiquidAI/LFM2-2.6B']:
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
@@ -410,6 +423,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
             cache_config.mamba_block_size = attn_block_size
+            
+        elif cache_config.enable_prefix_caching and model_config.model in ['LiquidAI/LFM2-700M', 'LiquidAI/LFM2-350M', 'LiquidAI/LFM2-1.2B', 'LiquidAI/LFM2-2.6B']:
+            attn_block_size = kernel_block_alignment_size * cdiv(
+                mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
+            )        
+            cache_config.mamba_block_size = attn_block_size    
+            
         else:
             # Without prefix caching, select minimum valid attention block size
             # to minimize mamba state padding

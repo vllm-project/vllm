@@ -608,9 +608,6 @@ def causal_conv1d_fn(
         if bias is not None:
             assert bias.dim() == 1
             assert dim == bias.size(0)
-        if cache_indices is not None:
-            assert cache_indices.dim() == 1
-            assert padded_batch == cache_indices.size(0)
         if has_initial_state is not None:
             assert has_initial_state.size() == (padded_batch,)
             assert conv_states is not None, (
