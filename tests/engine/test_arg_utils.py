@@ -239,7 +239,6 @@ def test_optimization_level(arg, expected):
 
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     parsed_args = parser.parse_args([arg])
-    # breakpoint()
     assert parsed_args.optimization_level == expected
     assert parsed_args.compilation_config.mode is None
 

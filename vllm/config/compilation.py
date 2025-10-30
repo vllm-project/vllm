@@ -213,7 +213,7 @@ class CompilationConfig:
          Requires no dynamic-shape-dependent control-flow.
     - 3: VLLM_COMPILE: Custom vLLM Inductor-based backend with caching,
          piecewise compilation, shape specialization, and custom passes."""
-    debug_dump_path: Path = Field(default=None)
+    debug_dump_path: Path | None = None
     """The path to dump the debug information."""
     cache_dir: str = ""
     """The directory to store the compiled graph, to accelerate Inductor
@@ -250,7 +250,7 @@ class CompilationConfig:
     By default, all custom ops are enabled when running without Inductor and
     disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
-    splitting_ops: list[str] = Field(default=None)
+    splitting_ops: list[str] | None = None
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
     The behavior depends on use_inductor_graph_partition:
@@ -270,7 +270,7 @@ class CompilationConfig:
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
 
     # Inductor capture
-    use_inductor: bool = Field(default=None)
+    use_inductor: bool | None = None
     """
     Whether to use inductor compilation.
 
@@ -288,7 +288,7 @@ class CompilationConfig:
     For future compatibility:
     If use_inductor is True, backend="inductor" otherwise backend="eager".
     """
-    compile_sizes: list[int | str] = Field(default=None)
+    compile_sizes: list[int | str] | None = None
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
@@ -356,7 +356,7 @@ class CompilationConfig:
     It means the first several runs will be treated as warmup runs.
     Only after that, the execution will be recorded, and the recorded
     cudagraph will be used for subsequent runs."""
-    cudagraph_capture_sizes: list[int] = Field(default=None)
+    cudagraph_capture_sizes: list[int] | None = None
     """Sizes to capture cudagraph.
     - None (default): capture sizes are inferred from vllm config.
     - list[int]: capture sizes are specified as given."""
@@ -890,7 +890,7 @@ class CompilationConfig:
             A flag indicating if the op is enabled.
         """
         if "all" in self.custom_ops:
-            return f"-{op}" not in self.custom_ops:
-        
+            return f"-{op}" not in self.custom_ops
+
         assert "none" in self.custom_ops
-        return f"+{op}" in self.custom_ops:
+        return f"+{op}" in self.custom_ops

@@ -277,7 +277,7 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
 )
 def test_is_quantized(model_id, quantized):
     model_config = ModelConfig(model_id)
-    # Just check that is_moe_model field exists and is a boolean
+    # Just check that quantized field exists and is a boolean
     assert model_config.is_quantized() == quantized
 
 

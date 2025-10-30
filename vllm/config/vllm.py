@@ -79,12 +79,13 @@ def build_defaults(
     is_rms_norm_enabled = compilation_config.is_custom_op_enabled("rms_norm")
     is_quant_fp8_enabled = compilation_config.is_custom_op_enabled("quant_fp8")
     is_quantized = False
-    is_sequential = False
+    is_dense = False
     # The optimizations that depend on these properties currently set to False
     # in all cases.
     # if model_config is not None:
     #     is_quantized = model_config.is_quantized()
     #     is_sequential = not model_config.is_model_moe()
+    # See https://github.com/vllm-project/vllm/issues/25689.
     optimization_level_00 = {
         "general": {
             "pass_config": {
@@ -137,8 +138,8 @@ def build_defaults(
         "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
         "is_sequential": {
             "pass_config": {
-                "enable_sequence_parallelism": is_sequential,
-                "enable_async_tp": is_sequential,
+                "enable_sequence_parallelism": is_dense,
+                "enable_async_tp": is_dense,
             }
         },
     }
@@ -156,8 +157,8 @@ def build_defaults(
         "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
         "is_sequential": {
             "pass_config": {
-                "enable_sequence_parallelism": is_sequential,
-                "enable_async_tp": is_sequential,
+                "enable_sequence_parallelism": is_dense,
+                "enable_async_tp": is_dense,
             }
         },
     }
@@ -175,10 +176,6 @@ def build_defaults(
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
-
-    This dataclass is only meant to be within the vllm config.
-    If used outside of the vllm config, some fields may be left in an
-    improper state.
     """
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
@@ -195,9 +192,9 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
-    lora_config: LoRAConfig = Field(default=None)
+    lora_config: LoRAConfig | None = None
     """LoRA configuration."""
-    speculative_config: SpeculativeConfig = Field(default=None)
+    speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
     structured_outputs_config: StructuredOutputsConfig = Field(
         default_factory=StructuredOutputsConfig
@@ -207,7 +204,7 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
-    quant_config: QuantizationConfig = Field(default=None)
+    quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
@@ -218,9 +215,9 @@ class VllmConfig:
     You can specify the full compilation config like so:
     `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
-    kv_transfer_config: KVTransferConfig = Field(default=None)
+    kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
-    kv_events_config: KVEventsConfig = Field(default=None)
+    kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
@@ -503,6 +500,16 @@ class VllmConfig:
                 "set to level 0. This may result in reduced performance."
             )
             self.optimization_level = OptimizationLevel.O0
+
+        if (
+            self.compilation_config.backend == "eager"
+            or self.compilation_config.mode == CompilationMode.NONE
+        ):
+            logger.warning(
+                "Warning Compilation was disabled by user settings,"
+                "Optimizations settings that are only active during"
+                "compiliation will be ignored."
+            )
 
         # Apply optimization level-specific defaults
         default_config = build_defaults(
@@ -805,15 +812,6 @@ class VllmConfig:
                     env_path,
                 )
             self.compilation_config.debug_dump_path = env_path
-        if (
-            self.compilation_config.backend == "eager"
-            or self.compilation_config.mode == CompilationMode.NONE
-        ):
-            logger.warning(
-                "Warning Compilation was disabled by user settings,"
-                "Optimizations settings that are only active during"
-                "compiliation will be ignored."
-            )
 
         def has_blocked_weights():
             if self.quant_config is not None:
