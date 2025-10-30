@@ -77,7 +77,7 @@ def init_attn_backend(
 
         if "FLASHINFER" in attn_backend.get_name():
             if flashinfer_workspace is None:
-                flashinfer_workspace = attn_metadata_builder.get_workspace_buffer()
+                flashinfer_workspace = attn_metadata_builder._get_workspace_buffer()
             else:
                 attn_metadata_builder.set_workspace_buffer(flashinfer_workspace)
     return attn_backends, attn_metadata_builders
