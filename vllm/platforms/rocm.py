@@ -434,19 +434,22 @@ class RocmPlatform(Platform):
         )
 
     @classmethod
-    def supports_mx(cls) -> bool:
+    def arch_is_in(cls, arch_list: list[str]) -> bool:
+        # only device 0 is checked, this assumes MI300 platforms are homogeneous
         gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx95"])
+        return any(gfx in gcn_arch for gfx in arch_list)
+
+    @classmethod
+    def supports_mx(cls) -> bool:
+        return cls.arch_is_in(["gfx95"])
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
+        return cls.arch_is_in(["gfx94", "gfx95", "gfx12"])
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
-        # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return "gfx94" in torch.cuda.get_device_properties(0).gcnArchName
+        return cls.arch_is_in(["gfx94"])
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -457,10 +460,13 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        # We only enable custom allreduce for MI300 series
-        gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
-        supported_archs = ["gfx94", "gfx95"]
-        return any(gfx in gcn_arch for gfx in supported_archs)
+        # Enable for MI300 and MI350 series
+        return cls.arch_is_in(["gfx94", "gfx95"])
+
+    @classmethod
+    def supports_aiter_w8a8_block_fp8_linear(cls) -> bool:
+        # Enable for MI300 and MI350 series
+        return cls.arch_is_in(["gfx94", "gfx95"])
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
