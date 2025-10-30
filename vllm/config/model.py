@@ -1236,6 +1236,7 @@ class ModelConfig:
             "deepseek_v32",
             "deepseek_mtp",
             "kimi_k2",
+            "kimi_linear",
             "longcat_flash",
         ):
             return self.hf_text_config.kv_lora_rank is not None
