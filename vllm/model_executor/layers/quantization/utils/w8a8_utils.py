@@ -89,7 +89,7 @@ def all_close_1d(x: torch.Tensor) -> bool:
 
 def convert_to_channelwise(
     weight_scale: torch.Tensor, logical_widths: list[int]
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     # Create channelwise buffer
     weight_scale_channel = torch.empty(
         (sum(logical_widths), 1), dtype=torch.float32, device=weight_scale.device
