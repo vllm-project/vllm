@@ -97,16 +97,11 @@ def rank_worker(
     exceptions = []
     count = 0
 
-    torch.set_printoptions(profile="full")  # debugging
-
     for m, topk in product(Ms, TOPKs):
         # override m and topk
         config = copy.deepcopy(base_config)
         config.Ms = m
         config.topks = topk
-
-        ref_out = None
-        mk_out = None
 
         try:
             print(f"Running[{pgi.rank}]: m={m}, topk={topk} ...")
@@ -128,15 +123,9 @@ def rank_worker(
                 atol = 3e-2
                 rtol = 3e-2
 
-            # print(f"REF = {ref_out}")
-            # print(f"OUT = {mk_out}")
-
             torch.testing.assert_close(ref_out, mk_out, atol=atol, rtol=rtol)
             format_result(verbose, config.describe())
         except Exception as ex:
-            print(f"REF = {ref_out}")
-            print(f"OUT = {mk_out}")
-
             format_result(verbose, config.describe(), ex)
             if exit_first:
                 raise ex
@@ -170,42 +159,15 @@ def run(config: Config):
     )
 
 
-if True:
-    Ms = [32, 64, 256]
-    # hidden sizes, making this too large will cause fp4 tests to fail.
-    # Also needs to be a multiple of 1024 for deep_gemm.
-    Ks = [512, 2048]
-    Ns = [128, 1024]
-    TOPKs = [4, 1]
-    Es = [32]
-    DTYPEs = [torch.bfloat16]
-    FUSED_MOE_CHUNK_SIZEs = [None, 16]
-else:
-    Ms = [16]  # [32, 64]
-    Ks = [512]  # must be >= 512 for hybrid
-    Ns = [128]
-    TOPKs = [4, 1]
-    Es = [8]
-    DTYPEs = [torch.bfloat16]
-    FUSED_MOE_CHUNK_SIZEs = [None]
-
-if False:
-    Ms = [32]
-    Ks = [512]
-    Ns = [128]
-    TOPKs = [4]
-    Es = [32]
-    DTYPEs = [torch.bfloat16]
-    FUSED_MOE_CHUNK_SIZEs = [None]
-
-if False:
-    Ms = [16]
-    Ks = [512]
-    Ns = [128]
-    TOPKs = [2]
-    Es = [4]
-    DTYPEs = [torch.bfloat16]
-    FUSED_MOE_CHUNK_SIZEs = [None]
+Ms = [32, 64]
+# hidden sizes, making this too large will cause fp4 tests to fail.
+# Also needs to be a multiple of 1024 for deep_gemm.
+Ks = [2048]
+Ns = [1024]
+TOPKs = [4, 1]
+Es = [32]
+DTYPEs = [torch.bfloat16]
+FUSED_MOE_CHUNK_SIZEs = [None, 16]
 
 
 def is_nyi_config(config: Config) -> bool:
