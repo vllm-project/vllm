@@ -591,6 +591,25 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
+        # TODO smor- adjusted to your current dummy MTP variant
+        if (
+            hasattr(config, "num_nextn_predict_layers")
+            and config.num_nextn_predict_layers > 0
+        ):
+            # Check for MTP layer weights (after mapper has remapped backbone -> model)
+            layer_idx = config.num_hidden_layers
+            for i in range(config.num_nextn_predict_layers):
+                if weight_name.startswith(f"layers.{layer_idx + i}."):
+                    return True
+            
+            # Also skip the MTP-specific final norm (backbone.norm.weight -> norm.weight)
+            # This is different from the main model's norm_f
+            if weight_name == "norm.weight":
+                return True
+        return False
+
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -623,6 +642,10 @@ class NemotronHModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+            
+            # Skip MTP/spec decode layers early (before stacked params mapping)
+            if self.is_spec_layer(self.config, name):
+                continue
 
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:

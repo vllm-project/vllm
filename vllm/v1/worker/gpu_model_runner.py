@@ -83,6 +83,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -1403,7 +1404,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 extra_attn_metadata_args = {}
-                if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+                if use_spec_decode and isinstance(
+                    builder, (GDNAttentionMetadataBuilder, Mamba2AttentionMetadataBuilder)
+                ):
                     extra_attn_metadata_args = dict(
                         num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
                         num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[

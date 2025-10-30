@@ -516,6 +516,15 @@ class MambaMixer2(MambaBase, CustomOp):
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
             state_indices_tensor = attn_metadata.state_indices_tensor
+            
+            # Handle speculative decode state indices
+            spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
+            non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
+            spec_sequence_masks = attn_metadata.spec_sequence_masks
+            num_accepted_tokens = attn_metadata.num_accepted_tokens
+            spec_query_start_loc = attn_metadata.spec_query_start_loc
+            non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -523,6 +532,8 @@ class MambaMixer2(MambaBase, CustomOp):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
+            
+            num_actual_tokens = attn_metadata.num_actual_tokens
 
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
@@ -793,6 +804,14 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
+            # TODO(spec_decode): Add spec decode handling here
+            # For now, treating all decode as non-spec (regular single-token decode)
+            # When spec decode is detected (spec_sequence_masks is not None), need to:
+            # 1. Split hidden_states_B_C_d into spec and non-spec
+            # 2. For spec sequences: use variable-length kernels with num_accepted_tokens
+            # 3. For non-spec sequences: use existing single-token decode
+            # See GDN implementation or the design doc for details
+            
             if prefix_caching_enabled:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
@@ -812,6 +831,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_indices_tensor_d_output = state_indices_tensor_d
 
             # 2. Convolution sequence transformation
+            # TODO(spec_decode): Pass num_accepted_tokens for spec decode sequences
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
                 conv_state,
@@ -821,11 +841,20 @@ class MambaMixer2(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
                 initial_state_idx=block_idx_last_computed_token_d,
+                # num_accepted_tokens=num_accepted_tokens,  # TODO: Add for spec decode
             )
 
             hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(hidden_states_B_C_d)
 
             # 3. State Space Model sequence transformation
+            # TODO(spec_decode): Add variable-length SSM kernel for spec decode
+            # Current kernel only supports single-token decode
+            # For spec decode, need to:
+            # - Use spec_state_indices_tensor (2D: [batch, num_spec+1])
+            # - Pass num_accepted_tokens to load correct checkpoint
+            # - Pass query_start_loc for variable-length processing
+            # - Loop over tokens inside kernel (similar to GDN fused_recurrent_gated_delta_rule_fwd_kernel)
+            
             n_groups = self.n_groups // self.tp_size
             A_d = (
                 self.A[:, None, ...][:, :, None]
@@ -859,6 +888,10 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                # TODO(spec_decode): Add these parameters for spec decode support
+                # num_accepted_tokens=num_accepted_tokens,
+                # query_start_loc=spec_query_start_loc,
+                # max_query_len=max_spec_len,
             )
 
         # 4. gated MLP
