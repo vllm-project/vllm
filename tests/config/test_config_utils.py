@@ -11,14 +11,14 @@ from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
 
-def _endswith_fqname(obj, suffix: str) -> bool:
+def endswith_fqname(obj, suffix: str) -> bool:
     # normalize_value(type) returns fully-qualified name
     # Compare suffix to avoid brittle import paths.
     out = normalize_value(obj)
     return isinstance(out, str) and out.endswith(suffix)
 
 
-def _expected_path(p_str: str = ".") -> str:
+def expected_path(p_str: str = ".") -> str:
     import pathlib
 
     p = pathlib.Path(p_str)
@@ -87,7 +87,7 @@ def test_normalize_value_path_normalization():
 
     # Paths expand/resolve to absolute strings.
     # Stabilizes hashing across working dirs.
-    assert normalize_value(Path(".")) == _expected_path(".")
+    assert normalize_value(Path(".")) == expected_path(".")
 
 
 def test_normalize_value_uuid_and_to_json():
@@ -160,4 +160,4 @@ def test_classes_are_types():
     class LocalDummy:
         pass
 
-    assert _endswith_fqname(LocalDummy, ".LocalDummy")
+    assert endswith_fqname(LocalDummy, ".LocalDummy")
