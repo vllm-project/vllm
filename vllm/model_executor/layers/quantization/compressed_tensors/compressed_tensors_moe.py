@@ -477,7 +477,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 "w1_weight_global_scale must match w3_weight_global_scale. "
                 "Accuracy may be affected.")
 
-        w13_weight_scale_2 = layer.w13_weight_global_scale[:, 0]
+        w13_weight_scale_2 = 1/layer.w13_weight_global_scale[:, 0]
         layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
                                              requires_grad=False)
 
@@ -510,7 +510,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         else:
             w2_input_scale = layer.w2_input_global_scale
 
-        layer.w2_weight_scale_2 = Parameter(layer.w2_weight_global_scale.data,
+        layer.w2_weight_scale_2 = Parameter(1/layer.w2_weight_global_scale.data,
                                             requires_grad=False)
 
         layer.g2_alphas = Parameter(
