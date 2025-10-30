@@ -1339,10 +1339,7 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
         else:
-            # FIXME(Kuntai): This HMA code tries to pass a tuple of list[int]
-            # to the KV connector, but all kv connectors take one list[int]
-            assert len(self.kv_cache_config.kv_cache_groups) == 1
-            return self.connector.request_finished(request, block_ids[0])
+            return self.connector.request_finished_all_groups(request)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
