@@ -1974,9 +1974,10 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
-        self._init_mid_activation_quantizers()
 
-    def _init_mid_activation_quantizers(self) -> None:
+        self.init_mid_activation_quantizers()
+
+    def init_mid_activation_quantizers(self) -> None:
         self.qfp8_mid_group: QuantFP8 | None = None
         self.qfp8_mid_dynamic: QuantFP8 | None = None
         self.qfp8_mid_static: QuantFP8 | None = None
