@@ -172,8 +172,8 @@ class FlashInferBackend(AttentionBackend):
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
         # Note(Chen): FlashInfer backend supports other block_sizes. But as
         # the backend doesn't know the block_size selected, we hardcode it as only
-        # supports 16 for now.
-        return [16]
+        # supports 32 for now.
+        return [32]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -291,7 +291,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        block_size = 16  # Note(Chen): Hardcode the block_size as 16 temporarily.
+        block_size = 32  # Note(Chen): Hardcode the block_size as 16 temporarily.
 
         if vllm_is_batch_invariant():
             self.decode_fixed_split_size = 2048

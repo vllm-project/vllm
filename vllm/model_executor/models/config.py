@@ -380,6 +380,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if model_config.use_mla:
             use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
             kernel_block_alignment_size = 128 if use_cutlass_mla else 64
+        elif envs.VLLM_ATTENTION_BACKEND == "FLASHINFER":
+            kernel_block_alignment_size = 32
         else:
             kernel_block_alignment_size = 16
 
