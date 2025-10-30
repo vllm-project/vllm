@@ -71,4 +71,5 @@ class TestQwen3xmlToolParser(ToolParserTests):
                     "Qwen3XML streaming reconstruction has known issues"
                 ),
             },
+            supports_typed_arguments=False,
         )
