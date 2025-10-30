@@ -49,10 +49,6 @@ def is_deep_gemm_e8m0_used() -> bool:
         logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
 
-    if envs.VLLM_USE_FLASHINFER_MOE_FP8:
-        logger.info_once("DeepGEMM E8M0 disabled: FlashInfer MOE is enabled.")
-        return False
-
     if envs.VLLM_USE_DEEP_GEMM_E8M0:
         logger.info_once("DeepGEMM E8M0 enabled on current platform.")
         return True
@@ -127,7 +123,10 @@ def _lazy_init() -> None:
     _get_mk_alignment_for_contiguous_layout_impl = getattr(
         _dg, "get_mk_alignment_for_contiguous_layout", None
     )
-    _transform_sf_into_required_layout_impl = getattr(_dg, "transform_sf_into_required_layout", None)
+    _transform_sf_into_required_layout_impl = getattr(
+        _dg, "transform_sf_into_required_layout", None
+    )
+
 
 def get_num_sms() -> int:
     _lazy_init()
@@ -181,11 +180,14 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
 
+
 def transform_sf_into_required_layout(*args, **kwargs):
     _lazy_init()
     if _transform_sf_into_required_layout_impl is None:
         return _missing(*args, **kwargs)
-    return _transform_sf_into_required_layout_impl(*args, disable_ue8m0_cast = not is_deep_gemm_e8m0_used(), **kwargs)
+    return _transform_sf_into_required_layout_impl(
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
+    )
 
 
 def fp8_mqa_logits(

@@ -60,13 +60,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    expert_weight_is_col_major,
+    deepgemm_transform_sf_into_required_layout,
     maybe_post_process_fp8_weight_block,
     process_fp8_weight_block_strategy,
     process_fp8_weight_tensor_strategy,
-    requant_weight_ue8m0_inplace,
     validate_fp8_block_shape,
-    deepgemm_transform_sf_into_required_layout,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
@@ -96,7 +94,6 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
-    get_col_major_tma_aligned_tensor,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
@@ -919,15 +916,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
-            if self.allow_deep_gemm and not is_deep_gemm_e8m0_used():
-                if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-                    layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                        layer.w13_weight_scale_inv
+            if self.allow_deep_gemm:
+                layer.w13_weight.data, layer.w13_weight_scale_inv.data = (
+                    deepgemm_transform_sf_into_required_layout(
+                        layer.w13_weight.data,
+                        layer.w13_weight_scale_inv.data,
+                        is_weights=True,
+                        use_e8m0=is_deep_gemm_e8m0_used(),
                     )
-                if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-                    layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-                        layer.w2_weight_scale_inv
+                )
+                layer.w2_weight.data, layer.w2_weight_scale_inv.data = (
+                    deepgemm_transform_sf_into_required_layout(
+                        layer.w2_weight.data,
+                        layer.w2_weight_scale_inv.data,
+                        is_weights=True,
+                        use_e8m0=is_deep_gemm_e8m0_used(),
                     )
+                )
 
         # If checkpoint is fp16, quantize in place.
         elif not self.quant_config.is_checkpoint_fp8_serialized:
@@ -1062,42 +1067,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Activations not quantized for marlin.
             del layer.w13_input_scale
             del layer.w2_input_scale
-
-        # TODO (varun): do this iff block_size matches deepgemm block size
-        if is_deep_gemm_e8m0_used() and self.block_quant:
-            # TODO (varun) : THis is dangerous - what if we use some other experts with this data ??? 
-            layer.w13_weight.data, layer.w13_weight_scale_inv.data = deepgemm_transform_sf_into_required_layout(layer.w13_weight.data,
-                                                                                        layer.w13_weight_scale_inv.data,
-                                                                                        is_weights = True)
-            layer.w2_weight.data, layer.w2_weight_scale_inv.data = deepgemm_transform_sf_into_required_layout(layer.w2_weight.data,
-                                                                                        layer.w2_weight_scale_inv.data,
-                                                                                        is_weights = True)
-
-        #if is_deep_gemm_e8m0_used() and self.block_quant:
-        #    assert layer.weight_block_size is not None
-        #    # Re-quantise the expert weights so their scales are UE8M0.
-        #    block_sz = tuple(layer.weight_block_size)
-        #    requant_weight_ue8m0_inplace(
-        #        layer.w13_weight.data,
-        #        layer.w13_weight_scale_inv.data,
-        #        block_sz,
-        #    )
-        #    requant_weight_ue8m0_inplace(
-        #        layer.w2_weight.data,
-        #        layer.w2_weight_scale_inv.data,
-        #        block_sz,
-        #    )
-
-        #    # Ensure column-major TMA alignment expected by DeepGEMM.
-        #    if expert_weight_is_col_major(layer.w13_weight_scale_inv):
-        #        layer.w13_weight_scale_inv = get_col_major_tma_aligned_tensor(
-        #            layer.w13_weight_scale_inv
-        #        )
-        #    if expert_weight_is_col_major(layer.w2_weight_scale_inv):
-        #        layer.w2_weight_scale_inv = get_col_major_tma_aligned_tensor(
-        #            layer.w2_weight_scale_ine
-        #        )
-
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
