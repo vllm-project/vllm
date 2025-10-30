@@ -518,6 +518,7 @@ def sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
+    fp8_dtype = current_platform.fp8_dtype()
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         return sparse_attn_indexer_fake(
@@ -557,7 +558,7 @@ def sparse_attn_indexer(
             k_fp8 = torch.empty(
                 [chunk.total_seq_lens, head_dim],
                 device=k.device,
-                dtype=torch.float8_e4m3fn,
+                dtype=fp8_dtype,
             )
             k_scale = torch.empty(
                 [chunk.total_seq_lens, 4],
@@ -571,7 +572,12 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-            logits = fp8_mqa_logits(
+            fp8_mqa_logits_func = fp8_mqa_logits
+            if current_platform.is_rocm():
+                from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
+
+                fp8_mqa_logits_func = rocm_fp8_mqa_logits
+            logits = fp8_mqa_logits_func(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
                 weights[chunk.token_start : chunk.token_end],
@@ -616,7 +622,14 @@ def sparse_attn_indexer(
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
-        logits = fp8_paged_mqa_logits(
+        fp8_paged_mqa_logits_func = fp8_paged_mqa_logits
+        if current_platform.is_rocm():
+            from vllm.attention.ops.rocm_aiter_mla_sparse import (
+                rocm_fp8_paged_mqa_logits,
+            )
+
+            fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
+        logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
             weights[:num_padded_tokens],
@@ -785,15 +798,7 @@ class Indexer(nn.Module):
         )
         weights = weights.squeeze(-1)
 
-        sparse_attn_indexer_func = torch.ops.vllm.sparse_attn_indexer
-        if current_platform.is_rocm():
-            from vllm.attention.ops.rocm_aiter_mla_sparse import (
-                rocm_sparse_attn_indexer,
-            )
-
-            sparse_attn_indexer_func = rocm_sparse_attn_indexer
-
-        return sparse_attn_indexer_func(
+        return torch.ops.vllm.sparse_attn_indexer(
             hidden_states,
             self.k_cache.prefix,
             self.k_cache.kv_cache[0],
