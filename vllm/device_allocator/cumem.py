@@ -18,6 +18,7 @@ from typing import Any
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
@@ -215,6 +216,16 @@ class CuMemAllocator:
             offload_tags = (offload_tags,)
 
         assert isinstance(offload_tags, tuple)
+
+        if current_platform.is_rocm() and not (
+            len(offload_tags) == 1 and offload_tags[0] == "weights"
+        ):
+            logger.warning(
+                "Only sleep mode Level 1 is fully tested on ROCm platforms, "
+                "there might be memory leak issues for other sleep modes, "
+                "use with caution!"
+            )
+            # TODO: remove this warning after this has been addressed.
 
         total_bytes = 0
         backup_bytes = 0
