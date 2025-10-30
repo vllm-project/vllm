@@ -326,11 +326,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     SRCS "${VLLM_EXT_SRC}"
     CUDA_ARCHS "${CUDA_ARCHS}")
 
-  # Only build Marlin kernels if we are building for at least some compatible archs.
-  # Keep building Marlin for 9.0 as there are some group sizes and shapes that
-  # are not supported by Machete yet.
-  # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  # ------------------------------------------------------------------------------
+  # Configure Marlin kernel build targets
+  #
+  # Marlin provides optimized FP16/BF16/AWQ GEMM kernels for various CUDA archs.
+  # We enable builds for architectures that are both supported by CUDA and
+  # compatible with the target GPU(s).
+  #
+  # Notes:
+  # - 8.0 / 8.7 : Ampere (e.g., A100, A30, A40)
+  # - 8.9       : Ada (e.g., RTX 4090, L40, L40S)
+  # - 9.0+PTX   : Hopper and future architectures (for bf16 atomicAdd)
+  # ------------------------------------------------------------------------------
+
+  cuda_archs_loose_intersection(
+    MARLIN_ARCHS
+    "8.0;8.7;8.9;9.0+PTX"
+    "${CUDA_ARCHS}"
+  )
   if (MARLIN_ARCHS)
 
     #
@@ -913,8 +926,18 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     CUDA_ARCHS "${CUDA_ARCHS}")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
-  # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  # ------------------------------------------------------------------------------
+  # Configure Marlin-MoE kernel build targets
+  #
+  # MoE variant requires similar architectural support as base Marlin.
+  # Keep 9.0+PTX enabled for the latest bf16 atomicAdd PTX instructions.
+  # ------------------------------------------------------------------------------
+
+  cuda_archs_loose_intersection(
+    MARLIN_MOE_ARCHS
+    "8.0;8.7;8.9;9.0+PTX"
+    "${CUDA_ARCHS}"
+  )
   if (MARLIN_MOE_ARCHS)
 
     #
