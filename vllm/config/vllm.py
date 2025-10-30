@@ -130,7 +130,6 @@ class VllmConfig:
         from vllm import __version__
 
         vllm_factors.append(__version__)
-        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -306,7 +305,6 @@ class VllmConfig:
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
-            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
         if self.quant_config is None and self.model_config is not None:
@@ -332,18 +330,9 @@ class VllmConfig:
         # we use the default mode. The default mode depends on other
         # settings (see the below code).
         if self.compilation_config.mode is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
-                else:
-                    self.compilation_config.mode = CompilationMode.NONE
-
+            if self.model_config is not None and not self.model_config.enforce_eager:
+                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
-                # NB: Passing both --enforce-eager and a compilation mode
-                # in V0 means the compilation mode wins out.
                 self.compilation_config.mode = CompilationMode.NONE
         else:
             assert self.compilation_config.mode >= CompilationMode.NONE
@@ -371,10 +360,7 @@ class VllmConfig:
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
-                if (
-                    envs.VLLM_USE_V1
-                    and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                ):
+                if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_AND_PIECEWISE
@@ -428,7 +414,7 @@ class VllmConfig:
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0
                 self.compilation_config.cudagraph_capture_sizes = []
-            elif envs.VLLM_USE_V1:
+            else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
@@ -535,14 +521,11 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # Do this after all the updates to compilation_config.mode
-        if (
-            envs.VLLM_USE_V1
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-        ):
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
 
         # final check of cudagraph mode after all possible updates
-        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike():
             if (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
@@ -587,10 +570,7 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if (
-            envs.VLLM_USE_V1
-            and not self.scheduler_config.disable_hybrid_kv_cache_manager
-        ):
+        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
