@@ -326,7 +326,7 @@ class OpenAIServing:
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
-        trace_headers: Optional[Mapping[str, str]] = None,
+        trace_headers: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         beam_width = params.beam_width
         max_tokens = params.max_tokens
