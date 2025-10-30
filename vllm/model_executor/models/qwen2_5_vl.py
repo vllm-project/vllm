@@ -431,7 +431,6 @@ class Qwen2_5_VisionAttention(nn.Module):
                 cu_seqlens,
                 max_seqlen,
                 batch_size,
-                self.attn_backend == _Backend.FLASH_ATTN,
                 self.use_upstream_fa,
             )
         elif self.attn_backend == _Backend.TORCH_SDPA:

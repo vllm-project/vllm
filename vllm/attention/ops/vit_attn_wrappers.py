@@ -68,7 +68,6 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
-    is_rocm_aiter: bool,
     use_upstream_fa: bool,
 ) -> torch.Tensor:
     if (
@@ -108,7 +107,6 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
-    is_rocm_aiter: bool,
     use_upstream_fa: bool,
 ) -> torch.Tensor:
     b, s, h, d = q.shape
@@ -129,9 +127,8 @@ def vit_flash_attn_wrapper(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
-    is_rocm_aiter: bool,
     use_upstream_fa: bool,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter, use_upstream_fa
+        q, k, v, cu_seqlens, max_seqlen, batch_size, use_upstream_fa
     )
