@@ -108,4 +108,5 @@ class TestStep3ToolParser(ToolParserTests):
                     "doesn't match non-streaming"
                 ),
             },
+            supports_typed_arguments=False,
         )

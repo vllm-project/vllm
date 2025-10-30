@@ -3,6 +3,7 @@
 
 import json
 from dataclasses import dataclass, field
+from types import NoneType
 from typing import Any
 
 import pytest
@@ -47,6 +48,7 @@ class ToolParserTestConfig:
 
         Special flags:
         allow_empty_or_json_empty_args: True if "" or "{}" both valid for empty args
+        supports_typed_arguments: True if the parser supports typed function arguments
     """
 
     # Parser identification
@@ -82,6 +84,7 @@ class ToolParserTestConfig:
 
     # Special assertions for edge cases
     allow_empty_or_json_empty_args: bool = True  # "{}" or "" for empty args
+    supports_typed_arguments: bool = True
 
 
 class ToolParserTests:
@@ -232,19 +235,25 @@ class ToolParserTests:
 
         args = json.loads(tool_calls[0].function.arguments)
         # Verify all expected fields present
-        required_fields = [
-            "string_field",
-            "int_field",
-            "float_field",
-            "bool_field",
-            "null_field",
-            "array_field",
-            "object_field",
-        ]
-        for required_field in required_fields:
+        required_fields_types = {
+            "string_field": str,
+            "int_field": int,
+            "float_field": float,
+            "bool_field": bool,
+            "null_field": NoneType,
+            "array_field": list,
+            "object_field": dict,
+        }
+        for required_field, expected_type in required_fields_types.items():
             assert required_field in args, (
                 f"Expected field '{required_field}' in arguments"
             )
+            if test_config.supports_typed_arguments:
+                found_type = type(args[required_field])
+                assert found_type is expected_type, (
+                    f"Expected field '{required_field}' to have type {expected_type}, "
+                    f"got {found_type}"
+                )
 
     def test_empty_arguments(
         self,
