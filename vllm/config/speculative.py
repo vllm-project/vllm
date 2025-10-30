@@ -39,6 +39,7 @@ SpeculativeMethod = Literal[
     "deepseek_mtp",
     "ernie_mtp",
     "qwen3_next_mtp",
+    "nemotron_h_mtp",
     "mimo_mtp",
     "longcat_flash_mtp",
     "pangu_ultra_moe_mtp",
@@ -50,6 +51,7 @@ MTP_MODEL_TYPES = (
     "mimo_mtp",
     "glm4_moe_mtp",
     "ernie_mtp",
+    "nemotron_h_mtp",
     "qwen3_next_mtp",
     "longcat_flash_mtp",
     "pangu_ultra_moe_mtp",
@@ -217,6 +219,16 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
+            )
+        
+        if hf_config.model_type == "nemotron_h":
+            # Check if this is an MTP variant
+            if hasattr(hf_config, "num_nextn_predict_layers") and hf_config.num_nextn_predict_layers > 0:
+                hf_config.model_type = "nemotron_h_mtp"
+        if hf_config.model_type == "nemotron_h_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
             )
 
         if hf_config.model_type == "qwen3_next":

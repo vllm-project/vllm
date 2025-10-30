@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from torch._tensor import Tensor
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -469,6 +470,31 @@ class MambaMixer2(MambaBase, CustomOp):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+        
+        # Pre-allocate temporary cache for speculative decoding checkpointing
+        # Shape: [num_spec_tokens, num_heads // tp_size, head_dim, ssm_state_size]
+        vllm_config = get_current_vllm_config()
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is not None and speculative_config.num_speculative_tokens is not None:
+            num_spec = speculative_config.num_speculative_tokens
+            # Allocate temp cache for checkpointing during speculation
+            # We'll move it to the correct device after the model is loaded
+            self.spec_temp_cache = torch.zeros(
+                num_spec + 1,
+                num_heads // self.tp_size,
+                head_dim,
+                ssm_state_size,
+                dtype=torch.float32,  # Will be cast to correct dtype in forward
+            )
+            
+        else:
+            self.spec_temp_cache = None
+        
+        self.num_spec = (
+            speculative_config.num_speculative_tokens
+            if speculative_config is not None and speculative_config.num_speculative_tokens is not None
+            else 0
+        )
 
     def forward_native(
         self,
@@ -503,10 +529,15 @@ class MambaMixer2(MambaBase, CustomOp):
         # modes; they are computed at top-level model forward since they
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
+    
 
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         prefix_caching_enabled = self.cache_config.enable_prefix_caching
+    
+        # TODO SMOR- remove as you progress
+        assert prefix_caching_enabled is False, "Prefix caching is not supported for spec decode"
+
         if attn_metadata is not None:
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
@@ -515,7 +546,7 @@ class MambaMixer2(MambaBase, CustomOp):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor = attn_metadata.state_indices_tensor  # Used for prefill only
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -523,7 +554,18 @@ class MambaMixer2(MambaBase, CustomOp):
             query_start_loc_p = attn_metadata.query_start_loc_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
-
+            
+            spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor
+            non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor
+            num_accepted_tokens = attn_metadata.num_accepted_tokens
+            spec_sequence_masks = attn_metadata.spec_sequence_masks
+            spec_query_start_loc = attn_metadata.spec_query_start_loc
+            non_spec_query_start_loc = attn_metadata.non_spec_query_start_loc
+            num_spec_decodes = attn_metadata.num_spec_decodes
+            num_decodes = attn_metadata.num_decode_tokens  # token count (non-spec only!)
+            num_spec_decode_tokens = attn_metadata.num_spec_decode_tokens
+            num_non_spec_decode_tokens = num_decodes  # num_decodes already excludes spec tokens!
+            
         # 1. Gated MLP's linear projection
         projected_states, _ = self.in_proj(hidden_states)
 
@@ -567,30 +609,33 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         num_prefills = attn_metadata.num_prefills  # request count
-        num_decodes = attn_metadata.num_decode_tokens  # token count (=request)
         num_prefill_tokens = attn_metadata.num_prefill_tokens  # token count
         has_prefill = num_prefills > 0
-        has_decode = num_decodes > 0
-        num_actual_tokens = num_prefill_tokens + num_decodes
+        has_decode = (num_decodes > 0) or (num_spec_decode_tokens > 0)
+        # Include spec decode tokens in total count
+        num_actual_tokens = num_prefill_tokens + num_decodes + num_spec_decode_tokens
 
         # Separate prefill and decode by splitting varlen input
         # Split along token dimension
+        # Note: total_decode_tokens includes both spec and non-spec decode tokens
+        total_decode_tokens = num_decodes + num_spec_decode_tokens
+        
         hidden_states_B_C_d, hidden_states_B_C_p = torch.split(
             hidden_states_B_C[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            [total_decode_tokens, num_prefill_tokens],
             dim=0,
         )
         dt_d, dt_p = torch.split(
             dt[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
+            [total_decode_tokens, num_prefill_tokens],
             dim=0,
         )
-        # Split along batch dimension
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor[:num_actual_tokens],
-            [num_decodes, num_prefills],
-            dim=0,
-        )
+        state_indices_tensor_d = None  # Not used - we use spec/non-spec variants
+        if num_prefills > 0:
+            # Prefill uses legacy state_indices_tensor (already correctly shaped)
+            state_indices_tensor_p = state_indices_tensor
+        else:
+            state_indices_tensor_p = None
 
         if prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
@@ -626,7 +671,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # and decode outputs
         preallocated_ssm_out = torch.empty(
             [
-                num_prefill_tokens + num_decodes,
+                num_actual_tokens,
                 (self.num_heads // self.tp_size) * self.head_dim,
             ],
             dtype=hidden_states.dtype,
@@ -634,10 +679,9 @@ class MambaMixer2(MambaBase, CustomOp):
         )
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
             preallocated_ssm_out,
-            [num_decodes, num_prefill_tokens],
+            [total_decode_tokens, num_prefill_tokens],
             dim=0,
         )
-
         # Process prefill requests
         if has_prefill:
             # 2. Convolution sequence transformation
@@ -784,7 +828,6 @@ class MambaMixer2(MambaBase, CustomOp):
                         1, block_idx_last_scheduled_token_p.unsqueeze(1)
                     ).squeeze(1)
                 ] = varlen_states[last_chunk_indices_p]
-
             else:
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
@@ -807,59 +850,192 @@ class MambaMixer2(MambaBase, CustomOp):
                 #   block_idx_first_scheduled_token_d >
                 #       block_idx_last_computed_token_d
             else:
-                # Without caching, read and write in-place to the same blocks:
-                state_indices_tensor_d_input = state_indices_tensor_d
-                state_indices_tensor_d_output = state_indices_tensor_d
+                # Without caactivation=ching, read and write in-place to the same blocks:
+                # state_indices_tensor_d_input = state_indices_tensor_d
+                # state_indices_tensor_d_output = state_indices_tensor_d
+                
+                has_spec_decode = spec_sequence_masks is not None and spec_sequence_masks.any() # should be revisit towards cuda graph support
+                
+                # Prepare SSM parameters (shared by all decode paths)
+                n_groups = self.n_groups // self.tp_size
+                A_d = (
+                    self.A[:, None, ...][:, :, None]
+                    .expand(-1, self.head_dim, self.ssm_state_size)
+                    .to(dtype=torch.float32)
+                )
+                dt_bias_expanded = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
+                D_d = self.D[:, None, ...].expand(-1, self.head_dim)
 
-            # 2. Convolution sequence transformation
-            hidden_states_B_C_d = causal_conv1d_update(
-                hidden_states_B_C_d,
-                conv_state,
-                conv_weights,
-                self.conv1d.bias,
-                self.activation,
-                conv_state_indices=state_indices_tensor_d,
-                block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
-                initial_state_idx=block_idx_last_computed_token_d,
-            )
+                if has_spec_decode:
+                    if num_spec_decode_tokens > 0:
+                        hidden_states_B_C_d_spec = hidden_states_B_C_d[:num_spec_decode_tokens]
+                        dt_d_spec = dt_d[:num_spec_decode_tokens]
+                        preallocated_ssm_out_d_spec = preallocated_ssm_out_d[:num_spec_decode_tokens]
+                        
+                        if num_spec_decodes > 1:
+                            max_spec_len = int((spec_query_start_loc[1:] - spec_query_start_loc[:-1]).max().item())
+                        else:
+                            max_spec_len = int(spec_query_start_loc[-1].item())
+                        # 2a. Convolution with spec decode support
+                        hidden_states_B_C_d_spec = causal_conv1d_update(
+                            hidden_states_B_C_d_spec,
+                            conv_state,
+                            conv_weights,
+                            self.conv1d.bias,
+                            self.activation,
+                            conv_state_indices=spec_state_indices_tensor[:, 0][:num_spec_decodes],
+                            num_accepted_tokens=num_accepted_tokens,
+                            query_start_loc=spec_query_start_loc,
+                            max_query_len=max_spec_len,
+                            validate_data=False,
+                        )
+                        hidden_states_d_spec, B_d_spec, C_d_spec = split_hidden_states_B_C_fn(hidden_states_B_C_d_spec)
+                        
+                        # 3a. SSM with spec decode support
+                        dt_d_spec = dt_d_spec[:, :, None].expand(-1, -1, self.head_dim)
+                        B_d_spec = B_d_spec.view(-1, n_groups, B_d_spec.shape[1] // n_groups)
+                        C_d_spec = C_d_spec.view(-1, n_groups, C_d_spec.shape[1] // n_groups)
+                        hidden_states_d_spec = hidden_states_d_spec.view(
+                            -1, self.num_heads // self.tp_size, self.head_dim
+                        )
 
-            hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(hidden_states_B_C_d)
+                        state_slots = spec_state_indices_tensor[0]
+                        
+                        init_checkpoint_idx = 0 if (num_accepted_tokens is None or num_accepted_tokens[0] <= 1) else (num_accepted_tokens[0].item() - 1)
+                        init_slot = state_slots[init_checkpoint_idx].item()
+                        
+                        # Ensure temp cache is on correct device and dtype
+                        if self.spec_temp_cache.device != ssm_state.device:
+                            self.spec_temp_cache = torch.zeros(
+                                self.spec_temp_cache.shape[0],
+                                self.num_heads // self.tp_size,
+                                self.head_dim,
+                                self.ssm_state_size,
+                                dtype=ssm_state.dtype,
+                                device=ssm_state.device,
+                            )
+                            print(f"SMOR: Moved spec_temp_cache to {ssm_state.device} with shape {self.spec_temp_cache.shape}")
+                        
+                        self.spec_temp_cache[0] = ssm_state[init_slot].clone()
+                        temp_cache_working_slot = self.spec_temp_cache[0:1]
+                        for token_idx in range(num_spec_decode_tokens):
+                            selective_state_update(
+                                temp_cache_working_slot,  # [1, num_heads, head_dim, dstate]
+                                hidden_states_d_spec[token_idx:token_idx+1],
+                                dt_d_spec[token_idx:token_idx+1],
+                                A_d,
+                                B_d_spec[token_idx:token_idx+1],
+                                C_d_spec[token_idx:token_idx+1],
+                                D_d,
+                                z=None,
+                                dt_bias=dt_bias_expanded,
+                                dt_softplus=True,
+                                state_batch_indices=torch.tensor([0], dtype=torch.int32, device=ssm_state.device),  # FIXED: Use 0 for single-slot cache
+                                dst_state_batch_indices=torch.tensor([0], dtype=torch.int32, device=ssm_state.device),  # FIXED: Use 0 for single-slot cache
+                                out=preallocated_ssm_out_d_spec[token_idx:token_idx+1].view(1, -1, self.head_dim),
+                            )
+                            
+                            if token_idx + 1 < self.spec_temp_cache.shape[0]:
+                                self.spec_temp_cache[token_idx + 1] = temp_cache_working_slot[0].clone()
+                        num_checkpoints_to_save = min(
+                            num_accepted_tokens[0].item() if num_accepted_tokens is not None else 1,
+                            len(state_slots)
+                        )
+                        for checkpoint_idx in range(num_checkpoints_to_save):
+                            checkpoint_slot = state_slots[checkpoint_idx].item()
+                            ssm_state[checkpoint_slot] = self.spec_temp_cache[checkpoint_idx + 1].clone()
+                        
+                    if num_non_spec_decode_tokens > 0:
+                        print(f"SMOR, should have happened???")
+                        raise ValueError("SMOR, should have happened???")
+                        # Extract non-spec inputs
+                        hidden_states_B_C_d_non_spec = hidden_states_B_C_d[num_spec_decode_tokens:]
+                        dt_d_non_spec = dt_d[num_spec_decode_tokens:]
+                        preallocated_ssm_out_d_non_spec = preallocated_ssm_out_d[num_spec_decode_tokens:]
+                        
+                        # 2b. Convolution (regular decode)
+                        # TODO smor- need to be adjusted
+                        hidden_states_B_C_d_non_spec = causal_conv1d_update(
+                            hidden_states_B_C_d_non_spec,
+                            conv_state,
+                            conv_weights,
+                            self.conv1d.bias,
+                            self.activation,
+                            conv_state_indices=non_spec_state_indices_tensor,
+                        )
+                        
+                        hidden_states_d_non_spec, B_d_non_spec, C_d_non_spec = split_hidden_states_B_C_fn(hidden_states_B_C_d_non_spec)
+                        
+                        # 3b. SSM (regular decode)
+                        dt_d_non_spec = dt_d_non_spec[:, :, None].expand(-1, -1, self.head_dim)
+                        B_d_non_spec = B_d_non_spec.view(-1, n_groups, B_d_non_spec.shape[1] // n_groups)
+                        C_d_non_spec = C_d_non_spec.view(-1, n_groups, C_d_non_spec.shape[1] // n_groups)
+                        hidden_states_d_non_spec = hidden_states_d_non_spec.view(
+                            -1, self.num_heads // self.tp_size, self.head_dim
+                        )
+                        
+                        selective_state_update(
+                            ssm_state,
+                            hidden_states_d_non_spec,
+                            dt_d_non_spec,
+                            A_d,
+                            B_d_non_spec,
+                            C_d_non_spec,
+                            D_d,
+                            z=None,
+                            dt_bias=dt_bias_expanded,
+                            dt_softplus=True,
+                            state_batch_indices=non_spec_state_indices_tensor,
+                            dst_state_batch_indices=non_spec_state_indices_tensor,
+                            out=preallocated_ssm_out_d_non_spec.view(num_non_spec_decode_tokens, -1, self.head_dim),
+                        )
+                else:
+                    # ========== NO SPEC DECODE PATH ==========
+                    # Use non_spec_state_indices_tensor from metadata (1D, consecutive)
+                    # NOT state_indices_tensor_d which might be 2D!
+                    state_indices_tensor_d_input = non_spec_state_indices_tensor
+                    state_indices_tensor_d_output = non_spec_state_indices_tensor
+                    # 2. Convolution sequence transformation                            
+                    hidden_states_B_C_d: Tensor = causal_conv1d_update(
+                        hidden_states_B_C_d,
+                        conv_state,
+                        conv_weights,
+                        self.conv1d.bias,
+                        self.activation,
+                        conv_state_indices=non_spec_state_indices_tensor,
+                        block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                        initial_state_idx=block_idx_last_computed_token_d,
+                    )
 
-            # 3. State Space Model sequence transformation
-            n_groups = self.n_groups // self.tp_size
-            A_d = (
-                self.A[:, None, ...][:, :, None]
-                .expand(-1, self.head_dim, self.ssm_state_size)
-                .to(dtype=torch.float32)
-            )
-            dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
-            dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
-            D_d = self.D[:, None, ...].expand(-1, self.head_dim)
-            B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
-            C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
-            hidden_states_d = hidden_states_d.view(
-                -1, self.num_heads // self.tp_size, self.head_dim
-            )
+                    hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(hidden_states_B_C_d)
 
-            # - the hidden is reshaped into (bs, num_heads, head_dim)
-            # - mamba_cache_params.ssm_state's slots will be selected
-            #   using state_indices_tensor_d
-            # NOTE: final output is an in-place update of out tensor
-            selective_state_update(
-                ssm_state,
-                hidden_states_d,
-                dt_d,
-                A_d,
-                B_d,
-                C_d,
-                D_d,
-                z=None,
-                dt_bias=dt_bias,
-                dt_softplus=True,
-                state_batch_indices=state_indices_tensor_d_input,
-                dst_state_batch_indices=state_indices_tensor_d_output,
-                out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
-            )
+                    # 3. State Space Model sequence transformation
+                    dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
+                    B_d = B_d.view(-1, n_groups, B_d.shape[1] // n_groups)
+                    C_d = C_d.view(-1, n_groups, C_d.shape[1] // n_groups)
+                    hidden_states_d = hidden_states_d.view(
+                        -1, self.num_heads // self.tp_size, self.head_dim
+                    )
+
+                    # - the hidden is reshaped into (bs, num_heads, head_dim)
+                    # - mamba_cache_params.ssm_state's slots will be selected
+                    #   using state_indices_tensor_d
+                    # NOTE: final output is an in-place update of out tensor
+                    selective_state_update(
+                        ssm_state,
+                        hidden_states_d,
+                        dt_d,
+                        A_d,
+                        B_d,
+                        C_d,
+                        D_d,
+                        z=None,
+                        dt_bias=dt_bias_expanded,
+                        dt_softplus=True,
+                        state_batch_indices=state_indices_tensor_d_input,
+                        dst_state_batch_indices=state_indices_tensor_d_output,
+                        out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                    )
 
         # 4. gated MLP
         # GatedRMSNorm internally applying SiLU to the gate
@@ -888,6 +1064,7 @@ class MambaMixer2(MambaBase, CustomOp):
             head_dim=self.head_dim,
             state_size=self.ssm_state_size,
             conv_kernel=self.conv_kernel_size,
+            num_spec=self.num_spec,
         )
 
     @property
