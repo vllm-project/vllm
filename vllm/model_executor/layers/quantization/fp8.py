@@ -1090,7 +1090,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
-            BatchedTritonOrDeepGemmExperts,
+            BatchedDeepGemmExperts,
+            BatchedTritonExperts,
             TritonOrDeepGemmExperts,
         )
 
@@ -1106,20 +1107,24 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
             assert max_num_tokens_per_rank is not None
+
+            experts_impl = (
+                BatchedDeepGemmExperts if self.allow_deep_gemm else BatchedTritonExperts
+            )
             logger.debug(
-                "BatchedTritonOrDeepGemmExperts(%s): "
-                "max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
+                "%s(%s): max_tokens_per_rank=%s, block_size=%s, per_act_token=%s",
+                experts_impl.__class__.__name__,
                 self.__class__.__name__,
                 max_num_tokens_per_rank,
                 self.weight_block_size,
                 False,
             )
-            return BatchedTritonOrDeepGemmExperts(
+            return experts_impl(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
-                allow_deep_gemm=self.allow_deep_gemm,
             )
+
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             experts = select_cutlass_fp8_gemm_impl(
                 self.moe,

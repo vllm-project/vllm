@@ -231,6 +231,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         super().__init__(quant_config)
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
+        assert self.quant_config.use_fp8_w8a8
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -249,7 +250,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
-    def supports_packed_ue8m0_activation_scales(self) -> bool:
+    def supports_packed_ue8m0_act_scales(self) -> bool:
         """
         DeepGemm supports packed ue8m0 activation scales format in devices >= sm100
         """

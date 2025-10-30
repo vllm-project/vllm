@@ -107,7 +107,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def setup_packed_ue8m0_scales_dispatch(self) -> None:
         if self.use_fp8_dispatch:
-            self.use_ue8m0_dispatch = True
+            logger.debug_once(
+                "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch"
+            )
+            self.use_ue8m0 = True
         else:
             logger.warning_once(
                 "Ignoring request to dispatch activation scales in a packed "
@@ -228,8 +231,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_experts,
             use_fp8=self.use_fp8_dispatch,
             # round_scale needs to be set to dispatch in ue8m0
-            round_scale=self.use_ue8m0_dispatch,
-            use_ue8m0=self.use_ue8m0_dispatch,
+            round_scale=self.use_ue8m0,
+            use_ue8m0=self.use_ue8m0,
             async_finish=False,
             return_recv_hook=True,
         )
