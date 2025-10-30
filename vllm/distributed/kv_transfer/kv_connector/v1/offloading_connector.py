@@ -494,5 +494,5 @@ def yield_req_data(
     yield from zip(
         cached_reqs.req_ids,
         cached_reqs.new_block_ids,
-        cached_reqs.resumed_from_preemption,
+        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
     )
