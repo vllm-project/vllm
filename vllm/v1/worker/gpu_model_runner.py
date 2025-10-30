@@ -4157,7 +4157,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self, kv_manager_block_size: int, attn_groups: list[AttentionGroup]
     ) -> int:
         """
-        Select a block size that is supported by all backends and is divisible by
+        Select a block size that is supported by all backends and is a factor of
         kv_manager_block_size.
 
         If kv_manager_block_size is supported by all backends, return it directly.
@@ -4202,12 +4202,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if block_size_is_supported(backends, kv_manager_block_size):
             return kv_manager_block_size
 
-        # Case 2: otherwise, the block_size must be a `int`-format supported size of
-        # at lease one backend. Iterate over all `int`-format supported sizes in
+        # Case 2: otherwise, the block_size must be an `int`-format supported size of
+        # at least one backend. Iterate over all `int`-format supported sizes in
         # descending order and return the first one that is supported by all backends.
         # Simple proof:
         # If the supported size b is in MultipleOf(x_i) format for all attention
-        # backends i, and b is divisible by kv_manager_block_size, then
+        # backends i, and b a factor of kv_manager_block_size, then
         # kv_manager_block_size also satisfies MultipleOf(x_i) for all i. We will
         # return kv_manager_block_size in case 1.
         all_int_supported_sizes = set(
@@ -4232,7 +4232,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Args:
             kv_cache_config: The KV cache configuration.
-            kernel_block_sizes: The kernel block sizes for each attention backend.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size
@@ -4368,7 +4368,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_cache_config: The KV cache config
             kv_cache_raw_tensors: The KV cache buffer of each layer, with
                 correct size but uninitialized shape.
-            kernel_block_sizes: The kernel block sizes for attention backends.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
@@ -4494,7 +4494,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Args:
             kv_cache_config: The KV cache config
-            kernel_block_sizes: The kernel block sizes for each attention backend.
+            kernel_block_sizes: The kernel block sizes for each KV cache group.
 
         Returns:
             Dict[str, torch.Tensor]: A map between layer names to their
@@ -4563,9 +4563,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
         self.initialize_attn_backend(kv_cache_config)
-        # The block size of attention backends. For example, if kv_cache_manager uses
-        # block_size 256, but attention backends only supports block_size 64, we will
-        # return kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
+        # The kernel block size for all KV cache groups. For example, if
+        # kv_cache_manager uses block_size 256 for a given group, but the attention
+        # backends for that group only supports block_size 64, we will return
+        # kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
         # tokens each.
         kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
         # Reinitialize need to after initialize_attn_backend
