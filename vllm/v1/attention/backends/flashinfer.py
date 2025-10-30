@@ -156,6 +156,12 @@ def trtllm_prefill_attn_kvfp8_dequant(
     return mock_kv_cache, mock_block_table
 
 
+# Note(Chen): FlashInfer backend supports other block_sizes. But as
+# the backend doesn't know the block_size selected, we hardcode it as only
+# supports 32 for now.
+FLASH_INFER_BLOCK_SIZE = 32
+
+
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
@@ -170,10 +176,7 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        # Note(Chen): FlashInfer backend supports other block_sizes. But as
-        # the backend doesn't know the block_size selected, we hardcode it as only
-        # supports 32 for now.
-        return [32]
+        return [FLASH_INFER_BLOCK_SIZE]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -291,7 +294,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        block_size = 32  # Note(Chen): Hardcode the block_size as 32 temporarily.
+        block_size = FLASH_INFER_BLOCK_SIZE  # Note(Chen): temporary hardcode for now.
 
         if vllm_is_batch_invariant():
             self.decode_fixed_split_size = 2048
