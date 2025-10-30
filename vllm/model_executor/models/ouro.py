@@ -25,8 +25,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Ouro model compatible with HuggingFace weights."""
+
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any
 
 import torch
 from torch import nn
@@ -40,27 +41,37 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
-                    is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
 
 class OuroMLP(nn.Module):
-
     def __init__(
         self,
         hidden_size: int,
@@ -85,8 +96,9 @@ class OuroMLP(nn.Module):
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
+            raise ValueError(
+                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
+            )
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -97,7 +109,6 @@ class OuroMLP(nn.Module):
 
 
 class OuroAttention(nn.Module):
-
     def __init__(
         self,
         config: PretrainedConfig,
@@ -138,7 +149,7 @@ class OuroAttention(nn.Module):
 
         # Get total_ut_steps from config, default to 4 if not specified
         total_ut_steps = getattr(config, "total_ut_steps", 4)
-        
+
         # Use total number of hidden layers instead of hardcoded 24
         total_layers = config.num_hidden_layers
 
@@ -171,25 +182,30 @@ class OuroAttention(nn.Module):
         for ut_step in range(total_ut_steps):
             base_layer_idx = extract_layer_index(prefix)
             unique_layer_idx = ut_step * total_layers + base_layer_idx
-            #print(unique_layer_idx)
+            # print(unique_layer_idx)
 
-            unique_prefix = prefix.replace(f"layers.{base_layer_idx}", 
-                                   f"layers.{unique_layer_idx}")
-                                   
-            self.attn.append(Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                num_kv_heads=self.num_kv_heads,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                attn_type=attn_type,
-                prefix=f"{unique_prefix}.attn",
-                **{
-                    "layer_idx": unique_layer_idx,
-                    "dual_chunk_attention_config": dual_chunk_attention_config,
-                } if dual_chunk_attention_config else {}))
-            
+            unique_prefix = prefix.replace(
+                f"layers.{base_layer_idx}", f"layers.{unique_layer_idx}"
+            )
+
+            self.attn.append(
+                Attention(
+                    self.num_heads,
+                    self.head_dim,
+                    self.scaling,
+                    num_kv_heads=self.num_kv_heads,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    attn_type=attn_type,
+                    prefix=f"{unique_prefix}.attn",
+                    **{
+                        "layer_idx": unique_layer_idx,
+                        "dual_chunk_attention_config": dual_chunk_attention_config,
+                    }
+                    if dual_chunk_attention_config
+                    else {},
+                )
+            )
 
     def forward(
         self,
@@ -209,8 +225,8 @@ class OuroDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -218,9 +234,9 @@ class OuroDecoderLayer(nn.Module):
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
-        dual_chunk_attention_config = getattr(config,
-                                              "dual_chunk_attention_config",
-                                              None)
+        dual_chunk_attention_config = getattr(
+            config, "dual_chunk_attention_config", None
+        )
 
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
@@ -248,15 +264,15 @@ class OuroDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        self.input_layernorm_2 = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps)
-        
-        self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
-        self.post_attention_layernorm_2 = RMSNorm(config.hidden_size,
-                                                eps=config.rms_norm_eps)
+        self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm_2 = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_attention_layernorm_2 = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -265,13 +281,10 @@ class OuroDecoderLayer(nn.Module):
         current_ut: int,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            current_ut=current_ut
+            positions=positions, hidden_states=hidden_states, current_ut=current_ut
         )
         hidden_states = self.input_layernorm_2(hidden_states)
 
@@ -281,7 +294,7 @@ class OuroDecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.post_attention_layernorm_2(hidden_states)
         hidden_states = residual + hidden_states
-        
+
         return hidden_states, None
 
 
@@ -291,14 +304,16 @@ class OuroDecoderLayer(nn.Module):
         "positions": -1,
         "intermediate_tensors": 0,
         "inputs_embeds": 0,
-    })
+    }
+)
 class OuroModel(nn.Module):
-
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 decoder_layer_type: type[nn.Module] = OuroDecoderLayer):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        decoder_layer_type: type[nn.Module] = OuroDecoderLayer,
+    ):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -306,8 +321,9 @@ class OuroModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
-        if (cache_config.sliding_window is not None
-                and hasattr(config, "max_window_layers")):
+        if cache_config.sliding_window is not None and hasattr(
+            config, "max_window_layers"
+        ):
             assert config.max_window_layers == config.num_hidden_layers, (
                 "Sliding window for some but all layers is not supported. "
                 "This model uses sliding window but `max_window_layers` = {} "
@@ -315,14 +331,16 @@ class OuroModel(nn.Module):
                 "to discuss this feature.".format(
                     config.max_window_layers,
                     config.num_hidden_layers,
-                ))
+                )
+            )
 
         self.config = config
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank or (config.tie_word_embeddings
-                                            and get_pp_group().is_last_rank):
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -336,16 +354,18 @@ class OuroModel(nn.Module):
         decoder_layer_type = decoder_layer_type or OuroDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer_type(config=config,
-                                              cache_config=cache_config,
-                                              quant_config=quant_config,
-                                              prefix=prefix),
+            lambda prefix: decoder_layer_type(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            ),
             prefix=f"{prefix}.layers",
         )
 
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
+            ["hidden_states", "residual"], config.hidden_size
+        )
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
@@ -372,29 +392,24 @@ class OuroModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        
+
         # Get total_ut_steps from config, default to 4 if not specified
         total_ut_steps = getattr(self.config, "total_ut_steps", 4)
-        #print(total_ut_steps)
-        
+        # print(total_ut_steps)
+
         for current_ut in range(total_ut_steps):
-            for layer in self.layers[self.start_layer:self.end_layer]:
+            for layer in self.layers[self.start_layer : self.end_layer]:
                 hidden_states, residual = layer(
-                    positions,
-                    hidden_states,
-                    current_ut,
-                    None
+                    positions, hidden_states, current_ut, None
                 )
             if not get_pp_group().is_last_rank:
-                return IntermediateTensors({
-                    "hidden_states": hidden_states,
-                    "residual": residual
-                })
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states, "residual": residual}
+                )
             hidden_states = self.norm(hidden_states)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -408,18 +423,19 @@ class OuroModel(nn.Module):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if (self.quant_config is not None and
-                (scale_name := self.quant_config.get_cache_scale(name))):
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
                 # Loading kv cache quantization scales
                 param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
-                                 loaded_weight[0])
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -451,8 +467,7 @@ class OuroModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -481,25 +496,28 @@ class OuroForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = OuroModel(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "model"))
+        self.model = OuroModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
-                self.lm_head = ParallelLMHead(config.vocab_size,
-                                              config.hidden_size,
-                                              quant_config=quant_config,
-                                              prefix=maybe_prefix(
-                                                  prefix, "lm_head"))
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
         else:
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -511,8 +529,9 @@ class OuroForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
+        hidden_states = self.model(
+            input_ids, positions, intermediate_tensors, inputs_embeds
+        )
         return hidden_states
 
     def compute_logits(
@@ -522,11 +541,9 @@ class OuroForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
