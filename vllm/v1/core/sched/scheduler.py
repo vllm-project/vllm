@@ -1334,7 +1334,13 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
         else:
-            return self.connector.request_finished_all_groups(request, block_ids)
+            # NOTE(gluo): Ignoring mypy error as request_finished_all_groups() is
+            # not defined in KVConnectorBase_V1. However, supports_hma() implies
+            # the connector implements SupportsHMA interface which provides this
+            # method.
+            # This ignore is only for unblocking mypy check, should not be needed
+            # after we merge the code path as mentioned in the above comment.
+            return self.connector.request_finished_all_groups(request, block_ids)  # type: ignore[attr-defined]
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
