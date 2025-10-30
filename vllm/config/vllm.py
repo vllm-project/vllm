@@ -2,22 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import getpass
 import hashlib
 import json
 import os
+import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
@@ -126,7 +130,6 @@ class VllmConfig:
         from vllm import __version__
 
         vllm_factors.append(__version__)
-        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -206,6 +209,28 @@ class VllmConfig:
         # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
 
+    def enable_trace_function_call_for_thread(self) -> None:
+        """
+        Set up function tracing for the current thread,
+        if enabled via the `VLLM_TRACE_FUNCTION` environment variable.
+        """
+        if envs.VLLM_TRACE_FUNCTION:
+            tmp_dir = tempfile.gettempdir()
+            # add username to tmp_dir to avoid permission issues
+            tmp_dir = os.path.join(tmp_dir, getpass.getuser())
+            filename = (
+                f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                f"_thread_{threading.get_ident()}_at_{datetime.now()}.log"
+            ).replace(" ", "_")
+            log_path = os.path.join(
+                tmp_dir,
+                "vllm",
+                f"vllm-instance-{self.instance_id}",
+                filename,
+            )
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            enable_trace_function_call(log_path)
+
     @staticmethod
     def _get_quantization_config(
         model_config: ModelConfig, load_config: LoadConfig
@@ -280,7 +305,6 @@ class VllmConfig:
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
-            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
         if self.quant_config is None and self.model_config is not None:
@@ -306,18 +330,9 @@ class VllmConfig:
         # we use the default mode. The default mode depends on other
         # settings (see the below code).
         if self.compilation_config.mode is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
-                else:
-                    self.compilation_config.mode = CompilationMode.NONE
-
+            if self.model_config is not None and not self.model_config.enforce_eager:
+                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
-                # NB: Passing both --enforce-eager and a compilation mode
-                # in V0 means the compilation mode wins out.
                 self.compilation_config.mode = CompilationMode.NONE
         else:
             assert self.compilation_config.mode >= CompilationMode.NONE
@@ -345,10 +360,7 @@ class VllmConfig:
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
-                if (
-                    envs.VLLM_USE_V1
-                    and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                ):
+                if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_AND_PIECEWISE
@@ -402,7 +414,7 @@ class VllmConfig:
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0
                 self.compilation_config.cudagraph_capture_sizes = []
-            elif envs.VLLM_USE_V1:
+            else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
@@ -509,14 +521,11 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # Do this after all the updates to compilation_config.mode
-        if (
-            envs.VLLM_USE_V1
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-        ):
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
 
         # final check of cudagraph mode after all possible updates
-        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike():
             if (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
@@ -553,15 +562,26 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if (
-            envs.VLLM_USE_V1
-            and not self.scheduler_config.disable_hybrid_kv_cache_manager
-        ):
+        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
             if not current_platform.support_hybrid_kv_cache():
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if self.kv_transfer_config is not None:
+                # NOTE(Kuntai): turn HMA off for connector for now.
+                # TODO(Kuntai): have a more elegent solution to check and
+                # turn off HMA for connector that does not support HMA.
+                logger.warning(
+                    "Turning off hybrid kv cache manager because "
+                    "`--kv-transfer-config` is set. This will reduce the "
+                    "performance of vLLM on LLMs with sliding window attention "
+                    "or Mamba attention. If you are a developer of kv connector"
+                    ", please consider supporting hybrid kv cache manager for "
+                    "your connector by making sure your connector is a subclass"
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                )
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
@@ -900,6 +920,20 @@ class VllmConfig:
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
+
+    @model_validator(mode="after")
+    def validate_mamba_block_size(self) -> "VllmConfig":
+        if self.model_config is None:
+            return self
+        mamba_block_size_is_set = (
+            self.cache_config.mamba_block_size is not None
+            and self.cache_config.mamba_block_size != self.model_config.max_model_len
+        )
+        if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
+            raise ValueError(
+                "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
 
 
 _current_vllm_config: VllmConfig | None = None

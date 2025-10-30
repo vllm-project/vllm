@@ -32,7 +32,6 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_interleaved,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -41,7 +40,6 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import LayerBlockType
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -91,6 +89,7 @@ LogprobsMode = Literal[
 ]
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
+LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
     "generate": ["generate", "transcription"],
@@ -163,7 +162,7 @@ class ModelConfig:
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
     allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for 
+    """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
@@ -345,6 +344,7 @@ class ModelConfig:
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
+        factors.append(self.enable_prompt_embeds)
 
         # hf_config can control how the model looks!
         try:
@@ -441,15 +441,12 @@ class ModelConfig:
             self.enforce_eager = True
 
         # Set the default seed to 0 in V1.
-        # NOTE(woosuk): In V0, we set the default seed to None because the
-        # driver worker shares the same process as the user process, and thus
-        # setting a seed affects the user process as well.
-        # In V1, we use separate processes for workers (unless
+        # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
         # doesn't affect the user process. However, without a consistent seed,
         # different tensor parallel workers would sample different tokens,
         # leading to inconsistent results.
-        if envs.VLLM_USE_V1 and self.seed is None:
+        if self.seed is None:
             self.seed = 0
             if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
                 logger.warning(
@@ -701,23 +698,6 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-
-        # Interleaved attention is not supported by some backends in V0
-        if (
-            not self.disable_sliding_window
-            and is_interleaved(self.hf_text_config)
-            and not envs.VLLM_USE_V1
-            and (backend := envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER")
-        ):
-            logger.warning_once(
-                "%s has interleaved attention, which is currently not "
-                "supported by the %s backend. Disabling sliding window and "
-                "capping the max length to the sliding window size (%d).",
-                self.hf_text_config.model_type,
-                backend,
-                self.hf_text_config.sliding_window,
-            )
-            self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
@@ -1432,11 +1412,11 @@ class ModelConfig:
     def get_num_layers_by_block_type(
         self,
         parallel_config: ParallelConfig,
-        block_type: LayerBlockType = LayerBlockType.attention,
+        block_type: LayerBlockType = "attention",
     ) -> int:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
-        attn_block_type = block_type == LayerBlockType.attention
+        attn_block_type = block_type == "attention"
         is_transformer = (
             not self.is_hybrid and not self.has_noops and not self.is_attention_free
         )
@@ -1468,9 +1448,7 @@ class ModelConfig:
                         )
                     else:
                         return self.get_num_layers(parallel_config)
-                return sum(
-                    t == block_type.value for t in layers_block_type_value[start:end]
-                )
+                return sum(t == block_type for t in layers_block_type_value[start:end])
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
@@ -1480,19 +1458,16 @@ class ModelConfig:
             # Hybrid model Qwen3Next
             layer_types_value = getattr(self.hf_config, "layer_types", None)
             if layer_types_value is not None:
-                if getattr(block_type, "value", block_type) == "attention":
+                if block_type == "attention":
                     return sum(
                         t == "full_attention" for t in layer_types_value[start:end]
                     )
-                elif getattr(block_type, "value", block_type) == "linear_attention":
+                elif block_type == "linear_attention":
                     return sum(
                         t == "linear_attention" for t in layer_types_value[start:end]
                     )
                 else:
-                    return sum(
-                        t == getattr(block_type, "value", block_type)
-                        for t in layer_types_value[start:end]
-                    )
+                    return sum(t == block_type for t in layer_types_value[start:end])
 
             if (
                 layers_block_type_value is None
@@ -1500,10 +1475,9 @@ class ModelConfig:
                 and layer_types_value is None
             ):
                 raise ValueError(
-                    "The model is an hybrid without a"
-                    "layers_block_type or an attn_type_list, or a layer_types "
-                    "in the hf_config, cannot determine the num of "
-                    f"{block_type.value} layers"
+                    "The model is an hybrid without a layers_block_type or an "
+                    "attn_type_list, or a layer_types in the hf_config, "
+                    f"cannot determine the num of {block_type} layers"
                 )
 
     def get_mamba_chunk_size(self) -> int | None:
@@ -1617,6 +1591,29 @@ class ModelConfig:
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
+
+    @property
+    def uses_alibi(self) -> bool:
+        cfg = self.hf_text_config
+
+        return (
+            getattr(cfg, "alibi", False)  # Falcon
+            or "BloomForCausalLM" in self.architectures  # Bloom
+            or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
+            or (
+                hasattr(cfg, "attn_config")  # MPT
+                and (
+                    (
+                        isinstance(cfg.attn_config, dict)
+                        and cfg.attn_config.get("alibi", False)
+                    )
+                    or (
+                        not isinstance(cfg.attn_config, dict)
+                        and getattr(cfg.attn_config, "alibi", False)
+                    )
+                )
+            )
+        )
 
     @property
     def uses_mrope(self) -> bool:
@@ -2119,8 +2116,18 @@ def _get_and_verify_max_len(
     # If the user didn't specify `max_model_len`, then use that derived from
     # the model config as a default value.
     if max_model_len is None:
-        max_model_len = int(derived_max_model_len)
+        # For LongRoPE, default to original_max_position_embeddings to avoid
+        # performance degradation for shorter sequences
+        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+            max_model_len = int(
+                getattr(
+                    hf_config, "original_max_position_embeddings", derived_max_model_len
+                )
+            )
+        else:
+            max_model_len = int(derived_max_model_len)
         max_model_len = current_platform.check_max_model_len(max_model_len)
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     elif max_model_len > derived_max_model_len:
