@@ -30,12 +30,14 @@ from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQ
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_ep_group,
+    get_inner_dp_world_group,
     get_pp_group,
     get_tp_group,
-    get_world_group,
+    is_global_first_rank,
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils import (
     _maybe_force_spawn,
     decorate_logs,
@@ -60,7 +62,7 @@ class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
     def init_request_rpc_mq(self) -> None:
-        if self.parallel_config.distributed_node_rank == 0:
+        if self.parallel_config.distributed_node_rank_within_dp == 0:
             max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
             self.rpc_broadcast_mq = MessageQueue(
                 self.world_size,
@@ -85,15 +87,14 @@ class MultiprocExecutor(Executor):
 
         self.world_size = self.parallel_config.world_size
         assert (
-            self.parallel_config.world_size % self.parallel_config.distributed_node_size
-            == 0
+            self.world_size % self.parallel_config.distributed_node_size_within_dp == 0
         ), (
-            f"world_size ({self.parallel_config.world_size}) must be "
-            f"divisible by distributed_node_size "
-            f"({self.parallel_config.distributed_node_size}). "
+            f"global world_size ({self.parallel_config.world_size}) must be "
+            f"divisible by distributed_node_size_within_dp "
+            f"({self.parallel_config.distributed_node_size_within_dp}). "
         )
         self.local_world_size = (
-            self.world_size // self.parallel_config.distributed_node_size
+            self.world_size // self.parallel_config.distributed_node_size_within_dp
         )
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
@@ -124,7 +125,8 @@ class MultiprocExecutor(Executor):
         success = False
         try:
             global_start_rank = (
-                self.local_world_size * self.parallel_config.distributed_node_rank
+                self.local_world_size
+                * self.parallel_config.distributed_node_rank_within_dp
             )
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
@@ -141,8 +143,10 @@ class MultiprocExecutor(Executor):
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
+
             self.workers = WorkerProc.wait_for_ready(unready_workers)
-            if self.parallel_config.distributed_node_size > 1:
+
+            if self.parallel_config.distributed_node_size_within_dp > 1:
                 self.response_mqs = [
                     mq for mq in self.workers[0].rpc_response_mqs if mq is not None
                 ]
@@ -150,6 +154,7 @@ class MultiprocExecutor(Executor):
                 self.response_mqs = [w.worker_response_mq for w in self.workers]
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
+
             if self.rpc_broadcast_mq is not None:
                 self.rpc_broadcast_mq.wait_until_ready()
             for response_mq in self.response_mqs:
@@ -456,8 +461,7 @@ class WorkerProc:
     def init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
-        node_size = vllm_config.parallel_config.distributed_node_size
-        if node_size == 1:
+        if vllm_config.parallel_config.distributed_node_size_within_dp == 1:
             # Initialize MessageQueue for receiving SchedulerOutput
             self.rpc_broadcast_mq = MessageQueue.create_from_handle(
                 input_shm_handle, self.worker.rank
@@ -467,16 +471,19 @@ class WorkerProc:
             self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
             self.rpc_response_handles = []
         else:
-            # multi node
+            # multi node within DP
             # generate mq broadcaster from world group
             # for cross-node communication
-            self.rpc_broadcast_mq = get_world_group().create_mq_broadcaster(
+            self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
                 extra_writer_handle=input_shm_handle,
                 # we will wait until ready later
                 blocking=False,
             )
+            # driver worker(rank 0 in inner_dp_world_group) will be the only reader of responses for all messages remotely
             self.worker_response_mq, self.rpc_response_handles = (
-                get_world_group().create_single_reader_mq_broadcasters(reader_rank=0)
+                get_inner_dp_world_group().create_single_reader_mq_broadcasters(
+                    reader_rank_in_group=0
+                )
             )
 
     def __init__(
@@ -846,3 +853,93 @@ def set_multiprocessing_worker_envs():
         )
         os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
         torch.set_num_threads(default_omp_num_threads)
+
+
+class ExecutorProc:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+    ):
+        from vllm.plugins import load_general_plugins
+        from vllm.version import __version__ as VLLM_VERSION
+
+        load_general_plugins()
+
+        self.vllm_config = vllm_config
+        if is_global_first_rank():
+            logger.info(
+                "Initializing a vLLM (%s) Executor Proc (%s) with config: %s",
+                executor_class.__name__,
+                VLLM_VERSION,
+                vllm_config,
+            )
+
+        self.model_executor = executor_class(vllm_config)
+
+    def run_busy_loop(self):
+        """Core busy loop of the EngineCore."""
+        while True:
+            time.sleep(1)
+
+    def shutdown(self):
+        self.model_executor.shutdown()
+
+    def __del__(self):
+        self.shutdown()
+
+    @staticmethod
+    def create(vllm_config: VllmConfig, executor_class: type[Executor]):
+        context = get_mp_context()
+        node_rank = vllm_config.parallel_config.distributed_node_rank
+        process = context.Process(
+            target=ExecutorProc.start,
+            name=f"ModelExecutorProc_{node_rank}",
+            kwargs={
+                "vllm_config": vllm_config,
+                "executor_class": executor_class,
+            },
+        )
+        process.start()
+        return process
+
+    @staticmethod
+    def start(vllm_config: VllmConfig, executor_class: type[Executor]):
+        """Launch exeuctor_proc busy loop in background process."""
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = False
+
+        # Ensure we can serialize transformer config after spawning
+        maybe_register_config_serialize_by_value()
+
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested:
+                shutdown_requested = True
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the engine_core
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        exeuctor_proc: ExecutorProc | None = None
+        try:
+            decorate_logs()
+            exeuctor_proc = ExecutorProc(vllm_config, executor_class)
+            exeuctor_proc.run_busy_loop()
+
+        except SystemExit:
+            logger.debug("ExecutorProc exiting.")
+            raise
+        except Exception as e:
+            if ExecutorProc is None:
+                logger.exception("ExecutorProc failed to start.")
+            else:
+                logger.exception("ExecutorProc encountered a fatal error.")
+            raise e
+        finally:
+            if exeuctor_proc is not None:
+                exeuctor_proc.shutdown()

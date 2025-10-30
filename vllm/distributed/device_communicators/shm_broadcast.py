@@ -603,10 +603,9 @@ class MessageQueue:
         blocking: bool = False,
     ):
         """Create a message queue from ranks."""
-        # We assume same size acrsso groups
         local_size = torch.cuda.device_count()
-        group_rank = dist.get_rank(pg)
-        same_node = group_rank // local_size == reader_rank // local_size
+        rank = dist.get_rank()
+        same_node = rank // local_size == reader_rank // local_size
         buffer_io = MessageQueue(
             n_reader=1,
             n_local_reader=1 if same_node else 0,
@@ -614,9 +613,7 @@ class MessageQueue:
             max_chunks=max_chunks,
         )
         handle = buffer_io.export_handle()
-        handles = (
-            [None] * dist.get_world_size(pg) if group_rank == reader_rank else None
-        )
+        handles = [None] * dist.get_world_size(pg) if rank == reader_rank else None
         dist.gather_object(handle, handles, dst=reader_rank, group=pg)
         if blocking:
             buffer_io.wait_until_ready()

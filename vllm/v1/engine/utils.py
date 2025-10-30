@@ -164,45 +164,6 @@ class CoreEngineProcManager:
         }
 
 
-class CoreEngineProcManagerExecutorOnly(CoreEngineProcManager):
-    """
-    Utility class to handle creation, readiness, and shutdown
-    of background processes used by the AsyncLLM and LLMEngine.
-    """
-
-    def __init__(
-        self,
-        target_fn: Callable,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-    ) -> None:
-        context = get_mp_context()
-        common_kwargs = {
-            "vllm_config": vllm_config,
-            "executor_class": executor_class,
-        }
-        global_index = vllm_config.parallel_config.distributed_node_rank
-        self.process = context.Process(
-            target=target_fn, name=f"EngineCore_{global_index}", kwargs=common_kwargs
-        )
-
-        self._finalizer = weakref.finalize(self, shutdown, self.process)
-        self.process.start()
-
-    def finished_procs(self) -> dict[str, int]:
-        """Returns dict of proc name -> exit code for any finished procs."""
-        if self.process.exitcode is not None:
-            return {self.process.name: self.process.exitcode}
-        return {}
-
-    def join_first(self):
-        """Wait for any process to exit."""
-        connection.wait(self.process.sentinel)
-
-    def close(self):
-        self._finalizer()
-
-
 @contextlib.contextmanager
 def set_device_control_env_var(
     vllm_config: VllmConfig, local_dp_rank: int
@@ -212,15 +173,19 @@ def set_device_control_env_var(
     for engine subprocess.
     """
     world_size = vllm_config.parallel_config.world_size
+    local_world_size = vllm_config.parallel_config.local_world_size
     evar = current_platform.device_control_env_var
 
-    value = get_device_indices(evar, local_dp_rank, world_size)
+    value = get_device_indices(evar, local_dp_rank, world_size, local_world_size)
     with patch.dict(os.environ, values=((evar, value),)):
         yield
 
 
 def get_device_indices(
-    device_control_env_var: str, local_dp_rank: int, world_size: int
+    device_control_env_var: str,
+    local_dp_rank: int,
+    world_size: int,
+    local_world_size: int = -1,
 ):
     """
     Returns a comma-separated string of device indices for the specified
@@ -229,10 +194,15 @@ def get_device_indices(
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
     this will select devices 2 and 3 for local_dp_rank=1.
     """
+    if local_world_size < 0:
+        local_world_size = world_size
     try:
         value = ",".join(
             str(current_platform.device_id_to_physical_device_id(i))
-            for i in range(local_dp_rank * world_size, (local_dp_rank + 1) * world_size)
+            for i in range(
+                local_dp_rank * world_size,
+                local_dp_rank * world_size + local_world_size,
+            )
         )
     except IndexError as e:
         raise Exception(
@@ -1035,20 +1005,13 @@ def wait_for_engine_startup(
             conn_pending[0 if local else 1] -= 1
             start_pending[0 if local else 1] += 1
             engine.state = CoreEngineState.CONNECTED
-
-        elif (
-            status == "READY"
-            and engine.state == CoreEngineState.CONNECTED
-            and parallel_config.distributed_node_rank > 0
-        ):
-            engine.state = CoreEngineState.READY
-            start_pending[0 if local else 1] -= 1
         elif status == "READY" and engine.state == CoreEngineState.CONNECTED:
             # Setup KV cache config with initialization state from
             # engine core process. Sum values from all engines in DP case.
             num_gpu_blocks = cache_config.num_gpu_blocks or 0
             num_gpu_blocks += msg["num_gpu_blocks"]
             cache_config.num_gpu_blocks = num_gpu_blocks
+
             # In external DP LB mode, the coordinator address that the
             # front-end procs connect to is obtained from rank 0 via
             # one of the engine handshakes, and passed to the local

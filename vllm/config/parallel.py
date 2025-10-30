@@ -70,7 +70,7 @@ class ParallelConfig:
     distributed_master_ip: str = "127.0.0.1"
     """distributed master ip for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    distributed_master_port: int = 0
+    distributed_master_port: int = 29501
     """distributed master port """
     distributed_node_rank: int = 0
     """distributed node rank """
@@ -384,6 +384,23 @@ class ParallelConfig:
             and self.data_parallel_size > 1
         )
 
+    @property
+    def distributed_node_rank_within_dp(self) -> int:
+        return self.distributed_node_rank % self.distributed_node_size_within_dp
+
+    @property
+    def distributed_node_size_within_dp(self) -> int:
+        if self.distributed_node_size == 1:
+            return 1
+        data_parallel_node_size = (
+            self.data_parallel_size // self.data_parallel_size_local
+        )
+        return self.distributed_node_size // data_parallel_node_size
+
+    @property
+    def local_world_size(self) -> int:
+        return self.world_size // self.distributed_node_size_within_dp
+
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
         tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="cpu")
@@ -530,7 +547,6 @@ class ParallelConfig:
             elif (
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
-                and self.distributed_node_size == 1
             ):
                 if not ray_found:
                     raise ValueError(

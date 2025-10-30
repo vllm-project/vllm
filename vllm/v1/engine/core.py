@@ -108,6 +108,7 @@ class EngineCore:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
+
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config
@@ -403,7 +404,7 @@ class EngineCore:
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
-        # re-sync the internal caches ((P0 sender, P1 receiver)
+        # re-sync the internal caches (P0 sender, P1 receiver)
         if self.scheduler.has_unfinished_requests():
             logger.warning(
                 "Resetting the multi-modal cache when requests are "
@@ -493,82 +494,6 @@ class EngineCore:
             # compilation status before scheduling request.
             self.structured_output_manager.grammar_init(req)
         return req, request.current_wave
-
-
-class ExecutorOnlyEngineProc:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-    ):
-        from vllm.plugins import load_general_plugins
-
-        load_general_plugins()
-
-        self.vllm_config = vllm_config
-        if is_global_first_rank():
-            logger.info(
-                "Initializing a V1 Executor Only LLM engine (v%s) with config: %s",
-                VLLM_VERSION,
-                vllm_config,
-            )
-
-        # Setup Model.
-        self.model_executor = executor_class(vllm_config)
-
-    def run_busy_loop(self):
-        """Core busy loop of the EngineCore."""
-        while True:
-            time.sleep(1)
-
-    def shutdown(self):
-        self.model_executor.shutdown()
-
-    @staticmethod
-    def run_engine_core(*args, **kwargs):
-        """Launch EngineCore busy loop in background process."""
-
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
-        shutdown_requested = False
-
-        # Ensure we can serialize transformer config after spawning
-        maybe_register_config_serialize_by_value()
-
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
-
-        # Either SIGTERM or SIGINT will terminate the engine_core
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-        engine_core: ExecutorOnlyEngineProc | None = None
-        try:
-            parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
-            distributed_node_rank = parallel_config.distributed_node_rank
-            set_process_title(
-                "EngineCore", f"Distributed-node-rank-{distributed_node_rank}"
-            )
-            decorate_logs()
-            engine_core = ExecutorOnlyEngineProc(*args, **kwargs)
-            engine_core.run_busy_loop()
-
-        except SystemExit:
-            logger.debug("EngineCore exiting.")
-            raise
-        except Exception as e:
-            if engine_core is None:
-                logger.exception("EngineCore failed to start.")
-            else:
-                logger.exception("EngineCore encountered a fatal error.")
-            raise e
-        finally:
-            if engine_core is not None:
-                engine_core.shutdown()
 
 
 class EngineCoreProc(EngineCore):

@@ -399,11 +399,17 @@ class GroupCoordinator:
             blocking=blocking,
         )
 
-    def create_single_reader_mq_broadcasters(self, reader_rank=0, blocking=False):
+    def create_single_reader_mq_broadcasters(
+        self, reader_rank_in_group=0, blocking=False
+    ):
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
         return MessageQueue.create_from_process_group_single_reader(
-            self.cpu_group, 1 << 22, 6, reader_rank=reader_rank, blocking=blocking
+            self.cpu_group,
+            1 << 22,
+            6,
+            reader_rank=self.ranks[reader_rank_in_group],
+            blocking=blocking,
         )
 
     @property
@@ -1018,12 +1024,18 @@ class GroupCoordinator:
 
 
 _WORLD: GroupCoordinator | None = None
+_INNER_DP_WORLD: GroupCoordinator | None = None
 _NODE_COUNT: int | None = None
 
 
 def get_world_group() -> GroupCoordinator:
     assert _WORLD is not None, "world group is not initialized"
     return _WORLD
+
+
+def get_inner_dp_world_group() -> GroupCoordinator:
+    assert _INNER_DP_WORLD is not None, "inner dp world group is not initialized"
+    return _INNER_DP_WORLD
 
 
 def init_world_group(
@@ -1044,12 +1056,13 @@ def init_model_parallel_group(
     backend: str,
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
+    use_device_communicator: bool = True,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=group_ranks,
         local_rank=local_rank,
         torch_distributed_backend=backend,
-        use_device_communicator=True,
+        use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
@@ -1164,7 +1177,14 @@ def init_distributed_environment(
     from vllm.config import get_current_vllm_config
 
     config = get_current_vllm_config()
-    if (
+    if config is not None and config.parallel_config.distributed_node_size > 1:
+        parallel_config = config.parallel_config
+        ip = parallel_config.distributed_master_ip
+        rank = parallel_config.data_parallel_rank * world_size + rank
+        world_size = parallel_config.world_size_across_dp
+        port = parallel_config.distributed_master_port
+        distributed_init_method = get_distributed_init_method(ip, port)
+    elif (
         config is not None
         and config.parallel_config.data_parallel_size > 1
         and config.parallel_config.distributed_executor_backend != "external_launcher"
@@ -1176,10 +1196,7 @@ def init_distributed_environment(
         # adjust the world size to take into account data parallelism
         world_size = parallel_config.world_size_across_dp
         ip = parallel_config.data_parallel_master_ip
-        if config.parallel_config.distributed_master_port > 0:
-            port = config.parallel_config.distributed_master_port
-        else:
-            port = parallel_config.get_next_dp_init_port()
+        port = parallel_config.get_next_dp_init_port()
         distributed_init_method = get_distributed_init_method(ip, port)
         logger.info(
             "Adjusting world_size=%d rank=%d distributed_init_method=%s for DP",
@@ -1187,10 +1204,6 @@ def init_distributed_environment(
             rank,
             distributed_init_method,
         )
-    elif config is not None and config.parallel_config.distributed_node_size > 1:
-        ip = config.parallel_config.distributed_master_ip
-        port = config.parallel_config.distributed_master_port
-        distributed_init_method = get_distributed_init_method(ip, port)
     if not torch.distributed.is_initialized():
         logger.info(
             "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1228,12 +1241,11 @@ def init_distributed_environment(
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
-    global _WORLD, _NODE_COUNT
+    global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
         if config.parallel_config.distributed_node_size > 1:
-            # TODO: fix me (connection reset with below code across nodes)
             _NODE_COUNT = config.parallel_config.distributed_node_size
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
@@ -1242,6 +1254,23 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
+    if config.parallel_config.distributed_node_size_within_dp > 1:
+        if parallel_config.data_parallel_size > 1:
+            world_size_inner_dp = parallel_config.world_size
+            group_ranks = [
+                [dp_rank * world_size_inner_dp + i for i in range(world_size_inner_dp)]
+                for dp_rank in range(parallel_config.data_parallel_size)
+            ]
+            _INNER_DP_WORLD = init_model_parallel_group(
+                group_ranks,
+                get_world_group().local_rank,
+                backend,
+                use_message_queue_broadcaster=True,
+                group_name="inner_dp_world",
+                use_device_communicator=False,
+            )
+        else:
+            _INNER_DP_WORLD = _WORLD
 
 
 def initialize_model_parallel(

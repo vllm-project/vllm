@@ -1389,6 +1389,35 @@ class EngineArgs:
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
 
+        assert (
+            self.data_parallel_backend == "mp" or not self.distributed_node_size > 1
+        ), "distributed_node_size > 1 is only supported with data_parallel_backend=mp"
+        inferred_data_parallel_rank = 0
+        if self.distributed_node_size > 1:
+            world_size = (
+                self.data_parallel_size
+                * self.pipeline_parallel_size
+                * self.tensor_parallel_size
+            )
+            world_size_within_dp = (
+                self.pipeline_parallel_size * self.tensor_parallel_size
+            )
+            local_world_size = world_size // self.distributed_node_size
+            assert world_size % self.distributed_node_size == 0, (
+                f"world_size={world_size} must be divisible by "
+                f"distributed_node_size={self.distributed_node_size}."
+            )
+            inferred_data_parallel_rank = (
+                self.distributed_node_rank * local_world_size
+            ) // world_size_within_dp
+            if self.data_parallel_size > 1 and self.data_parallel_size_local is None:
+                self.data_parallel_rank = inferred_data_parallel_rank
+                logger.info(
+                    "Inferred data_parallel_rank %d from distributed_node_rank"
+                    " %d for external lb",
+                    self.data_parallel_rank,
+                    self.distributed_node_rank,
+                )
         data_parallel_external_lb = self.data_parallel_rank is not None
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
@@ -1414,7 +1443,15 @@ class EngineArgs:
                 # Disable hybrid LB mode if set for a single node
                 self.data_parallel_hybrid_lb = False
 
-            self.data_parallel_rank = self.data_parallel_start_rank or 0
+            self.data_parallel_rank = (
+                self.data_parallel_start_rank or inferred_data_parallel_rank
+            )
+            if self.distributed_node_size > 1:
+                logger.info(
+                    "Inferred data_parallel_rank %d from distributed_node_rank %d",
+                    self.data_parallel_rank,
+                    self.distributed_node_rank,
+                )
         else:
             assert not self.data_parallel_hybrid_lb, (
                 "data_parallel_size_local must be set to use data_parallel_hybrid_lb."
@@ -1444,7 +1481,9 @@ class EngineArgs:
                     "data_parallel_backend can only be ray or mp, got %s",
                     self.data_parallel_backend,
                 )
-                data_parallel_address = ParallelConfig.data_parallel_master_ip
+                data_parallel_address = (
+                    self.distributed_master_ip or ParallelConfig.data_parallel_master_ip
+                )
         else:
             data_parallel_address = self.data_parallel_address
 
