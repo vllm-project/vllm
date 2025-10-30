@@ -886,7 +886,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter triton mla ops.
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_TRITON_MLA": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_MLA", "False").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_MLA", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.
