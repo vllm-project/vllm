@@ -68,11 +68,11 @@ def _fused_moe_lora_kernel(
     stride_cn,
     stride_tl,
     stride_el,
-    slice_a_size,
-    slice_c_size,
     # Meta-parameters
     num_slice_a: tl.constexpr,
     num_slice_c: tl.constexpr,
+    slice_a_size: tl.constexpr,
+    slice_c_size: tl.constexpr,
     top_k: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -81,21 +81,27 @@ def _fused_moe_lora_kernel(
     GROUP_SIZE_M: tl.constexpr,
     SPLIT_K: tl.constexpr,
 ):
+    """Grid-based split-K: Each thread block processes one K-chunk in parallel with atomic accumulation."""
+
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
     max_loras = tl.num_programs(axis=2)
-    grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
-    # calculate pid_m,pid_n
+    # Extract split_k index from grid
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    pid_sk = pid % SPLIT_K
+    pid_m_n = pid // SPLIT_K
+
+    # calculate pid_m,pid_n with swizzling
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
+    group_id = pid_m_n // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
+    pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_idx)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
@@ -109,7 +115,7 @@ def _fused_moe_lora_kernel(
 
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
-    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
+    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(a_ptr.dtype.element_ty))
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
@@ -122,42 +128,51 @@ def _fused_moe_lora_kernel(
     )
     token_mask = offs_token < num_valid_tokens
 
-    # get a_ptrs,b_ptrs
+    # Calculate K range for this split_k chunk
+    k_chunk_size = K // SPLIT_K
+    k_remainder = K % SPLIT_K
+    k_start = pid_sk * k_chunk_size + min(pid_sk, k_remainder)
+    actual_k_size = k_chunk_size + (1 if pid_sk < k_remainder else 0)
+
+    # get a_ptrs,b_ptrs starting at k_start
     a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
+        offs_token[:, None] // top_k * stride_am + (k_start + offs_k[None, :]) * stride_ak
     )
 
     b_ptrs = (
         cur_b_ptr
         + lora_idx * stride_bl
         + expert_id * stride_be
-        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+        + ((k_start + offs_k[:, None]) * stride_bk + offs_bn[None, :] * stride_bn)
     )
 
     # accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, grid_k):
-        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+    # Loop over K blocks within this split's chunk
+    num_k_blocks = tl.cdiv(actual_k_size, BLOCK_SIZE_K)
+    for k_block in range(num_k_blocks):
+        k_offset = k_block * BLOCK_SIZE_K
+        k_remaining = actual_k_size - k_offset
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
             other=0.0,
         )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        accumulator += tl.dot(a, b)
+        accumulator = tl.dot(a, b, accumulator)
         # Advance the ptrs to the next K block.
-        a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
+        a_ptrs += BLOCK_SIZE_K * stride_ak
+        b_ptrs += BLOCK_SIZE_K * stride_bk
 
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
 
-    accumulator = accumulator.to(c_ptr.dtype.element_ty)
-    # Write back the block of the output
+    # Write back the block of the output with atomic add for split-K accumulation
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
+
     if SPLIT_K == 1:
         tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
