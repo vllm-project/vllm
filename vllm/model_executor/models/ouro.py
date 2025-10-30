@@ -359,6 +359,8 @@ class OuroModel(nn.Module):
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.early_exit_gate = RowParallelLinear(config.hidden_size, 1, bias=True)
 
+        self.total_ut_steps = getattr(self.config, "total_ut_steps", 4)
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -375,10 +377,7 @@ class OuroModel(nn.Module):
             hidden_states = self.get_input_embeddings(input_ids)
         residual = None
 
-        # Get total_ut_steps from config, default to 4 if not specified
-        total_ut_steps = getattr(self.config, "total_ut_steps", 4)
-
-        for current_ut in range(total_ut_steps):
+        for current_ut in range(self.total_ut_steps):
             for layer in self.layers[self.start_layer : self.end_layer]:
                 hidden_states, residual = layer(
                     positions, hidden_states, current_ut, None
