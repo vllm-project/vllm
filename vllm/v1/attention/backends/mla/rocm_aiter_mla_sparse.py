@@ -90,50 +90,15 @@ class ROCMAiterMLASparseMetadata:
 
     block_table: torch.Tensor
     req_id_per_token: torch.Tensor
-    block_size: int = 64
+    block_size: int = 1
     topk_tokens: int = 2048
-
-
-def ref_convert_to_global(
-    req_id: torch.Tensor,
-    block_table: torch.Tensor,
-    token_indices: torch.Tensor,
-    block_size: int,
-) -> torch.Tensor:
-    # Ensure contiguous
-    req_id_c = req_id.contiguous()
-    block_table_c = block_table.contiguous()
-    token_indices_c = token_indices.contiguous()
-    max_num_blocks = block_table_c.size(-1)
-
-    # Compute block index and intra-block offset
-    idxs_in = token_indices_c // block_size
-    idxs_out = token_indices_c % block_size
-
-    block_table_indexed = block_table_c[req_id_c]
-
-    invalid = (idxs_in < 0) | (idxs_in >= max_num_blocks)
-
-    idxs_in_clamped = idxs_in.masked_fill(invalid, 0)
-
-    num_tokens = idxs_in_clamped.size(0)
-    rest = idxs_in_clamped.numel() // num_tokens
-    gathered = torch.gather(
-        block_table_indexed, 1, idxs_in_clamped.view(num_tokens, rest)
-    ).view_as(idxs_in_clamped)
-
-    # Compute global indices and apply invalid mask
-    out = gathered * block_size + idxs_out
-    out = out.masked_fill(invalid, -1)
-
-    return out
 
 
 @dataclass
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
     def __init__(
         self,
@@ -205,7 +170,7 @@ class ROCMAiterMLASparseMetadataBuilder(
 # https://github.com/deepseek-ai/FlashMLA/blob/main/tests/test_flash_mla_prefill.py#L72
 def reference_mla_sparse_prefill(
     q: torch.Tensor, kv: torch.Tensor, indices: torch.Tensor, sm_scale: float, d_v: int
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     import math
 
     def log2sumexp2(a: torch.Tensor, dim: int) -> torch.Tensor:
@@ -217,20 +182,17 @@ def reference_mla_sparse_prefill(
     dqk = q.shape[-1]
     indices = indices[:, 0, :]  # [s_q, topk]
     invalid_indices_mask = (indices < 0) | (indices >= skv)
-    qs = q.float()  # [s_q, h_q, d_qk]
-    kvs = kv[:, 0, :].float()  # [s_kv, d_qk]
+    indices[invalid_indices_mask] = 0
+    qs = q  # [s_q, h_q, d_qk]
+    kvs = kv[:, 0, :][indices].view(sq, topk, dqk)  # [s_q, topk, d_qk]
 
-    kvs = torch.index_select(
-        kvs, 0, indices.masked_fill(invalid_indices_mask, 0).flatten()
-    ).view(sq, topk, dqk)  # [s_q, topk, d_qk]
-    attn_score = qs @ kvs.transpose(1, 2)  # [s_q, h_q, topk]
+    attn_score = (qs @ kvs.transpose(1, 2)).float()  # [s_q, h_q, topk]
     attn_score.masked_fill_(invalid_indices_mask.unsqueeze(1), float("-inf"))
     attn_score *= sm_scale * math.log2(math.e)
-    max_logits = torch.max(attn_score, dim=-1)[0]  # [s_q, h_q]
     lse = log2sumexp2(attn_score, dim=-1)  # [s_q, h_q]
     attn_score = torch.exp2(attn_score - lse.unsqueeze(-1))  # [s_q, h_q, topk]
-    result = attn_score @ kvs[:, :, :d_v]
-    return (result.to(q.dtype), max_logits, lse)
+    result = attn_score.to(q.dtype) @ kvs[:, :, :d_v]
+    return (result, lse)
 
 
 class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
