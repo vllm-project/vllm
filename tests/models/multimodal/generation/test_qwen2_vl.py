@@ -8,8 +8,10 @@ import pytest
 import torch
 from PIL import Image
 
+from vllm.attention.backends.registry import _MHA_Backend
 from vllm.multimodal.image import rescale_image_size
 from vllm.multimodal.video import rescale_video_size, sample_frames_from_video
+from vllm.platforms import current_platform
 
 from ....conftest import (
     IMAGE_ASSETS,
@@ -273,6 +275,7 @@ def run_embedding_input_test(
     mm_limit: int,
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
+    mm_encoder_attn_backend: _MHA_Backend | None = None,
 ):
     """Inference result should be the same between
     original image/video input and image/video embeddings input.
@@ -293,6 +296,7 @@ def run_embedding_input_test(
         distributed_executor_backend=distributed_executor_backend,
         default_torch_num_threads=1,
         enable_mm_embeds=True,
+        mm_encoder_attn_backend=mm_encoder_attn_backend,
     ) as vllm_model:
         outputs_per_case_for_original_input = [
             vllm_model.generate_greedy_logprobs(
@@ -347,6 +351,9 @@ def run_embedding_input_test(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize(
+    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+)
 def test_qwen2_vl_image_embeddings_input(
     vllm_runner,
     image_assets,
@@ -355,6 +362,7 @@ def test_qwen2_vl_image_embeddings_input(
     dtype,
     max_tokens,
     num_logprobs,
+    mm_encoder_attn_backend: _MHA_Backend,
     monkeypatch,
 ) -> None:
     images = [asset.pil_image for asset in image_assets]
@@ -377,6 +385,7 @@ def test_qwen2_vl_image_embeddings_input(
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
+        mm_encoder_attn_backend=mm_encoder_attn_backend,
     )
 
 
@@ -397,6 +406,9 @@ def test_qwen2_vl_image_embeddings_input(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize(
+    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+)
 def test_qwen2_vl_multiple_image_embeddings_input(
     vllm_runner,
     image_assets,
@@ -405,6 +417,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    mm_encoder_attn_backend: _MHA_Backend,
 ) -> None:
     images = [asset.pil_image for asset in image_assets]
 
@@ -428,6 +441,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(
         num_logprobs=num_logprobs,
         mm_limit=2,
         tensor_parallel_size=1,
+        mm_encoder_attn_backend=mm_encoder_attn_backend,
     )
 
 
@@ -447,6 +461,9 @@ def test_qwen2_vl_multiple_image_embeddings_input(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
+@pytest.mark.parametrize(
+    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+)
 def test_qwen2_vl_video_embeddings_input(
     vllm_runner,
     video_assets,
@@ -455,6 +472,7 @@ def test_qwen2_vl_video_embeddings_input(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
+    mm_encoder_attn_backend: _MHA_Backend,
 ) -> None:
     num_frames = 4
     sampled_vids = [
@@ -480,4 +498,5 @@ def test_qwen2_vl_video_embeddings_input(
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
+        mm_encoder_attn_backend=mm_encoder_attn_backend,
     )
