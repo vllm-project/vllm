@@ -1,11 +1,16 @@
 # Google TPU
 
 !!! note "vLLM TPU Support via `tpu-inference`"
-    vLLM support for Google TPUs is now provided through the [`tpu-inference`](http://github.com/vllm-project/tpu-inference/) library, a dedicated plugin for vLLM. This new backend unifies support for PyTorch and JAX, offering improved performance and a streamlined user experience.
+    vLLM support for Google TPUs is provided through the [`tpu-inference`](http://github.com/vllm-project/tpu-inference/) library, a dedicated plugin for vLLM. This backend unifies support for PyTorch and JAX, offering improved performance and a streamlined user experience.
 
-    **The documentation for TPU support has moved to a new, dedicated site.**
+## Quick Install
+You can install the vLLM TPU backend with `pip`:
+```bash
+pip install vllm-tpu
+```
 
-    For the most up-to-date guides, please see:
+## Documentation and Guides
+For detailed instructions, including Docker, installing from source, and more, please see the **dedicated vLLM on TPU documentation site**.
 
 * [**vLLM on TPU Documentation Site**](https://docs.vllm.ai/projects/tpu/en/latest/)
 * [**Installation Guide**](https://docs.vllm.ai/projects/tpu/en/latest/getting_started/installation/)
