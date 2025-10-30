@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlexAttention."""
 
+import math
 from dataclasses import dataclass
-from typing import Optional, Union
 
 import torch
 import torch._dynamo.decorators
@@ -27,9 +27,10 @@ from vllm.attention.backends.abstract import (
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
-from vllm.utils import cdiv, is_torch_equal_or_newer
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -282,9 +283,9 @@ class FlexAttentionMetadata:
 
     use_cascade: bool
     common_prefix_len: int
-    cu_prefix_query_lens: Optional[torch.Tensor]
-    prefix_kv_lens: Optional[torch.Tensor]
-    suffix_kv_lens: Optional[torch.Tensor]
+    cu_prefix_query_lens: torch.Tensor | None
+    prefix_kv_lens: torch.Tensor | None
+    suffix_kv_lens: torch.Tensor | None
 
     # Block info
     total_cache_tokens: int
@@ -300,15 +301,15 @@ class FlexAttentionMetadata:
 
     # Flex Metadata
     num_blocks = 0
-    block_mask: Optional[BlockMask] = None
-    score_mod: Optional[_score_mod_signature] = None
+    block_mask: BlockMask | None = None
+    score_mod: _score_mod_signature | None = None
     logical_mask_mod: _mask_mod_signature = causal_mask_mod
-    doc_ids: Optional[torch.Tensor] = None
+    doc_ids: torch.Tensor | None = None
     direct_build: bool = True
     q_block_size: int = 16
     kv_block_size: int = 16
-    transformed_score_mod: Optional[_score_mod_signature] = None
-    sliding_window: Optional[int] = None
+    transformed_score_mod: _score_mod_signature | None = None
+    sliding_window: int | None = None
 
     def _convert_physical_to_logical(
         self,
@@ -443,7 +444,7 @@ class FlexAttentionMetadata:
             mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
         return mask_mod
 
-    def get_transformed_score_mod(self) -> Optional[_score_mod_signature]:
+    def get_transformed_score_mod(self) -> _score_mod_signature | None:
         """Creates the transformed score_mod function for FlexAttention.
 
         This function wraps the user's score_mod to handle physical-to-logical
@@ -592,9 +593,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
-        self.q_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
-        self.kv_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
+        supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
+        self.direct_build: bool = supports_small_blocks
+        self.q_block_size: int = 16 if supports_small_blocks else 128
+        self.kv_block_size: int = self.block_size if supports_small_blocks else 128
 
     def build(
         self,
@@ -658,7 +660,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
-            direct_build=self.direct_build,
+            # FIXME(Isotr0py): direct build has issue to build bidirectional
+            # attention block mask for encoder-only models, disable it temporarily.
+            # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
+            direct_build=(self.direct_build and common_attn_metadata.causal),
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
         )
@@ -669,9 +674,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
 
 
 class FlexAttentionImpl(AttentionImpl):
-    sliding_window: Optional[int]
-    alibi_slopes: Optional[torch.Tensor]
-    logits_soft_cap: Optional[float]
+    sliding_window: int | None
+    alibi_slopes: torch.Tensor | None
+    logits_soft_cap: float | None
 
     def __init__(
         self,
@@ -679,12 +684,12 @@ class FlexAttentionImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: str | None = None,
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -742,9 +747,9 @@ class FlexAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlexAttentionMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with FLexAttention.
 
@@ -768,7 +773,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
             # query = self.view_as_4d(query).permute(0, 2, 1, 3)
             # return torch.empty_like(query)
 
@@ -860,11 +865,27 @@ class FlexAttentionImpl(AttentionImpl):
 
 def get_kernel_options(
     query, block_m, block_n, use_direct_build: bool
-) -> dict[str, Union[int, bool]]:
-    kernel_options: dict[str, Union[int, bool]] = {
+) -> dict[str, int | bool]:
+    kernel_options: dict[str, int | bool] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
-    if vllm_kernel_override_batch_invariant():
+
+    def ensure_divisible(candidate: int, block_size: int) -> int:
+        """Pick a kernel block size that divides the logical block."""
+        if block_size <= 0:
+            return candidate
+        candidate = min(candidate, block_size)
+        if candidate <= 0:
+            return block_size
+        if block_size % candidate == 0:
+            return candidate
+
+        candidate = math.gcd(candidate, block_size)
+        if candidate <= 1:
+            return block_size
+        return candidate
+
+    if vllm_is_batch_invariant():
         kernel_options["BLOCK_M"] = 16
         kernel_options["BLOCK_N"] = 16
         kernel_options["IS_DIVISIBLE"] = False
@@ -874,17 +895,22 @@ def get_kernel_options(
         kernel_options["BLOCK_N"] = block_n
         return kernel_options
     else:
-        kernel_options["BLOCK_M"] = 64
-        kernel_options["BLOCK_N"] = 64
-        if query.dtype == torch.float32:
-            kernel_options["BLOCK_M"] = 32
-            kernel_options["BLOCK_N"] = 32
-        # if current_platform.is_cuda():
+        preferred_block = 32 if query.dtype == torch.float32 else 64
+        block_m_candidate = ensure_divisible(preferred_block, block_m)
+        block_n_candidate = ensure_divisible(preferred_block, block_n)
+
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
             max_shared_memory = device_props.shared_memory_per_block_optin
             if max_shared_memory < 144 * 1024:
-                kernel_options["BLOCK_M"] = kernel_options["BLOCK_M"] // 2
-                kernel_options["BLOCK_N"] = kernel_options["BLOCK_N"] // 2
+                block_m_candidate = ensure_divisible(
+                    max(1, block_m_candidate // 2), block_m
+                )
+                block_n_candidate = ensure_divisible(
+                    max(1, block_n_candidate // 2), block_n
+                )
+
+        kernel_options["BLOCK_M"] = block_m_candidate
+        kernel_options["BLOCK_N"] = block_n_candidate
 
     return kernel_options

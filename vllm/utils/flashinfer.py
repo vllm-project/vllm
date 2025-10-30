@@ -5,15 +5,14 @@
 Users of vLLM should always import **only** these wrappers.
 """
 
-from __future__ import annotations
-
 import contextlib
 import functools
 import importlib
 import importlib.util
 import os
 import shutil
-from typing import Any, Callable, NoReturn
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import requests
 import torch
@@ -35,7 +34,7 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
 
 @functools.cache
 def has_flashinfer() -> bool:
-    """Return ``True`` if FlashInfer is available."""
+    """Return `True` if FlashInfer is available."""
     # Use find_spec to check if the module exists without importing it
     # This avoids potential CUDA initialization side effects
     if importlib.util.find_spec("flashinfer") is None:
@@ -115,13 +114,13 @@ autotune = _lazy_import_wrapper(
 
 @functools.cache
 def has_flashinfer_comm() -> bool:
-    """Return ``True`` if FlashInfer comm module is available."""
+    """Return `True` if FlashInfer comm module is available."""
     return has_flashinfer() and importlib.util.find_spec("flashinfer.comm") is not None
 
 
 @functools.cache
 def has_flashinfer_all2all() -> bool:
-    """Return ``True`` if FlashInfer mnnvl all2all is available."""
+    """Return `True` if FlashInfer mnnvl all2all is available."""
     if not has_flashinfer_comm():
         return False
 
@@ -142,7 +141,7 @@ def has_flashinfer_all2all() -> bool:
 
 @functools.cache
 def has_flashinfer_moe() -> bool:
-    """Return ``True`` if FlashInfer MoE module is available."""
+    """Return `True` if FlashInfer MoE module is available."""
     return (
         has_flashinfer()
         and importlib.util.find_spec("flashinfer.fused_moe") is not None
@@ -151,7 +150,7 @@ def has_flashinfer_moe() -> bool:
 
 @functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
-    """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_moe():
         return False
 
@@ -172,7 +171,7 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 @functools.cache
 def has_nvidia_artifactory() -> bool:
-    """Return ``True`` if NVIDIA's artifactory is accessible.
+    """Return `True` if NVIDIA's artifactory is accessible.
 
     This checks connectivity to the kernel inference library artifactory
     which is required for downloading certain cubin kernels like TRTLLM FHMA.
@@ -219,9 +218,9 @@ def _force_use_trtllm_attention(env_value: bool | None) -> bool | None:
 
 def force_use_trtllm_attention() -> bool | None:
     """
-    Return ``None`` if VLLM_USE_TRTLLM_ATTENTION is not set,
-    return ``True`` if TRTLLM attention is forced to be used,
-    return ``False`` if TRTLLM attention is forced to be not used.
+    Return `None` if VLLM_USE_TRTLLM_ATTENTION is not set,
+    return `True` if TRTLLM attention is forced to be used,
+    return `False` if TRTLLM attention is forced to be not used.
     """
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
@@ -245,7 +244,7 @@ def use_trtllm_attention(
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
-    """Return ``True`` if TRTLLM attention is used."""
+    """Return `True` if TRTLLM attention is used."""
     force_use_trtllm = force_use_trtllm_attention()
 
     # Environment variable is set to 0 - respect it

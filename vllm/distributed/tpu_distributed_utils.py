@@ -30,9 +30,9 @@ class XlaQKVParallelLinear(nn.Module):
         self.q_weight: Parameter
         self.k_weight: Parameter
         self.v_weight: Parameter
-        self.q_bias: Optional[Parameter]
-        self.k_bias: Optional[Parameter]
-        self.v_bias: Optional[Parameter]
+        self.q_bias: Parameter | None
+        self.k_bias: Parameter | None
+        self.v_bias: Parameter | None
         self._load_weights_from_qkv_linear(qkv_linear)
         if mesh is not None:
             self._shard_weight(mesh)

@@ -4,12 +4,13 @@
 
 from collections.abc import Iterable, Mapping
 from functools import partial
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
 from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 
+from vllm.attention.backends.registry import _Backend
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -102,9 +103,10 @@ class VisualTokenizer(torch.nn.Module):
         self,
         config: PretrainedConfig,
         visual_vocab_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         super().__init__()
         self.config = config
@@ -113,6 +115,7 @@ class VisualTokenizer(torch.nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.vit",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         # reserved tokens for INDICATOR_IDS
         head_dim = visual_vocab_size - len(INDICATOR_IDS)
@@ -129,9 +132,10 @@ class VisualTokenizer(torch.nn.Module):
     def _init_backbone(
         self,
         config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: _Backend | None = None,
     ):
         model_type = config.model_type
         if model_type == "siglip2_navit":
@@ -140,6 +144,7 @@ class VisualTokenizer(torch.nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 use_data_parallel=use_data_parallel,
+                attn_backend_override=attn_backend_override,
             )
         raise ValueError(f"Unsupported visual tokenizer model_type: {model_type}")
 
@@ -205,7 +210,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
     def get_image_processor(self) -> BaseImageProcessor:
         return self.get_hf_processor().image_processor  # type: ignore
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": 1}
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -274,7 +279,7 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Optional[BaseImageProcessor],
+        image_processor: BaseImageProcessor | None,
     ) -> int:
         num_video_tokens = self.get_num_image_tokens(
             image_width=image_width, image_height=image_height, num_frames=num_frames
@@ -305,7 +310,7 @@ class Ovis2_5DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2_5ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -457,6 +462,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config: PretrainedConfig = config
         self.llm = init_vllm_registered_model(
@@ -464,11 +470,17 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
             prefix=maybe_prefix(prefix, "llm"),
         )
 
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.visual_tokenizer = VisualTokenizer(
             config=config.vit_config,
             visual_vocab_size=config.visual_vocab_size,
             quant_config=quant_config,
             prefix=f"{prefix}.visual_tokenizer",
+            attn_backend_override=attn_backend_override,
         )
 
         self.vte = VisualEmbedding(config.visual_vocab_size, config.hidden_size)
@@ -482,7 +494,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Ovis2_5ImagePatchInputs]:
+    ) -> Ovis2_5ImagePatchInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         indicator_tokens = kwargs.pop("indicator_tokens", None)
         grids = kwargs.pop("grids", None)
@@ -516,7 +528,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
     def _parse_and_validate_video_input(
         self, **kwargs: object
-    ) -> Optional[Ovis2_5VideoPatchInputs]:
+    ) -> Ovis2_5VideoPatchInputs | None:
         pixel_values = kwargs.pop("video_pixel_values", None)
         indicator_tokens = kwargs.pop("video_indicator_tokens", None)
         grids = kwargs.pop("video_grids", None)
@@ -549,7 +561,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         raise AssertionError("This line should be unreachable.")
 
     def _process_visual_input(
-        self, visual_input: Union[Ovis2_5ImagePatchInputs, Ovis2_5VideoPatchInputs]
+        self, visual_input: Ovis2_5ImagePatchInputs | Ovis2_5VideoPatchInputs
     ) -> MultiModalEmbeddings:
         image_patches_flat = visual_input["flat_data"]
         patches_per_image = visual_input["patches_per_item"]
@@ -616,12 +628,12 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_visual_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_visual_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "videos":
                 video_input = modalities["videos"]
                 video_embeddings = self._process_visual_input(video_input)
-                multimodal_embeddings += video_embeddings
+                multimodal_embeddings += tuple(video_embeddings)
 
         return multimodal_embeddings
 
@@ -629,10 +641,10 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -649,7 +661,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.llm.compute_logits(hidden_states)
         return logits
 

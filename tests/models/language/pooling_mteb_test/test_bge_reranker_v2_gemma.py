@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pytest
@@ -111,7 +111,7 @@ class GemmaMtebEncoder(VllmMtebEncoder):
 
     def predict(
         self,
-        sentences: list[tuple[str, str, Optional[str]]],  # query, corpus, prompt
+        sentences: list[tuple[str, str, str | None]],  # query, corpus, prompt
         *args,
         **kwargs,
     ) -> np.ndarray:

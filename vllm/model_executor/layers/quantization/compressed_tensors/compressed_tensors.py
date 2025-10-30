@@ -71,7 +71,7 @@ logger = init_logger(__name__)
 __all__ = ["CompressedTensorsLinearMethod"]
 
 SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
-QUANTIZATION_SCHEME_MAP_TYPE = dict[str, Optional[dict[str, QuantizationArgs]]]
+QUANTIZATION_SCHEME_MAP_TYPE = dict[str, dict[str, QuantizationArgs] | None]
 
 
 class CompressedTensorsConfig(QuantizationConfig):
@@ -82,9 +82,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         quant_format: str,
         sparsity_scheme_map: dict[str, SparsityCompressionConfig],
         sparsity_ignore_list: list[str],
-        kv_cache_scheme: Optional[dict[str, Any]] = None,
-        config: Optional[dict[str, Any]] = None,
-        transform_config: Optional[dict[str, Any]] = None,
+        kv_cache_scheme: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        transform_config: dict[str, Any] | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -310,7 +310,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         is_float_type = (
             weight_quant.type == QuantizationType.FLOAT
-            and input_quant.type == QuantizationType.FLOAT.value
+            and input_quant.type == QuantizationType.FLOAT
         )
         is_4_bits = weight_quant.num_bits == 4 and input_quant.num_bits == 4
 
@@ -524,7 +524,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         self,
         weight_quant: QuantizationArgs,
         input_quant: QuantizationArgs,
-        format: Optional[str] = None,
+        format: str | None = None,
     ) -> "CompressedTensorsScheme":
         # use the per-layer format if defined, otherwise, use global format
         format = format if format is not None else self.quant_format
@@ -631,7 +631,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         raise NotImplementedError("No compressed-tensors compatible scheme was found.")
 
     def get_scheme(
-        self, layer: torch.nn.Module, layer_name: Optional[str] = None
+        self, layer: torch.nn.Module, layer_name: str | None = None
     ) -> Optional["CompressedTensorsScheme"]:
         """
         compressed-tensors supports non uniform in the following way:
@@ -674,7 +674,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         sparsity_targets = self.sparsity_scheme_map.keys() - set(
             self.sparsity_ignore_list
         )
-        sparsity_scheme: Optional[SparsityCompressionConfig] = None
+        sparsity_scheme: SparsityCompressionConfig | None = None
         with suppress(ValueError):
             matched_target = find_matched_target(
                 layer_name=layer_name,
@@ -723,7 +723,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         logger.debug("Using scheme: %s for %s", scheme.__class__.__name__, layer_name)
         return scheme
 
-    def get_cache_scale(self, name: str) -> Optional[str]:
+    def get_cache_scale(self, name: str) -> str | None:
         """
         Check whether the param name matches the format for k/v cache scales
         in compressed-tensors. If this is the case, return its equivalent
@@ -751,9 +751,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     @staticmethod
     def supports_cutlass_24(
-        weight_quant: Optional[QuantizationArgs],
-        input_quant: Optional[QuantizationArgs],
-        sparsity_scheme: Optional[SparsityCompressionConfig] = None,
+        weight_quant: QuantizationArgs | None,
+        input_quant: QuantizationArgs | None,
+        sparsity_scheme: SparsityCompressionConfig | None = None,
     ) -> bool:
         """
         Check if the layer is supported by the Cutlass 2:4 Kernel
@@ -853,7 +853,7 @@ class CompressedTensorsLinearMethod(LinearMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ):
         """
         Use the output of create_weights and the CompressedTensorsScheme
@@ -878,7 +878,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         super().__init__(quant_config)
 
     @staticmethod
-    def validate_kv_cache_scheme(kv_cache_scheme: Optional[dict[str, Any]]):
+    def validate_kv_cache_scheme(kv_cache_scheme: dict[str, Any] | None):
         """
         Validator for the kv cache scheme. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
