@@ -164,6 +164,29 @@ def get_eplb_stats(llm):
         return None
 
 
+def _save_eplb_state_from_worker(worker, file_path: str, num_logical_experts: int):
+    """Save EPLB state to file by invoking EplbState.save_to_file on workers.
+
+    Must be executed via collective RPC so that all EP ranks participate
+    in the all_reduce performed inside save_to_file; only rank 0 writes.
+    """
+    try:
+        model_runner = worker.model_runner
+        if not hasattr(model_runner, "eplb_state") or model_runner.eplb_state is None:
+            return False
+
+        eplb_state = model_runner.eplb_state
+        eplb_state.save_to_file(
+            file_path=file_path,
+            num_logical_experts=num_logical_experts,
+            save_expert_load=False,
+        )
+        return True
+    except Exception as e:
+        logger.exception("Error saving EPLB state on worker: %s", e)
+        return False
+
+
 def generate_summary(stats, top_k_experts=10, tp_size=1):
     """Generate a summary with top-k expert load percentages and per-GPU loads.
 
@@ -541,6 +564,9 @@ def main(args):
     detailed_dir.mkdir(parents=True, exist_ok=True)
     summary_dir.mkdir(parents=True, exist_ok=True)
 
+    state_dir = output_dir / "eplb_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+
     # Track all snapshots
     snapshots = [initial_stats]
     previous_stats = initial_stats
@@ -620,6 +646,17 @@ def main(args):
                 if rearrange_summary:
                     rearrangement_summaries.append(rearrange_summary)
                     print_rearrangement_summary(rearrange_summary)
+
+                # Save EPLB state after rearrangement
+                try:
+                    state_file = state_dir / f"eplb_state_{rearrangement_num}.json"
+                    llm.llm_engine.model_executor.collective_rpc(
+                        _save_eplb_state_from_worker,
+                        args=(str(state_file), current_stats["num_logical_experts"]),
+                    )
+                    logger.info("Saved EPLB state to %s", state_file)
+                except Exception as e:  # noqa: BLE001
+                    logger.exception("Failed to save EPLB state: %s", e)
 
             previous_stats = current_stats
 
