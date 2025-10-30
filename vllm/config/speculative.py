@@ -122,9 +122,6 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    disable_log_stats: SkipValidation[bool] = None  # type: ignore
-    """Whether to disable the periodic printing of stage times in speculative
-    decoding."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
