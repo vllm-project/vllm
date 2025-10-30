@@ -132,6 +132,8 @@ class OpenPanguMoE(nn.Module):
         prefix: str = "",
     ):
         super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tp_group().rank_in_group
 
         self.routed_scaling_factor = config.routed_scaling_factor
         self.ep_group = get_ep_group().device_group
@@ -202,9 +204,6 @@ class OpenPanguMoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
         )
 
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tp_group().rank_in_group
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -221,11 +220,9 @@ class OpenPanguMoE(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
 
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-        else:
-            shared_output = None
-            final_hidden_states = fused_moe_out
+        shared_output, final_hidden_states = fused_moe_out
+        if self.shared_experts is None:
+            assert shared_output is None
 
         if hidden_states.dtype != torch.float16:
             final_hidden_states *= self.routed_scaling_factor
@@ -431,10 +428,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
             )
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
-        if (
-            self.total_num_kv_heads >= tp_size
-            and self.total_num_kv_heads % tp_size != 0
-        ):
+        if self.total_num_kv_heads > tp_size and self.total_num_kv_heads % tp_size != 0:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel ranks.
             raise ValueError(
@@ -653,16 +647,14 @@ class OpenPanguDecoderLayer(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
         self.tp_group = get_tp_group().device_group
-        if getattr(config, "sandwich_norm", False):
-            self.sandwich_norm = True
+        self.sandwich_norm = getattr(config, "sandwich_norm", False)
+        if self.sandwich_norm:
             self.pre_mlp_layernorm = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
             )
             self.post_mlp_layernorm = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
             )
-        else:
-            self.sandwich_norm = False
 
     def forward(
         self,
@@ -791,6 +783,7 @@ class OpenPanguModel(nn.Module):
 
 class OpenPanguForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
     packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
