@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 
+from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
+from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.utils import CpuGpuBuffer
 
 _NP_INT64_MIN = np.iinfo(np.int64).min
 _NP_INT64_MAX = np.iinfo(np.int64).max
+NO_LORA_ID = 0
 
 
 @dataclass
 class SamplingMetadata:
-
     temperature: torch.Tensor
 
     top_p: torch.Tensor | None
@@ -36,12 +37,14 @@ class SamplingMetadata:
         assert num_reqs > 0
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         temperature[0] = 0.5
-        top_p = torch.ones(num_reqs, dtype=torch.float32, device=device)
-        top_p[0] = 0.99
-        top_k = torch.ones(num_reqs, dtype=torch.int32, device=device)
+        # TODO(woosuk): Use top-p and top-k for dummy sampler.
+        # Currently, they are disabled because of memory usage.
+        top_p = None
+        top_k = None
         seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         max_num_logprobs = 20
+
         return cls(
             temperature=temperature,
             top_p=top_p,
@@ -53,7 +56,6 @@ class SamplingMetadata:
 
 
 class RequestState:
-
     def __init__(
         self,
         max_num_reqs: int,
@@ -73,15 +75,15 @@ class RequestState:
         self.req_id_to_index: dict[str, int] = {}
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
+        self.extra_data: dict[str, ExtraData] = {}
 
-        # NOTE(woosuk): Strictly speaking, it contains prompt + some output
-        # because of preemption.
-        self.prompt_token_ids = np.zeros(
+        self.prompt_len = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.prefill_token_ids = np.zeros(
             (self.max_num_reqs, self.max_model_len),
             dtype=np.int32,
         )
-        self.num_tokens = self._make_buffer(self.max_num_reqs,
-                                            dtype=torch.int32)
+        self.prefill_len = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+        self.num_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.num_computed_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled tokens.
@@ -91,6 +93,10 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+
+        # LoRA.
+        self.lora_ids = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.lora_ids.fill(NO_LORA_ID)
 
         # Sampling parameters.
         self.temperature = self._make_param(self.max_num_reqs, torch.float32)
@@ -104,16 +110,12 @@ class RequestState:
         self.needs_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
 
     def _make_param(self, size: int, dtype: torch.dtype) -> "Param":
-        return Param(size,
-                     dtype=dtype,
-                     device=self.device,
-                     pin_memory=self.pin_memory)
+        return Param(size, dtype=dtype, device=self.device, pin_memory=self.pin_memory)
 
     def _make_buffer(self, size: int, dtype: torch.dtype) -> CpuGpuBuffer:
-        return CpuGpuBuffer(size,
-                            dtype=dtype,
-                            device=self.device,
-                            pin_memory=self.pin_memory)
+        return CpuGpuBuffer(
+            size, dtype=dtype, device=self.device, pin_memory=self.pin_memory
+        )
 
     @property
     def num_reqs(self) -> int:
@@ -122,23 +124,32 @@ class RequestState:
     def add_request(
         self,
         req_id: str,
-        prompt_token_ids: list[int],
+        prompt_len: int,
+        prefill_token_ids: list[int],
         num_computed_tokens: int,
         sampling_params: SamplingParams,
+        lora_request: LoRARequest | None,
     ) -> None:
-        assert len(self.free_indices) > 0
+        assert len(self.free_indices) > 0, "No free indices"
         req_idx = self.free_indices.pop()
         self.req_id_to_index[req_id] = req_idx
         self.index_to_req_id[req_idx] = req_id
+        self.extra_data[req_id] = ExtraData(lora_request)
 
-        # NOTE(woosuk): Strictly speaking, "prompt_len" here may include
-        # output tokens, if the request is resumed from preemption.
-        prompt_len = len(prompt_token_ids)
-        self.prompt_token_ids[req_idx, :prompt_len] = prompt_token_ids
-        self.num_tokens.np[req_idx] = prompt_len
+        self.prompt_len[req_idx] = prompt_len
+        prefill_len = len(prefill_token_ids)
+        assert prefill_len >= prompt_len, (
+            f"prefill_len {prefill_len} < prompt_len {prompt_len}"
+        )
+        self.prefill_len.np[req_idx] = prefill_len
+        self.prefill_token_ids[req_idx, :prefill_len] = prefill_token_ids
+        self.num_tokens[req_idx] = prefill_len
         self.num_computed_tokens[req_idx] = num_computed_tokens
-        # TODO(woosuk): Optimize.
-        self.last_sampled_tokens[req_idx].fill_(-1)
+
+        if lora_request is not None:
+            self.lora_ids[req_idx] = lora_request.lora_int_id
+        else:
+            self.lora_ids[req_idx] = NO_LORA_ID
 
         self.temperature.np[req_idx] = sampling_params.temperature
         self.top_p.np[req_idx] = sampling_params.top_p
@@ -165,6 +176,7 @@ class RequestState:
         self.needs_prompt_logprobs[req_idx] = needs_prompt_logprobs
 
     def remove_request(self, req_id: str) -> None:
+        self.extra_data.pop(req_id, None)
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:
             # Request not found.
@@ -205,9 +217,25 @@ class RequestState:
             max_num_logprobs=max_num_logprobs,
         )
 
+    def make_lora_inputs(
+        self,
+        req_ids: list[str],
+        idx_mapping: np.ndarray,
+        num_scheduled_tokens: np.ndarray,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
+        lora_ids = self.lora_ids[idx_mapping]
+        prompt_lora_mapping = tuple(lora_ids)
+        token_lora_mapping = tuple(lora_ids.repeat(num_scheduled_tokens))
+
+        active_lora_requests: set[LoRARequest] = set()
+        for req_id in req_ids:
+            lora_request = self.extra_data[req_id].lora_request
+            if lora_request is not None:
+                active_lora_requests.add(lora_request)
+        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
+
 
 class Param:
-
     def __init__(
         self,
         size: int,
@@ -227,3 +255,9 @@ class Param:
         n = x.shape[0]
         self.buffer.np[:n] = x
         return self.buffer.copy_to_gpu(n)
+
+
+@dataclass
+class ExtraData:
+    lora_request: LoRARequest | None
+    in_progress_prompt_logprobs: list[LogprobsTensors] = field(default_factory=list)

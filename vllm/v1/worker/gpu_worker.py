@@ -42,6 +42,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import report_usage_stats
+
 # from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
@@ -495,6 +496,8 @@ class Worker(WorkerBase):
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        return self.model_runner.execute_model(scheduler_output)
+
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens

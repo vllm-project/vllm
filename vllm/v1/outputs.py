@@ -15,7 +15,6 @@ else:
 
 
 class LogprobsLists(NamedTuple):
-
     # [num_reqs, max_num_logprobs + 1]
     logprob_token_ids: np.ndarray
     # [num_reqs, max_num_logprobs + 1]
@@ -135,13 +134,14 @@ class KVConnectorOutput:
 class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
+    # req_id -> index
+    req_id_to_index: dict[str, int]
 
     # num_reqs x num_generated_tokens
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: np.ndarray | None
-    num_sampled_tokens: np.ndarray | None
+    sampled_token_ids: list[list[int]]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
@@ -186,8 +186,8 @@ class DraftTokenIds:
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
     req_ids=[],
-    sampled_token_ids=None,
-    num_sampled_tokens=None,
+    req_id_to_index={},
+    sampled_token_ids=[],
     logprobs=None,
     prompt_logprobs_dict={},
     pooler_output=[],
