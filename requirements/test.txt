@@ -965,11 +965,11 @@ rsa==4.9.1
     # via google-auth
 rtree==1.4.0
     # via torchgeo
-runai-model-streamer==0.14.0
+runai-model-streamer==0.15.0
     # via -r requirements/test.in
-runai-model-streamer-gcs==0.14.0
+runai-model-streamer-gcs==0.15.0
     # via runai-model-streamer
-runai-model-streamer-s3==0.14.0
+runai-model-streamer-s3==0.15.0
     # via runai-model-streamer
 s3transfer==0.10.3
     # via boto3

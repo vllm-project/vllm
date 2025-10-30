@@ -30,7 +30,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
     KVConnectorRole,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -252,6 +257,18 @@ class NixlConnector(KVConnectorBase_V1):
             NixlKVConnectorStats(data=data)
             if data is not None
             else NixlKVConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[str]],
+    ) -> KVConnectorPromMetrics:
+        return NixlPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
@@ -1960,3 +1977,125 @@ class NixlKVConnectorStats(KVConnectorStats):
     @property
     def num_successful_transfers(self) -> int:
         return len(self.data["transfer_duration"])
+
+
+class NixlPromMetrics(KVConnectorPromMetrics):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[str]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+        buckets = [
+            0.001,
+            0.005,
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.2,
+            0.3,
+            0.5,
+            0.75,
+            1.0,
+            5.0,
+        ]
+        nixl_histogram_xfer_time = self._histogram_cls(
+            name="vllm:nixl_xfer_time_seconds",
+            documentation="Histogram of transfer duration for NIXL KV Cache transfers.",
+            buckets=buckets[1:],
+            labelnames=labelnames,
+        )
+        self.nixl_histogram_xfer_time = self.make_per_engine(nixl_histogram_xfer_time)
+        nixl_histogram_post_time = self._histogram_cls(
+            name="vllm:nixl_post_time_seconds",
+            documentation="Histogram of transfer post time for NIXL KV"
+            " Cache transfers.",
+            buckets=buckets,
+            labelnames=labelnames,
+        )
+        self.nixl_histogram_post_time = self.make_per_engine(nixl_histogram_post_time)
+        # uniform 2kb to 16gb range
+        buckets = [2 ** (10 + i) for i in range(1, 25, 2)]
+        nixl_histogram_bytes_transferred = self._histogram_cls(
+            name="vllm:nixl_bytes_transferred",
+            documentation="Histogram of bytes transferred per NIXL KV Cache transfers.",
+            buckets=buckets,
+            labelnames=labelnames,
+        )
+        self.nixl_histogram_bytes_transferred = self.make_per_engine(
+            nixl_histogram_bytes_transferred
+        )
+        buckets = [
+            10,
+            20,
+            30,
+            50,
+            75,
+            100,
+            200,
+            400,
+            1000,
+            2000,
+            4000,
+            10000,
+            20000,
+            50000,
+        ]
+        nixl_histogram_num_descriptors = self._histogram_cls(
+            name="vllm:nixl_num_descriptors",
+            documentation="Histogram of number of descriptors per NIXL"
+            "  KV Cache transfers.",
+            buckets=buckets,
+            labelnames=labelnames,
+        )
+        self.nixl_histogram_num_descriptors = self.make_per_engine(
+            nixl_histogram_num_descriptors
+        )
+        counter_nixl_num_failed_transfers = self._counter_cls(
+            name="vllm:nixl_num_failed_transfers",
+            documentation="Number of failed NIXL KV Cache transfers.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_failed_transfers = self.make_per_engine(
+            counter_nixl_num_failed_transfers
+        )
+        counter_nixl_num_failed_notifications = self._counter_cls(
+            name="vllm:nixl_num_failed_notifications",
+            documentation="Number of failed NIXL KV Cache notifications.",
+            labelnames=labelnames,
+        )
+        self.counter_nixl_num_failed_notifications = self.make_per_engine(
+            counter_nixl_num_failed_notifications
+        )
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        for prom_obj, list_item_key in zip(
+            [
+                self.nixl_histogram_xfer_time,
+                self.nixl_histogram_post_time,
+                self.nixl_histogram_bytes_transferred,
+                self.nixl_histogram_num_descriptors,
+            ],
+            [
+                "transfer_duration",
+                "post_duration",
+                "bytes_transferred",
+                "num_descriptors",
+            ],
+        ):
+            for list_item in transfer_stats_data[list_item_key]:
+                prom_obj[engine_idx].observe(list_item)
+        for counter_obj, counter_item_key in zip(
+            [
+                self.counter_nixl_num_failed_transfers,
+                self.counter_nixl_num_failed_notifications,
+            ],
+            ["num_failed_transfers", "num_failed_notifications"],
+        ):
+            for list_item in transfer_stats_data[counter_item_key]:
+                counter_obj[engine_idx].inc(list_item)
