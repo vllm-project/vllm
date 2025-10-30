@@ -32,7 +32,6 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_interleaved,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -442,15 +441,12 @@ class ModelConfig:
             self.enforce_eager = True
 
         # Set the default seed to 0 in V1.
-        # NOTE(woosuk): In V0, we set the default seed to None because the
-        # driver worker shares the same process as the user process, and thus
-        # setting a seed affects the user process as well.
-        # In V1, we use separate processes for workers (unless
+        # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
         # doesn't affect the user process. However, without a consistent seed,
         # different tensor parallel workers would sample different tokens,
         # leading to inconsistent results.
-        if envs.VLLM_USE_V1 and self.seed is None:
+        if self.seed is None:
             self.seed = 0
             if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
                 logger.warning(
@@ -702,23 +698,6 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-
-        # Interleaved attention is not supported by some backends in V0
-        if (
-            not self.disable_sliding_window
-            and is_interleaved(self.hf_text_config)
-            and not envs.VLLM_USE_V1
-            and (backend := envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER")
-        ):
-            logger.warning_once(
-                "%s has interleaved attention, which is currently not "
-                "supported by the %s backend. Disabling sliding window and "
-                "capping the max length to the sliding window size (%d).",
-                self.hf_text_config.model_type,
-                backend,
-                self.hf_text_config.sliding_window,
-            )
-            self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
