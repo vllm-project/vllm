@@ -955,6 +955,7 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_mla_attention(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
