@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import ClassificationResponse
+from vllm.entrypoints.openai.protocol import ClassificationResponse, PoolingResponse
 
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 DTYPE = "float32"  # Use float32 to avoid NaN issue
@@ -163,20 +163,24 @@ async def test_invocations(server: RemoteOpenAIServer):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_activation(server: RemoteOpenAIServer, model_name: str):
+async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
     input_text = ["This product was excellent and exceeded my expectations"]
 
-    async def get_outputs(activation):
+    async def get_outputs(use_activation):
         response = requests.post(
             server.url_for("classify"),
-            json={"model": model_name, "input": input_text, "activation": activation},
+            json={
+                "model": model_name,
+                "input": input_text,
+                "use_activation": use_activation,
+            },
         )
         outputs = response.json()
         return torch.tensor([x["probs"] for x in outputs["data"]])
 
-    default = await get_outputs(activation=None)
-    w_activation = await get_outputs(activation=True)
-    wo_activation = await get_outputs(activation=False)
+    default = await get_outputs(use_activation=None)
+    w_activation = await get_outputs(use_activation=True)
+    wo_activation = await get_outputs(use_activation=False)
 
     assert torch.allclose(default, w_activation, atol=1e-2), (
         "Default should use activation."
@@ -191,18 +195,7 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_pooling(server: RemoteOpenAIServer, model_name: str):
-    # pooling api uses ALL pooling, which does not support chunked prefill.
-    response = requests.post(
-        server.url_for("pooling"),
-        json={"model": model_name, "input": "test", "encoding_format": "float"},
-    )
-    assert response.json()["error"]["type"] == "BadRequestError"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_score(server: RemoteOpenAIServer, model_name: str):
+async def test_score(server: RemoteOpenAIServer, model_name: str):
     # score api is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("score"),
@@ -217,7 +210,7 @@ def test_score(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_rerank(server: RemoteOpenAIServer, model_name: str):
+async def test_rerank(server: RemoteOpenAIServer, model_name: str):
     # rerank api is only enabled for num_labels == 1.
     response = requests.post(
         server.url_for("rerank"),
@@ -228,3 +221,62 @@ def test_rerank(server: RemoteOpenAIServer, model_name: str):
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
+    input_text = "This product was excellent and exceeded my expectations"
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": input_text,
+            "encoding_format": "float",
+            "task": "classify",
+        },
+    )
+    poolings = PoolingResponse.model_validate(response.json())
+    assert len(poolings.data) == 1
+    assert len(poolings.data[0].data) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
+    # token_classify uses ALL pooling, which does not support chunked prefill.
+    task = "token_classify"
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float",
+            "task": task,
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["error"]["message"].startswith(
+        f"Task {task} is not supported"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+async def test_pooling_not_supported(
+    server: RemoteOpenAIServer, model_name: str, task: str
+):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float",
+            "task": task,
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["error"]["message"].startswith(
+        f"Task {task} is not supported"
+    )
