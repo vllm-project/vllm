@@ -8,6 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
+from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
@@ -4139,26 +4140,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def calculate_reorder_batch_threshold(self) -> None:
         """
-        Check that if any backends reorder batches; that the reordering
-        is compatible (e.g., decode threshold is the same)
+        Choose the minimum reorder batch threshold from all attention groups.
+        Backends should be able to support lower threshold then what they request
+        just may have a performance penalty due to that backend treating decodes
+        as prefills.
         """
-        for group in self._attn_group_iterator():
-            attn_metadata_builder_i = group.get_metadata_builder()
+        min_none_high = lambda a, b: a if b is None else b if a is None else min(a, b)
 
-            # check that if any backends reorder batches; that the reordering
-            # is compatible (e.g., decode threshold is the same)
-            reorder_batch_threshold_i = attn_metadata_builder_i.reorder_batch_threshold
-            if reorder_batch_threshold_i is not None:
-                if self.reorder_batch_threshold is not None:
-                    if reorder_batch_threshold_i != self.reorder_batch_threshold:
-                        raise ValueError(
-                            f"Attention backend reorders decodes with "
-                            f"threshold {reorder_batch_threshold_i} but other "
-                            f"backend uses threshold "
-                            f"{self.reorder_batch_threshold}"
-                        )
-                else:
-                    self.reorder_batch_threshold = reorder_batch_threshold_i
+        reorder_batch_thresholds = [
+            group.get_metadata_builder().reorder_batch_threshold
+            for group in self._attn_group_iterator()
+        ]
+        self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)
 
     def _select_common_block_size(
         self, kv_manager_block_size: int, attn_groups: list[AttentionGroup]
@@ -4347,6 +4340,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # all backends in the group.
                 attn_groups = self.attn_groups[kv_cache_group_id]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
+                print(f"kv_manager_block_size: {kv_manager_block_size}")
                 selected_kernel_size = self._select_common_block_size(
                     kv_manager_block_size, attn_groups
                 )
