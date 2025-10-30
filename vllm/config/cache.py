@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, SkipValidation, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -185,11 +185,3 @@ class CacheConfig:
             raise ValueError("Too large swap space. " + msg)
         elif cpu_memory_usage > 0.4 * total_cpu_memory:
             logger.warning("Possibly too large swap space. %s", msg)
-
-    @model_validator(mode="after")
-    def validate_mamba_block_size(self) -> "CacheConfig":
-        if self.mamba_block_size is not None and not self.enable_prefix_caching:
-            raise ValueError(
-                "--mamba-block-size can only be set with --enable-prefix-caching"
-            )
-        return self

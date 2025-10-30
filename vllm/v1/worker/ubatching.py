@@ -185,6 +185,15 @@ def dbo_register_recv_hook(recv_hook):
         next_ctx.recv_hook = recv_hook
 
 
+def dbo_get_previous_event(func, *args, **kwargs):
+    if len(_THREAD_ID_TO_CONTEXT) > 0:
+        ctx_idx = _THREAD_ID_TO_CONTEXT[threading.get_ident()]
+        ctx = _CURRENT_CONTEXTS[ctx_idx]
+        # execute callable on the ubatch compute stream to record/wait events there
+        with torch.cuda.stream(ctx.compute_stream):
+            return func(*args, **kwargs)
+
+
 def make_ubatch_contexts(
     num_micro_batches: int,
     compute_stream: torch.cuda.Stream,
