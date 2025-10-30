@@ -204,22 +204,60 @@ class LastPool(PoolingMethod):
 
 
 class AllPool(PoolingMethod):
+    def __init__(self):
+        super().__init__()
+
+        vllm_config = get_current_vllm_config()
+        self.enable_chunked_prefill = (
+            vllm_config.scheduler_config.enable_chunked_prefill
+        )
+
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed", "token_classify"}
 
     def forward_all(
+        self, hidden_states: torch.Tensor, pooling_cursor: PoolingCursor
+    ) -> list[torch.Tensor] | torch.Tensor:
+        raise NotImplementedError(
+            "forward_all is not implemented for AllPool. Use forward instead."
+        )
+
+    def forward(
         self,
         hidden_states: torch.Tensor,
-        pooling_cursor: PoolingCursor,
+        pooling_metadata: PoolingMetadata,
     ) -> list[torch.Tensor] | torch.Tensor:
-        assert not pooling_cursor.is_partial_prefill(), (
-            "partial prefill not supported with ALL pooling"
-        )
+        pooling_cursor = pooling_metadata.pooling_cursor
+        pooling_params = get_pooling_params(pooling_metadata)
+        is_finished = pooling_cursor.is_finished()
 
         hidden_states_lst = list(
             hidden_states.split(pooling_cursor.num_scheduled_tokens_cpu.tolist())
         )
-        return [hidden_states_lst[i] for i in pooling_cursor.index]
+        hidden_states_lst = [hidden_states_lst[i] for i in pooling_cursor.index]
+
+        if not self.enable_chunked_prefill:
+            return hidden_states_lst
+
+        # If chunked_prefill is enabled
+        # 1. first store the chunked hidden_states in pooling_param.hidden_states_cache
+        for pooling_param, hs_chunk in zip(pooling_params, hidden_states_lst):
+            pooling_param.hidden_states_cache.append(hs_chunk)
+
+        # 2. Once prefill is finished, send hidden_states_cache to PoolerHead
+        output_list = []
+        for pooling_param, finished in zip(pooling_params, is_finished):
+            if finished:
+                hidden_states_cache = pooling_param.hidden_states_cache
+                if len(hidden_states_cache) == 1:
+                    output_list.append(hidden_states_cache[0])
+                else:
+                    output_list.append(torch.concat(hidden_states_cache, dim=0))
+                pooling_param.hidden_states_cache.clear()
+            else:
+                output_list.append(None)
+
+        return output_list
 
 
 class MeanPool(PoolingMethod):
@@ -622,8 +660,12 @@ class ClassifierPooler(Pooler):
 
 class TokenEmbeddingPoolerHead(EmbeddingPoolerHead):
     def forward(
-        self, pooled_data: torch.Tensor, pooling_param: PoolingParams
-    ) -> torch.Tensor:
+        self, pooled_data: torch.Tensor | None, pooling_param: PoolingParams
+    ) -> PoolerOutput:
+        # for unfinished chunked prefill
+        if pooled_data is None:
+            return None
+
         pooled_data = pooled_data.to(self.head_dtype)
         # pooled_data shape: [n_tokens, hidden_dimension]
 
@@ -666,9 +708,13 @@ class TokenClassifierPoolerHead(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | None,
         pooling_param: PoolingParams,
-    ) -> torch.Tensor:
+    ) -> PoolerOutput:
+        # for unfinished chunked prefill
+        if hidden_states is None:
+            return None
+
         hidden_states = hidden_states.to(self.head_dtype)
         # hidden_states shape: [n_token, hidden_size]
 
@@ -722,17 +768,20 @@ class StepPooler(Pooler):
         self,
         hidden_states: torch.Tensor | list[torch.Tensor],
         pooling_metadata: PoolingMetadata,
-    ) -> torch.Tensor | list[torch.Tensor]:
+    ) -> PoolerOutput:
         pooled_data_lst = self.pooling(hidden_states, pooling_metadata)
         prompt_token_ids = get_prompt_token_ids(pooling_metadata)
-
-        pooled_data = list[torch.Tensor]()
-
         pooling_params = get_pooling_params(pooling_metadata)
 
+        pooled_data: list[torch.Tensor | None] = []
         for data, token_id, pooling_param in zip(
             pooled_data_lst, prompt_token_ids, pooling_params
         ):
+            # for unfinished chunked prefill
+            if data is None:
+                pooled_data.append(data)
+                continue
+
             step_tag_id = pooling_param.step_tag_id
             returned_token_ids = pooling_param.returned_token_ids
 

@@ -7,7 +7,7 @@ import torch
 import torch.nn.functional as F
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.protocol import ClassificationResponse
+from vllm.entrypoints.openai.protocol import ClassificationResponse, PoolingResponse
 
 MODEL_NAME = "jason9693/Qwen2.5-1.5B-apeach"
 DTYPE = "float32"  # Use float32 to avoid NaN issue
@@ -192,12 +192,17 @@ async def test_activation(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_pooling(server: RemoteOpenAIServer, model_name: str):
-    # pooling api uses ALL pooling, which does not support chunked prefill.
+    input_text = ["This product was excellent and exceeded my expectations"]
     response = requests.post(
         server.url_for("pooling"),
-        json={"model": model_name, "input": "test", "encoding_format": "float"},
+        json={"model": model_name, "input": input_text, "encoding_format": "float"},
     )
-    assert response.json()["error"]["type"] == "BadRequestError"
+    poolings = PoolingResponse.model_validate(response.json())
+
+    # token_classify
+    assert len(poolings.data) == 1
+    assert len(poolings.data[0].data) == 8
+    assert len(poolings.data[0].data[0]) == 2
 
 
 @pytest.mark.asyncio
