@@ -178,13 +178,6 @@ def is_nyi_config(config: Config) -> bool:
 
     return not info.supports_expert_map
 
-    # if (
-    #     quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
-    # ) and not current_platform.has_device_capability(89):
-    #     pytest.skip(
-    #         "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
-    #     )
-
 
 def generate_valid_test_cases(
     world_size: int, prepare_finalize_types
@@ -230,6 +223,18 @@ def generate_valid_test_cases(
         if is_nyi_config(config):
             if verbose:
                 print(f"Test config {config} is nyi.")
+            continue
+
+        if (
+            quant_config is not None
+            and quant_config.quant_dtype == torch.float8_e4m3fn
+            and not current_platform.has_device_capability(89)
+        ):
+            if verbose:
+                print(
+                    f"Test config {config} is not valid: Triton limitation: "
+                    "fp8e4nv data type is not supported on CUDA arch < 89."
+                )
             continue
 
         cases.append(
@@ -334,13 +339,6 @@ def test_modular_kernel_combinations_singlegpu(
         verbose=pytestconfig.getoption("verbose") > 0,
         exit_first=pytestconfig.getoption("maxfail") == 1,
     )
-
-    if (
-        quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
-    ) and not current_platform.has_device_capability(89):
-        pytest.skip(
-            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
-        )
 
     if config.verbose:
         print(f"\nTesting {config.describe()}\n")
