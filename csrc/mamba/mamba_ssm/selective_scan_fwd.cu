@@ -182,7 +182,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
                                    reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
 
-    const int load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
+    const size_t load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
@@ -279,9 +279,9 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 } else {
                     // Load initial state
                     if (params.cache_enabled && has_initial_state && batch_cache_indices != nullptr) {
-                        int state_offset = load_cache_slot * params.ssm_states_batch_stride +
-                                         r * params.ssm_states_dim_stride +
-                                         state_idx * params.ssm_states_dstate_stride;
+                        size_t state_offset = load_cache_slot * params.ssm_states_batch_stride +
+                                             r * params.ssm_states_dim_stride +
+                                             state_idx * params.ssm_states_dstate_stride;
                         running_prefix = make_float2(1.0, float(ssm_states[state_offset]));
                     } else if (has_initial_state) {
                         // Non-APC mode: load from current batch position
@@ -304,16 +304,16 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                     // Store state at the end of each chunk when cache is enabled
                     if (params.cache_enabled && batch_cache_indices != nullptr) {
 
-                        int cache_slot;
+                        size_t cache_slot;
                         if (chunk == n_chunks - 1) {
                             cache_slot = batch_cache_indices[block_idx_last_scheduled[batch_id]];
                         } else {
                             cache_slot = batch_cache_indices[block_idx_first_scheduled[batch_id] + chunk];
                         }
 
-                        int state_offset = cache_slot * params.ssm_states_batch_stride +
-                                         r * params.ssm_states_dim_stride +
-                                         state_idx * params.ssm_states_dstate_stride;
+                        size_t state_offset = cache_slot * params.ssm_states_batch_stride +
+                                             r * params.ssm_states_dim_stride +
+                                             state_idx * params.ssm_states_dstate_stride;
 
                         ssm_states[state_offset] = typename Ktraits::state_t(prefix_op.running_prefix.y);
                     } else if (!params.cache_enabled && chunk == n_chunks - 1) {
