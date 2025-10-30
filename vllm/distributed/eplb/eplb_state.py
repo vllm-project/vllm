@@ -35,6 +35,7 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
+from vllm import envs
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (
     get_ep_group,
@@ -196,9 +197,6 @@ class EplbState:
         """
         print("eplb_config", parallel_config.eplb_config)
 
-        # Check if we should load EPLB state from a file
-        from vllm import envs
-
         eplb_state_path = envs.VLLM_EPLB_STATE_PATH
         if (
             eplb_state_path is not None
@@ -217,24 +215,24 @@ class EplbState:
                     num_physical_experts=model.num_physical_experts,
                     device=device,
                 )
-                logger.info("EPLB state loaded successfully from file.")
-            except Exception as e:
-                logger.warning(
-                    "Failed to load EPLB state from %s: %s. "
-                    "Continuing with default initialization.",
-                    eplb_state_path,
-                    e,
-                )
+            except Exception:
                 global_expert_load = None
                 old_global_expert_indices = None
-        physical_to_logical_map_list = cls.build_initial_global_physical_to_logical_map(
-            model.num_routed_experts,
-            model.num_redundant_experts,
-        )
-        physical_to_logical_map = torch.tensor(
-            physical_to_logical_map_list,
-            device=device,
-        )
+        # Build mapping: use loaded mapping if available; otherwise use default
+        if old_global_expert_indices is not None:
+            # Loaded mapping is per-layer
+            physical_to_logical_map = old_global_expert_indices.to(device)
+        else:
+            physical_to_logical_map_list = (
+                cls.build_initial_global_physical_to_logical_map(
+                    model.num_routed_experts,
+                    model.num_redundant_experts,
+                )
+            )
+            physical_to_logical_map = torch.tensor(
+                physical_to_logical_map_list,
+                device=device,
+            )
         # Assuming 8 GPUs per node, this supports up to
         # (1023 + 1) / 8 = 128 nodes for now.
         # TODO(rui): make this configurable
@@ -244,48 +242,36 @@ class EplbState:
             f"must be less than or equal to {MAX_EXPERT_REDUNDANCY}"
         )
         max_slots_per_logical_expert = MAX_EXPERT_REDUNDANCY + 1
+        # Ensure mapping is per-layer
+        if physical_to_logical_map.dim() == 1:
+            physical_to_logical_map = (
+                physical_to_logical_map.unsqueeze(0)
+                .expand(model.num_moe_layers, -1)
+                .contiguous()
+            )
+
+        # Build inverse maps and replica counts from the chosen mapping
         logical_to_physical_map = torch.full(
-            (model.num_logical_experts, max_slots_per_logical_expert),
+            (
+                model.num_moe_layers,
+                model.num_logical_experts,
+                max_slots_per_logical_expert,
+            ),
             -1,
             device=device,
         )
         logical_replica_count = torch.zeros(
-            (model.num_logical_experts,),
+            (model.num_moe_layers, model.num_logical_experts),
             device=device,
             dtype=torch.long,
         )
 
-        for i in range(model.num_physical_experts):
-            logical_idx = physical_to_logical_map[i]
-            logical_to_physical_map[logical_idx, logical_replica_count[logical_idx]] = i
-            logical_replica_count[logical_idx] += 1
-
-        # Duplicate initial mapping for all layers
-        physical_to_logical_map = (
-            physical_to_logical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-            )
-            .contiguous()
-        )
-        logical_to_physical_map = (
-            logical_to_physical_map.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-                -1,
-            )
-            .contiguous()
-        )
-        logical_replica_count = (
-            logical_replica_count.unsqueeze(0)
-            .expand(
-                model.num_moe_layers,
-                -1,
-            )
-            .contiguous()
-        )
+        for layer in range(model.num_moe_layers):
+            for phys_idx in range(model.num_physical_experts):
+                logical_idx = physical_to_logical_map[layer, phys_idx]
+                slot = logical_replica_count[layer, logical_idx]
+                logical_to_physical_map[layer, logical_idx, slot] = phys_idx
+                logical_replica_count[layer, logical_idx] += 1
 
         expert_load_pass = torch.zeros(
             (model.num_moe_layers, model.num_physical_experts),
@@ -303,7 +289,7 @@ class EplbState:
         eplb_step_interval = parallel_config.eplb_config.step_interval
         expert_rearrangement_step = max(0, eplb_step_interval - eplb_step_interval // 4)
 
-        if global_expert_load is not None:
+        if global_expert_load is not None and old_global_expert_indices is None:
             ep_group = get_ep_group().device_group
             assert global_expert_load.shape == (
                 model.num_moe_layers,
@@ -355,10 +341,21 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-        if global_expert_load is not None:
+        # If we loaded a mapping from file, realign weights from the initial
+        # default mapping to the loaded mapping and start from step 0
+        if old_global_expert_indices is not None:
+            ep_group = get_ep_group().device_group
+            init_map_list = cls.build_initial_global_physical_to_logical_map(
+                model.num_routed_experts,
+                model.num_redundant_experts,
+            )
+            init_map = torch.tensor(init_map_list, device=device)
+            init_map = (
+                init_map.unsqueeze(0).expand(model.num_moe_layers, -1).contiguous()
+            )
             rearrange_expert_weights_inplace(
-                old_global_expert_indices,
-                new_physical_to_logical_map,
+                init_map,
+                physical_to_logical_map,
                 model.expert_weights,
                 ep_group,
                 False,
@@ -468,7 +465,12 @@ class EplbState:
         self.expert_rearrangement_step += 1
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             self.expert_rearrangement_step = 0
-            self.rearrange(model)
+            if not envs.VLLM_SKIP_EXPERT_REARRANGE:
+                self.rearrange(model)
+            else:
+                logger.info_once(
+                    "Skipping expert rearrangement due to VLLM_SKIP_EXPERT_REARRANGE"
+                )
 
     def rearrange(
         self,
@@ -651,52 +653,54 @@ class EplbState:
         self,
         file_path: str,
         num_logical_experts: int,
+        save_expert_load: bool = True,
     ) -> None:
         """
         Save the current EPLB state to a file.
 
-        This is a convenience method that extracts the current state and
-        saves it using save_eplb_state(). This should only be called on rank 0.
-
         Args:
             file_path: Path to save the EPLB state file.
             num_logical_experts: Number of logical experts in the model.
+            save_expert_load: If False, skip computing/saving expert load to avoid
+                an all-reduce. Only saves mappings and metadata.
         """
-        # Collect global expert load from the sliding window
-        # Use the average load across the window
-        logical_expert_load_window = torch.zeros(
-            self.expert_load_window_size,
-            self.physical_to_logical_map.shape[0],
-            num_logical_experts,
-            dtype=self.expert_load_window.dtype,
-            device=self.expert_load_window.device,
-        )
-        logical_expert_load_window.scatter_add_(
-            dim=-1,
-            index=self.physical_to_logical_map.unsqueeze(0)
-            .expand_as(self.expert_load_window)
-            .long(),
-            src=self.expert_load_window,
-        )
+        global_expert_load: torch.Tensor | None = None
+        if save_expert_load:
+            # Collect global expert load from the sliding window
+            # Use the average load across the window
+            logical_expert_load_window = torch.zeros(
+                self.expert_load_window_size,
+                self.physical_to_logical_map.shape[0],
+                num_logical_experts,
+                dtype=self.expert_load_window.dtype,
+                device=self.expert_load_window.device,
+            )
+            logical_expert_load_window.scatter_add_(
+                dim=-1,
+                index=self.physical_to_logical_map.unsqueeze(0)
+                .expand_as(self.expert_load_window)
+                .long(),
+                src=self.expert_load_window,
+            )
 
-        # Aggregate across the window
-        global_expert_load = logical_expert_load_window.sum(dim=0)
+            # Aggregate across the window
+            global_expert_load = logical_expert_load_window.sum(dim=0)
 
-        # Perform all-reduce to get the expert load across all ranks
-        ep_group = get_ep_group().device_group
-        all_reduce(global_expert_load, group=ep_group)
+            # Perform all-reduce to get the expert load across all ranks
+            ep_group = get_ep_group().device_group
+            all_reduce(global_expert_load, group=ep_group)
 
         num_moe_layers = self.physical_to_logical_map.shape[0]
         num_physical_experts = self.physical_to_logical_map.shape[1]
-
-        save_eplb_state(
-            file_path=file_path,
-            global_expert_load=global_expert_load,
-            physical_to_logical_map=self.physical_to_logical_map,
-            num_moe_layers=num_moe_layers,
-            num_logical_experts=num_logical_experts,
-            num_physical_experts=num_physical_experts,
-        )
+        if get_ep_group().rank_in_group == 0:
+            save_eplb_state(
+                file_path=file_path,
+                global_expert_load=global_expert_load,
+                physical_to_logical_map=self.physical_to_logical_map,
+                num_moe_layers=num_moe_layers,
+                num_logical_experts=num_logical_experts,
+                num_physical_experts=num_physical_experts,
+            )
 
 
 def _node_count_with_rank_mapping(
@@ -738,7 +742,7 @@ def _node_count_with_rank_mapping(
 
 def save_eplb_state(
     file_path: str,
-    global_expert_load: torch.Tensor,
+    global_expert_load: torch.Tensor | None,
     physical_to_logical_map: torch.Tensor,
     num_moe_layers: int,
     num_logical_experts: int,
@@ -759,16 +763,18 @@ def save_eplb_state(
         num_physical_experts: Number of physical experts (including redundant).
     """
     ep_group = get_ep_group()
-    if ep_group.device_group.rank() != 0:
+    if ep_group.rank_in_group != 0:
         logger.warning(
             "save_eplb_state should only be called on rank 0, "
             "but was called on rank %d",
-            ep_group.device_group.rank(),
+            ep_group.rank_in_group,
         )
         return
 
     state = {
-        "global_expert_load": global_expert_load.cpu().tolist(),
+        "global_expert_load": (
+            None if global_expert_load is None else global_expert_load.cpu().tolist()
+        ),
         "physical_to_logical_map": physical_to_logical_map.cpu().tolist(),
         "num_moe_layers": num_moe_layers,
         "num_logical_experts": num_logical_experts,
@@ -825,7 +831,7 @@ def load_eplb_state(
             state = json.load(f)
 
         # Extract arrays and metadata
-        global_expert_load_list = state["global_expert_load"]
+        global_expert_load_list = state.get("global_expert_load")
         physical_to_logical_map_list = state["physical_to_logical_map"]
         saved_num_moe_layers = state["num_moe_layers"]
         saved_num_logical_experts = state["num_logical_experts"]
@@ -851,6 +857,12 @@ def load_eplb_state(
             )
 
         # Verify array shapes
+        if global_expert_load_list is None:
+            raise ValueError(
+                "Saved EPLB state does not contain expert load. "
+                "It was likely saved with save_expert_load=False and cannot be used "
+                "for loading."
+            )
         if (
             len(global_expert_load_list) != num_moe_layers
             or (len(global_expert_load_list[0]) if num_moe_layers > 0 else 0)
