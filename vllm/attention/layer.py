@@ -108,7 +108,7 @@ def maybe_get_vit_flash_attn_backend(
     # we already have the attn_backend,
     # overriding logic is done in the platform-specific implementation.
     # so we don't need to override backend here.
-    # Just return the attn_backend and use_upstream_fa.
+    # Just return the attn_backend and flash_attn_varlen_func.
 
     if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_cuda_alike():
         from flash_attn import flash_attn_varlen_func
