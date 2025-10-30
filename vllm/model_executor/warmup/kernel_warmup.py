@@ -46,9 +46,15 @@ def kernel_warmup(worker: "Worker"):
         except NotImplementedError:
             return False
 
-    if not worker.model_runner.is_pooling_model and all(
-            _is_flashinfer_backend(group.backend)
-            for groups in worker.model_runner.attn_groups for group in groups):
+    # NOTE: we add check for empty attn_groups to avoid errors when
+    # deploying models such as E instances and encoder-only models.
+    # As for those models, worker.model_runner.attn_groups is empty.
+    # This change is made during EPD feature development.
+    if (not worker.model_runner.is_pooling_model
+            and worker.model_runner.attn_groups and all(
+                _is_flashinfer_backend(group.backend)
+                for groups in worker.model_runner.attn_groups
+                for group in groups)):
         logger.info("Warming up FlashInfer attention.")
         # Warmup with mixed batch containing both prefill and decode tokens
         # This is to warm up both prefill and decode attention kernels

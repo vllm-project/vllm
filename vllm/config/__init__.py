@@ -28,6 +28,7 @@ from vllm.config.cache import (BlockSize, CacheConfig, CacheDType, MambaDType,
 from vllm.config.compilation import (CompilationConfig, CompilationLevel,
                                      CUDAGraphMode, PassConfig)
 from vllm.config.device import Device, DeviceConfig
+from vllm.config.ec_transfer import ECTransferConfig
 from vllm.config.kv_events import KVEventsConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.load import LoadConfig
@@ -103,6 +104,9 @@ class VllmConfig:
     """Scheduler configuration."""
     device_config: DeviceConfig = field(default_factory=DeviceConfig)
     """Device configuration."""
+    ec_transfer_config: ECTransferConfig = field(
+        default_factory=ECTransferConfig)
+    """EC Transfer configuration."""
     load_config: LoadConfig = field(default_factory=LoadConfig)
     """Load configuration."""
     lora_config: Optional[LoRAConfig] = None

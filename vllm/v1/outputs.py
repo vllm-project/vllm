@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Union
 
 import torch
 
+from vllm.v1.core.sched.output import SchedulerOutput
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorStats)
@@ -93,6 +95,13 @@ class KVConnectorOutput:
                 and not self.kv_connector_stats)
 
 
+@dataclass
+class ECConnectorOutput:
+    # [mm_hash]
+    finished_sending: Optional[set[str]] = None
+    finished_recving: Optional[set[str]] = None
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -125,6 +134,8 @@ class ModelRunnerOutput:
 
     kv_connector_output: Optional[KVConnectorOutput] = None
 
+    ec_connector_output: Optional[ECConnectorOutput] = None
+
     # req_id -> num_nans_in_logits
     num_nans_in_logits: Optional[dict[str, int]] = None
 
@@ -135,7 +146,7 @@ class AsyncModelRunnerOutput(ABC):
     @abstractmethod
     def get_output(self) -> ModelRunnerOutput:
         """Get the ModelRunnerOutput for this async output.
-        
+
         This is a blocking call that waits until the results are ready, which
         might involve copying device tensors to the host.
         This method should only be called once per AsyncModelRunnerOutput.
@@ -150,6 +161,43 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+
+
+def make_empty_encoder_model_runner_output(
+    scheduler_output: "SchedulerOutput", ) -> ModelRunnerOutput:
+    """
+    Create a ModelRunnerOutput stub that contains the correct
+    per-request bookkeeping but no generated data yet.
+    """
+    if not scheduler_output.num_scheduled_tokens:
+        return EMPTY_MODEL_RUNNER_OUTPUT
+
+    # Convert to list so we get a deterministic, indexable sequence
+    req_ids: list[str] = list(scheduler_output.num_scheduled_tokens.keys())
+
+    # Give every request its own contiguous index
+    req_id_to_index: dict[str, int] = {
+        rid: idx
+        for idx, rid in enumerate(req_ids)
+    }
+
+    # No tokens generated yet ⇒ one empty list per request
+    sampled_token_ids: list[list[int]] = [[0] for _ in req_ids]
+
+    # Pooler outputs are not available yet ⇒ use None placeholders
+    pooler_output: list[Optional[torch.Tensor]] = [None for _ in req_ids]
+
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_id_to_index,
+        sampled_token_ids=sampled_token_ids,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=pooler_output,
+        kv_connector_output=None,
+        ec_connector_output=None,
+        num_nans_in_logits=None,
+    )
 
 
 EMPTY_MODEL_RUNNER_OUTPUT = ModelRunnerOutput(req_ids=[],
