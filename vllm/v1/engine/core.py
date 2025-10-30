@@ -16,6 +16,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
@@ -24,6 +25,7 @@ from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
+from vllm.profiler import NsysIterationProfiler
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
@@ -168,6 +170,10 @@ class EngineCore:
                     if worker_dict is not None:
                         content.update(worker_dict)
                 kv_connector.set_xfer_handshake_metadata(content)
+        # Nsight Systems CUDA profiler range (iteration-based)
+        # Uses VLLM_NSYS_PROFILE_START_STOP env var parsed in helper class
+        self._nsys_profiler = NsysIterationProfiler.from_env_string(
+            envs.VLLM_NSYS_PROFILE_START_STOP)
 
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
@@ -318,6 +324,8 @@ class EngineCore:
         was executed.
         """
 
+        self._nsys_profiler.maybe_profile_now()
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -370,6 +378,8 @@ class EngineCore:
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
         assert len(batch_queue) < self.batch_queue_size
+
+        self._nsys_profiler.maybe_profile_now()
 
         model_executed = False
         deferred_scheduler_output = None
@@ -468,6 +478,9 @@ class EngineCore:
         return engine_core_outputs, model_executed
 
     def shutdown(self):
+        # Ensure profiler is stopped
+        self._nsys_profiler.shutdown()
+        
         self.structured_output_manager.clear_backend()
         if self.model_executor:
             self.model_executor.shutdown()
