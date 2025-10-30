@@ -181,7 +181,7 @@ class MultiprocExecutor(Executor):
         scheduler_output: SchedulerOutput,
         non_block: bool = False,
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.do_execute_model(
+        return self._execute_with_aggregation(
             "execute_model", scheduler_output, non_block=non_block
         )
 
@@ -190,11 +190,11 @@ class MultiprocExecutor(Executor):
         grammar_output: GrammarOutput | None,
         non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
-        return self.do_execute_model(  # type: ignore[return-value]
+        return self._execute_with_aggregation(  # type: ignore[return-value]
             "sample_tokens", grammar_output, non_block=non_block
         )
 
-    def do_execute_model(
+    def _execute_with_aggregation(
         self,
         method: str,
         *args,
