@@ -66,16 +66,13 @@ class XPUPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
-        use_v1 = envs.VLLM_USE_V1
-        if not use_v1:
-            raise ValueError("XPU backend only supports V1.")
         TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
         FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
         if selected_backend == _Backend.TRITON_ATTN:
-            logger.info_once("Using Triton backend on V1 engine.")
+            logger.info_once("Using Triton backend.")
             return TRITON_ATTN
         elif selected_backend == _Backend.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
+            logger.info_once("Using Flash Attention backend.")
             return FLASH_ATTN
         elif selected_backend:
             raise ValueError(
@@ -83,7 +80,7 @@ class XPUPlatform(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}"
             )
 
-        logger.info("Using Flash Attention backend on V1 engine.")
+        logger.info("Using Flash Attention backend.")
         return "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
 
     @classmethod
