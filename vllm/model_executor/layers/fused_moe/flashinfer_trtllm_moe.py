@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
