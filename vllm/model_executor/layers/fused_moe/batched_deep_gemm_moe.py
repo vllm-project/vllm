@@ -217,8 +217,6 @@ def persistent_masked_m_silu_mul_quant(
     return y_q, y_s
 
 
-PRINT_CACHE = set()
-
 class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(
         self,
@@ -311,19 +309,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
-        #s = "MM1: "
-        #s += f"  a1q : {a1q.dtype} {a1q.shape} {a1q.stride()} \n"
-        #s += f"  a1q_scale : {a1q_scale.dtype} {a1q_scale.shape} {a1q_scale.stride()} \n"
-        #s += f"  w1 : {w1.dtype} {w1.shape} {w1.stride()}\n"
-        #s += f"  w1_scale : {self.w1_scale.dtype} {self.w1_scale.shape} {self.w1_scale.stride()} \n"
-        #s += f"  out : {workspace1.dtype} {workspace1.shape} {workspace1.stride()}"
-        #print (s)
-
-        #if s not in PRINT_CACHE:
-        #    print(s)
-        #    PRINT_CACHE.add(s)
-
-
         # (from deepgemm docs) : A value hint (which is a value on CPU)
         # for the M expectation of each batch, correctly setting this value
         # may lead to better performance.
@@ -339,18 +324,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         a2q, a2q_scale = persistent_masked_m_silu_mul_quant(
             workspace1, expert_num_tokens
         )
-
-
-        #s = "MM2: "
-        #s += f"  a2q : {a2q.dtype} {a2q.shape} {a2q.stride()} \n"
-        #s += f"  a2q_scale : {a2q_scale.dtype} {a2q_scale.shape} {a2q_scale.stride()} \n"
-        #s += f"  w2 : {w2.dtype} {w2.shape} {w2.stride()}\n"
-        #s += f"  w2_scale : {self.w2_scale.dtype} {self.w2_scale.shape} {self.w2_scale.stride()} \n"
-        #s += f"  out : {output.dtype} {output.shape} {output.stride()}"
-        #print (s)
-        #if s not in PRINT_CACHE:
-        #    print(s)
-        #    PRINT_CACHE.add(s)
 
         fp8_m_grouped_gemm_nt_masked(
             (a2q, a2q_scale), (w2, self.w2_scale), output, expert_num_tokens, expected_m
