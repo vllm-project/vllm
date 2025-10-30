@@ -4,7 +4,6 @@
 import math
 from collections.abc import Callable
 from functools import cache
-from importlib.util import find_spec
 
 import torch
 
@@ -77,53 +76,10 @@ def dispatch_rotary_emb_function(
     if current_platform.is_cuda():
         return apply_rotary_emb
 
-    if current_platform.is_rocm():
-        if find_spec("flash_attn") is not None:
-            return torch.ops.vllm.flash_attn_rotary_embed_ops
-        else:
-            logger.warning(
-                "flash_attn is not installed. Falling back to PyTorch "
-                "implementation for rotary embeddings."
-            )
-
     if default is not None:
         return default
 
     return apply_rotary_emb_torch
-
-
-def apply_rotary_pos_emb_vision(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-    rotary_emb_function: Callable[..., torch.Tensor],
-) -> torch.Tensor:
-    t_ = t.float()
-    cos = freqs.cos()
-    sin = freqs.sin()
-    output = rotary_emb_function(t_, cos, sin).type_as(t)
-    return output
-
-
-def flash_attn_rotary_embed_ops_impl(
-    t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> torch.Tensor:
-    from flash_attn.ops.triton.rotary import apply_rotary
-
-    return apply_rotary(t, cos, sin)
-
-
-def flash_attn_rotary_embed_ops_fake(
-    t: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-) -> torch.Tensor:
-    return torch.empty_like(t)
-
-
-if current_platform.is_rocm() and find_spec("flash_attn") is not None:
-    direct_register_custom_op(
-        op_name="flash_attn_rotary_embed_ops",
-        op_func=flash_attn_rotary_embed_ops_impl,
-        fake_impl=flash_attn_rotary_embed_ops_fake,
-    )
 
 
 # yarn functions

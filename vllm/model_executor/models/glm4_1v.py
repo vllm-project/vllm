@@ -64,10 +64,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding.common import (
-    apply_rotary_pos_emb_vision,
-    dispatch_rotary_emb_function,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -96,7 +92,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .qwen2_vl import _create_qwen2vl_field_factory, apply_rotary_emb_torch
+from .qwen2_vl import _create_qwen2vl_field_factory, apply_rotary_pos_emb_vision
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -321,9 +317,6 @@ class Glm4vVisionAttention(nn.Module):
             _Backend.FLASH_ATTN,
             _Backend.ROCM_AITER_FA,
         }
-        self.rotary_embedding_func = dispatch_rotary_emb_function(
-            default=apply_rotary_emb_torch
-        )
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
@@ -361,9 +354,7 @@ class Glm4vVisionAttention(nn.Module):
         if rotary_pos_emb is not None:
             # [2 * b, s, heads, head_dim]
             qk_concat = torch.cat([q, k], dim=0)
-            qk_rotated = apply_rotary_pos_emb_vision(
-                qk_concat, rotary_pos_emb, self.rotary_embedding_func
-            )
+            qk_rotated = apply_rotary_pos_emb_vision(qk_concat, rotary_pos_emb)
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
