@@ -112,7 +112,7 @@ class ARCOffloadingManager(OffloadingManager):
                 self.b1.move_to_end(block_hash)
 
             elif block_hash in self.b2:
-                delta = max(1, len(self.b1) // len(self.b2)) if len(self.b2) > 0 else 1
+                delta = max(1, len(self.b1) / len(self.b2))
                 self.target_t1_size = max(self.target_t1_size - delta, 0)
                 # move to MRU position (end) to keep it fresh in the ghost list
                 self.b2.move_to_end(block_hash)
