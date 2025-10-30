@@ -490,6 +490,9 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             prepare_moe_fp4_layer_for_marlin(layer)
             return
 
+        w13_weight_scale_2 = 1/layer.w13_weight_global_scale[:, 0]
+        layer.w13_weight_scale_2 = Parameter(w13_weight_scale_2,
+                                             requires_grad=False)
         # swizzle weight scales
         layer.w13_weight_scale = torch.nn.Parameter(
             swizzle_blockscale(layer.w13_weight_scale), requires_grad=False
