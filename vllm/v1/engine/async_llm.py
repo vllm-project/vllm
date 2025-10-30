@@ -6,7 +6,7 @@ import socket
 import time
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import torch
@@ -131,10 +131,9 @@ class AsyncLLM(EngineClient):
         self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats
         )
-        if self.observability_config.otlp_traces_endpoint is not None:
-            tracer = init_tracer(
-                "vllm.llm_engine", self.observability_config.otlp_traces_endpoint
-            )
+        endpoint = self.observability_config.otlp_traces_endpoint
+        if endpoint is not None:
+            tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
@@ -266,7 +265,9 @@ class AsyncLLM(EngineClient):
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
-        cancel_task_threadsafe(getattr(self, "output_handler", None))
+        handler = getattr(self, "output_handler", None)
+        if handler is not None:
+            cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return await self.engine_core.get_supported_tasks_async()
@@ -314,7 +315,10 @@ class AsyncLLM(EngineClient):
                 priority,
                 data_parallel_rank,
             )
-            prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
+            if isinstance(prompt, str):
+                prompt_text = prompt
+            elif isinstance(prompt, Mapping):
+                prompt_text = cast(str | None, prompt.get("prompt"))
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
@@ -436,6 +440,7 @@ class AsyncLLM(EngineClient):
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
                 finished = out.finished
+                assert isinstance(out, RequestOutput)
                 yield out
 
         # If the request is disconnected by the client, generate()
@@ -653,7 +658,7 @@ class AsyncLLM(EngineClient):
         return self.tokenizer
 
     async def is_tracing_enabled(self) -> bool:
-        return self.observability_config.otlp_traces_endpoint is not None
+        return self.observability_config.otlp_traces_endpoint is not None  # type: ignore
 
     async def do_log_stats(self) -> None:
         if self.logger_manager:

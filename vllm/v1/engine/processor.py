@@ -3,7 +3,7 @@
 
 import time
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from vllm.config import VllmConfig
 from vllm.inputs import ProcessorInputs, PromptType, SingletonInputs
@@ -208,9 +208,9 @@ class Processor:
             enc = prompt.get("encoder_prompt")
             dec = prompt.get("decoder_prompt")
             if enc is not None:
-                _validate_single_prompt(enc)
+                _validate_single_prompt(cast(dict | str, enc))
             if dec is not None:
-                _validate_single_prompt(dec)
+                _validate_single_prompt(cast(dict | str, dec))
         else:
             _validate_single_prompt(prompt)  # type: ignore[arg-type]
 
@@ -332,7 +332,7 @@ class Processor:
         if not mm_data:
             return None
 
-        mm_uuids: MultiModalUUIDDict = {}
+        mm_uuids: dict[str, list[str | None] | str] = {}
         for modality, data in mm_data.items():
             n = len(data) if isinstance(data, list) else 1
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
@@ -384,7 +384,9 @@ class Processor:
             # if provided.
             self._validate_multi_modal_uuids(prompt)
             if isinstance(prompt, dict):
-                mm_uuids = prompt.get("multi_modal_uuids")
+                mm_uuids = cast(
+                    MultiModalUUIDDict | None, prompt.get("multi_modal_uuids")
+                )
             else:
                 mm_uuids = None
 
@@ -410,20 +412,13 @@ class Processor:
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
-        # Mypy does not always properly infer the types of some elements of
-        # discriminated unions of TypedDicts, because of how it handles
-        # inheritance of TypedDict. If we explicitly extract the items we want
-        # we can avoid type errors from using `dict.get` later in the method.
-        prompt_token_ids = (
-            decoder_inputs["prompt_token_ids"]
-            if decoder_inputs["type"] != "embeds"
-            else None
-        )
-        prompt_embeds = (
-            decoder_inputs["prompt_embeds"]
-            if decoder_inputs["type"] == "embeds"
-            else None
-        )
+        # Mypy can be conservative for TypedDict unions; normalize access.
+        if decoder_inputs["type"] == "embeds":
+            prompt_token_ids = None
+            prompt_embeds = decoder_inputs["prompt_embeds"]
+        else:
+            prompt_token_ids = decoder_inputs["prompt_token_ids"]
+            prompt_embeds = None
 
         sampling_params = None
         pooling_params = None
