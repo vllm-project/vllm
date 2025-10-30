@@ -879,7 +879,7 @@ class CompilationConfig:
                     op,
                 )
 
-    def is_custom_op_enabled(self, op: str):
+    def is_custom_op_enabled(self, op: str) -> bool:
         """
         Determine if a custom op is enabled.
 
