@@ -31,8 +31,6 @@ from typing import Any
 
 import torch
 from torch import nn
-
-# TODO(yinfan.1024): How to handle that, still use Qwen2Config?
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionType
@@ -180,7 +178,6 @@ class OuroAttention(nn.Module):
         for ut_step in range(total_ut_steps):
             base_layer_idx = extract_layer_index(prefix)
             unique_layer_idx = ut_step * total_layers + base_layer_idx
-            # print(unique_layer_idx)
 
             unique_prefix = prefix.replace(
                 f"layers.{base_layer_idx}", f"layers.{unique_layer_idx}"
@@ -343,7 +340,7 @@ class OuroModel(nn.Module):
             prefix=f"{prefix}.embed_tokens",
         )
 
-        # Use the provided decoder layer type or default to Qwen2DecoderLayer
+        # Use the provided decoder layer type or default to OuroDecoderLayer
         decoder_layer_type = decoder_layer_type or OuroDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -380,7 +377,6 @@ class OuroModel(nn.Module):
 
         # Get total_ut_steps from config, default to 4 if not specified
         total_ut_steps = getattr(self.config, "total_ut_steps", 4)
-        # print(total_ut_steps)
 
         for current_ut in range(total_ut_steps):
             for layer in self.layers[self.start_layer : self.end_layer]:
