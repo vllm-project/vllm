@@ -334,7 +334,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             return
 
         # Save the user input before it gets modified by MambaModelConfig
-        mamba_block_size = vllm_config.cache_config.mamba_block_size
+        # NOTE(gluo): F841 is suppressed as mamba_block_size is used but ruff flags it
+        mamba_block_size = vllm_config.cache_config.mamba_block_size  # noqa: F841
         # Enable FULL_AND_PIECEWISE by default
         MambaModelConfig.verify_and_update_config(vllm_config)
 
