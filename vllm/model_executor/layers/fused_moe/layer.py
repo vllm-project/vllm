@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
@@ -266,6 +267,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
             )
             self.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
             experts = self.select_gemm_impl(prepare_finalize, layer)
+
+            if (
+                experts.supports_packed_ue8m0_act_scales()
+                and prepare_finalize.supports_packed_ue8m0_scales_dispatch()
+            ):
+                prepare_finalize.setup_packed_ue8m0_scales_dispatch()
+
             self.fused_experts = FusedMoEModularKernel(
                 prepare_finalize,
                 experts,

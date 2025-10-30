@@ -347,6 +347,20 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         raise NotImplementedError
 
+    def supports_packed_ue8m0_scales_dispatch(self) -> bool:
+        """
+        Return true if the implementation can dispatch activation scales in
+        packed ue8m0 format.
+        """
+        return False
+
+    def setup_packed_ue8m0_scales_dispatch(self) -> None:
+        """
+        Setup internal state of the implementation to dispatch activation scales
+        in packed ue8m0 format.
+        """
+        raise NotImplementedError
+
 
 # TODO: add supported activations method (return string)
 class FusedMoEPermuteExpertsUnpermute(ABC):
@@ -502,6 +516,13 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         A flag indicating whether or not this class supports expert maps
         """
         raise NotImplementedError
+
+    def supports_packed_ue8m0_act_scales(self) -> bool:
+        """
+        A flag indicating whether or not this class can process packed ue8m0
+        activation scales.
+        """
+        return False
 
     def workspace_dtype(self, act_dtype: torch.dtype) -> torch.dtype:
         """

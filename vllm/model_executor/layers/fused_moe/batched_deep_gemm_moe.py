@@ -249,6 +249,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
+    def supports_packed_ue8m0_activation_scales(self) -> bool:
+        """
+        DeepGemm supports packed ue8m0 activation scales format in devices >= sm100
+        """
+        return current_platform.is_device_capability(100)
+
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
