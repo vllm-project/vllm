@@ -232,13 +232,15 @@ class GGUFModelLoader(BaseModelLoader):
                     is_gemma3_multimodal = arch == "gemma3"
                     if is_gemma3_multimodal:
                         logger.info(
-                            f"Detected Gemma3 multimodal GGUF model with mmproj file: "
-                            f"{mmproj_files[0].name}"
+                            "Detected Gemma3 multimodal GGUF model with "
+                            "mmproj file: %s",
+                            mmproj_files[0].name,
                         )
             except Exception as e:
                 logger.warning(
-                    f"Failed to detect model architecture from GGUF: {e}. "
-                    f"Skipping mmproj loading."
+                    "Failed to detect model architecture from GGUF: %s. "
+                    "Skipping mmproj loading.",
+                    e,
                 )
 
         if is_gemma3_multimodal:
@@ -261,8 +263,8 @@ class GGUFModelLoader(BaseModelLoader):
             mmproj_mapping = self._create_mmproj_tensor_mapping()
 
             logger.info(
-                f"Loading vision tower and projector weights from "
-                f"{mmproj_files[0].name}..."
+                "Loading vision tower and projector weights from %s...",
+                mmproj_files[0].name,
             )
             for name, tensor in gguf_quant_weights_iterator(
                 mmproj_path, mmproj_mapping
