@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from itertools import accumulate
-from typing import Optional
 
 import nvtx
 import torch
 
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding, get_rope
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def benchmark_rope_kernels_multi_lora(
@@ -18,7 +17,7 @@ def benchmark_rope_kernels_multi_lora(
     seq_len: int,
     num_heads: int,
     head_size: int,
-    rotary_dim: Optional[int],
+    rotary_dim: int | None,
     dtype: torch.dtype,
     seed: int,
     device: str,

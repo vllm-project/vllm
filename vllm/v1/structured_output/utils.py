@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from __future__ import annotations
 
 import hashlib
@@ -16,7 +15,7 @@ from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import LazyLoader
+from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import outlines_core as oc
@@ -37,6 +36,10 @@ else:
         "transformers.models.gpt2.tokenization_gpt2",
     )
 
+    AnyTokenizer = object
+    SchedulerOutput = object
+    InputBatch = object
+
 logger = init_logger(__name__)
 
 CACHE = None
@@ -46,7 +49,6 @@ def apply_grammar_bitmask(
     scheduler_output: SchedulerOutput,
     input_batch: InputBatch,
     logits: torch.Tensor,
-    device: torch.device,
 ) -> None:
     """
     Apply grammar bitmask to output logits of the model with xgrammar function.
@@ -55,7 +57,6 @@ def apply_grammar_bitmask(
         scheduler_output (SchedulerOutput): The result of engine scheduling.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
-        device (torch.device): The device that model runner running on.
     """
     grammar_bitmask = scheduler_output.grammar_bitmask
     if grammar_bitmask is None:
@@ -76,27 +77,28 @@ def apply_grammar_bitmask(
     for req_id, batch_index in seq:
         logit_index = batch_index + cumulative_offset
         cumulative_offset += len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+        )
         if req_id in scheduler_output.structured_output_request_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
     out_indices = []
 
     # Reorder the bitmask to match the order of the requests in the batch.
-    sorted_bitmask = np.full(shape=(logits.shape[0], grammar_bitmask.shape[1]),
-                             fill_value=-1,
-                             dtype=grammar_bitmask.dtype)
+    sorted_bitmask = np.full(
+        shape=(logits.shape[0], grammar_bitmask.shape[1]),
+        fill_value=-1,
+        dtype=grammar_bitmask.dtype,
+    )
     cumulative_index = 0
-    seq = sorted(scheduler_output.structured_output_request_ids.items(),
-                 key=lambda x: x[1])
-    for req_id, _ in seq:
+    for req_id in scheduler_output.structured_output_request_ids:
         num_spec_tokens = len(
-            scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
+        )
         if req_id in struct_out_req_batch_indices:
             logit_index = struct_out_req_batch_indices[req_id]
             for i in range(1 + num_spec_tokens):
-                sorted_bitmask[logit_index + i] = \
-                    grammar_bitmask[cumulative_index + i]
+                sorted_bitmask[logit_index + i] = grammar_bitmask[cumulative_index + i]
                 out_indices.append(logit_index + i)
         cumulative_index += 1 + num_spec_tokens
     grammar_bitmask = sorted_bitmask
@@ -112,7 +114,7 @@ def apply_grammar_bitmask(
 
     xgr.apply_token_bitmask_inplace(
         logits,
-        grammar_bitmask.to(device, non_blocking=True),
+        grammar_bitmask.to(logits.device, non_blocking=True),
         indices=out_indices if not skip_out_indices else None,
     )
 
@@ -128,8 +130,7 @@ class OutlinesVocabulary:
         self.inner = vocabulary
         # Have to do abs(hash()) because python hashes can
         # be negative, and we are using hash as a cache key.
-        hex_str = hashlib.sha256(
-            vocabulary.__repr__().encode('utf-8')).hexdigest()
+        hex_str = hashlib.sha256(vocabulary.__repr__().encode("utf-8")).hexdigest()
         hash_int = int(hex_str, 16)
         self._hash = hash_int
 
@@ -165,16 +166,18 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
-        logger.warning("Enabling outlines cache. This is an unbounded on-disk "
-                       "cache. It may consume a lot of disk space and should "
-                       "not be used with untrusted clients.")
+        logger.warning(
+            "Enabling outlines cache. This is an unbounded on-disk "
+            "cache. It may consume a lot of disk space and should "
+            "not be used with untrusted clients."
+        )
         cache = Cache(cache_dir, eviction_policy="none", cull_limit=0)
         outlines_version = importlib.metadata.version("outlines_core")
 
-        cached_version = cache.get('__version__', None)
+        cached_version = cache.get("__version__", None)
         if cached_version != outlines_version:
             cache.clear()
-        cache.set('__version__', outlines_version)
+        cache.set("__version__", outlines_version)
         return cache
     else:
         return LRUCache(maxsize=128)
@@ -194,19 +197,17 @@ def _reduced_vocabulary(
         A Dict of token string -> equivalent token ids
     """
 
-    unicode_to_bytes = {
-        v: k
-        for k, v in tokenization_gpt2.bytes_to_unicode().items()
-    }
+    unicode_to_bytes = {v: k for k, v in tokenization_gpt2.bytes_to_unicode().items()}
 
     def convert_token_to_string(token: str) -> str:
-
         string = tokenizer.convert_tokens_to_string([token])
 
         # A hack to handle missing spaces to HF's Llama tokenizers
-        if (type(token) is str
-                and token.startswith(file_utils.SPIECE_UNDERLINE)
-                or token == "<0x20>"):
+        if (
+            type(token) is str
+            and token.startswith(file_utils.SPIECE_UNDERLINE)
+            or token == "<0x20>"
+        ):
             return " " + string
 
         return string
@@ -226,8 +227,7 @@ def _reduced_vocabulary(
                 # by this point.
                 token_bytes = bytes(token_str)  # type: ignore[arg-type]
 
-            elif "\ufffd" in token_str and not re_replacement_seq.match(
-                    token_str):
+            elif "\ufffd" in token_str and not re_replacement_seq.match(token_str):
                 # Handle tokens with invalid UTF-8 sequences.
                 if re_llama_byte_token.match(token):
                     # Llama-like tokenizers use <0xXX> for incomplete sequences.
@@ -238,12 +238,13 @@ def _reduced_vocabulary(
                     if None in byte_vals:
                         raise RuntimeError(
                             f"Cannot convert token `{token}`"
-                            f" ({token_idx}) to bytes: {token_str}")
+                            f" ({token_idx}) to bytes: {token_str}"
+                        )
                     # safe to ignore, since if None in byte_vals,
                     # an error is thrown.
                     token_bytes = bytes(byte_vals)  # type: ignore[arg-type]
             else:
-                token_bytes = token_str.encode('utf-8')
+                token_bytes = token_str.encode("utf-8")
 
             if token_idx != eos_token_id:
                 vocabulary.setdefault(token_bytes, []).append(token_idx)
@@ -254,16 +255,18 @@ def _reduced_vocabulary(
 
 
 def get_outlines_vocabulary(tokenizer: AnyTokenizer) -> oc.Vocabulary:
-    """Get the `Vocabulary` object for a given tokenizer.
-    """
+    """Get the `Vocabulary` object for a given tokenizer."""
     if hasattr(tokenizer, "_outlines_vocabulary"):
         return tokenizer._outlines_vocabulary  # type: ignore
 
     try:
-        if hasattr(
+        if (
+            hasattr(
                 tokenizer,
                 "eos_token_id",
-        ) and tokenizer.eos_token_id is not None:
+            )
+            and tokenizer.eos_token_id is not None
+        ):
             eos_token_id = tokenizer.eos_token_id
         else:
             raise ValueError(
@@ -272,17 +275,18 @@ def get_outlines_vocabulary(tokenizer: AnyTokenizer) -> oc.Vocabulary:
 
         reduced_vocab = _reduced_vocabulary(
             tokenizer,
-            eos_token_id  #type: ignore
+            eos_token_id,  # type: ignore
         )
-        vocabulary = OutlinesVocabulary(
-            oc.Vocabulary(eos_token_id, reduced_vocab))
+        vocabulary = OutlinesVocabulary(oc.Vocabulary(eos_token_id, reduced_vocab))
         tokenizer._outlines_vocabulary = vocabulary  # type: ignore
 
         return vocabulary
     except AttributeError as e:
-        raise ValueError(f"Cannot get the vocabulary of the tokenizer "
-                         f"({type(tokenizer)}). The tokenizer should have a "
-                         "get_vocab method.") from e
+        raise ValueError(
+            f"Cannot get the vocabulary of the tokenizer "
+            f"({type(tokenizer)}). The tokenizer should have a "
+            "get_vocab method."
+        ) from e
 
 
 def grammar_is_likely_lark(grammar_str: str) -> bool:
@@ -304,14 +308,14 @@ def grammar_is_likely_lark(grammar_str: str) -> bool:
     if not grammar_str or not isinstance(grammar_str, str):
         return False
 
-    for line in grammar_str.split('\n'):
+    for line in grammar_str.split("\n"):
         # Remove both comment styles
-        line = re.sub(r'(#|//).*$', '', line).strip()
+        line = re.sub(r"(#|//).*$", "", line).strip()
         if not line:
             continue
 
         # Look for EBNF rule definition
-        if '::=' in line:
+        if "::=" in line:
             return False
 
     return True
@@ -348,40 +352,41 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
     def clean_line(line: str) -> str:
         """Remove comments and whitespace from line."""
-        return re.sub(r'(#|//).*$', '', line).strip()
+        return re.sub(r"(#|//).*$", "", line).strip()
 
     def check_quotes(text: str, rule_name: str, line_num: int) -> None:
         """Validate quote matching in text."""
         if text.count("'") % 2 != 0 or text.count('"') % 2 != 0:
-            raise ValueError(
-                f"Mismatched quotes in {rule_name} on line {line_num}")
+            raise ValueError(f"Mismatched quotes in {rule_name} on line {line_num}")
 
     def extract_references(text: str) -> set[str]:
         """Extract rule references from text."""
         # Remove quoted strings and special characters
-        text = re.sub(r'"[^"]*"', '', text)
-        text = re.sub(r'[+*?()|\[\]{}]', ' ', text)
-        return set(re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', text))
+        text = re.sub(r'"[^"]*"', "", text)
+        text = re.sub(r"[+*?()|\[\]{}]", " ", text)
+        return set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", text))
 
     # First pass: Find root rule and validate rule definitions
-    lines = [clean_line(line) for line in grammar_str.split('\n')]
+    lines = [clean_line(line) for line in grammar_str.split("\n")]
     first_rule = None
 
     for line_num, line in enumerate(lines, 1):
-        if not line or line.startswith('|'):
+        if not line or line.startswith("|"):
             continue
 
-        if ':' in line:
+        if ":" in line:
             try:
-                name = line.split(':', 1)[0].strip().strip('?')
+                name = line.split(":", 1)[0].strip().strip("?")
                 defined_rules.add(name)
                 if first_rule is None:
                     first_rule = name
-                if name == 'start':
-                    first_rule = 'start'
+                if name == "start":
+                    first_rule = "start"
             except IndexError as e:
-                raise ValueError(f"Invalid rule format on line {line_num}. "
-                                 "Expected 'rule_name: definition'") from e
+                raise ValueError(
+                    f"Invalid rule format on line {line_num}. "
+                    "Expected 'rule_name: definition'"
+                ) from e
 
     if not defined_rules:
         raise ValueError("No valid rules found in grammar")
@@ -398,29 +403,33 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
             continue
 
         try:
-            if ':' in line and not line.startswith('|'):
+            if ":" in line and not line.startswith("|"):
                 # Save previous rule if exists
                 if current_rule:
                     output_lines.append(
-                        f"{current_rule} ::= {' | '.join(current_definition)}")
+                        f"{current_rule} ::= {' | '.join(current_definition)}"
+                    )
 
                 # Process new rule
-                name, definition = line.split(':', 1)
-                current_rule = name.strip().strip('?')
+                name, definition = line.split(":", 1)
+                current_rule = name.strip().strip("?")
 
                 check_quotes(definition, f"rule '{current_rule}'", line_num)
                 definition = re.sub(r"'([^']*)'", r'"\1"', definition)
                 referenced_rules.update(extract_references(definition))
                 current_definition = [definition.strip()]
 
-            elif line.startswith('|'):
+            elif line.startswith("|"):
                 if not current_rule:
-                    raise ValueError(f"Alternative '|' on line {line_num} "
-                                     "without a preceding rule definition")
+                    raise ValueError(
+                        f"Alternative '|' on line {line_num} "
+                        "without a preceding rule definition"
+                    )
 
                 alt_def = line[1:].strip()
-                check_quotes(alt_def, f"alternative for rule '{current_rule}'",
-                             line_num)
+                check_quotes(
+                    alt_def, f"alternative for rule '{current_rule}'", line_num
+                )
                 alt_def = re.sub(r"'([^']*)'", r'"\1"', alt_def)
                 referenced_rules.update(extract_references(alt_def))
                 current_definition.append(alt_def)
@@ -430,25 +439,24 @@ def convert_lark_to_ebnf(grammar_str: str) -> str:
 
     # Add final rule if exists
     if current_rule:
-        output_lines.append(
-            f"{current_rule} ::= {' | '.join(current_definition)}")
+        output_lines.append(f"{current_rule} ::= {' | '.join(current_definition)}")
 
     # Validate all rules are defined
-    undefined_rules = referenced_rules - defined_rules - {'root'}
+    undefined_rules = referenced_rules - defined_rules - {"root"}
     if undefined_rules:
-        raise ValueError("Referenced rules are not defined: "
-                         f"{', '.join(sorted(undefined_rules))}")
+        raise ValueError(
+            f"Referenced rules are not defined: {', '.join(sorted(undefined_rules))}"
+        )
 
-    return '\n'.join(output_lines)
+    return "\n".join(output_lines)
 
 
 def choice_as_grammar(choice: list[str]) -> str:
-
     def escape_ebnf_string(s: str) -> str:
         """Escape special characters in a EBNF string."""
         # Escape double quotes and backslashes
-        return re.sub(r'(["\\])', r'\\\1', s)
+        return re.sub(r'(["\\])', r"\\\1", s)
 
     escaped_choices = (escape_ebnf_string(c) for c in choice)
-    grammar = ('root ::= ' + ' | '.join(f'"{c}"' for c in escaped_choices))
+    grammar = "root ::= " + " | ".join(f'"{c}"' for c in escaped_choices)
     return grammar
