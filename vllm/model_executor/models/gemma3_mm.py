@@ -715,18 +715,7 @@ class Gemma3ForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # V0 compatibility: generate inputs_embeds if not provided
-        elif inputs_embeds is None:
-            multimodal_embeddings = self.embed_multimodal(**kwargs)
-            inputs_embeds = self.get_input_embeddings(input_ids, multimodal_embeddings)
-            if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
-                kwargs = self.prepare_attn_masks(
-                    input_ids,
-                    positions,
-                    mask_dtype=self.dtype,
-                    **kwargs,
-                )
-            input_ids = None
+
 
         hidden_states = self.language_model.model(
             input_ids,
