@@ -38,7 +38,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -59,12 +59,10 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -338,17 +336,12 @@ class OuroModel(nn.Module):
         self.quant_config = quant_config
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank or (
-            config.tie_word_embeddings and get_pp_group().is_last_rank
-        ):
-            self.embed_tokens = VocabParallelEmbedding(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=f"{prefix}.embed_tokens",
-            )
-        else:
-            self.embed_tokens = PPMissingLayer()
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
+        )
 
         # Use the provided decoder layer type or default to Qwen2DecoderLayer
         decoder_layer_type = decoder_layer_type or OuroDecoderLayer
@@ -366,10 +359,7 @@ class OuroModel(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        if get_pp_group().is_last_rank:
-            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        else:
-            self.norm = PPMissingLayer()
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.early_exit_gate = RowParallelLinear(config.hidden_size, 1, bias=True)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -382,16 +372,11 @@ class OuroModel(nn.Module):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
-            residual = None
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
         else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
+            hidden_states = self.get_input_embeddings(input_ids)
+        residual = None
 
         # Get total_ut_steps from config, default to 4 if not specified
         total_ut_steps = getattr(self.config, "total_ut_steps", 4)
@@ -401,10 +386,6 @@ class OuroModel(nn.Module):
             for layer in self.layers[self.start_layer : self.end_layer]:
                 hidden_states, residual = layer(
                     positions, hidden_states, current_ut, None
-                )
-            if not get_pp_group().is_last_rank:
-                return IntermediateTensors(
-                    {"hidden_states": hidden_states, "residual": residual}
                 )
             hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -442,8 +423,6 @@ class OuroModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                if is_pp_missing_parameter(name, self):
-                    continue
                 if name.endswith("scale"):
                     # Remapping the name of FP8 kv-scale.
                     name = maybe_remap_kv_scale_name(name, params_dict)
@@ -464,8 +443,6 @@ class OuroModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
-                if is_pp_missing_parameter(name, self):
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
@@ -473,7 +450,7 @@ class OuroModel(nn.Module):
         return loaded_params
 
 
-class OuroForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class OuroForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -500,18 +477,15 @@ class OuroForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
-                self.lm_head = self.model.embed_tokens
-            else:
-                self.lm_head = ParallelLMHead(
-                    config.vocab_size,
-                    config.hidden_size,
-                    quant_config=quant_config,
-                    prefix=maybe_prefix(prefix, "lm_head"),
-                )
+        if config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens
         else:
-            self.lm_head = PPMissingLayer()
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
