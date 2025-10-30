@@ -410,6 +410,30 @@ def rms_norm_dynamic_per_token_quant(
     return output, scales
 
 
+# fused quant layer norm ops bloked
+def rms_norm_per_block_quant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    group_size: list[int],
+    scale_ub: torch.Tensor | None = None,
+    residual: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert len(group_size) == 2
+    output = torch.empty_like(input, dtype=quant_dtype)
+    scales = torch.zeros(
+        (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
+        device=input.device,
+        dtype=torch.float32,
+    )
+
+    torch.ops._C.rms_norm_per_block_quant(
+        output, input, weight, scales, epsilon, scale_ub, residual, group_size[1]
+    )
+    return output, scales
+
+
 # quantization ops
 # awq
 def awq_dequantize(

@@ -123,6 +123,13 @@ void rms_norm_dynamic_per_token_quant(torch::Tensor& out,
                                       std::optional<torch::Tensor> scale_ub,
                                       std::optional<torch::Tensor> residual);
 
+void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
+                              torch::Tensor const& weight,
+                              torch::Tensor& scales, double const epsilon,
+                              std::optional<torch::Tensor> scale_ub,
+                              std::optional<torch::Tensor> residual,
+                              int64_t group_size);
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
