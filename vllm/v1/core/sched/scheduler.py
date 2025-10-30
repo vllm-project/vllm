@@ -93,7 +93,6 @@ class Scheduler(SchedulerInterface):
             )
 
             connector_vllm_config = copy.copy(self.vllm_config)
-            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
             self.connector = KVConnectorFactory.create_connector(
                 config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
@@ -1335,7 +1334,7 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
         else:
-            return self.connector.request_finished(request, block_ids)
+            return self.connector.request_finished_all_groups(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
