@@ -85,6 +85,9 @@ def _fused_moe_lora_kernel(
     USE_GDC: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
 ):
+    if USE_GDC and IS_PRIMARY:
+        # GDC launch dependents hints the runtime system to launch dependent kernels.
+        tl.extra.cuda.gdc_launch_dependents()
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
@@ -109,9 +112,6 @@ def _fused_moe_lora_kernel(
     expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
     if expert_id == -1:
         return
-    if USE_GDC and IS_PRIMARY:
-        # GDC launch dependents hints the runtime system to launch dependent kernels.
-        tl.extra.cuda.gdc_launch_dependents()
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
     cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
@@ -138,20 +138,22 @@ def _fused_moe_lora_kernel(
         + expert_id * stride_be
         + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
     )
-    # GDC wait waits for ALL programs in the the prior kernel to complete
-    # before continuing.
-    if USE_GDC and not IS_PRIMARY:
-        tl.extra.cuda.gdc_wait()
+
     # accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     for k in range(0, grid_k):
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+        # pre-fetch lora weight
+        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        # GDC wait waits for ALL programs in the the prior kernel to complete
+        # before continuing.
+        if USE_GDC and not IS_PRIMARY:
+            tl.extra.cuda.gdc_wait()
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
             other=0.0,
         )
-        b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
         accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
@@ -166,7 +168,7 @@ def _fused_moe_lora_kernel(
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-   
+
     if SPLIT_K == 1:
         tl.store(c_ptrs, accumulator, mask=c_mask)
     else:
@@ -255,7 +257,7 @@ def _fused_moe_lora(
         "GROUP_SIZE_M": group_size_m,
         "SPLIT_K": split_k,
         "USE_GDC": use_gdc,
-        "launch_pdl": use_gdc,  # trtion kernel metadata
+        "launch_pdl": use_gdc,  # triton kernel metadata
     }
 
     grid = lambda META: (

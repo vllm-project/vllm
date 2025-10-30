@@ -22,6 +22,7 @@ def mm_k(
     SPLIT_K: tl.constexpr,
     CAST_TYPE: tl.constexpr,
     b_dtype: tl.constexpr,
+    USE_GDC: tl.constexpr,
 ):
     """
     Given a_ptr and b_ptr, that identify the rows of A (m x k) and columns of
@@ -45,18 +46,24 @@ def mm_k(
         CAST_TYPE: if True, cast the values from the A matrix to the B
           matrix dtype.
         b_dtype: datatype of the B matrix
+        USE_GDC:
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(tl.cdiv(K, BLOCK_K * SPLIT_K)):
         if EVEN_K:
-            tiled_a = tl.load(a_ptr)
+            # pre-fetech lora weight
             tiled_b = tl.load(b_ptr)
+            if USE_GDC:
+                tl.extra.cuda.gdc_wait()
+            tiled_a = tl.load(a_ptr)
         else:
-            tiled_a = tl.load(
-                a_ptr, mask=offset_k[None, :] < K - k * (BLOCK_K * SPLIT_K), other=0
-            )
             tiled_b = tl.load(
                 b_ptr, mask=offset_k[:, None] < K - k * (BLOCK_K * SPLIT_K), other=0
+            )
+            if USE_GDC:
+                tl.extra.cuda.gdc_wait()
+            tiled_a = tl.load(
+                a_ptr, mask=offset_k[None, :] < K - k * (BLOCK_K * SPLIT_K), other=0
             )
         if CAST_TYPE:
             tiled_a = tiled_a.to(b_dtype)
@@ -155,8 +162,7 @@ def do_expand_kernel(
 
     # Compute the block matrix product.
     SPLIT_K = 1
-    if USE_GDC:
-        tl.extra.cuda.gdc_wait()
+
     accumulator = mm_k(
         a_ptr,
         b_ptr,
@@ -171,6 +177,7 @@ def do_expand_kernel(
         SPLIT_K,
         CAST_TYPE,
         cur_lora_ptr.dtype.element_ty,
+        USE_GDC,
     )
 
     tiled_c = accumulator.to(cur_lora_ptr.dtype.element_ty)
@@ -276,6 +283,7 @@ def do_shrink_kernel(
         SPLIT_K,
         False,
         cur_lora_ptr.dtype.element_ty,
+        False,  # USE_GDC is always False in shrink kernel
     )
 
     # Identify the C output pointers to store the results of the accumulator.
@@ -289,9 +297,7 @@ def do_shrink_kernel(
     )
     c_mask = (offset_cm[:, None] < M_LEN) & (offset_cn[None, :] < N)
     accumulator *= scaling
-    # GDC launch dependents hints the runtime system to launch dependent kernels.
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
+
     # handles write-back with reduction-splitting
     if SPLIT_K == 1:
         tl.store(c_ptr, accumulator, mask=c_mask)
