@@ -255,12 +255,33 @@ def _wait_until_pg_ready(current_placement_group: "PlacementGroup"):
     try:
         ray.get(pg_ready_ref, timeout=0)
     except ray.exceptions.GetTimeoutError:
-        raise ValueError(
-            "Cannot provide a placement group of "
-            f"{placement_group_specs=} within {PG_WAIT_TIMEOUT} seconds. See "
-            "`ray status` and `ray list nodes` to make sure the cluster has "
-            "enough resources."
-        ) from None
+        # Provide more helpful error message when GPU count is exceeded
+        total_gpu_required = sum(spec.get("GPU", 0) for spec in placement_group_specs)
+        # If more than one GPU is required for the placement group, provide a
+        # more specific error message.
+        # We use >1 here because multi-GPU (tensor parallel) jobs are more
+        # likely to fail due to insufficient cluster resources, and users may
+        # need to adjust tensor_parallel_size to fit available GPUs.
+        if total_gpu_required > 1:
+            raise ValueError(
+                f"Cannot provide a placement group requiring "
+                f"{total_gpu_required} GPUs "
+                f"(placement_group_specs={placement_group_specs}) within "
+                f"{PG_WAIT_TIMEOUT} seconds.\n"
+                f"Tensor parallel size may exceed available GPUs in your "
+                f"cluster. Check resources with `ray status` and "
+                f"`ray list nodes`.\n"
+                f"If running on K8s with limited GPUs, consider reducing "
+                f"--tensor-parallel-size to match available GPU resources."
+            ) from None
+        else:
+            raise ValueError(
+                "Cannot provide a placement group of "
+                f"{placement_group_specs=} within "
+                f"{PG_WAIT_TIMEOUT} seconds. See "
+                "`ray status` and `ray list nodes` to make sure the cluster "
+                "has enough resources."
+            ) from None
 
 
 def _wait_until_pg_removed(current_placement_group: "PlacementGroup"):
@@ -298,6 +319,23 @@ def initialize_ray_cluster(
     """
     assert_ray_available()
     from vllm.platforms import current_platform
+
+    # Prevalidate GPU requirements before Ray processing
+    if current_platform.is_cuda() and parallel_config.world_size > 1:
+        from vllm.utils import cuda_device_count_stateless
+
+        available_gpus = cuda_device_count_stateless()
+        if parallel_config.world_size > available_gpus:
+            logger.warning(
+                "Tensor parallel size (%d) exceeds available GPUs (%d). "
+                "This may result in Ray placement group allocation failures. "
+                "Consider reducing tensor_parallel_size to %d or less, "
+                "or ensure your Ray cluster has %d GPUs available.",
+                parallel_config.world_size,
+                available_gpus,
+                available_gpus,
+                parallel_config.world_size,
+            )
 
     if ray.is_initialized():
         logger.info("Ray is already initialized. Skipping Ray initialization.")
