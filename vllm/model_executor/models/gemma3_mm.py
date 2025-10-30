@@ -746,10 +746,7 @@ class Gemma3ForConditionalGeneration(
         seq_lens = []
         for i in range(num_seqs):
             start_idx = start_indices[i]
-            if i < num_seqs - 1:
-                end_idx = start_indices[i + 1]
-            else:
-                end_idx = len(input_ids)
+            end_idx = start_indices[i + 1] if i < num_seqs - 1 else len(input_ids)
             seq_lens.append(end_idx - start_idx)
 
         global_attn_masks = []

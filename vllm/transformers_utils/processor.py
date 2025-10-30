@@ -253,8 +253,10 @@ def cached_processor_from_config(
         logger = init_logger(__name__)
         processor_name = model_config.tokenizer
         logger.info(
-            f"GGUF model detected: loading processor from tokenizer path "
-            f'"{processor_name}" instead of "{model_config.model}"'
+            "GGUF model detected: loading processor from tokenizer path "
+            "%s instead of %s",
+            processor_name,
+            model_config.model,
         )
     else:
         processor_name = model_config.model
@@ -274,7 +276,8 @@ def cached_processor_from_config(
         )
         logger.info(
             "GGUF Gemma3: Pre-configuring image_processor with 896x896 "
-            f"(loading processor from {processor_name})"
+            "(loading processor from %s)",
+            processor_name,
         )
 
     # Merge kwargs and add image_processor override if present
