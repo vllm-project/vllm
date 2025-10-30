@@ -72,7 +72,7 @@ def flash_attn_maxseqlen_wrapper(
 ) -> torch.Tensor:
     if (
         current_platform.is_rocm()
-        and on_gfx9
+        and on_gfx9()
         and envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_MHA
     ):
