@@ -148,55 +148,6 @@ def get_connector_config_parser(
         return None
 
     if backend_name not in _CONFIG_PARSER_REGISTRY:
-        available_backends = ", ".join(_CONFIG_PARSER_REGISTRY.keys())
-        raise ValueError(
-            f"Unknown offloading backend: '{backend_name}'. "
-            f"Available backends: {available_backends}"
-        )
+        logger.error("Unknown offloading backend: '%s'", backend_name)
 
     return _CONFIG_PARSER_REGISTRY[backend_name]
-
-
-def apply_extra_kv_connector_config(
-    vllm_config: "VllmConfig",
-    kv_transfer_config: KVTransferConfig | None,
-) -> KVTransferConfig | None:
-    """Apply KV offloading configuration to KVTransferConfig.
-
-    This function reads the offloading settings from CacheConfig and
-    configures the KVTransferConfig accordingly using the registered
-    backend handler.
-
-    Args:
-        vllm_config: The CacheConfig containing offloading settings.
-        kv_transfer_config: The KVTransferConfig to modify.
-
-    Returns:
-        The modified KVTransferConfig with offloading settings applied.
-
-    Raises:
-        ValueError: If offloading configuration is invalid or backend
-            is not registered.
-    """
-    config_parser = get_connector_config_parser(vllm_config)
-    if config_parser is None:
-        # No connector is configured, return the original
-        return kv_transfer_config
-
-    # Initialize KVTransferConfig if not provided
-    if kv_transfer_config is None:
-        kv_transfer_config = KVTransferConfig()
-
-    # Apply the configuration
-    config_parser.configure_kv_transfer(
-        kv_transfer_config=kv_transfer_config,
-        vllm_config=vllm_config,
-    )
-
-    backend_name = vllm_config.cache_config.kv_offloading_backend
-    logger.info(
-        "KV connector configured with backend: %s",
-        backend_name,
-    )
-
-    return kv_transfer_config

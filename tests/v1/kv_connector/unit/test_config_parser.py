@@ -3,14 +3,11 @@
 
 """Tests for KV cache offloading configuration."""
 
-import pytest
-
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.config_parser import (
     LMCacheOffloadingParser,
     NativeOffloadingParser,
-    apply_extra_kv_connector_config,
     get_connector_config_parser,
 )
 
@@ -50,20 +47,6 @@ class TestGetConnectorConfigParser:
         parser = get_connector_config_parser(vllm_config)
 
         assert parser is None
-
-    def test_raises_error_for_unknown_backend(self):
-        """Test that unknown backend raises ValueError."""
-        cache_config = CacheConfig(
-            kv_offloading_backend="unknown_backend", kv_offloading_size=4.0
-        )
-        vllm_config = VllmConfig(cache_config=cache_config)
-
-        with pytest.raises(ValueError) as exc_info:
-            get_connector_config_parser(vllm_config)
-
-        assert "Unknown offloading backend: 'unknown_backend'" in str(exc_info.value)
-        assert "native" in str(exc_info.value)
-        assert "lmcache" in str(exc_info.value)
 
 
 class TestNativeOffloadingParser:
@@ -251,101 +234,3 @@ class TestLMCacheOffloadingParser:
         # Verify that extra config is replaced (not merged) for LMCache
         assert "existing_key" not in kv_transfer_config.kv_connector_extra_config
         assert "lmcache.local_cpu" in kv_transfer_config.kv_connector_extra_config
-
-
-class TestApplyKVConnectorConfig:
-    """Tests for apply_extra_kv_connector_config function."""
-
-    def test_apply_native_backend(self):
-        """Test applying native backend configuration."""
-        # Setup
-        cache_config = CacheConfig(
-            kv_offloading_backend="native", kv_offloading_size=4.0
-        )
-        parallel_config = ParallelConfig(
-            tensor_parallel_size=1, pipeline_parallel_size=1
-        )
-        vllm_config = VllmConfig(
-            cache_config=cache_config, parallel_config=parallel_config
-        )
-        kv_transfer_config = KVTransferConfig()
-
-        # Execute
-        apply_extra_kv_connector_config(vllm_config, kv_transfer_config)
-
-        # Verify
-        assert kv_transfer_config.kv_connector == "OffloadingConnector"
-        assert kv_transfer_config.kv_role == "kv_both"
-        assert kv_transfer_config.kv_connector_extra_config is not None
-
-    def test_apply_lmcache_backend(self):
-        """Test applying LMCache backend configuration."""
-        # Setup
-        cache_config = CacheConfig(
-            kv_offloading_backend="lmcache", kv_offloading_size=4.0
-        )
-        parallel_config = ParallelConfig(
-            tensor_parallel_size=1, pipeline_parallel_size=1
-        )
-        vllm_config = VllmConfig(
-            cache_config=cache_config, parallel_config=parallel_config
-        )
-        kv_transfer_config = KVTransferConfig()
-
-        # Execute
-        apply_extra_kv_connector_config(vllm_config, kv_transfer_config)
-
-        # Verify
-        assert kv_transfer_config.kv_connector == "LMCacheConnectorV1"
-        assert kv_transfer_config.kv_role == "kv_both"
-        assert kv_transfer_config.kv_connector_extra_config is not None
-
-    def test_no_configuration_when_backend_is_none(self):
-        """Test that no configuration is applied when backend is None."""
-        # Setup
-        cache_config = CacheConfig(kv_offloading_backend=None)
-        vllm_config = VllmConfig(cache_config=cache_config)
-        kv_transfer_config = KVTransferConfig()
-
-        # Execute
-        apply_extra_kv_connector_config(vllm_config, kv_transfer_config)
-
-        # Verify that config remains unchanged
-        assert kv_transfer_config.kv_connector is None
-        assert kv_transfer_config.kv_role is None
-
-    def test_apply_with_different_parallel_configurations(self):
-        """Test applying config with various parallelism settings."""
-        test_cases = [
-            # (tp_size, pp_size, total_size_gib, expected_bytes_per_rank)
-            (1, 1, 4.0, 4.0 * (1 << 30)),
-            (2, 1, 4.0, 2.0 * (1 << 30)),
-            (1, 2, 4.0, 2.0 * (1 << 30)),
-            (2, 2, 8.0, 2.0 * (1 << 30)),
-            (4, 2, 16.0, 2.0 * (1 << 30)),
-        ]
-
-        for tp_size, pp_size, total_size_gib, expected_bytes in test_cases:
-            # Setup
-            cache_config = CacheConfig(
-                kv_offloading_backend="native", kv_offloading_size=total_size_gib
-            )
-            parallel_config = ParallelConfig(
-                tensor_parallel_size=tp_size, pipeline_parallel_size=pp_size
-            )
-            vllm_config = VllmConfig(
-                cache_config=cache_config, parallel_config=parallel_config
-            )
-            kv_transfer_config = KVTransferConfig()
-
-            # Execute
-            apply_extra_kv_connector_config(vllm_config, kv_transfer_config)
-
-            # Verify
-            actual_bytes = kv_transfer_config.kv_connector_extra_config[
-                "kv_bytes_per_rank"
-            ]
-            assert actual_bytes == expected_bytes, (
-                f"Failed for tp={tp_size}, pp={pp_size}: "
-                f"expected {expected_bytes}, got {actual_bytes}"
-            )

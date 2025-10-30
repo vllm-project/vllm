@@ -291,6 +291,29 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    def _apply_extra_kv_connector_config(self) -> None:
+        """Update KVTransferConfig based on top-level configs in VllmConfig.
+
+        Right now, this function reads the offloading settings from
+        CacheConfig and configures the KVTransferConfig accordingly.
+        """
+        from vllm.distributed.kv_transfer.kv_connector.config_parser import (
+            get_connector_config_parser,
+        )
+
+        parser = get_connector_config_parser(self)
+        if parser is None:
+            return
+
+        # If no KVTransferConfig is provided, create a default one.
+        if self.kv_transfer_config is None:
+            self.kv_transfer_config = KVTransferConfig()
+
+        # Configue the KVTransferConfig in place.
+        parser.configure_kv_transfer(
+            kv_transfer_config=self.kv_transfer_config, vllm_config=self
+        )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -668,13 +691,7 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         # Handle the KV connector configs
-        from vllm.distributed.kv_transfer.kv_connector.config_parser import (
-            apply_extra_kv_connector_config,
-        )
-
-        self.kv_transfer_config = apply_extra_kv_connector_config(
-            self, self.kv_transfer_config
-        )
+        self._apply_extra_kv_connector_config()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when

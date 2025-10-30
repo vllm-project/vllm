@@ -134,7 +134,7 @@ class CacheConfig:
     to None, which means no KV offloading is enabled. When set with
     kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
 
-    kv_offloading_backend: str | None = None
+    kv_offloading_backend: Literal["native", "lmcache"] | None = None
     """The backend to use for KV cache offloading. Supported backends include
     'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
     together with kv_offloading_size."""
