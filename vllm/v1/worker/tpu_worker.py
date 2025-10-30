@@ -25,7 +25,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
@@ -89,7 +89,7 @@ class TPUWorker:
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
-            from vllm.utils import init_cached_hf_modules
+            from vllm.utils.import_utils import init_cached_hf_modules
 
             init_cached_hf_modules()
 
