@@ -275,10 +275,7 @@ def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
 
     placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
     prompts = [
-        (
-            "<|begin_of_sentence|>User: "
-            f"{question}{placeholder}\nAssistant: <think></think>"
-        )
+        (f"<|begin_of_sentence|>User: {question}{placeholder}\nAssistant: ")
         for question in questions
     ]
 
