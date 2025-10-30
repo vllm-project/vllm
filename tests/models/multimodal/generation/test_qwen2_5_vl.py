@@ -53,8 +53,6 @@ def test_qwen2_5_vl_evs_functionality(
     pruning rates.
     """
 
-    print(f"encoder_attn_backend: {encoder_attn_backend}")
-
     # Sample frames from video assets
     sampled_vids = [
         sample_frames_from_video(asset.np_ndarrays, num_frames)
