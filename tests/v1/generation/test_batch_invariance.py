@@ -256,6 +256,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_num_seqs=32,
         max_model_len=8192,
         dtype="bfloat16",  # not everything is supported
+        gpu_memory_utilization=0.9,
     )
 
     # Use more realistic prompts for better token generation
