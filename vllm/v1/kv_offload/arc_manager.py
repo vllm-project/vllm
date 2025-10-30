@@ -104,7 +104,7 @@ class ARCOffloadingManager(OffloadingManager):
                 self.t2.move_to_end(block_hash)
 
             elif block_hash in self.b1:
-                delta = max(1, len(self.b2) // len(self.b1)) if len(self.b1) > 0 else 1
+                delta = max(1, len(self.b2) / len(self.b1))
                 self.target_t1_size = min(
                     self.target_t1_size + delta, self.cache_capacity
                 )
