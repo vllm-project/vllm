@@ -239,6 +239,7 @@ class RocmPlatform(Platform):
                 f"Backend {backend} is not supported for vit attention. "
                 f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
+            logger.info_once(f"Using backend {backend} for vit attention")
             return backend
 
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():

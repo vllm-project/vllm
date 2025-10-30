@@ -201,9 +201,9 @@ class Platform:
         from vllm.attention.backends.registry import _MHA_Backend
 
         if backend is not None:
-            assert backend in [_MHA_Backend.TORCH_SDPA], (
+            assert backend in cls.get_supported_vit_attn_backends(), (
                 f"Backend {backend} is not supported for vit attention"
-                f"Supported backends are: {_MHA_Backend.TORCH_SDPA}"
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
             )
             logger.info_once(f"Using backend {backend} for vit attention")
             return backend
