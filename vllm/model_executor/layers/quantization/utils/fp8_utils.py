@@ -942,10 +942,13 @@ def requant_weight_ue8m0_inplace(
 def deepgemm_transform_sf_into_required_layout(
     xq: torch.Tensor, xs: torch.Tensor, is_weights: bool, use_e8m0: bool
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    if xq.dtype != torch.float8_e4m3fn:
-        raise ValueError(
-            f"Expected tensor dtype to be torch.float8_e4m3fn, got {xq.dtype} instead."
-        )
+    assert xq.dtype == torch.float8_e4m3fn, (
+        "Expected quantized tensor dtype "
+        f"to be torch.float8_e4m3fn, got {xq.dtype} instead."
+    )
+    assert xs.dtype == torch.float32, (
+        f"Expected tensor scales dtype to be torch.float32, got {xs.dtype} instead"
+    )
 
     if use_e8m0:
         requant_weight_ue8m0_inplace(xq, xs)
@@ -956,18 +959,20 @@ def deepgemm_transform_sf_into_required_layout(
         xq = xq.unsqueeze(0)
         xs = xs.unsqueeze(0)
 
-    # TODO (varun) : port get default recipe from here
-    # https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
+    # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
     recipe = (1, 128, 128)
-    # is the scale factors for A in ( Refers to the argument A in A @ B)
-    is_sfa = not is_weights
+
+    # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
+    # DeepGemm uses the `transform_sf_into_required_layout` function to
+    # represent scales in the correct format.
     dg_xs = transform_sf_into_required_layout(
         sf=xs,
         mn=xq.size(1),
         k=xq.size(2),
         recipe=recipe,
         num_groups=xq.size(0),
-        is_sfa=is_sfa,
+        # is the scale factors for A in (Refers to the argument A in A @ B)
+        is_sfa=not is_weights,
     )
 
     if original_ndim == 2:
@@ -1202,13 +1207,13 @@ def maybe_post_process_fp8_weight_block(
     should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
         layer.orig_dtype, layer.weight
     )
-    if is_deep_gemm_e8m0_used() and should_use_deepgemm:
+    if should_use_deepgemm:
         layer.weight.data, layer.weight_scale.data = (
             deepgemm_transform_sf_into_required_layout(
                 layer.weight.data,
                 layer.weight_scale.data,
                 is_weights=True,
-                use_e8m0=True,
+                use_e8m0=is_deep_gemm_e8m0_used(),
             )
         )
     # SM90 Block FP8 CUTLASS requires row-major weight scales
