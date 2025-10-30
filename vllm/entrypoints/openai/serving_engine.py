@@ -10,7 +10,8 @@ from collections.abc import AsyncGenerator, Callable, Iterable, Mapping, Sequenc
 import concurrent
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from http import HTTPStatus
-from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, Annotated, Optional, Union
+from typing import Any, ClassVar, Generic, TypeAlias, TypeVar, \
+    Annotated, Optional, Union
 
 import torch
 from fastapi import Request
@@ -273,17 +274,30 @@ class OpenAIServing:
             apply_mistral_chat_template, executor=self._tokenizer_executor
         )
 
-        self.enable_tokenizer_proc_pool = os.getenv("TOKENIZER_PROC_POOL", "0") == "1"
-        self.tokenizer_worker_num = max(1, int(os.getenv("TOKENIZER_WORKER_NUM", default=5)))
-        self.process_pool_threshold = max(1, int(os.getenv("TOKENIZER_PROC_POOL_THRES", 512)))
+
+        self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
+        self.log_error_stack = log_error_stack
+
+        self.processor = self.models.processor
+        self.io_processor = self.models.io_processor
+        self.model_config = self.models.model_config
+        self.max_model_len = self.model_config.max_model_len
+
+        self.enable_tokenizer_proc_pool = \
+            os.getenv("TOKENIZER_PROC_POOL", "0") == "1"
+        self.tokenizer_worker_num = \
+            max(1, int(os.getenv("TOKENIZER_WORKER_NUM", default=5)))
+        self.process_pool_threshold = \
+            max(1, int(os.getenv("TOKENIZER_PROC_POOL_THRES", 512)))
 
         self.do_lower_case = False
         if self.model_config and self.model_config.encoder_config:
-            self.do_lower_case = self.model_config.encoder_config.get("do_lower_case", False)
+            self.do_lower_case = \
+                self.model_config.encoder_config.get("do_lower_case", False)
         if self.enable_tokenizer_proc_pool:
-            logger.info(f"Tokenizer process pool is enabled.")
-            logger.info(f"Tokenizer worker num is {self.tokenizer_worker_num}.")
-            logger.info(f"Process pool threshold is {self.process_pool_threshold}.")
+            logger.info("Tokenizer process pool is enabled.")
+            logger.info("Tokenizer worker num is %s.", self.tokenizer_worker_num)
+            logger.info("Process pool threshold is %s.", self.process_pool_threshold)
 
             self._tokenizer_proc_pool_executor = ProcessPoolExecutor(
                 max_workers=self.tokenizer_worker_num,
@@ -304,14 +318,6 @@ class OpenAIServing:
                 executor=self._tokenizer_proc_pool_executor
             )
             self._initialize_process_pool()
-
-        self._async_tokenizer_pool: dict[AnyTokenizer, AsyncMicrobatchTokenizer] = {}
-        self.log_error_stack = log_error_stack
-
-        self.processor = self.models.processor
-        self.io_processor = self.models.io_processor
-        self.model_config = self.models.model_config
-        self.max_model_len = self.model_config.max_model_len
 
     def _get_tool_parser(
         self, tool_parser_name: str | None = None, enable_auto_tools: bool = False
@@ -578,31 +584,37 @@ class OpenAIServing:
         Initializes the process pool executor by submitting and waiting for dummy tasks.
         Ensures the process pool is properly set up before use.
         """
-        if hasattr(self, '_tokenizer_proc_pool_executor'):
-            executor: Optional[concurrent.futures.ProcessPoolExecutor] = getattr(self, '_tokenizer_proc_pool_executor')
-            futures = []
-
-            try:
-                # Submit dummy tasks to all workers
-                for _ in range(executor._max_workers):
-                    future = executor.submit(
-                        OpenAIServing._proc_pool_dummy_task, 
-                    )
-                    futures.append(future)
-
-                # Wait for all dummy tasks to complete
-                for future in futures:
-                    future.result()
-                logger.info("Process pool initialized successfully")
-            except concurrent.futures.process.BrokenProcessPool as e:
-                logger.error(f"Process pool initialization failed: {e}")
-                raise
-            except Exception as e:
-                logger.error(f"Unexpected error during process pool initialization: {e}")
-                raise
-        else:
+        executor: Optional[ProcessPoolExecutor] = getattr(
+            self, '_tokenizer_proc_pool_executor', None
+        )
+        
+        if executor is None:
             logger.error("Process pool executor not found")
             raise ValueError("Process pool executor not initialized")
+
+        # Use stored max_workers instead of private _max_workers
+        max_workers: int = getattr(self, 'tokenizer_worker_num', 1)
+
+        futures = []
+        try:
+            # Submit dummy tasks to all workers
+            for _ in range(max_workers):
+                future = executor.submit(
+                    OpenAIServing._proc_pool_dummy_task,
+                )
+                futures.append(future)
+
+            # Wait for all dummy tasks to complete
+            for future in futures:
+                future.result()
+            logger.info("Process pool initialized successfully")
+            
+        except concurrent.futures.process.BrokenProcessPool as e:
+            raise RuntimeError(f"Process pool initialization failed: {e}")
+        except Exception as e:
+            raise RuntimeError(
+                f"Unexpected error during process pool initialization: {e}"
+            ) from e
 
     @staticmethod
     def _proc_pool_dummy_task():
@@ -648,7 +660,7 @@ class OpenAIServing:
                 truncation_side=truncation_side
             )
         except Exception as e:
-            raise ValueError(f"Failed to initialize tokenizer: {e}")
+            raise ValueError(f"Failed to initialize tokenizer: {e}") from e
 
     @staticmethod
     def _normalize_prompt_text_to_input_static(
@@ -675,7 +687,12 @@ class OpenAIServing:
  
         input_text = prompt
  
-        return OpenAIServing._validate_input_static(request, input_ids, input_text, max_model_len)
+        return OpenAIServing._validate_input_static(
+                request, 
+                input_ids, 
+                input_text, 
+                max_model_len
+            )
  
     @staticmethod
     def _normalize_prompt_tokens_to_input_static(
@@ -692,7 +709,12 @@ class OpenAIServing:
  
         input_text = tokenizer.decode(input_ids)
  
-        return OpenAIServing._validate_input_static(request, input_ids, input_text, max_model_len)
+        return OpenAIServing._validate_input_static(
+                request, 
+                input_ids, 
+                input_text, 
+                max_model_len
+            )
 
     @staticmethod
     def _tokenize_prompt_input_or_inputs_proc_pool(
@@ -706,9 +728,14 @@ class OpenAIServing:
 
        # Validate global tokenizer state
         if _process_tokenizer is None:
-            raise ValueError("Tokenizer not initialized. Call _init_proc_tokenizer first.")
+            raise ValueError("Tokenizer not initialized. "
+                             "Call _init_proc_tokenizer first."
+                            )
         if _process_max_model_len is None or _process_do_lower_case is None:
-            raise ValueError("Tokenizer configuration (max_model_len or do_lower_case) not initialized.")
+            raise ValueError(
+                    "Tokenizer configuration "
+                    "(max_model_len or do_lower_case) not initialized."
+                    )
 
         # Process each prompt input
         tokenized_prompts = []
@@ -1308,8 +1335,10 @@ class OpenAIServing:
                 prompt=request_prompt, prompt_token_ids=[1]
             )
         elif isinstance(request_prompt, str):
-            if self.enable_tokenizer_proc_pool and len(request_prompt) >= self.process_pool_threshold:
-                    prompt_inputs = await self._tokenize_prompt_input_or_inputs_async_proc_pool(
+            if self.enable_tokenizer_proc_pool and \
+                len(request_prompt) >= self.process_pool_threshold:
+                    prompt_inputs = \
+                        await self._tokenize_prompt_input_or_inputs_async_proc_pool(
                         request,
                         request_prompt,
                         add_special_tokens=add_special_tokens,
