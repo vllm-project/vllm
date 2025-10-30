@@ -922,6 +922,16 @@ class SupportsEagle3(Protocol):
         MRO of your model class.
     """
 
+    has_own_lm_head: ClassVar[bool] = False
+    """
+    A flag that indicates this model has trained its own lm_head.
+    """
+
+    has_own_embed_tokens: ClassVar[bool] = False
+    """
+    A flag that indicates this model has trained its own input embeddings.
+    """
+
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """
         Set which layers should output auxiliary

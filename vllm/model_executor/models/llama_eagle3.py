@@ -148,7 +148,6 @@ class LlamaModel(nn.Module):
             self.config.hidden_size,
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
-        self.has_own_embed_tokens = False
 
         self.layers = nn.ModuleList(
             [
@@ -264,8 +263,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
-        # To prevent overriding lm_head with target model's lm_head
-        self.has_own_lm_head = False
 
     def get_input_embeddings(
         self,
@@ -335,7 +332,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             if "lm_head" in name:
                 self.has_own_lm_head = True
             if "embed_tokens" in name:
-                self.model.has_own_embed_tokens = True
+                self.has_own_embed_tokens = True
 
         skip_substrs = []
         if not includes_draft_id_mapping:
