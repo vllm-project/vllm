@@ -380,7 +380,7 @@ def configure_quant_config(
             quant_config.packed_modules_mapping = packed_mapping
 
 
-def extract_vision_config_from_gguf(mmproj_path):
+def extract_vision_config_from_gguf(mmproj_path: str) -> "Optional[SiglipVisionConfig]":  # type: ignore[name-defined]
     """
     Extract vision config parameters from mmproj.gguf metadata.
 
@@ -394,6 +394,8 @@ def extract_vision_config_from_gguf(mmproj_path):
     Returns:
         SiglipVisionConfig if extraction succeeds, None otherwise
     """
+    from typing import Optional
+
     try:
         import gguf
         from transformers import SiglipVisionConfig
