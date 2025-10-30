@@ -1679,6 +1679,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
+        tier: float = 1,
     ) -> None:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
