@@ -356,11 +356,17 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "Olmo3ForCausalLM": _HfExamplesInfo("shanearora/2025-sep-a-base-model"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
+    "OpenPanguMTPModel": _HfExamplesInfo(
+        "FreedomIntelligence/openPangu-Ultra-MoE-718B", trust_remote_code=True
+    ),
     "OPTForCausalLM": _HfExamplesInfo(
         "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
     ),
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
+    ),
+    "PanguUltraMoEForCausalLM": _HfExamplesInfo(
+        "FreedomIntelligence/openPangu-Ultra-MoE-718B", trust_remote_code=True
     ),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
