@@ -13,6 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
+    SupportsHMA,
     supports_hma,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
@@ -1339,6 +1340,7 @@ class Scheduler(SchedulerInterface):
             assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
         else:
+            assert isinstance(self.connector, SupportsHMA)
             return self.connector.request_finished_all_groups(request)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
