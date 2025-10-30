@@ -93,7 +93,7 @@ class Scheduler(SchedulerInterface):
             )
 
             connector_vllm_config = copy.copy(self.vllm_config)
-            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
+            connector_vllm_config.cache_config = copy.copy(kv_cache_config)
             self.connector = KVConnectorFactory.create_connector(
                 config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
