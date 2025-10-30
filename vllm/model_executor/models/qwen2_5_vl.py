@@ -416,6 +416,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             q, k = torch.chunk(qk_rotated, 2, dim=0)
 
         if self.is_flash_attn_backend:
+            from importlib.util import find_spec
+
+            if not isinstance(max_seqlen, torch.Tensor):
+                max_seqlen = torch.tensor(
+                    max_seqlen, device=q.device, dtype=torch.int32
+                )
+            self.use_upstream_fa = find_spec("flash_attn") is not None
+
             context_layer = vit_flash_attn_wrapper(
                 q,
                 k,
@@ -423,7 +431,7 @@ class Qwen2_5_VisionAttention(nn.Module):
                 cu_seqlens,
                 max_seqlen,
                 batch_size,
-                self.attn_backend == _Backend.ROCM_AITER_FA,
+                self.attn_backend == _Backend.FLASH_ATTN,
                 self.use_upstream_fa,
             )
         elif self.attn_backend == _Backend.TORCH_SDPA:

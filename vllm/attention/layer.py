@@ -48,9 +48,10 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
+    from vllm.platforms.rocm import on_gfx9, on_gfx1x
 else:
     on_gfx9 = lambda *args, **kwargs: False
+    on_gfx1x = lambda *args, **kwargs: False
 
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -103,13 +104,25 @@ def maybe_get_vit_flash_attn_backend(
     use_upstream_fa: bool,
     attn_backend_override: _Backend | None = None,
 ) -> tuple[_Backend, Callable | None]:
+    import os
+    from importlib.util import find_spec
+
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             attn_backend = _Backend.ROCM_AITER_FA
 
         elif (
+            os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") == "TRUE"
+            and os.environ.get("GPU_ARCHS") == "gfx1100"
+            and find_spec("flash_attn") is not None
+            and on_gfx1x()
+            and attn_backend_override is None
+        ):
+            attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
+        elif (
             check_upstream_fa_availability(torch.get_default_dtype())
-            and on_gfx9()
             and attn_backend_override is None
         ):
             attn_backend = _Backend.FLASH_ATTN

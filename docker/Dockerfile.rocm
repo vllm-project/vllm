@@ -11,10 +11,29 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget curl
+    apt-transport-https ca-certificates wget curl git
+
 # Remove sccache
 RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
+
+# BUILD FA only if both FLASH_ATTENTION_TRITON_AMD_ENABLE and GPU_ARCHS are passed/declared and non-empty
+ARG FLASH_ATTENTION_TRITON_AMD_ENABLE
+ARG GPU_ARCHS
+
+RUN if [ -n "${FLASH_ATTENTION_TRITON_AMD_ENABLE}" ] && [ -n "${GPU_ARCHS}" ]; then \
+    echo "Compiling Flash Attention with GPU_ARCHS=${GPU_ARCHS}..." ; \
+    export FLASH_ATTENTION_TRITON_AMD_ENABLE="${FLASH_ATTENTION_TRITON_AMD_ENABLE}"; \
+    export GPU_ARCHS="${GPU_ARCHS}"; \
+    git clone --single-branch --branch main_perf https://github.com/ROCm/flash-attention.git \
+    && cd flash-attention \
+    && python3 setup.py install \
+    && cd .. \
+    && rm -rf flash-attention ; \
+    else \
+    echo "Skipping Flash Attention compilation (FLASH_ATTENTION_TRITON_AMD_ENABLE and/or GPU_ARCHS not set)." ; \
+    fi
+
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
 
@@ -27,9 +46,9 @@ FROM base AS fetch_vllm_1
 ARG VLLM_REPO="https://github.com/vllm-project/vllm.git"
 ARG VLLM_BRANCH="main"
 ONBUILD RUN git clone ${VLLM_REPO} \
-	    && cd vllm \
-	    && git fetch -v --prune -- origin ${VLLM_BRANCH} \
-	    && git checkout FETCH_HEAD \
+        && cd vllm \
+        && git fetch -v --prune -- origin ${VLLM_BRANCH} \
+        && git checkout FETCH_HEAD \
         && if [ ${VLLM_REPO} != "https://github.com/vllm-project/vllm.git" ] ; then \
                git remote add upstream "https://github.com/vllm-project/vllm.git" \
                && git fetch upstream ; fi

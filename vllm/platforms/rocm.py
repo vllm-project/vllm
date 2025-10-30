@@ -222,7 +222,9 @@ class RocmPlatform(Platform):
             and find_spec("flash_attn") is not None
             and on_gfx1x()
         ):
-            logger.info("Using Vit FLASH_ATTN upstream V1 engine on gfx1x rdna3")
+            logger.info(
+                "Using ViT FlashAttention (upstream) on V1 engine (gfx1x / RDNA3)."
+            )
             return _Backend.FLASH_ATTN
 
         logger.info("Using Vit TORCH_SDPA V1 engine")
