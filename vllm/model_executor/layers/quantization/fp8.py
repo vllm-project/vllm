@@ -360,6 +360,7 @@ class Fp8LinearMethod(LinearMethodBase):
             self.use_marlin = False
 
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
