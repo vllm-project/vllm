@@ -712,7 +712,7 @@ setup(
         "bench": ["pandas", "matplotlib", "seaborn", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.14.0"],
+        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.0"],
         "audio": [
             "librosa",
             "soundfile",
