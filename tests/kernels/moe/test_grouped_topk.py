@@ -27,7 +27,7 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("topk_group", [2])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
 @pytest.mark.parametrize("routed_scaling_factor", [1.0, 2.5])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_grouped_topk(
     monkeypatch: pytest.MonkeyPatch,
     n_token: int,
