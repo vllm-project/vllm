@@ -5,7 +5,6 @@ from math import prod
 
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
@@ -146,7 +145,9 @@ def _fp8_quantize(
             column_major_scales=False,
             use_ue8m0=is_deep_gemm_e8m0_used(),
         )
-        return quant_op(A)
+        A_q, scale = quant_op(A)
+        assert cdiv(A.size(-1), block_k) == scale.size(-1)
+        return A_q, scale
 
 
 def _int8_quantize(

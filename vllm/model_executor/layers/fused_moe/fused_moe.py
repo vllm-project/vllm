@@ -1981,6 +1981,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.qfp8_mid_dynamic: QuantFP8 | None = None
         self.qfp8_mid_static: QuantFP8 | None = None
 
+        if self.quant_dtype != torch.float8_e4m3fn:
+            return
+
         if self.block_shape:
             block_k = self.block_shape[1]
             self.qfp8_mid_group = QuantFP8(
@@ -2002,6 +2005,15 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def quantize_mid(
         self, x: torch.Tensor, a_scale: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.quant_dtype != torch.float8_e4m3fn:
+            return moe_kernel_quantize_input(
+                x,
+                a_scale,
+                self.quant_dtype,
+                self.per_act_token_quant,
+                self.block_shape,
+            )
+
         if self.qfp8_mid_group is not None:
             assert a_scale is None, "Grouped FP8 activations are always dynamic."
             return self.qfp8_mid_group(x)
