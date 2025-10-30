@@ -267,7 +267,7 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
 
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
-                "fused output quantization is not yet supported for MLACommonImpl"
+                "fused output quantization is not yet supported for ROCMAiterMLASparse"
             )
 
         if attn_metadata is None:
