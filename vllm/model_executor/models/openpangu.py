@@ -67,6 +67,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
     extract_layer_index,
     is_pp_missing_parameter,
@@ -525,7 +526,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
     ) -> None:
         is_neox_style = True
         is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "Pangu":
+        if is_gguf and config.model_type == "PanguEmbedded":
             is_neox_style = False
 
         self.rotary_emb = get_rope(
@@ -719,11 +720,16 @@ class OpenPanguModel(nn.Module):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        eplb_config = vllm_config.parallel_config.eplb_config
+        self.config = config
+        self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
-        if get_pp_group().is_first_rank:
+        if get_pp_group().is_first_rank or (
+            config.tie_word_embeddings and get_pp_group().is_last_rank
+        ):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
@@ -779,107 +785,6 @@ class OpenPanguModel(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
-
-
-class OpenPanguForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA):
-    packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
-
-        self.fuse_qkv_a_proj = (
-            hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
-        )
-        if self.fuse_qkv_a_proj:
-            self.packed_modules_mapping["fused_qkv_a_proj"] = [
-                "q_a_proj",
-                "kv_a_proj_with_mqa",
-            ]
-
-        self.model = OpenPanguModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "lm_head"),
-            )
-        else:
-            self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-        self.expert_weights = []
-
-        # Set MoE hyperparameters
-        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
-        self.num_expert_groups = 1
-
-        self.moe_layers: list[SharedFusedMoE] = []
-        example_moe = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-
-            assert isinstance(layer, OpenPanguDecoderLayer)
-            if isinstance(layer.mlp, OpenPanguMoE):
-                # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
-
-        if example_moe is None:
-            raise RuntimeError("No MOE layer found in model.layers.")
-
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.n_routed_experts = example_moe.n_routed_experts
-        self.n_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for layer in self.model.layers:
-            if isinstance(layer.mlp, OpenPanguMoE):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
 
     def load_attn_mlp_weight(
         self,
@@ -972,6 +877,8 @@ class OpenPanguForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
 
             if (
                 "layers" in name
@@ -1018,9 +925,49 @@ class OpenPanguForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
         return loaded_params
+
+
+class OpenPanguModelBase(nn.Module, SupportsPP, SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+
+        self.fuse_qkv_a_proj = (
+            hasattr(config, "q_lora_rank") and config.q_lora_rank is not None
+        )
+        if self.fuse_qkv_a_proj:
+            self.packed_modules_mapping["fused_qkv_a_proj"] = [
+                "q_a_proj",
+                "kv_a_proj_with_mqa",
+            ]
+
+        self.model = OpenPanguModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
+        else:
+            self.lm_head = PPMissingLayer()
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
@@ -1044,6 +991,88 @@ class OpenPanguForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
 
-class PanguUltraMoEForCausalLM(OpenPanguForCausalLM):
+
+class OpenPanguMoEModel(OpenPanguModelBase, MixtureOfExperts):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        config = vllm_config.model_config.hf_config
+
+        # Set MoE hyperparameters
+        self.expert_weights = []
+        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
+        self.num_expert_groups = 1
+
+        self.moe_layers: list[SharedFusedMoE] = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
+            assert isinstance(layer, OpenPanguDecoderLayer)
+            if isinstance(layer.mlp, OpenPanguMoE):
+                # Pick last one layer since the first ones may be dense layers.
+                example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
+
+        if example_moe is None:
+            raise RuntimeError("No MOE layer found in model.layers.")
+
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.n_routed_experts = example_moe.n_routed_experts
+        self.n_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, OpenPanguMoE):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
+
+
+class OpenPanguEmbeddedModel(OpenPanguModelBase):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+
+class PanguEmbeddedForCausalLM(OpenPanguEmbeddedModel):
+    pass
+
+
+class PanguUltraMoEForCausalLM(OpenPanguMoEModel):
     pass
