@@ -6,10 +6,14 @@ import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Optional
 
 import torch
 from torch import nn
 from typing_extensions import assert_never
+
+if TYPE_CHECKING:
+    from transformers import SiglipVisionConfig
 
 from vllm.attention import Attention
 from vllm.attention.layer import MLAAttention
@@ -380,7 +384,7 @@ def configure_quant_config(
             quant_config.packed_modules_mapping = packed_mapping
 
 
-def extract_vision_config_from_gguf(mmproj_path: str) -> "Optional[SiglipVisionConfig]":  # type: ignore[name-defined]
+def extract_vision_config_from_gguf(mmproj_path: str) -> Optional["SiglipVisionConfig"]:
     """
     Extract vision config parameters from mmproj.gguf metadata.
 
@@ -394,8 +398,6 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "Optional[SiglipVisionC
     Returns:
         SiglipVisionConfig if extraction succeeds, None otherwise
     """
-    from typing import Optional
-
     try:
         import gguf
         from transformers import SiglipVisionConfig
