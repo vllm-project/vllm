@@ -25,6 +25,7 @@
 #     and $$BUILDKITE_PARALLEL_JOB_COUNT environment variables.
 # working_dir(str): specify the place where the command should execute, default to /vllm-workspace/tests
 # source_file_dependencies(list): the list of prefixes to opt-in the test for, if empty, the test will always run.
+# autorun_on_main (bool): default to false, if true, the test will run automatically when commit is pushed to main branch.
 
 # When adding a test
 # - If the test belongs to an existing group, add it there
@@ -606,6 +607,7 @@ steps:
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
+  autorun_on_main: true
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
@@ -939,7 +941,7 @@ steps:
     # this runner has 2 GPUs available even though num_gpus=2 is not set
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
-    # Wrap with quotes to escape yaml 
+    # Wrap with quotes to escape yaml
     - "pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and Llama-3.1 and -quant_fp8 and -rms_norm'"
 
 - label: Blackwell Fusion E2E Tests # 30 min
