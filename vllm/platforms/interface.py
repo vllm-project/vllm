@@ -550,13 +550,6 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
-    def check_if_supports_dtype(cls, dtype: torch.dtype):
-        """
-        Check if the dtype is supported by the current platform.
-        """
-        raise NotImplementedError
-
-    @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         """
         Returns if the hybrid kv cache is supported by the current platform.
