@@ -51,9 +51,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self, kv_caches: dict[str, torch.Tensor]
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handler:
-            if not current_platform.is_cuda():
+            if not current_platform.is_cuda_alike():
                 raise Exception(
-                    "CPU Offloading is currently only supported on CUDA GPUs"
+                    "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
             layer_names = list(kv_caches.keys())

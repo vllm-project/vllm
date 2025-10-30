@@ -7,7 +7,7 @@ import torch
 
 from vllm.platforms import current_platform
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 from .common import (
     rotate_gptj,
     rotate_neox,
@@ -22,7 +22,7 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
-class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
+class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     """RotaryEmbedding extended with YaRN method.
 
     Credits to Peng et al. github.com/jquesnelle/yarn

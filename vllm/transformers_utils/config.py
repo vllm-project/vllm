@@ -79,6 +79,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_v3="DeepseekV3Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
     Llama_Nemotron_Nano_VL="Nemotron_Nano_VL_Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
@@ -622,9 +623,14 @@ def get_config(
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
         if config.model_type not in MODEL_MAPPING_NAMES:
-            raise ValueError(f"Cannot find architecture name for {config.model_type}")
-        model_type = MODEL_MAPPING_NAMES[config.model_type]
-        config.update({"architectures": [model_type]})
+            logger.warning(
+                "Model config does not have a top-level 'architectures' field: "
+                "expecting `hf_overrides={'architectures': ['...']}` to be passed "
+                "in engine args."
+            )
+        else:
+            model_type = MODEL_MAPPING_NAMES[config.model_type]
+            config.update({"architectures": [model_type]})
 
     # ModelOpt 0.31.0 and after saves the quantization config in the model
     # config file.

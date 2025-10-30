@@ -218,8 +218,8 @@ class TestModel:
             # TODO: reset this tolerance to 0.01 once we find
             # an alternative to flash_attn with bfloat16
 
-    def test_activation(self, server: RemoteOpenAIServer, model: dict[str, Any]):
-        def get_outputs(activation):
+    def test_use_activation(self, server: RemoteOpenAIServer, model: dict[str, Any]):
+        def get_outputs(use_activation):
             text_1 = "What is the capital of France?"
             text_2 = "The capital of France is Paris."
             response = requests.post(
@@ -228,7 +228,7 @@ class TestModel:
                     "model": model["name"],
                     "text_1": text_1,
                     "text_2": text_2,
-                    "activation": activation,
+                    "use_activation": use_activation,
                 },
             )
             if response.status_code != 200:
@@ -238,9 +238,9 @@ class TestModel:
             return torch.tensor([x["score"] for x in outputs["data"]])
 
         if model["is_cross_encoder"]:
-            default = get_outputs(activation=None)
-            w_activation = get_outputs(activation=True)
-            wo_activation = get_outputs(activation=False)
+            default = get_outputs(use_activation=None)
+            w_activation = get_outputs(use_activation=True)
+            wo_activation = get_outputs(use_activation=False)
 
             assert torch.allclose(default, w_activation, atol=1e-2), (
                 "Default should use activation."
@@ -252,8 +252,8 @@ class TestModel:
                 "w_activation should be close to activation(wo_activation)."
             )
         else:
-            get_outputs(activation=None)
+            get_outputs(use_activation=None)
 
             # The activation parameter only works for the is_cross_encoder model
-            response = get_outputs(activation=True)
+            response = get_outputs(use_activation=True)
             assert response.status_code == 400
