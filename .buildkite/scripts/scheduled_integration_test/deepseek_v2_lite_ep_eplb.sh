@@ -2,7 +2,7 @@
 set -euxo pipefail
 
 # args: [THRESHOLD] [NUM_QUESTIONS] [START_PORT]
-THRESHOLDOLD=${1:-0.25}
+THRESHOLD=${1:-0.25}
 NUM_Q=${2:-1319}
 PORT=${3:-8010}
 OUT_DIR=${OUT_DIR:-/tmp/vllm-scheduled}
