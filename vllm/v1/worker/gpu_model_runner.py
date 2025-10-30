@@ -70,10 +70,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import (
-    check_use_alibi,
-    length_from_prompt_token_ids_or_embeds,
-)
+from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_constants import GiB_bytes
@@ -171,6 +168,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self,
         model_runner_output: ModelRunnerOutput,
         sampled_token_ids: torch.Tensor,
+        logprobs_tensors: torch.Tensor | None,
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
     ):
@@ -183,6 +181,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
         self._sampled_token_ids = sampled_token_ids
+        self._logprobs_tensors = logprobs_tensors
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -190,6 +189,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
             async_output_copy_stream.wait_stream(default_stream)
             self.sampled_token_ids_cpu = self._sampled_token_ids.to(
                 "cpu", non_blocking=True
+            )
+            self._logprobs_tensors_cpu = (
+                self._logprobs_tensors.to_cpu_nonblocking()
+                if self._logprobs_tensors
+                else None
             )
             self.async_copy_ready_event.record()
 
@@ -200,7 +204,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         """
         self.async_copy_ready_event.synchronize()
 
-        # Release the device tensor once the copy has completed
+        # Release the device tensors once the copy has completed.
+        del self._logprobs_tensors
         del self._sampled_token_ids
 
         valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
@@ -209,6 +214,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
+        if self._logprobs_tensors_cpu:
+            # NOTE(nick): this will need to be updated to use cu_num_accepted_tokens
+            # for async sched + spec decode + logprobs compatibility.
+            output.logprobs = self._logprobs_tensors_cpu.tolists()
         return output
 
 
@@ -272,7 +281,7 @@ class GPUModelRunner(
         self.hidden_size = model_config.get_hidden_size()
         self.attention_chunk_size = model_config.attention_chunk_size
         # Only relevant for models using ALiBi (e.g, MPT)
-        self.use_alibi = check_use_alibi(model_config)
+        self.use_alibi = model_config.uses_alibi
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
@@ -1112,7 +1121,7 @@ class GPUModelRunner(
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
         if self.enable_prompt_embeds:
-            is_token_ids = self.input_batch.is_token_ids.flatten()
+            is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
                 is_token_ids,
                 0,
@@ -2353,11 +2362,9 @@ class GPUModelRunner(
                     cu_num_accepted_tokens[-1] + len(sampled_ids)
                 )
 
-        # NOTE: GPU -> CPU Sync happens here.
-        # Move as many CPU operations as possible before this sync point.
         logprobs_lists = (
             logprobs_tensors.tolists(cu_num_accepted_tokens)
-            if logprobs_tensors is not None
+            if not self.use_async_scheduling and logprobs_tensors is not None
             else None
         )
 
@@ -2695,6 +2702,7 @@ class GPUModelRunner(
         async_output = AsyncGPUModelRunnerOutput(
             model_runner_output=output,
             sampled_token_ids=sampler_output.sampled_token_ids,
+            logprobs_tensors=sampler_output.logprobs_tensors,
             invalid_req_indices=invalid_req_indices,
             async_output_copy_stream=self.async_output_copy_stream,
         )
