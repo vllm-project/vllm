@@ -340,6 +340,17 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: Batch Invariance Tests (H100) # 10min
+  timeout_in_minutes: 40
+  gpu: h100
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/generation/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/generation
+
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
     - vllm/
