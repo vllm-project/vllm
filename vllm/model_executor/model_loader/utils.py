@@ -64,7 +64,7 @@ def initialize_model(
                                 is_multimodal_gguf = True
                                 break
             except Exception as e:
-                logger.debug(f"GGUF multimodal detection failed: {e}")
+                logger.debug("GGUF multimodal detection failed: %s", e)
 
         if is_multimodal_gguf:
             # Only force multimodal for Gemma3 models
@@ -130,7 +130,7 @@ def initialize_model(
                     logger.debug("Multimodal GGUF detected for non-Gemma3 model")
                     model_class, _ = get_model_architecture(model_config)
             except (ImportError, AttributeError) as e:
-                logger.warning(f"Failed to load Gemma3ForConditionalGeneration: {e}")
+                logger.warning("Failed to load Gemma3ForConditionalGeneration: %s", e)
                 model_class, _ = get_model_architecture(model_config)
         else:
             # Standard path
@@ -378,3 +378,72 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
+
+
+def extract_vision_config_from_gguf(mmproj_path):
+    """
+    Extract vision config parameters from mmproj.gguf metadata.
+
+    Reads vision encoder configuration from GGUF metadata fields instead of
+    using hardcoded values. This makes the implementation robust across
+    different Gemma3 model sizes and future variations.
+
+    Args:
+        mmproj_path: Path to mmproj.gguf file (str or Path)
+
+    Returns:
+        SiglipVisionConfig if extraction succeeds, None otherwise
+    """
+    try:
+        import gguf
+        from transformers import SiglipVisionConfig
+
+        reader = gguf.GGUFReader(str(mmproj_path))
+
+        # Extract vision config parameters from GGUF metadata
+        hidden_size = reader.get_field("clip.vision.embedding_length")
+        intermediate_size = reader.get_field("clip.vision.feed_forward_length")
+        num_hidden_layers = reader.get_field("clip.vision.block_count")
+        num_attention_heads = reader.get_field("clip.vision.attention.head_count")
+        image_size = reader.get_field("clip.vision.image_size")
+        patch_size = reader.get_field("clip.vision.patch_size")
+        layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
+
+        # Validate all required fields are present
+        if any(
+            field is None
+            for field in [
+                hidden_size,
+                intermediate_size,
+                num_hidden_layers,
+                num_attention_heads,
+                image_size,
+                patch_size,
+                layer_norm_eps,
+            ]
+        ):
+            logger.warning("Missing required vision config fields in mmproj.gguf")
+            return None
+
+        # Extract scalar values from GGUF field parts
+        config = SiglipVisionConfig(
+            hidden_size=int(hidden_size.parts[-1]),
+            intermediate_size=int(intermediate_size.parts[-1]),
+            num_hidden_layers=int(num_hidden_layers.parts[-1]),
+            num_attention_heads=int(num_attention_heads.parts[-1]),
+            image_size=int(image_size.parts[-1]),
+            patch_size=int(patch_size.parts[-1]),
+            layer_norm_eps=float(layer_norm_eps.parts[-1]),
+            # Parameters not in GGUF - use safe defaults
+            num_channels=3,  # Standard RGB
+            attention_dropout=0.0,  # No dropout during inference
+            num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
+            vision_use_head=False,  # Gemma3 doesn't use pooling head
+        )
+
+        logger.info("Extracted vision config from mmproj.gguf metadata")
+        return config
+
+    except Exception as e:
+        logger.warning("Failed to extract vision config from GGUF: %s", e)
+        return None
