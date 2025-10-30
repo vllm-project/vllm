@@ -32,6 +32,7 @@ cleanup() {
 trap cleanup EXIT
 
 for BACK in "${BACKENDS[@]}"; do
+  VLLM_DEEP_GEMM_WARMUP=skip \
   VLLM_ALL2ALL_BACKEND=$BACK \
   vllm serve "$MODEL" \
     --enforce-eager \
