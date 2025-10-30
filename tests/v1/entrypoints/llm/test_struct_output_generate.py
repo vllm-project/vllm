@@ -601,6 +601,9 @@ Make the response as short as possible.
                     f"Invalid function call format: {generated_text!r}\nError: {str(e)}"
                 )
 
+    if current_platform.is_rocm():
+        cleanup_dist_env_and_memory()
+
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
@@ -681,6 +684,9 @@ def test_structured_output_with_reasoning_matrices(
     output_json = json.loads(content)
     jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
+    if current_platform.is_rocm():
+        cleanup_dist_env_and_memory()
+
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
@@ -727,6 +733,9 @@ def test_structured_output_auto_mode(
         # Parse to verify it is valid JSON
         parsed_json = json.loads(generated_text)
         assert isinstance(parsed_json, dict)
+
+    if current_platform.is_rocm():
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup
@@ -786,6 +795,9 @@ def test_guidance_no_additional_properties():
     assert "a4" not in generated
     assert "a5" not in generated
     assert "a6" not in generated
+
+    if current_platform.is_rocm():
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
