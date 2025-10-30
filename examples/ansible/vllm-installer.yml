@@ -1,0 +1,283 @@
+---
+- name: Provision EC2 Instance Playbook
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+  vars_files:
+    - vars.yml
+
+  tasks:
+
+    - name: Create EC2 instance
+      amazon.aws.ec2_instance:
+        name: "{{ vm_name }}"
+        key_name: "{{ key_name }}"
+        region: "{{ region }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ ami_id }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        network_interfaces:
+          - device_index: 0
+            groups: "{{ security_group_ids }}"
+            assign_public_ip: true
+        volumes:
+          - device_name: /dev/sda1 
+            ebs:
+              volume_size: "{{ volume_size }}"
+              volume_type: gp3
+              delete_on_termination: true
+        wait: true
+        count: 1
+        tags:
+          Name: "{{ vm_name }}"
+      register: ec2_info
+
+    - name: EC2 Instance Details
+      ansible.builtin.debug:
+        var: ec2_info.instances[0]
+
+    - name: Add the new instance to a temp inventory group
+      ansible.builtin.add_host:
+        name: launched_ec2
+        ansible_host: "{{ ec2_info.instances[0].public_ip_address }}"
+        ansible_user: "{{ ssh_user }}"
+        ansible_ssh_private_key_file: "{{ key_path }}"
+
+    - name: Wait until SSH is ready
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+        sleep: 5
+      delegate_to: launched_ec2
+
+- name: Install vLLM Playbook
+  hosts: launched_ec2
+  become: true
+  gather_facts: true
+  collections:                                                                  
+    - community.general
+    - community.docker
+  vars:
+    NVIDIA_CONTAINER_TOOLKIT_VERSION: "1.17.8-1"
+  vars_files:
+    - vars.yml
+
+  tasks:
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+
+    - name: Install ubuntu-drivers-common
+      ansible.builtin.apt:
+        name: 
+          - ubuntu-drivers-common
+          - python3-docker
+        state: present
+
+    - name: Install docker                                                         
+      community.general.snap:                                                      
+        name:                                                                      
+          - docker 
+        classic: true
+        state: present 
+
+    - name: Install recommended NVIDIA drivers
+      ansible.builtin.command: ubuntu-drivers install
+
+    - name: Reboot after driver install
+      ansible.builtin.reboot:
+
+    - name: Wait until SSH is ready after reboot
+      ansible.builtin.wait_for_connection:
+        timeout: 600
+        sleep: 5
+
+    - name: Validate NVIDIA with nvidia-smi
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi
+      changed_when: false
+
+    - name: Show nvidia-smi output
+      ansible.builtin.debug:
+        msg: "{{ nvidia_smi.stdout }}"
+
+    - name: Load NVIDIA kernel modules
+      ansible.builtin.modprobe:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - nvidia
+        - nvidia_uvm
+        - nvidia_modeset
+
+    - name: Ensure keyrings dir exists
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: "0755"
+    
+    - name: Download NVIDIA GPG key
+      ansible.builtin.get_url:
+        url: https://nvidia.github.io/libnvidia-container/gpgkey
+        dest: /tmp/nvidia-container-toolkit.asc
+        mode: '0644'  
+
+    - name: Convert and install GPG key to dedicated keyring
+      ansible.builtin.shell: |
+        gpg --dearmor < /tmp/nvidia-container-toolkit.asc > /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+      args:
+        creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg 
+ 
+    - name: Set permissions on GPG keyring
+      ansible.builtin.file:
+        path: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+        mode: '0644'
+
+    - name: Download and configure NVIDIA repository
+      ansible.builtin.shell: |
+        curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+      args:
+        creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+    - name: Clean up temporary GPG key file
+      ansible.builtin.file:
+        path: /tmp/nvidia-container-toolkit.asc
+        state: absent
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+ 
+    - name: Install NVIDIA container toolkit packages (pinned)
+      ansible.builtin.apt:
+        name:
+          - "nvidia-container-toolkit={{ NVIDIA_CONTAINER_TOOLKIT_VERSION }}"
+          - "nvidia-container-toolkit-base={{ NVIDIA_CONTAINER_TOOLKIT_VERSION }}"
+          - "libnvidia-container-tools={{ NVIDIA_CONTAINER_TOOLKIT_VERSION }}"
+          - "libnvidia-container1={{ NVIDIA_CONTAINER_TOOLKIT_VERSION }}"
+        state: present
+        update_cache: yes
+
+    - name: Configure Docker to use NVIDIA runtime (required for GPU with snap docker)
+      ansible.builtin.command: nvidia-ctk runtime configure --runtime=docker
+      register: nvidia_ctk_cfg
+      changed_when: nvidia_ctk_cfg.rc == 0
+
+    - name: Restart snap.docker.dockerd.service
+      ansible.builtin.systemd:
+        name: snap.docker.dockerd.service
+        state: restarted
+        enabled: true
+
+    - name: Validate GPU with a one-off container (all GPUs)
+      ansible.builtin.command: docker run --rm --runtime=nvidia --gpus all ubuntu nvidia-smi
+      register: nvidia_smi_run                                                       
+                                                                                
+    - name: Pull vLLM OpenAI image (requires some time to complete) 
+      community.docker.docker_image:                                            
+        name: vllm/vllm-openai                                                  
+        tag: latest                                                             
+        source: pull                                                            
+        state: present                                                          
+      register: image_pull
+      async: 3600
+      poll: 30                                                      
+                                                                                
+    - name: Create Hugging Face cache directory                                 
+      ansible.builtin.file:                                                     
+        path: "{{ ansible_env.HOME }}/.cache/huggingface"                       
+        state: directory                                                        
+        mode: '0755'                                                            
+                                                                                
+    - name: Start vLLM container using Qwen/Qwen3-0.6B model 
+      community.docker.docker_container:                                        
+        name: vllm-server-test                                                  
+        image: vllm/vllm-openai:latest                                          
+        state: started                                                          
+        restart_policy: unless-stopped                                          
+        ports:                                                                  
+          - "8000:8000"                                                         
+        volumes:                                                                
+          - "{{ ansible_env.HOME }}/.cache/huggingface:/root/.cache/huggingface"
+        env:                                                                    
+          HF_TOKEN: "{{ hf_token }}"                                            
+        command: "--model Qwen/Qwen3-0.6B"                                      
+        runtime: nvidia                                                         
+        device_requests:                                                        
+          - driver: nvidia                                                      
+            count: -1                                                           
+            capabilities:                                                       
+              - ["gpu"]                                                         
+        shm_size: "1g"  # equivalent to --ipc=host                              
+        detach: true                                                            
+
+    - name: Wait for vLLM API to be ready
+      ansible.builtin.uri:
+        url: "http://localhost:8000/v1/models"
+        method: GET
+        timeout: 10
+      register: health_check
+      until: health_check.status == 200
+      retries: 60
+      delay: 10
+
+    - name: Test models endpoint
+      ansible.builtin.uri:
+        url: "http://localhost:8000/v1/models"
+        method: GET
+        timeout: 10
+      register: models_test
+
+    - name: Show available models
+      ansible.builtin.debug:
+        msg: "Available models: {{ models_test.json.data | map(attribute='id') | list }}"
+
+    - name: Test chat completion
+      ansible.builtin.uri:
+        url: "http://localhost:8000/v1/chat/completions"
+        method: POST
+        body_format: json
+        body:
+          model: "Qwen/Qwen3-0.6B"
+          messages:
+            - role: "system"
+              content: "You are a helpful assistant."
+            - role: "user"
+              content: "Which lab creates the Qwen family of models?"
+        timeout: 30
+      register: chat_test
+
+    - name: Show chat response
+      ansible.builtin.debug:
+        msg: |
+            Question: Which lab creates the Qwen family of models?
+            AI Response: {{ chat_test.json.choices[0].message.content }}
+
+    - name: Show success summary
+      ansible.builtin.debug:
+        msg: |
+          vLLM is fully functional!
+
+          List of models available: curl http://{{ ansible_host }}:8000/v1/models
+
+          Model loaded: {{ models_test.json.data[0].id }}
+
+    - name: Try it out! External Test Command
+      ansible.builtin.debug:
+        msg: |
+          Want to try it for yourself? Copy/paste the following curl.
+          
+          curl http://{{ ansible_host }}:8000/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "Qwen/Qwen3-0.6B",
+              "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Is a hotdog a sandwich?"}
+              ]
+            }'
+         
+          NOTE: Make sure your AWS Security Group has port 8000 open.

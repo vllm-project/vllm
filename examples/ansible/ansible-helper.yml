@@ -1,0 +1,248 @@
+---
+- name: Ansible Helper to query AWS to populate vars.yml
+  hosts: localhost
+  gather_facts: false
+  collections:
+    - amazon.aws
+
+  vars_prompt:
+    - name: region
+      prompt: "AWS region (e.g., us-east-1)"
+      private: no
+      default: "us-east-1"
+    - name: instance_type
+      prompt: "Instance type"
+      private: no
+      default: "g6.2xlarge"
+    - name: ssh_user
+      prompt: "SSH user (usually 'ubuntu' for Ubuntu AMIs)"
+      private: no
+      default: "ubuntu"
+    - name: key_path
+      prompt: "Path to your private key (.pem)"
+      private: no
+      default: "~/.ssh/my-keypair.pem"
+    - name: vm_name
+      prompt: "Name of the VM"
+      private: no
+      default: "ubuntu-vllm-vm"
+    - name: volume_size
+      prompt: "Size of VM disk? Requires 40GB min"
+      private: no
+      default: "40"
+
+  tasks:
+    # -------- VPC selection --------
+    - name: Fetch all VPCs in region
+      amazon.aws.ec2_vpc_net_info:
+        region: "{{ region }}"
+      register: vpcs_info
+
+
+    - name: Show VPCs
+      ansible.builtin.debug:
+        msg: "{{ idx }}: {{ item.vpc_id }} — {{ item.cidr_block }}{{ ' — ' ~ (item.tags.Name | default('')) if item.tags is defined else '' }}{{ ' [default]' if (item.is_default | default(false)) else '' }}"
+      loop: "{{ vpcs_info.vpcs | unique(attribute='vpc_id') | sort(attribute='vpc_id') | list }}"
+      loop_control:
+        index_var: idx
+        label: "{{ idx }}: {{ item.vpc_id }} — {{ item.cidr_block }}{{ ' — ' ~ (item.tags.Name | default('')) if item.tags is defined else '' }}{{ ' [default]' if (item.is_default | default(false)) else '' }}"
+
+
+    - name: Prompt for VPC index (press Enter for default VPC)
+      ansible.builtin.pause:
+        prompt: "Enter VPC index (blank = default VPC)"
+      register: vpc_choice
+
+    - name: Compute default VPC (if any)
+      ansible.builtin.set_fact:
+        default_vpc: "{{ (vpcs_info.vpcs | unique(attribute='vpc_id') | selectattr('is_default','equalto', true) | list | first) | default(None) }}"
+    
+    - name: Choose VPC (blank => default)
+      ansible.builtin.set_fact:
+        chosen_vpc: >-
+          {{
+            ( default_vpc
+              if (vpc_choice.user_input | trim) == ''
+              else (vpcs_info.vpcs | unique(attribute='vpc_id') | sort(attribute='vpc_id') | list)[(vpc_choice.user_input | int)] )
+          }}
+
+
+    - name: Fail if user pressed Enter but no default VPC exists
+      ansible.builtin.fail:
+        msg: "No default VPC in {{ region }}. Please re-run and choose a VPC index."
+      when: (vpc_choice.user_input | trim) == '' and (default_vpc is none)
+
+    - name: Set vpc_id fact
+      ansible.builtin.set_fact:
+        vpc_id: "{{ chosen_vpc.vpc_id }}"
+
+    # -------- Security Groups --------
+    
+    - name: Fetch SGs in chosen VPC
+      amazon.aws.ec2_group_info:
+        region: "{{ region }}"
+        filters:
+          vpc-id: "{{ vpc_id }}"
+      register: sg_all
+    
+    - name: Prepare SG list (all, sorted)
+      ansible.builtin.set_fact:
+        sg_list: "{{ sg_all.security_groups | unique(attribute='group_id') | sort(attribute='group_name') | list }}"
+    
+    - name: Show Security Groups
+      ansible.builtin.debug:
+        msg: "{{ idx }}: {{ item.group_id }} — {{ item.group_name }} — {{ (item.description | default(''))[:60] }}"
+      loop: "{{ sg_list }}"
+      loop_control:
+        index_var: idx
+        label: "{{ idx }}: {{ item.group_id }} — {{ item.group_name }}"
+    
+    - name: Enter Security Group index
+      ansible.builtin.pause:
+        prompt: "Enter Security Group index"
+      register: sg_choice
+    
+    - name: Save chosen SG
+      ansible.builtin.set_fact:
+        chosen_sg: "{{ sg_list[sg_choice.user_input | int] }}"
+
+    # -------- Subnets --------
+    
+    - name: Fetch subnets in chosen VPC
+      amazon.aws.ec2_vpc_subnet_info:
+        region: "{{ region }}"
+        filters:
+          vpc-id: "{{ vpc_id }}"
+      register: subnet_all
+    
+    - name: Prepare subnet list (mark public/private)
+      ansible.builtin.set_fact:
+        subnet_list: >-
+          {{
+            subnet_all.subnets
+            | unique(attribute='subnet_id')
+            | sort(attribute='availability_zone')
+            | list
+          }}
+    
+    # Subnets — show as a neat numbered list with [public]/[private]
+    - name: Show Subnets
+      ansible.builtin.debug:
+        msg: >-
+          {{ idx }}: {{ item.subnet_id }} — {{ item.availability_zone }} — {{ item.cidr_block }}
+          {{ ' — ' ~ (item.tags.Name | default('')) if item.tags is defined else '' }}
+          {{ ' [public]' if (item.map_public_ip_on_launch | default(false)) else ' [private]' }}
+      loop: "{{ subnet_list }}"
+      loop_control:
+        index_var: idx
+        label: >-
+          {{ idx }}: {{ item.subnet_id }} — {{ item.availability_zone }} — {{ item.cidr_block }}
+          {{ ' — ' ~ (item.tags.Name | default('')) if item.tags is defined else '' }}
+          {{ ' [public]' if (item.map_public_ip_on_launch | default(false)) else ' [private]' }}
+    
+    - name: Enter Subnet index
+      ansible.builtin.pause:
+        prompt: "Enter Subnet index"
+      register: subnet_choice
+    
+    - name: Save chosen Subnet
+      ansible.builtin.set_fact:
+        chosen_subnet: "{{ subnet_list[subnet_choice.user_input | int] }}"
+        chosen_subnet_is_public: "{{ subnet_list[subnet_choice.user_input | int].map_public_ip_on_launch | default(false) }}"
+    
+    # Optional: warn if private subnet selected
+    - name: NOTE if you chose a private subnet
+      ansible.builtin.debug:
+        msg: >-
+          You selected a PRIVATE subnet (no auto public IP). Ensure you have a NAT/bastion or modify networking,
+          otherwise SSH from the Internet will fail.
+      when: not chosen_subnet_is_public
+
+    # -------- Key pairs --------
+    - name: Fetch key pairs
+      amazon.aws.ec2_key_info:
+        region: "{{ region }}"
+      register: key_info
+
+    - name: Prepare key list (all, sorted by name)
+      ansible.builtin.set_fact:
+        key_list: "{{ key_info.keypairs | unique(attribute='key_name') | sort(attribute='key_name') | list }}"
+    
+    - name: Show Key Pairs
+      ansible.builtin.debug:
+        msg: "{{ idx }}: {{ item.key_name }} — {{ item.key_type | default('unknown') }}{{ ' — ' ~ (item.key_fingerprint | default('')) if item.key_fingerprint is defined else '' }}"
+      loop: "{{ key_list }}"
+      loop_control:
+        index_var: idx
+        label: "{{ idx }}: {{ item.key_name }}"
+    
+    - name: Enter Key Pair index
+      ansible.builtin.pause:
+        prompt: "Enter Key Pair index"
+      register: key_choice
+    
+    - name: Save chosen Key
+      ansible.builtin.set_fact:
+        chosen_key_name: "{{ key_list[key_choice.user_input | int].key_name }}"
+
+
+    # -------- Ubuntu 24.04 AMI --------
+    - name: Get Ubuntu 24.04 AMIs (Canonical)
+      amazon.aws.ec2_ami_info:
+        region: "{{ region }}"
+        owners: ["099720109477"]
+        filters:
+          name: "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*"
+          state: available
+          architecture: x86_64
+          root-device-type: ebs
+          virtualization-type: hvm
+      register: ubuntu24_amis
+
+
+    - name: Fail if no AMIs found
+      ansible.builtin.fail:
+        msg: "No Ubuntu 24.04 (noble) AMIs found in region {{ region }}"
+      when: ubuntu24_amis.images | length == 0
+
+    - name: Set chosen AMI (latest Ubuntu 24.04)
+      ansible.builtin.set_fact:
+        chosen_ami_id: "{{ (ubuntu24_amis.images | sort(attribute='creation_date') | last).image_id }}"
+
+    - name: Show chosen AMI
+      ansible.builtin.debug:
+        msg: "Ubuntu 24.04 latest AMI: {{ chosen_ami_id }}"
+
+    # -------- Write vars.yml --------
+    - name: Write vars.yml
+      ansible.builtin.copy:
+        dest: vars.yml
+        mode: "0600"
+        content: |
+          # Generated by Ansible Helper Playbook
+          vm_name: {{ vm_name }}
+          volume_size: {{ volume_size }}
+          region: {{ region }}
+          ami_id: {{ chosen_ami_id }}
+          instance_type: {{ instance_type }}
+          key_name: {{ chosen_key_name }}
+          subnet_id: {{ chosen_subnet.subnet_id }}
+          security_group_ids:
+            - {{ chosen_sg.group_id }}
+          ssh_user: {{ ssh_user }}
+          key_path: {{ key_path }}
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "vars.yml created:"
+          - "  vm_name={{ vm_name }}"
+          - "  volume_size={{ volume_size }}"
+          - "  region={{ region }}"
+          - "  ami_id={{ chosen_ami_id }}"
+          - "  instance_type={{ instance_type }}"
+          - "  key_name={{ chosen_key_name }}"
+          - "  subnet_id={{ chosen_subnet.subnet_id }}"
+          - "  security_group_ids=[{{ chosen_sg.group_id }}]"
+          - "  ssh_user={{ ssh_user }}"
+          - "  key_path={{ key_path }}"
