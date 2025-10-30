@@ -890,9 +890,7 @@ class CompilationConfig:
             A flag indicating if the op is enabled.
         """
         if "all" in self.custom_ops:
-            if "-" + op not in self.custom_ops:
-                return True
-        else:
-            if "+" + op in self.custom_ops:
-                return True
-        return False
+            return f"-{op}" not in self.custom_ops:
+        
+        assert "none" in self.custom_ops
+        return f"+{op}" in self.custom_ops:
