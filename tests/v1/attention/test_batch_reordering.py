@@ -43,7 +43,7 @@ REORDER_TEST_CASES = {
         expected_modified=False,
     ),
     "all_prefills": ReorderTestCase(
-        requests=[(100, 0), (200, 0), (300, 0)],
+        requests=[(100, 100), (200, 200), (300, 300)],
         expected_order=[0, 1, 2],
         expected_modified=False,
     ),
