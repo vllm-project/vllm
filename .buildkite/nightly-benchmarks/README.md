@@ -11,7 +11,8 @@ See [vLLM performance dashboard](https://hud.pytorch.org/benchmark/llms?repoName
 
 ## Performance benchmark quick overview
 
-**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100 (the support for FP8 benchmark on H100 is coming!) and Intel® Xeon® Processors, with different models.
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on A100 (the support for FP8 benchmark on H100 is coming!),
+Intel® Xeon® Processors and ARM® Neoverse®, with different models.
 
 **Benchmarking Duration**: about 1hr.
 
@@ -41,6 +42,7 @@ bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
 Runtime environment variables:
 
 - `ON_CPU`: set the value to '1' on Intel® Xeon® Processors. Default value is 0.
+- `ON_ARM64_CPU`: set the value to '1' on ARM® Neoverse®. Default value is 0.
 - `SERVING_JSON`: JSON file to use for the serving tests. Default value is empty string (use default file).
 - `LATENCY_JSON`: JSON file to use for the latency tests. Default value is empty string (use default file).
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
@@ -54,7 +56,7 @@ Nightly benchmark will be triggered when:
 ## Performance benchmark details
 
 See [performance-benchmarks-descriptions.md](performance-benchmarks-descriptions.md) for detailed descriptions, and use `tests/latency-tests.json`, `tests/throughput-tests.json`, `tests/serving-tests.json` to configure the test cases.
-> NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead.
+> NOTE: For Intel® Xeon® Processors, use `tests/latency-tests-cpu.json`, `tests/throughput-tests-cpu.json`, `tests/serving-tests-cpu.json` instead. For Arm® Neoverse®, use `tests/latency-tests-arm64-cpu.json`, `tests/throughput-tests-arm64-cpu.json`, `tests/serving-tests-arm64-cpu.json` instead.
 >
 ### Latency test
 

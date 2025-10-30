@@ -45,6 +45,20 @@ check_cpus() {
   echo "GPU type is $gpu_type"
 }
 
+check_arm64_cpus() {
+  # check the number of CPUs and GPU type.
+  declare -g cpu_count=$(nproc)
+  if [[ $cpu_count -gt 0 ]]; then
+    echo "CPU found."
+    echo $cpu_count
+  else
+    echo "Need at least 1 CPU to run benchmarking."
+    exit 1
+  fi
+  declare -g gpu_type="arm64-cpu"
+  echo "GPU type is $gpu_type"
+}
+
 check_hf_token() {
   # check if HF_TOKEN is available and valid
   if [[ -z "$HF_TOKEN" ]]; then
@@ -202,6 +216,14 @@ run_latency_tests() {
         continue
       fi
     else
+      if [ "$ON_ARM64_CPU" == "1" ]; then
+        pp=$(echo "$latency_params" | jq -r '.pipeline_parallel_size')
+        world_size=$(($tp*$pp))
+        if [[ $cpu_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
+          echo "Required world-size $world_size but only $cpu_count CPU nodes found. Skip testcase $test_name."
+          continue
+        fi
+    else
       if [[ $gpu_count -lt $tp ]]; then
         echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
         continue
@@ -270,6 +292,14 @@ run_throughput_tests() {
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
+    else
+      if [ "$ON_ARM64_CPU" == "1" ]; then
+        pp=$(echo "$throughput_params" | jq -r '.pipeline_parallel_size')
+        world_size=$(($tp*$pp))
+        if [[ $cpu_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
+          echo "Required world-size $world_size but only $cpu_count CPU nodes found. Skip testcase $test_name."
+          continue
+        fi
     else
       if [[ $gpu_count -lt $tp ]]; then
         echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
@@ -350,6 +380,14 @@ run_serving_tests() {
         echo "Required world-size $world_size but only $numa_count NUMA nodes found. Skip testcase $test_name."
         continue
       fi
+    else
+      if [ "$ON_ARM64_CPU" == "1" ]; then
+        pp=$(echo "$server_params" | jq -r '.pipeline_parallel_size')
+        world_size=$(($tp*$pp))
+        if [[ $cpu_count -lt $world_size  && -z "${REMOTE_HOST}" ]]; then
+          echo "Required world-size $world_size but only $cpu_count CPU nodes found. Skip testcase $test_name."
+          continue
+        fi
     else
       if [[ $gpu_count -lt $tp ]]; then
         echo "Required tensor-parallel-size $tp but only $gpu_count GPU found. Skip testcase $test_name."
@@ -449,6 +487,10 @@ main() {
   if [ "$ON_CPU" == "1" ];then
      check_cpus
      ARCH='-cpu'
+  else
+    if [ "$ON_ARM64_CPU" == "1" ];then
+     check_arm64_cpus
+     ARCH='-arm64-cpu'
   else
      check_gpus
   fi
