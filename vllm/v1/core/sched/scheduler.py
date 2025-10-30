@@ -1341,7 +1341,7 @@ class Scheduler(SchedulerInterface):
             return self.connector.request_finished(request, block_ids[0])
         else:
             assert isinstance(self.connector, SupportsHMA)
-            return self.connector.request_finished_all_groups(request)
+            return self.connector.request_finished_all_groups(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
