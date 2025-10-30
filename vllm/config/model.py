@@ -33,6 +33,7 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
+    uses_custom_attention_masks,
     uses_mrope,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
@@ -87,10 +88,7 @@ def _detect_gguf_multimodal_gemma3(model: str) -> bool:
 
         model_dir = model_path.parent
         mmproj_patterns = ["mmproj.gguf", "mmproj-*.gguf", "*mmproj*.gguf"]
-        for pattern in mmproj_patterns:
-            if list(model_dir.glob(pattern)):
-                return True
-        return False
+        return any(list(model_dir.glob(pattern)) for pattern in mmproj_patterns)
     except Exception:
         return False
 
@@ -571,22 +569,53 @@ class ModelConfig:
                     not hasattr(self.hf_config, "vision_config")
                     or self.hf_config.vision_config is None
                 ):
-                    from transformers import SiglipVisionConfig
+                    from pathlib import Path
 
-                    self.hf_config.vision_config = SiglipVisionConfig(
-                        hidden_size=1152,
-                        intermediate_size=4304,
-                        num_hidden_layers=27,
-                        num_attention_heads=16,
-                        num_channels=3,
-                        image_size=896,
-                        patch_size=14,
-                        layer_norm_eps=1e-6,
-                        attention_dropout=0.0,
-                        num_image_tokens=256,
-                        # Disable pooling head for Gemma3
-                        vision_use_head=False,
+                    from vllm.model_executor.model_loader.utils import (
+                        extract_vision_config_from_gguf,
                     )
+
+                    # Find mmproj.gguf file to extract config from
+                    vision_config = None
+                    model_path = Path(self.model)
+                    if model_path.suffix.lower() == ".gguf":
+                        model_dir = model_path.parent
+                        mmproj_patterns = [
+                            "mmproj.gguf",
+                            "mmproj-*.gguf",
+                            "*mmproj*.gguf",
+                        ]
+                        for pattern in mmproj_patterns:
+                            mmproj_files = list(model_dir.glob(pattern))
+                            if mmproj_files:
+                                vision_config = extract_vision_config_from_gguf(
+                                    mmproj_files[0]
+                                )
+                                break
+
+                    # Fallback to hardcoded defaults if extraction fails
+                    if vision_config is None:
+                        from transformers import SiglipVisionConfig
+
+                        logger.warning(
+                            "Using fallback vision config (metadata extraction failed)"
+                        )
+                        vision_config = SiglipVisionConfig(
+                            hidden_size=1152,
+                            intermediate_size=4304,
+                            num_hidden_layers=27,
+                            num_attention_heads=16,
+                            num_channels=3,
+                            image_size=896,
+                            patch_size=14,
+                            layer_norm_eps=1e-6,
+                            attention_dropout=0.0,
+                            num_image_tokens=256,
+                            # Disable pooling head for Gemma3
+                            vision_use_head=False,
+                        )
+
+                    self.hf_config.vision_config = vision_config
                     self.hf_config.mm_tokens_per_image = 256
                     self.hf_config.image_token_index = 262144
                     # DO NOT set boi_token_index - let
@@ -940,6 +969,8 @@ class ModelConfig:
             if match:
                 _, (runner_type, _) = match
                 return runner_type
+
+        return "generate"
 
     def _get_runner_type(
         self,
@@ -1688,6 +1719,10 @@ class ModelConfig:
     @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
+
+    @property
+    def uses_custom_attention_masks(self) -> bool:
+        return uses_custom_attention_masks(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:

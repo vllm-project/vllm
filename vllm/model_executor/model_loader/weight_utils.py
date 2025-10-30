@@ -849,16 +849,6 @@ def gguf_quant_weights_iterator(
 
     reader = gguf.GGUFReader(gguf_file)
 
-    # Detect Gemma3 for RMSNorm weight format correction
-    is_gemma3 = False
-    try:
-        arch_field = reader.get_field("general.architecture")
-        if arch_field:
-            arch = arch_field.parts[-1].tobytes().decode("utf-8")
-            is_gemma3 = arch == "gemma3"
-    except Exception:
-        pass
-
     for tensor in reader.tensors:
         if tensor.name in gguf_to_hf_name_map:
             weight = tensor.data
@@ -888,18 +878,18 @@ def gguf_quant_weights_iterator(
                 weight_type.name in ("F16", "BF16") and is_vision_or_projector
             )
 
-            if is_truly_quantized and not is_unquantized_fp:
+            if (
+                is_truly_quantized
+                and not is_unquantized_fp
+                and is_embedding_or_linear
+                and not is_vision_or_projector
+            ):
                 # Truly quantized weights (Q4_0, Q8_0, etc.)
-                if is_embedding_or_linear and not is_vision_or_projector:
-                    weight_type_name = name.replace("weight", "qweight_type")
-                    yield weight_type_name, torch.tensor(weight_type)
-                    name = name.replace("weight", "qweight")
+                weight_type_name = name.replace("weight", "qweight_type")
+                yield weight_type_name, torch.tensor(weight_type)
+                name = name.replace("weight", "qweight")
 
             param = torch.tensor(weight)
-
-            # Gemma3 RMSNorm weight format: stored as (w+1), convert to w
-            if is_gemma3 and "norm" in name and len(param.shape) == 1:
-                param = param - 1.0
 
             yield name, param
 

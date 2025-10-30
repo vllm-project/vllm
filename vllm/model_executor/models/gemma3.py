@@ -431,6 +431,10 @@ class Gemma3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
+    def _is_gguf_loading(self) -> bool:
+        """Detect if currently loading from GGUF format."""
+        return self.quant_config is not None and self.quant_config.get_name() == "gguf"
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
@@ -443,6 +447,14 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # Apply Gemma3 GGUF RMSNorm offset: weights stored as (w+1)
+            if (
+                self._is_gguf_loading()
+                and "norm" in name
+                and len(loaded_weight.shape) == 1
+            ):
+                loaded_weight = loaded_weight - 1.0
+
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
