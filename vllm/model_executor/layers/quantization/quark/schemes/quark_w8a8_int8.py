@@ -102,24 +102,27 @@ class QuarkW8A8Int8(QuarkScheme):
         layer.register_parameter("weight_zero_point", weight_zero_point)
 
         # INPUT SCALE
+        input_zero_point=None
+        input_scale=None
         if self.is_static_input_scheme:
             input_scale = BasevLLMParameter(
                 data=torch.empty(1, dtype=torch.float32), weight_loader=weight_loader
             )
-            layer.register_parameter("input_scale", input_scale)
 
             input_zero_point = BasevLLMParameter(
                 data=torch.empty(1, dtype=torch.int8), weight_loader=weight_loader
             )
-            layer.register_parameter("input_zero_point", input_zero_point)
+
+        layer.register_parameter("input_scale", input_scale)
+        layer.register_parameter("input_zero_point", input_zero_point)
+        if not hasattr(layer, "azp_adj"):
+            layer.register_parameter("azp_adj", None)
+            
+        layer_param_names = ["weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"]
 
         self.kernel = kernel_type(
             c=scaled_mm_linear_kernel_config,
-            w_q_param_name="weight",
-            w_s_param_name="weight_scale",
-            i_s_param_name="input_scale",
-            i_zp_param_name="input_zero_point",
-            azp_adj_param_name="azp_adj",
+            layer_param_names = layer_param_names
         )
 
     # Checkpoints are serialized in quark format, which is

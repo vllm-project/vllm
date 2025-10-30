@@ -113,15 +113,11 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         if not hasattr(layer, "azp_adj"):
             layer.register_parameter("azp_adj", None)
 
-        param_name_list = ["weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"]
+        layer_param_names = ["weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"]
 
-        layer_mapping_function = lambda layer: (
-            tuple(getattr(layer, param_name) for param_name in param_name_list),
-            param_name_list,
-        )
         self.kernel = kernel_type(
             c=scaled_mm_linear_kernel_config,
-            layer_mapping_function = layer_mapping_function
+            layer_param_names = layer_param_names
         )
 
     # Checkpoints are serialized in compressed-tensors format, which is

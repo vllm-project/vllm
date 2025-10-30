@@ -5,10 +5,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import Generic, TypeVar
+from typing import Generic, Sequence, TypeVar
 import torch
+from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 
 
 class ScaledMMLinearQuantStrategy(Enum):
@@ -16,21 +18,19 @@ class ScaledMMLinearQuantStrategy(Enum):
     CHANNEL = "channel"
     BLOCK = "block"
 
-    def is_per_token(self) -> bool:
-        return self.row == 1 and self.col == -1
-
-    def is_per_group(self) -> bool:
-        return self.row == 1 and self.col >= 1
-
+QUANT_STRATEGY_MAP = {
+    QuantizationStrategy.TENSOR: ScaledMMLinearQuantStrategy.TENSOR,
+    QuantizationStrategy.CHANNEL: ScaledMMLinearQuantStrategy.CHANNEL,
+    QuantizationStrategy.CHANNEL: ScaledMMLinearQuantStrategy.BLOCK,
+}
 
 @dataclass
 class ScaledMMLinearLayerConfig:
-    pass
+    is_static_input_scheme: bool
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     is_channelwise: bool
-    is_static_input_scheme: bool
     input_symmetric: bool
 
 @dataclass
@@ -40,10 +40,24 @@ class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     out_dtype: torch.dtype
 
 
+
+Int8ParamsT = tuple[
+        torch.Tensor,  # weight
+        torch.Tensor,  # weight_scale
+        torch.Tensor | None,  # input_scale,
+]
+FP8ParamsT = tuple[
+        torch.Tensor,  # weight
+        torch.Tensor,  # weight_scale
+        torch.Tensor | None,  # input_scale,
+        torch.Tensor | None,  # input_zp
+        torch.Tensor | None,  # azp_adj
+    ]
+
+ParamsT = TypeVar('ParamsT', Int8ParamsT, FP8ParamsT)
 ConfigT = TypeVar('ConfigT', bound=ScaledMMLinearLayerConfig)
 
-
-class ScaledMMLinearKernel(Generic[ConfigT], ABC):
+class ScaledMMLinearKernel(Generic[ConfigT, ParamsT], ABC):
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
@@ -55,11 +69,11 @@ class ScaledMMLinearKernel(Generic[ConfigT], ABC):
         raise NotImplementedError
 
     def __init__(
-        self, c: ConfigT, layer_mapping_function: Callable
+        self, c: ConfigT, layer_param_names: Sequence[str]
     ) -> None:
         assert self.can_implement(c)
         self.config = c
-        self.layer_mapping_function = layer_mapping_function
+        self.layer_param_names = layer_param_names
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -73,3 +87,52 @@ class ScaledMMLinearKernel(Generic[ConfigT], ABC):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
+    
+    # return a covariant type in the subclass
+    @abstractmethod
+    def _get_layer_params(self, layer) -> ParamsT:
+        raise NotImplementedError
+
+
+class FP8ScaledMMLinearKernel(ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, FP8ParamsT], ABC):
+    def __init__(
+        self, c: ConfigT, layer_param_names: Sequence[str]
+    ) -> None:
+        self.quant_fp8 = QuantFP8(
+            static=c.is_static_input_scheme,
+            group_shape=c.activation_group_shape,
+            num_token_padding=self.get_ouput_padding(),
+        )
+        super().__init__(c, layer_param_names)
+    
+    @abstractmethod
+    def get_ouput_padding(self) -> int | None:
+        raise NotImplementedError
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # lovelace and up
+        return 89
+    
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    def _get_layer_params(self, layer) -> FP8ParamsT:
+        w, w_s, x_s = self.layer_param_names
+        return (
+            getattr(layer, w),
+            getattr(layer, w_s),
+            getattr(layer, x_s),
+        )
+
+
+class Int8ScaledMMLinearKernel(ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, Int8ParamsT], ABC):
+    def _get_layer_params(self, layer) -> Int8ParamsT:
+        w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
+        return (
+            getattr(layer, w_q),
+            getattr(layer, w_s),
+            getattr(layer, i_s),
+            getattr(layer, i_zp),
+            getattr(layer, azp_adj),
+        )

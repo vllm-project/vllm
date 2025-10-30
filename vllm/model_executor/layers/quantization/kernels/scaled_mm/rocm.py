@@ -12,11 +12,11 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .ScaledMMLinearKernel import (
-    ScaledMMLinearKernel,
+    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
-
+from .utils import apply_weights_fp8
 
 def rocm_per_tensor_float_w8a8_scaled_mm_impl(
     A: torch.Tensor,
@@ -88,20 +88,9 @@ if current_platform.is_rocm():
     )
 
 
-class ROCmScaledMMLinearKernel(ScaledMMLinearKernel):
-    def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_mapping_function: Callable
-    ) -> None:
-        self.quant_fp8 = QuantFP8(
-            static=c.is_static_input_scheme,
-            group_shape=GroupShape.PER_TENSOR,
-            num_token_padding=None,
-        )
-        super().__init__(c, layer_mapping_function)
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 90
+class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    def get_ouput_padding(self) -> int | None:
+        return None
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -128,7 +117,7 @@ class ROCmScaledMMLinearKernel(ScaledMMLinearKernel):
             return (
                 False,
                 "VLLM_ROCM_USE_SKINNY_GEMM must be enabled "
-                + "to use ROCmScaledMMLinearKernel ",
+                + "to use ROCmScaledMMLinearKernel.",
             )
 
         if not (per_tensor_activation_scales and per_tensor_weight_scales):
@@ -139,41 +128,20 @@ class ROCmScaledMMLinearKernel(ScaledMMLinearKernel):
             )
         return True, None
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        pass
-
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static, layer.input_scale is scalar and x_scale is input_scale.
-        (w, w_s, x_s), _ = self.layer_mapping_function(layer)
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-
-        out_dtype = self.config.out_dtype
-        out_dtype = x.dtype if out_dtype is None else out_dtype
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
-        x_2d_q = x_2d
-        if x.dtype != current_platform.fp8_dtype():
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-            )
-
-        output_shape = [*x_2d_q.shape[:-1], w.shape[1]]
-
-        return rocm_per_tensor_float_w8a8_scaled_mm(
-            A=x_2d_q,
-            B=w,
-            out_dtype=out_dtype,
-            As=x_s,
-            Bs=w_s,
-            bias=bias,
-            output_shape=output_shape,
+        w, w_s, x_s = self._get_layer_params(layer)
+        return apply_weights_fp8(
+            rocm_per_tensor_float_w8a8_scaled_mm,
+            self.quant_fp8,
+            w,
+            x,
+            w_s,
+            x_s,
+            bias,
+            self.config.out_dtype
         )

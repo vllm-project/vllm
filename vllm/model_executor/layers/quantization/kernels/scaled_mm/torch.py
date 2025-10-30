@@ -11,11 +11,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
-    ScaledMMLinearKernel,
+    FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 
+from .utils import apply_weights_fp8
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
@@ -134,35 +135,16 @@ def torch_channelwise_w8a8_scaled_mm(
     return output.to(out_dtype).view(*output_shape)
 
 
-class TorchScaledMMLinearKernel(ScaledMMLinearKernel):
-    def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_mapping_function: Callable
-    ) -> None:
+class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    def get_ouput_padding(self) -> int | None:
         vllm_config = get_current_vllm_config().compilation_config
         pad_output = vllm_config.mode < CompilationMode.VLLM_COMPILE
-
         output_padding = 17 if pad_output else None
-
-        self.quant_fp8 = QuantFP8(
-            static=c.is_static_input_scheme,
-            group_shape=GroupShape.PER_TENSOR,
-            num_token_padding=output_padding,
-        )
-        super().__init__(c, layer_mapping_function)
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        # lovelace and up
-        return 89
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        return
-
+        return output_padding
 
 class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        assert c.activation_group_shape is not None
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
         per_tensor_weight_scales = (
             c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR
@@ -182,35 +164,17 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static, layer.input_scale is scalar and x_scale is input_scale.
-        (w, w_s, x_s), _ = self.layer_mapping_function(layer)
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-
-        out_dtype = self.config.out_dtype
-        out_dtype = x.dtype if out_dtype is None else out_dtype
-
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
-        x_2d_q = x_2d
-        if x.dtype != current_platform.fp8_dtype():
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-            )
-        output_shape = [*x_2d_q.shape[:-1], w.shape[1]]
-        return torch_per_tensor_w8a8_scaled_mm(
-            A=x_2d_q,
-            B=w,
-            out_dtype=out_dtype,
-            As=x_s,
-            Bs=w_s,
-            bias=bias,
-            output_shape=output_shape,
+        w, w_s, x_s = self._get_layer_params(layer)
+        return apply_weights_fp8(
+            torch_per_tensor_w8a8_scaled_mm,
+            self.quant_fp8,
+            w,
+            x,
+            w_s,
+            x_s,
+            bias,
+            self.config.out_dtype
         )
-
 
 class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
@@ -219,14 +183,12 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        assert c.activation_group_shape is not None
-
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
         per_tensor_weight_scales = (
             c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR
         )
 
-        if per_tensor_activation_scales and per_tensor_weight_scales:
+        if per_tensor_activation_scales or per_tensor_weight_scales:
             return (
                 False,
                 "RowWiseTorchScaledMMLinearKernel cannot be used with "
@@ -254,33 +216,16 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static, layer.input_scale is scalar and x_scale is input_scale.
-        (w, w_s, x_s), _ = self.layer_mapping_function(layer)
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-
-        out_dtype = self.config.out_dtype
-        out_dtype = x.dtype if out_dtype is None else out_dtype
-
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
-        x_2d_q = x_2d
-        if x.dtype != current_platform.fp8_dtype():
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-            )
-        output_shape = [*x_2d_q.shape[:-1], w.shape[1]]
-        return torch_row_wise_w8a8_scaled_mm(
-            A=x_2d_q,
-            B=w,
-            out_dtype=out_dtype,
-            As=x_s,
-            Bs=w_s,
-            bias=bias,
-            output_shape=output_shape,
+        w, w_s, x_s = self._get_layer_params(layer)
+        return apply_weights_fp8(
+            torch_row_wise_w8a8_scaled_mm,
+            self.quant_fp8,
+            w,
+            x,
+            w_s,
+            x_s,
+            bias,
+            self.config.out_dtype
         )
 
 
@@ -291,8 +236,6 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        assert c.activation_group_shape is not None
-
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
         per_tensor_weight_scales = (
             c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR
@@ -313,31 +256,14 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        # ops.scaled_fp8_quant supports both dynamic and static quant.
-        #   If dynamic, layer.input_scale is None and x_scale computed from x.
-        #   If static, layer.input_scale is scalar and x_scale is input_scale.
-        (w, w_s, x_s), _ = self.layer_mapping_function(layer)
-        # View input as 2D matrix for fp8 methods
-        x_2d = x.view(-1, x.shape[-1])
-
-        out_dtype = self.config.out_dtype
-        out_dtype = x.dtype if out_dtype is None else out_dtype
-
-        # If input not quantized
-        # TODO(luka) remove this path if not used anymore
-        x_2d_q = x_2d
-        if x.dtype != current_platform.fp8_dtype():
-            x_2d_q, x_s = self.quant_fp8(
-                x_2d,
-                x_s,
-            )
-        output_shape = [*x_2d_q.shape[:-1], w.shape[1]]
-        return torch_channelwise_w8a8_scaled_mm(
-            A=x_2d_q,
-            B=w,
-            out_dtype=out_dtype,
-            As=x_s,
-            Bs=w_s,
-            bias=bias,
-            output_shape=output_shape,
+        w, w_s, x_s = self._get_layer_params(layer)
+        return apply_weights_fp8(
+            torch_channelwise_w8a8_scaled_mm,
+            self.quant_fp8,
+            w,
+            x,
+            w_s,
+            x_s,
+            bias,
+            self.config.out_dtype
         )

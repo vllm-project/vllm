@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 from torch.nn import Parameter
+from vllm.logger import init_logger
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
+    QUANT_STRATEGY_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -49,8 +51,11 @@ strategy_to_parameter_type = {
     QuantizationStrategy.TENSOR: PerTensorScaleParameter,
 }
 
+logger = init_logger(__name__)
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
+    _kernel_backends_being_used: set[str] = set()
+
     def __init__(self, weight_quant: QuantizationArgs, is_static_input_scheme: bool):
         self.weight_quant = weight_quant
         self.strategy = weight_quant.strategy
@@ -79,19 +84,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            param_name_list = ["weight", "weight_scale", "input_scale"]
-            layer_mapping_function = lambda layer: (
-                tuple(getattr(layer, param_name) for param_name in param_name_list),
-                param_name_list,
-            )
-
-            # TODO: clean up
-            if self.strategy == QuantizationStrategy.TENSOR:
-                weight_quant_strategy = ScaledMMLinearQuantStrategy.TENSOR
-            elif self.strategy == QuantizationStrategy.CHANNEL:
-                weight_quant_strategy = ScaledMMLinearQuantStrategy.CHANNEL
-
+            layer_param_names = ["weight", "weight_scale", "input_scale"]
+            weight_quant_strategy = QUANT_STRATEGY_MAP[self.strategy]
             scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+                is_static_input_scheme=self.is_static_input_scheme,
                 weight_quant_strategy=weight_quant_strategy,
                 activation_group_shape=self.act_q_group_shape,
                 out_dtype=self.out_dtype,
@@ -101,8 +97,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 _POSSIBLE_FP8_KERNELS,
             )
             self.fp8_linear = kernel(
-                scaled_mm_linear_kernel_config, layer_mapping_function
+                scaled_mm_linear_kernel_config, layer_param_names = layer_param_names
             )
+
+            if kernel.__name__ not in self._kernel_backends_being_used:
+                logger.info("Using %s for CompressedTensorsW8A8FP8", kernel.__name__)
+                self._kernel_backends_being_used.add(kernel.__name__)
 
     @classmethod
     def get_min_capability(cls) -> int:
