@@ -10,6 +10,7 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
+    TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.math_utils import round_up
@@ -125,8 +126,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def create_new_topk_data(
         self,
-        topk_ids,
-        topk_weights,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         all_topk_ids, all_topk_weights = get_dp_group().all_gatherv(
             [topk_ids, topk_weights], dim=0
@@ -135,7 +136,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         start = self.rank_expert_offset
         end = self.rank_expert_offset + self.num_local_experts
 
-        # subtract? use oob expert idx?
         oob_idx = self.num_local_experts if self.rank_expert_offset == 0 else 0
         assert not (all_topk_ids == oob_idx).all()
         new_topk_ids = torch.where(
@@ -172,7 +172,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # Dispatch in bfloat16 and quantize afterwards if not using block quantization.
         if quant_config.is_block_quantized:
             # Quant and Dispatch
-            assert quant_config.block_shape == [128, 128]  # TODO: use constant
+            assert quant_config.block_shape == [128, 128]
             a1q, a1q_scale = moe_kernel_quantize_input(
                 a1,
                 quant_config.a1_scale,
@@ -257,15 +257,19 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
+        probs = None
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
+            if not apply_router_weight_on_input:
+                weight_and_reduce_impl = TopKWeightAndReduceNoOP()
+                probs = self.expert_probs
+            else:
+                weight_and_reduce_impl = TopKWeightAndReduceContiguous()
+
         combined_x, combined_probs = self.buffer.combine(
             hidden=fused_expert_output,
-            # TODO: when weight_and_reduce_impl is delegate
-            probs=None,  # self.expert_probs,
+            probs=probs,
             handle=self.handle,
         )
-
-        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
-            weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
         weight_and_reduce_impl.apply(
             output=output,
