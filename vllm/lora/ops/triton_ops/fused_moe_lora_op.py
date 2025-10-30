@@ -239,7 +239,7 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
-    lora_intermediate_cache1 = torch.empty(
+    lora_intermediate_cache1 = torch.zeros(
         (num_slices * M * top_k_num * (max_lora_rank + w1_output_dim_size)),
         dtype=output.dtype,
         device=device,

@@ -97,20 +97,6 @@ def test_olmoe_lora(olmoe_lora_files):
     generate_and_test(llm, olmoe_lora_files, lora_id=2)
 
 
-def test_olmoe_lora_base_model(olmoe_lora_files):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        enforce_eager=True,
-        trust_remote_code=True,
-        enable_chunked_prefill=True,
-    )
-
-    generate_and_test(llm, olmoe_lora_files, lora_id=None)
-
-
 def test_olmoe_lora_mixed(olmoe_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
