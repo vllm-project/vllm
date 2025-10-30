@@ -1319,7 +1319,7 @@ class FusedMoE(CustomOp):
 
         if self.enable_eplb:
             from vllm.model_executor.layers.quantization.compressed_tensors import (
-                compressed_tensors_moe,
+                CompressedTensorsW8A8Fp8MoEMethod,
             )
             from vllm.model_executor.layers.quantization.fp8 import Fp8MoEMethod
 
@@ -1328,7 +1328,7 @@ class FusedMoE(CustomOp):
                 (
                     Fp8MoEMethod,
                     UnquantizedFusedMoEMethod,
-                    compressed_tensors_moe.CompressedTensorsW8A8Fp8MoEMethod,
+                    CompressedTensorsW8A8Fp8MoEMethod,
                 ),
             ):
                 # TODO: Add support for additional quantization methods.
