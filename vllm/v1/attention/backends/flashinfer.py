@@ -291,7 +291,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
-        block_size = 32  # Note(Chen): Hardcode the block_size as 16 temporarily.
+        block_size = 32  # Note(Chen): Hardcode the block_size as 32 temporarily.
 
         if vllm_is_batch_invariant():
             self.decode_fixed_split_size = 2048
