@@ -9,13 +9,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.config import VllmConfig
 else:
     _Backend = None
 
@@ -72,13 +72,14 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
     "0x74b5": "AMD_Instinct_MI300X",  # MI300X VF
+    "0x74a2": "AMD_Instinct_MI308X",
     "0x74a5": "AMD_Instinct_MI325X",
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
 }
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES``
+# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
 if "HIP_VISIBLE_DEVICES" in os.environ:
     val = os.environ["HIP_VISIBLE_DEVICES"]
     if cuda_val := os.environ.get("CUDA_VISIBLE_DEVICES", None):
@@ -205,12 +206,16 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        from importlib.util import find_spec
+
         from vllm.attention.backends.registry import _Backend
 
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
             return _Backend.ROCM_AITER_FA
-        if on_gfx9():
+
+        if on_gfx9() and find_spec("flash_attn") is not None:
             return _Backend.FLASH_ATTN
+
         return _Backend.TORCH_SDPA
 
     @classmethod
@@ -409,7 +414,7 @@ class RocmPlatform(Platform):
                 "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                 " is not set, enabling VLLM_USE_TRITON_AWQ."
             )
-        envs.VLLM_USE_TRITON_AWQ = True
+        os.environ["VLLM_USE_TRITON_AWQ"] = "1"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
@@ -476,12 +481,6 @@ class RocmPlatform(Platform):
     @classmethod
     def device_count(cls) -> int:
         return cuda_device_count_stateless()
-
-    @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        return True
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):

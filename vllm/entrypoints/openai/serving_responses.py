@@ -48,6 +48,7 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
@@ -63,6 +64,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
+    construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
@@ -98,11 +100,28 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+def extract_tool_types(tools: list[Tool]) -> set[str]:
+    """
+    Extracts the tool types from the given tools.
+    """
+    tool_types: set[str] = set()
+    for tool in tools:
+        if tool.type == "mcp":
+            # Allow the MCP Tool type to enable built in tools if the
+            # server_label is allowlisted in
+            # envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+            if tool.server_label in envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
+                tool_types.add(tool.server_label)
+        else:
+            tool_types.add(tool.type)
+    return tool_types
 
 
 class OpenAIServingResponses(OpenAIServing):
@@ -227,6 +246,36 @@ class OpenAIServingResponses(OpenAIServing):
             )
         return None
 
+    def _validate_create_responses_input(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        if self.use_harmony and request.is_include_output_logprobs():
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="logprobs are not supported with gpt-oss models",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if request.store and not self.enable_store and request.background:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "This vLLM engine does not support `store=True` and "
+                    "therefore does not support the background mode. To "
+                    "enable these features, set the environment variable "
+                    "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
+                    "the vLLM server."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if request.previous_input_messages and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `previous_input_messages` and "
+                "`previous_response_id` can be set.",
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        return None
+
     async def create_responses(
         self,
         request: ResponsesRequest,
@@ -240,6 +289,9 @@ class OpenAIServingResponses(OpenAIServing):
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
+        maybe_validation_error = self._validate_create_responses_input(request)
+        if maybe_validation_error is not None:
+            return maybe_validation_error
 
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
@@ -248,18 +300,6 @@ class OpenAIServingResponses(OpenAIServing):
             raise self.engine_client.dead_error
 
         if request.store and not self.enable_store:
-            if request.background:
-                return self.create_error_response(
-                    err_type="invalid_request_error",
-                    message=(
-                        "This vLLM engine does not support `store=True` and "
-                        "therefore does not support the background mode. To "
-                        "enable these features, set the environment variable "
-                        "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
-                        "the vLLM server."
-                    ),
-                    status_code=HTTPStatus.BAD_REQUEST,
-                )
             # Disable the store option.
             # NOTE(woosuk): Although returning an error is possible, we opted
             # to implicitly disable store and process the request anyway, as
@@ -267,12 +307,6 @@ class OpenAIServingResponses(OpenAIServing):
             # (i.e., their request's `store=True` just because it's the default
             # value).
             request.store = False
-        if self.use_harmony and request.is_include_output_logprobs():
-            return self.create_error_response(
-                err_type="invalid_request_error",
-                message="logprobs are not supported with gpt-oss models",
-                status_code=HTTPStatus.BAD_REQUEST,
-            )
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -357,6 +391,19 @@ class OpenAIServingResponses(OpenAIServing):
                         context = HarmonyContext(messages, available_tools)
                 else:
                     context = SimpleContext()
+
+                if self.reasoning_parser is not None:
+                    reasoning_parser = self.reasoning_parser(tokenizer)
+                    if sampling_params.structured_outputs is None:
+                        sampling_params.structured_outputs = StructuredOutputsParams()
+                    struct_out = sampling_params.structured_outputs
+                    if struct_out.all_non_structural_tag_constraints_none():
+                        sampling_params.structured_outputs.structural_tag = (
+                            reasoning_parser.prepare_structured_tag(
+                                sampling_params.structured_outputs.structural_tag,
+                                self.tool_server,
+                            )
+                        )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
                     request_prompt=request_prompts[i],
@@ -849,6 +896,47 @@ class OpenAIServingResponses(OpenAIServing):
             messages.extend(request.input)  # type: ignore
         return messages
 
+    def _construct_harmony_system_input_message(
+        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
+    ) -> OpenAIHarmonyMessage:
+        reasoning_effort = request.reasoning.effort if request.reasoning else None
+        enable_browser = (
+            "web_search_preview" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("browser")
+        )
+        enable_code_interpreter = (
+            "code_interpreter" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("python")
+        )
+        enable_container = (
+            "container" in tool_types
+            and self.tool_server is not None
+            and self.tool_server.has_tool("container")
+        )
+        sys_msg = get_system_message(
+            reasoning_effort=reasoning_effort,
+            browser_description=(
+                self.tool_server.get_tool_description("browser")
+                if enable_browser and self.tool_server is not None
+                else None
+            ),
+            python_description=(
+                self.tool_server.get_tool_description("python")
+                if enable_code_interpreter and self.tool_server is not None
+                else None
+            ),
+            container_description=(
+                self.tool_server.get_tool_description("container")
+                if enable_container and self.tool_server is not None
+                else None
+            ),
+            instructions=request.instructions,
+            with_custom_tools=with_custom_tools,
+        )
+        return sys_msg
+
     def _construct_input_messages_with_harmony(
         self,
         request: ResponsesRequest,
@@ -857,54 +945,11 @@ class OpenAIServingResponses(OpenAIServing):
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
             # New conversation.
-            reasoning_effort = request.reasoning.effort if request.reasoning else None
-            tool_types = [tool.type for tool in request.tools]
-
-            # Allow the MCP Tool type to enable built in tools if the
-            # server_label is allowlisted in
-            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-            if envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
-                for tool in request.tools:
-                    if (
-                        tool.type == "mcp"
-                        and tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-                    ):
-                        tool_types.append(tool.server_label)
-            enable_browser = (
-                "web_search_preview" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("browser")
-            )
-            enable_code_interpreter = (
-                "code_interpreter" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("python")
-            )
-            enable_container = (
-                "container" in tool_types
-                and self.tool_server is not None
-                and self.tool_server.has_tool("container")
-            )
+            tool_types = extract_tool_types(request.tools)
             with_custom_tools = has_custom_tools(tool_types)
-            sys_msg = get_system_message(
-                reasoning_effort=reasoning_effort,
-                browser_description=(
-                    self.tool_server.get_tool_description("browser")
-                    if enable_browser and self.tool_server is not None
-                    else None
-                ),
-                python_description=(
-                    self.tool_server.get_tool_description("python")
-                    if enable_code_interpreter and self.tool_server is not None
-                    else None
-                ),
-                container_description=(
-                    self.tool_server.get_tool_description("container")
-                    if enable_container and self.tool_server is not None
-                    else None
-                ),
-                instructions=request.instructions,
-                with_custom_tools=with_custom_tools,
+
+            sys_msg = self._construct_harmony_system_input_message(
+                request, with_custom_tools, tool_types
             )
             messages.append(sys_msg)
             if with_custom_tools:
@@ -912,6 +957,8 @@ class OpenAIServingResponses(OpenAIServing):
                     instructions=request.instructions, tools=request.tools
                 )
                 messages.append(dev_msg)
+            messages += construct_harmony_previous_input_messages(request)
+
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and
@@ -1903,6 +1950,7 @@ class OpenAIServingResponses(OpenAIServing):
                 processer = self._process_harmony_streaming_events
             else:
                 processer = self._process_simple_streaming_events
+            # TODO Hanchen make sampling params to include the structural tag
 
             initial_response = ResponsesResponse.from_request(
                 request,
