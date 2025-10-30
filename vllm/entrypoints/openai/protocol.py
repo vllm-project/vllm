@@ -47,6 +47,7 @@ from openai.types.responses import (
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm.utils.serial_utils import (
     EmbedDType,
@@ -69,6 +70,7 @@ from pydantic import (
     ConfigDict,
     Field,
     TypeAdapter,
+    ValidationError,
     ValidationInfo,
     field_serializer,
     field_validator,
@@ -382,10 +384,15 @@ class ResponsesRequest(OpenAIBaseModel):
         default=False,
         description=(
             "Dictates whether or not to return messages as part of the "
-            "response object. Currently only supported for non-streaming "
+            "response object. Currently only supported for"
             "non-background and gpt-oss only. "
         ),
     )
+    # similar to input_messages / output_messages in ResponsesResponse
+    # we take in previous_input_messages (ie in harmony format)
+    # this cannot be used in conjunction with previous_response_id
+    # TODO: consider supporting non harmony messages as well
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     # --8<-- [end:responses-extra-params]
 
     _DEFAULT_SAMPLING_PARAMS = {
@@ -476,6 +483,48 @@ class ResponsesRequest(OpenAIBaseModel):
                 raise ValueError(
                     "Parameter 'cache_salt' must be a non-empty string if provided."
                 )
+        return data
+
+    @model_validator(mode="before")
+    def function_call_parsing(cls, data):
+        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
+        This ensures Pydantic can properly resolve union types in the input field.
+        Function calls provided as dicts are converted to ResponseFunctionToolCall
+        objects before validation, while invalid structures are left for Pydantic
+        to reject with appropriate error messages.
+        """
+
+        input_data = data.get("input")
+
+        # Early return for None, strings, or bytes
+        # (strings are iterable but shouldn't be processed)
+        if input_data is None or isinstance(input_data, (str, bytes)):
+            return data
+
+        # Convert iterators (like ValidatorIterator) to list
+        if not isinstance(input_data, list):
+            try:
+                input_data = list(input_data)
+            except TypeError:
+                # Not iterable, leave as-is for Pydantic to handle
+                return data
+
+        processed_input = []
+        for item in input_data:
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                try:
+                    processed_input.append(ResponseFunctionToolCall(**item))
+                except ValidationError:
+                    # Let Pydantic handle validation for malformed function calls
+                    logger.debug(
+                        "Failed to parse function_call to ResponseFunctionToolCall, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+            else:
+                processed_input.append(item)
+
+        data["input"] = processed_input
         return data
 
 
@@ -811,8 +860,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = StructuredOutputsParams(**kwargs)
 
         response_format = self.response_format
-        json_schema_from_tool = self._get_json_schema_from_tool()
-        if response_format is not None or json_schema_from_tool is not None:
+        if response_format is not None:
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if self.structured_outputs is None:
@@ -837,10 +885,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     )
                     s_tag_obj = structural_tag.model_dump(by_alias=True)
                     self.structured_outputs.structural_tag = json.dumps(s_tag_obj)
-
-            # Set structured output params for tool calling
-            if json_schema_from_tool is not None:
-                self.structured_outputs.json = json_schema_from_tool
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
@@ -880,72 +924,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
         )
-
-    def _get_json_schema_from_tool(self) -> str | dict | None:
-        # user has chosen to not use any tool
-        if self.tool_choice == "none" or self.tools is None:
-            return None
-
-        # user has chosen to use a named tool
-        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
-            tool_name = self.tool_choice.function.name
-            tools = {tool.function.name: tool.function for tool in self.tools}
-            if tool_name not in tools:
-                raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-            tool = tools[tool_name]
-            return tool.parameters
-
-        if self.tool_choice == "required":
-            # Pydantic schema generation cannot be used since the JSON schema
-            # has to be constructed for a specific instantiation of a tool list
-            # so that parameters of a function are correctly generated
-            # based on the chosen function name
-            def get_tool_schema(tool: ChatCompletionToolsParam) -> dict:
-                return {
-                    "properties": {
-                        "name": {"type": "string", "enum": [tool.function.name]},
-                        # parameters are always generated as '{}' in the final
-                        # output if they are missing from the request
-                        # (i.e. are None or '{}') so the schema is
-                        # updated to produce an empty object in that case
-                        "parameters": tool.function.parameters
-                        if tool.function.parameters
-                        else {"type": "object", "properties": {}},
-                    },
-                    "required": ["name", "parameters"],
-                }
-
-            def get_tool_schema_defs(tools: list[ChatCompletionToolsParam]) -> dict:
-                all_defs = dict[str, dict[str, Any]]()
-                for tool in tools:
-                    if tool.function.parameters is None:
-                        continue
-                    defs = tool.function.parameters.pop("$defs", {})
-                    for def_name, def_schema in defs.items():
-                        if def_name in all_defs and all_defs[def_name] != def_schema:
-                            raise ValueError(
-                                f"Tool definition '{def_name}' has "
-                                "multiple schemas, which is not "
-                                "supported."
-                            )
-                        else:
-                            all_defs[def_name] = def_schema
-                return all_defs
-
-            json_schema = {
-                "type": "array",
-                "minItems": 1,
-                "items": {
-                    "type": "object",
-                    "anyOf": [get_tool_schema(tool) for tool in self.tools],
-                },
-            }
-            json_schema_defs = get_tool_schema_defs(self.tools)
-            if json_schema_defs:
-                json_schema["$defs"] = json_schema_defs
-            return json_schema
-
-        return None
 
     @model_validator(mode="before")
     @classmethod
@@ -1707,11 +1685,6 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     if the served model does not use priority scheduling.
     """
     data: T
-    """
-    When using plugins IOProcessor plugins, the actual input is processed
-    by the plugin itself. Hence, we use a generic type for the request data
-    """
-    activation: bool = False
 
     encoding_format: EncodingFormat = "float"
     embed_dtype: EmbedDType = Field(
@@ -1732,7 +1705,7 @@ class IOProcessorRequest(OpenAIBaseModel, Generic[T]):
     )
 
     def to_pooling_params(self):
-        return PoolingParams(task="token_classify", activation=self.activation)
+        return PoolingParams()
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):

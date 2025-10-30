@@ -215,6 +215,8 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         if self.has_shared_experts:
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+        else:
+            final_hidden_states = final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
