@@ -52,15 +52,13 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         buffer: deep_ep.HybridEPBuffer,
         num_dispatchers: int,
-        dp_size: int,  # Needed?
         rank_expert_offset: int,
         num_local_experts: int,
     ):
         super().__init__()
         self.buffer = buffer
         self.num_dispatchers_ = num_dispatchers
-        self.dp_size = dp_size
-        self.rank_expert_offset = rank_expert_offset  # TODO: not needed
+        self.rank_expert_offset = rank_expert_offset
         self.handle = None
         self.expert_probs = None
         self.do_permute = False
@@ -130,7 +128,8 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         elif False or force:
             print(
                 f"{msg}[{self.rank_expert_offset}] = "
-                f"{t.shape if t is not None else None}\n{t}"
+                f"{t.shape if t is not None else None}, "
+                f"{t.dtype if t is not None else None}\n{t}"
             )
 
     def create_new_topk_data(
@@ -138,9 +137,9 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_ids,
         topk_weights,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # TODO: use all_gatherv
-        all_topk_ids = get_dp_group().all_gather(topk_ids, dim=0)
-        all_topk_weights = get_dp_group().all_gather(topk_weights, dim=0)
+        all_topk_ids, all_topk_weights = get_dp_group().all_gatherv(
+            [topk_ids, topk_weights], dim=0
+        )
 
         # self.pp("ALL_TOPK_IDS", all_topk_ids)
 
@@ -200,6 +199,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             if a1q_scale is not None and a1q_scale.numel() == 1:
                 a1q_scale = a1q_scale.view(1, 1)
             a1_post_scale = None
+            self.pp("PRE DISPATCH SCALE", a1q_scale)
         else:
             a1q = a1
             a1q_scale = None
@@ -236,6 +236,7 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         self.pp("EXPERT_X", expert_x)
+        self.pp("POST DISPATCH SCALE", expert_x_scale)
 
         # (
         #     sparse_to_dense_map,
@@ -315,8 +316,6 @@ class DeepEPHybridPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             f"{fused_expert_output.dtype} out={output.shape} "
             f"fe_out={fused_expert_output.shape}"
         )
-
-        # self.pp("FUSED_EXPERT_OUTPUT", fused_expert_output, True)
 
         combined_x, combined_probs = self.buffer.combine(
             hidden=fused_expert_output,
