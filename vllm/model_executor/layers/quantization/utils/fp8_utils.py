@@ -878,27 +878,12 @@ def w8a8_triton_block_scaled_mm(
 
     return C
 
-def deepgemm_transform_sf_into_required_layout(xq: torch.Tensor,
-                                               xs: torch.Tensor,
-                                               is_weights: bool) -> torch.Tensor:
-    if xq.dtype != torch.float8_e4m3fn:
-        raise ValueError(
-            f"Expected tensor dtype to be torch.float8_e4m3fn, got {xq.dtype} instead."
-        )
-
-    # TODO (varun) : port get default recipe from here
-    # https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
-    recipe = (1, 128, 128)
-
-    # is the scale factors for A in ( Refers to the argument A in A @ B)
-    is_sfa = not is_weights
-    dg_xs = transform_sf_into_required_layout(sf = xs, mn= xq.size(1), k=xq.size(2), recipe = recipe, num_groups = xq.size(0), is_sfa = is_sfa) 
-    return dg_xs
 
 def requant_weight_ue8m0_inplace(
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     block_size: Sequence[int] = (128, 128),
+    use_e8m0: bool = True,
 ) -> None:
     """Re-quantise *weight* so that its per-block scaling factors are in the
     UE8M0 (power-of-two) format expected by the new DeepGEMM kernels inplace.
@@ -947,13 +932,33 @@ def requant_weight_ue8m0_inplace(
         w_dq = w_q.to(torch.float32) * s_exp
         # Re-quantise using power-of-two scaling (UE8M0).
         w_requant, s_requant = per_block_cast_to_fp8(
-            w_dq, [block_m, block_k], use_ue8m0=True
+            w_dq, [block_m, block_k], use_ue8m0=use_e8m0
         )
 
         # Write back the results in-place.
         w_q.copy_(w_requant)
         s_old.copy_(s_requant)
 
+
+def deepgemm_transform_sf_into_required_layout(xq: torch.Tensor,
+                                               xs: torch.Tensor,
+                                               is_weights: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    if xq.dtype != torch.float8_e4m3fn:
+        raise ValueError(
+            f"Expected tensor dtype to be torch.float8_e4m3fn, got {xq.dtype} instead."
+        )
+
+    requant_weight_ue8m0_inplace(xq, xs, use_e8m0=True)
+    #xs = xs.to(torch.uint8).view(torch.int32)
+
+    # TODO (varun) : port get default recipe from here
+    # https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
+    recipe = (1, 128, 128)
+
+    # is the scale factors for A in ( Refers to the argument A in A @ B)
+    is_sfa = not is_weights
+    dg_xs = transform_sf_into_required_layout(sf = xs, mn= xq.size(1), k=xq.size(2), recipe = recipe, num_groups = xq.size(0), is_sfa = is_sfa) 
+    return xq, dg_xs
 
 def check_aiter_fp8_linear_support() -> bool:
     """AITER is only supported on ROCm and only for FP8_FNUZ

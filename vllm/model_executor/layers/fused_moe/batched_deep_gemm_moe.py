@@ -154,16 +154,6 @@ def persistent_masked_m_silu_mul_quant(
     fp8_dtype = torch.float8_e4m3fn
     y_q = torch.empty((E, T, H), dtype=fp8_dtype, device=y.device)
 
-    stride_ys_e = T * G
-    stride_ys_t = 1
-    stride_ys_g = T
-    y_s = torch.empty_strided(
-        (E, T, G),
-        (stride_ys_e, stride_ys_t, stride_ys_g),
-        dtype=torch.float32,
-        device=y.device,
-    )
-
     use_ue8m0 = is_deep_gemm_e8m0_used()
 
     cuda_arch = current_platform.get_device_capability(
@@ -341,13 +331,13 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
 
-        #s = "MM2: "
-        #s += f"  a2q : {a2q.dtype} {a2q.shape} {a2q.stride()} \n"
-        #s += f"  a2q_scale : {a2q_scale.dtype} {a2q_scale.shape} {a2q_scale.stride()} \n"
-        #s += f"  w2 : {w2.dtype} {w2.shape} {w2.stride()}\n"
-        #s += f"  w2_scale : {self.w2_scale.dtype} {self.w2_scale.shape} {self.w2_scale.stride()} \n"
-        #s += f"  out : {output.dtype} {output.shape} {output.stride()}"
-        #print (s)
+        s = "MM2: "
+        s += f"  a2q : {a2q.dtype} {a2q.shape} {a2q.stride()} \n"
+        s += f"  a2q_scale : {a2q_scale.dtype} {a2q_scale.shape} {a2q_scale.stride()} \n"
+        s += f"  w2 : {w2.dtype} {w2.shape} {w2.stride()}\n"
+        s += f"  w2_scale : {self.w2_scale.dtype} {self.w2_scale.shape} {self.w2_scale.stride()} \n"
+        s += f"  out : {output.dtype} {output.shape} {output.stride()}"
+        print (s)
         #if s not in PRINT_CACHE:
         #    print(s)
         #    PRINT_CACHE.add(s)

@@ -1066,10 +1066,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO (varun): do this iff block_size matches deepgemm block size
         if is_deep_gemm_e8m0_used() and self.block_quant:
             # TODO (varun) : THis is dangerous - what if we use some other experts with this data ??? 
-            layer.w13_weight_scale_inv.data = deepgemm_transform_sf_into_required_layout(layer.w13_weight.data,
+            layer.w13_weight.data, layer.w13_weight_scale_inv.data = deepgemm_transform_sf_into_required_layout(layer.w13_weight.data,
                                                                                         layer.w13_weight_scale_inv.data,
                                                                                         is_weights = True)
-            layer.w2_weight_scale_inv.data = deepgemm_transform_sf_into_required_layout(layer.w2_weight.data,
+            layer.w2_weight.data, layer.w2_weight_scale_inv.data = deepgemm_transform_sf_into_required_layout(layer.w2_weight.data,
                                                                                         layer.w2_weight_scale_inv.data,
                                                                                         is_weights = True)
 
