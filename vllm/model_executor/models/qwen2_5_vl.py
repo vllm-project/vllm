@@ -428,6 +428,14 @@ class Qwen2_5_VisionAttention(nn.Module):
             )
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
+            from vllm.platforms import current_platform
+
+            # Never remove the next contiguous logic
+            # Without it, hallucinations occur with the backend
+            if current_platform.is_rocm():
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
             outputs = []
             for i in range(1, len(cu_seqlens)):
                 start_idx = cu_seqlens[i - 1]
@@ -452,15 +460,17 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "x": 0,
-        "cu_seqlens": 0,
-        "rotary_pos_emb": 0,
-        "seqlens": 0,
-    },
-    mark_unbacked_dims={"seqlens": 0},
-)
+# (FIXME): Enable this after dynamic slicing is fixed
+# See https://github.com/vllm-project/vllm/pull/27760
+# @support_torch_compile(
+#     dynamic_arg_dims={
+#         "x": 0,
+#         "cu_seqlens": 0,
+#         "rotary_pos_emb": 0,
+#         "seqlens": 0,
+#     },
+#     mark_unbacked_dims={"seqlens": 0},
+# )
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
