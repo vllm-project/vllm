@@ -108,10 +108,14 @@ class ARCOffloadingManager(OffloadingManager):
                 self.target_t1_size = min(
                     self.target_t1_size + delta, self.cache_capacity
                 )
+                # move to MRU position (end) to keep it fresh in the ghost list
+                self.b1.move_to_end(block_hash)
 
             elif block_hash in self.b2:
                 delta = max(1, len(self.b1) // len(self.b2)) if len(self.b2) > 0 else 1
                 self.target_t1_size = max(self.target_t1_size - delta, 0)
+                # move to MRU position (end) to keep it fresh in the ghost list
+                self.b2.move_to_end(block_hash)
 
     def complete_load(self, block_hashes: Iterable[BlockHash]):
         for block_hash in block_hashes:
