@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

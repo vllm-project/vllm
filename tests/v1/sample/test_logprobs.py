@@ -17,7 +17,7 @@ from tests.v1.sample.utils import (
     compute_correct_cumulative_logprob,
     get_test_batch,
 )
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
 

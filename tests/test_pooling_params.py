@@ -5,7 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from tests.models.utils import EmbedModelInfo
-from vllm import PoolingParams
+from vllm.pooling_params import PoolingParams
 from vllm.config import ModelConfig, PoolerConfig
 
 EMBEDDING_MODELS = [

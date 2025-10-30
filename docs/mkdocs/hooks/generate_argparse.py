@@ -66,10 +66,10 @@ bench_sweep_serve_sla = auto_mock(
 bench_throughput = auto_mock("vllm.benchmarks", "throughput")
 AsyncEngineArgs = auto_mock("vllm.engine.arg_utils", "AsyncEngineArgs")
 EngineArgs = auto_mock("vllm.engine.arg_utils", "EngineArgs")
-ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
-CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
-openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
-openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
+ChatCommand = auto_mock("vllm.entrypoints.cli.cli_openai", "ChatCommand")
+CompleteCommand = auto_mock("vllm.entrypoints.cli.cli_openai", "CompleteCommand")
+openai_cli_args = auto_mock("vllm.entrypoints.cli.cli_openai", "cli_args")
+openai_run_batch = auto_mock("vllm.entrypoints.cli.cli_openai", "run_batch")
 FlexibleArgumentParser = auto_mock(
     "vllm.utils.argparse_utils", "FlexibleArgumentParser"
 )

@@ -13,7 +13,7 @@ from tests.v1.engine.utils import (
     DummyOutputProcessorTestVectors,
     MockEngineCore,
 )
-from vllm import PoolingParams
+from vllm.pooling_params import PoolingParams
 from vllm.logprobs import PromptLogprobs, SampleLogprobs
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams

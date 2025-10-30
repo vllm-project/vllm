@@ -8,7 +8,7 @@ from typing import Any
 
 import torch
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.config import (
     CacheConfig,
     DeviceConfig,

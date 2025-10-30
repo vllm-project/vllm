@@ -9,7 +9,7 @@ import pytest
 import torch
 from transformers import AutoTokenizer
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 
 # A dummy small model quantized by GPTQModel, stored in GPTQ v2 format

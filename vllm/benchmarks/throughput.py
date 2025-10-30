@@ -177,7 +177,7 @@ async def run_vllm_async(
     disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
-    from vllm import SamplingParams
+    from vllm.sampling_params import SamplingParams
     from vllm.entrypoints.openai.api_server import (
         build_async_engine_client_from_engine_args,
     )

@@ -10,7 +10,7 @@ with dummy values for decode performance benchmarking.
 import pytest
 import torch
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 

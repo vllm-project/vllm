@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole

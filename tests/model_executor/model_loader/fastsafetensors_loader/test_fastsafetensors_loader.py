@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.platforms import current_platform
 
 test_model = "openai-community/gpt2"

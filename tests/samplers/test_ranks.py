@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 
 MODELS = ["distilbert/distilgpt2"]
 

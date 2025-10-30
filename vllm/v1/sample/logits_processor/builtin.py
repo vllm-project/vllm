@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, TypeVar
 
 import torch
 
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     LogitsProcessor,

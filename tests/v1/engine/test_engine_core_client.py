@@ -16,7 +16,7 @@ import torch
 from transformers import AutoTokenizer
 
 from tests.utils import multi_gpu_test
-from vllm import SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.distributed.kv_events import BlockStored, KVEventBatch, ZmqEventPublisher
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
