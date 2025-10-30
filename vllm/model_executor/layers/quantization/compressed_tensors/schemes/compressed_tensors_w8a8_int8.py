@@ -11,8 +11,8 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    ScaledMMLinearLayerConfig,
     choose_scaled_mm_linear_kernel,
+    _POSSIBLE_INT8_KERNELS
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -20,6 +20,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 logger = init_logger(__name__)
 
@@ -50,13 +51,16 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        scaled_mm_linear_kernel_config = ScaledMMLinearLayerConfig(
+        scaled_mm_linear_kernel_config = Int8ScaledMMLinearLayerConfig(
             is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
             is_static_input_scheme=self.is_static_input_scheme,
             input_symmetric=self.input_symmetric,
         )
 
-        kernel_type = choose_scaled_mm_linear_kernel(scaled_mm_linear_kernel_config)
+        kernel_type = choose_scaled_mm_linear_kernel(
+            scaled_mm_linear_kernel_config,
+            _POSSIBLE_INT8_KERNELS
+        )
 
         if kernel_type.__name__ not in self._kernel_backends_being_used:
             logger.info("Using %s for CompressedTensorsW8A8Int8", kernel_type.__name__)
@@ -90,12 +94,12 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
         # INPUT SCALE
+        input_zero_point=None
+        input_scale=None
         if self.is_static_input_scheme:
             input_scale = BasevLLMParameter(
                 data=torch.empty(1, dtype=torch.float32), weight_loader=weight_loader
             )
-            layer.register_parameter("input_scale", input_scale)
-
             if not self.input_symmetric:
                 # Note: compressed-tensors stores the zp using the same dtype
                 # as the weights
@@ -103,15 +107,21 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
                 input_zero_point = BasevLLMParameter(
                     data=torch.empty(1, dtype=torch.int8), weight_loader=weight_loader
                 )
-                layer.register_parameter("input_zero_point", input_zero_point)
 
+        layer.register_parameter("input_zero_point", input_zero_point)
+        layer.register_parameter("input_scale", input_scale)
+        if not hasattr(layer, "azp_adj"):
+            layer.register_parameter("azp_adj", None)
+
+        param_name_list = ["weight", "weight_scale", "input_scale", "input_zero_point", "azp_adj"]
+
+        layer_mapping_function = lambda layer: (
+            tuple(getattr(layer, param_name) for param_name in param_name_list),
+            param_name_list,
+        )
         self.kernel = kernel_type(
             c=scaled_mm_linear_kernel_config,
-            w_q_param_name="weight",
-            w_s_param_name="weight_scale",
-            i_s_param_name="input_scale",
-            i_zp_param_name="input_zero_point",
-            azp_adj_param_name="azp_adj",
+            layer_mapping_function = layer_mapping_function
         )
 
     # Checkpoints are serialized in compressed-tensors format, which is

@@ -11,7 +11,7 @@ from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 
 from .ScaledMMLinearKernel import (
     ScaledMMLinearKernel,
-    ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 
@@ -32,7 +32,7 @@ def flashinfer_w8a8_scaled_mm(
 
 class FlashInferScaledMMLinearKernel(ScaledMMLinearKernel):
     def __init__(
-        self, c: ScaledMMLinearLayerConfig, layer_mapping_function: Callable
+        self, c: Int8ScaledMMLinearLayerConfig, layer_mapping_function: Callable
     ) -> None:
         self.quant_fp8 = QuantFP8(
             static=c.is_static_input_scheme,
@@ -46,7 +46,7 @@ class FlashInferScaledMMLinearKernel(ScaledMMLinearKernel):
         return 100
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
         per_tensor_weight_scales = (
             c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR

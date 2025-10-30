@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     ScaledMMLinearKernel,
     ScaledMMLinearLayerConfig,
 )
+
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.torch import (
     ChannelWiseTorchScaledMMLinearKernel,
     PerTensorTorchScaledMMLinearKernel,

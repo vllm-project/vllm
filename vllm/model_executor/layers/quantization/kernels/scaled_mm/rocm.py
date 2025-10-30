@@ -13,7 +13,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 from .ScaledMMLinearKernel import (
     ScaledMMLinearKernel,
-    ScaledMMLinearLayerConfig,
+    FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 
@@ -90,7 +90,7 @@ if current_platform.is_rocm():
 
 class ROCmScaledMMLinearKernel(ScaledMMLinearKernel):
     def __init__(
-        self, c: ScaledMMLinearLayerConfig, layer_mapping_function: Callable
+        self, c: FP8ScaledMMLinearLayerConfig, layer_mapping_function: Callable
     ) -> None:
         self.quant_fp8 = QuantFP8(
             static=c.is_static_input_scheme,
@@ -104,7 +104,7 @@ class ROCmScaledMMLinearKernel(ScaledMMLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         # TODO: check if this causes an issue on non-ROCM platforms
         from vllm.platforms.rocm import on_mi3xx
 

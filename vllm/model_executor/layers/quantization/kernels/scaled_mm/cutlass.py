@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import ScaledMMLinearKernel, Int8ScaledMMLinearLayerConfig, FP8ScaledMMLinearLayerConfig
 
 
 def cutlass_w8a8_scaled_mm(
@@ -36,7 +36,7 @@ def cutlass_w8a8_scaled_mm(
 
 
 def process_weights_after_loading(
-    config: ScaledMMLinearLayerConfig,
+    config: Int8ScaledMMLinearLayerConfig,
     layer: torch.nn.Module,
     w_q_name: str,
     w_s_name: str,
@@ -98,9 +98,6 @@ def process_weights_after_loading(
                 layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
             )
 
-    else:
-        setattr(layer, i_s_name, None)
-        setattr(layer, i_zp_name, None)
 
     # azp_adj is the AZP adjustment term, used to account for weights.
     # It does not depend on scales or azp, so it is the same for
@@ -119,8 +116,6 @@ def process_weights_after_loading(
             azp_adj_name,
             torch.nn.Parameter(azp_adj, requires_grad=False),
         )
-    else:
-        setattr(layer, azp_adj_name, None)
 
 
 class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
@@ -129,7 +124,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "CutlassScaledMM requires running on CUDA."
 
@@ -177,7 +172,7 @@ class CutlassScaledMMLinearKernel(ScaledMMLinearKernel):
 
 class CutlassFP8ScaledMMLinearKernel(ScaledMMLinearKernel):
     def __init__(
-        self, c: ScaledMMLinearLayerConfig, layer_mapping_function: Callable
+        self, c: FP8ScaledMMLinearLayerConfig, layer_mapping_function: Callable
     ) -> None:
         self.quant_fp8 = QuantFP8(
             static=c.is_static_input_scheme,
@@ -192,7 +187,7 @@ class CutlassFP8ScaledMMLinearKernel(ScaledMMLinearKernel):
         return 89
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return (
                 False,

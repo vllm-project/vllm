@@ -10,7 +10,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .cutlass import process_weights_after_loading
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import ScaledMMLinearKernel, Int8ScaledMMLinearLayerConfig
 
 
 def rocm_aiter_gemm_w8a8_impl(
@@ -58,7 +58,7 @@ class AiterScaledMMLinearKernel(ScaledMMLinearKernel):
         return 90
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
             return (
                 False,

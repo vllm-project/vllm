@@ -12,7 +12,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import ScaledMMLinearKernel, Int8ScaledMMLinearLayerConfig
 
 
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
@@ -24,7 +24,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         )
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_tpu():
             return False, "ScaledMMXLA requires running on TPU."
 

@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
     ScaledMMLinearKernel,
-    ScaledMMLinearLayerConfig,
+    FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 
@@ -136,7 +136,7 @@ def torch_channelwise_w8a8_scaled_mm(
 
 class TorchScaledMMLinearKernel(ScaledMMLinearKernel):
     def __init__(
-        self, c: ScaledMMLinearLayerConfig, layer_mapping_function: Callable
+        self, c: FP8ScaledMMLinearLayerConfig, layer_mapping_function: Callable
     ) -> None:
         vllm_config = get_current_vllm_config().compilation_config
         pad_output = vllm_config.mode < CompilationMode.VLLM_COMPILE
@@ -161,7 +161,7 @@ class TorchScaledMMLinearKernel(ScaledMMLinearKernel):
 
 class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         assert c.activation_group_shape is not None
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
         per_tensor_weight_scales = (
@@ -218,7 +218,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         return 94
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         assert c.activation_group_shape is not None
 
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
@@ -290,7 +290,7 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         return 94
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         assert c.activation_group_shape is not None
 
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()

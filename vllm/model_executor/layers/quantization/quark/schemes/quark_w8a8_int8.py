@@ -7,9 +7,9 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    ScaledMMLinearLayerConfig,
     choose_scaled_mm_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -50,7 +50,7 @@ class QuarkW8A8Int8(QuarkScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        scaled_mm_linear_kernel_config = ScaledMMLinearLayerConfig(
+        scaled_mm_linear_kernel_config = Int8ScaledMMLinearLayerConfig(
             is_channelwise=(self.qscheme == "per_channel"),
             is_static_input_scheme=(self.is_static_input_scheme is True),
             input_symmetric=(self.input_symmetric is True),

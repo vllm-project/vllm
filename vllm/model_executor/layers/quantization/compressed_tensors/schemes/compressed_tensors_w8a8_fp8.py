@@ -15,7 +15,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     choose_scaled_mm_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
-    ScaledMMLinearLayerConfig,
+    FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -91,10 +91,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             elif self.strategy == QuantizationStrategy.CHANNEL:
                 weight_quant_strategy = ScaledMMLinearQuantStrategy.CHANNEL
 
-            scaled_mm_linear_kernel_config = ScaledMMLinearLayerConfig(
-                is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
-                is_static_input_scheme=self.is_static_input_scheme,
-                input_symmetric=True,
+            scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
                 weight_quant_strategy=weight_quant_strategy,
                 activation_group_shape=self.act_q_group_shape,
                 out_dtype=self.out_dtype,
