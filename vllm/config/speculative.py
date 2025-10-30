@@ -126,9 +126,6 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
-    """Whether vLLM is configured to use chunked prefill or not. Used for
-    raising an error since it's not yet compatible with speculative decode."""
     disable_log_stats: SkipValidation[bool] = None  # type: ignore
     """Whether to disable the periodic printing of stage times in speculative
     decoding."""
