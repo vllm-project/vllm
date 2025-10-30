@@ -49,6 +49,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Message as OpenAIHarmonyMessage
 
+from vllm.config.pooler import get_use_activation
 from vllm.tasks import PoolingTask
 from vllm.utils.serial_utils import (
     EmbedDType,
@@ -1673,6 +1674,14 @@ EmbeddingRequest: TypeAlias = EmbeddingCompletionRequest | EmbeddingChatRequest
 
 class PoolingCompletionRequest(EmbeddingCompletionRequest):
     task: PoolingTask | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
     use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
@@ -1685,12 +1694,20 @@ class PoolingCompletionRequest(EmbeddingCompletionRequest):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
             normalize=self.normalize,
-            use_activation=self.use_activation,
+            use_activation=get_use_activation(self),
         )
 
 
 class PoolingChatRequest(EmbeddingChatRequest):
     task: PoolingTask | None = None
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
     use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
@@ -1703,7 +1720,7 @@ class PoolingChatRequest(EmbeddingChatRequest):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             dimensions=self.dimensions,
             normalize=self.normalize,
-            use_activation=self.use_activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -1785,6 +1802,16 @@ class ScoreRequest(OpenAIBaseModel):
         ),
     )
 
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
     use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
@@ -1795,7 +1822,7 @@ class ScoreRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=self.use_activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -1822,6 +1849,16 @@ class RerankRequest(OpenAIBaseModel):
         ),
     )
 
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
     use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
@@ -1832,7 +1869,7 @@ class RerankRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=self.use_activation,
+            use_activation=get_use_activation(self),
         )
 
 
@@ -2000,6 +2037,16 @@ class ClassificationRequest(OpenAIBaseModel):
         ),
     )
 
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
     use_activation: bool | None = Field(
         default=None,
         description="Whether to use activation for classification outputs. "
@@ -2010,7 +2057,7 @@ class ClassificationRequest(OpenAIBaseModel):
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=self.use_activation,
+            use_activation=get_use_activation(self),
         )
 
 
