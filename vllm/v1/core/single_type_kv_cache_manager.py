@@ -26,6 +26,8 @@ class SingleTypeKVCacheManager(ABC):
     logic of one specific type of attention layer.
     """
 
+    is_cross_attention_manager: bool = False
+
     def __init__(
         self,
         kv_cache_spec: KVCacheSpec,
@@ -636,6 +638,8 @@ class MambaManager(SingleTypeKVCacheManager):
 
 class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
+
+    is_cross_attention_manager: bool = True
 
     def save_new_computed_blocks(
         self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
