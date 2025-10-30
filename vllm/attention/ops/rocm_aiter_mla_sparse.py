@@ -39,9 +39,8 @@ def fp8_mqa_logits_torch(
     """
     kv, scale = kv
     seq_len_kv = kv.shape[0]
-    k = kv
-    q = q.float()
-    k = k.float() * scale
+    k = kv.to(torch.bfloat16)
+    q = q.to(torch.bfloat16)
 
     mask_lo = (
         torch.arange(0, seq_len_kv, device="cuda")[None, :] >= cu_seqlen_ks[:, None]
@@ -51,7 +50,7 @@ def fp8_mqa_logits_torch(
     )
     mask = mask_lo & mask_hi
 
-    score = torch.einsum("mhd,nd->hmn", q, k)
+    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
     logits = logits.masked_fill(~mask, float("-inf"))
 
@@ -83,13 +82,14 @@ def rocm_fp8_mqa_logits(
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
 
-    if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
-        from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
+    # TODO(ganyi): Uncomment this after aiter merge this kernel into main
+    # if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    #     from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
 
-        kv, scale = kv
-        return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
-    else:
-        return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+    #     kv, scale = kv
+    #     return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+    # else:
+    return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
@@ -101,7 +101,7 @@ def fp8_paged_mqa_logits_torch(
     block_tables: torch.Tensor,
     max_model_len: int,
 ):
-    from vllm.utils import cdiv
+    from vllm.utils.math_utils import cdiv
 
     fp8_dtype = current_platform.fp8_dtype()
     batch_size, next_n, _, dim = q.size()

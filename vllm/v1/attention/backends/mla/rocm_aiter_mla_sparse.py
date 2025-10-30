@@ -300,16 +300,6 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
 
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        # Note: the above triton kernel may triggers some strange unexpected
-        # crush on Mi300, although the code looks fine on memory access pattern,
-        # this ref torch  impl can help to alleviate this issue.
-        # topk_indices_global = ref_convert_to_global(
-        #     attn_metadata.req_id_per_token,
-        #     attn_metadata.block_table,
-        #     topk_indices,
-        #     attn_metadata.block_size,
-        # )
-
         topk_indices_global = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token,
             attn_metadata.block_table,
