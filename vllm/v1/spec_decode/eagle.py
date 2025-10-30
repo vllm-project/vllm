@@ -998,7 +998,7 @@ class EagleProposer:
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
 
-            if not self.model.model.has_own_embed_tokens:
+            if not self.model.has_own_embed_tokens:
                 logger.info(
                     "Draft model embed_tokens are uninitialized. "
                     "Sharing vocab embedding with the target model."
