@@ -390,10 +390,7 @@ class UBatchWrapper:
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
                 num_tokens = batch_descriptor.num_tokens
-                uniform_decode = (
-                    cudagraph_runtime_mode.decode_mode() == CUDAGraphMode.FULL
-                    and cudagraph_runtime_mode.separate_routine()
-                )
+                uniform_decode = batch_descriptor.uniform_decode
                 # Check if the model runner made a non-dbo cudagraph for this shape
                 cudagraph_exists = check_cudagraph_threshold(
                     self.vllm_config.parallel_config, num_tokens, uniform_decode
