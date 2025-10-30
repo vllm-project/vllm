@@ -170,10 +170,10 @@ class FlashInferBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms,
-        # but on Blackwell, only support a page size of
-        # 16, 32, 64
-        return [16, 32, 64]
+        # Note(Chen): FlashInfer backend supports other block_sizes. But as
+        # the backend doesn't know the block_size selected, we hardcode it as only
+        # supports 16 for now.
+        return [16]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -291,6 +291,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._workspace_buffer = None
         self._prefill_wrapper = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
+        block_size = 16  # Note(Chen): Hardcode the block_size as 16 temporarily.
 
         if vllm_is_batch_invariant():
             self.decode_fixed_split_size = 2048
@@ -302,9 +303,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
-        max_num_pages_per_req = cdiv(
-            self.model_config.max_model_len, self.kv_cache_spec.block_size
-        )
+        max_num_pages_per_req = cdiv(self.model_config.max_model_len, block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
@@ -333,7 +332,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
         FlashInferBackend.validate_head_size(self.head_dim)
-        self.page_size = self.kv_cache_spec.block_size
+        self.page_size = block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
         if self.cache_dtype.startswith("fp8"):
