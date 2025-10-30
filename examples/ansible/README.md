@@ -4,7 +4,7 @@ This example provides Ansible playbooks to automatically deploy vLLM on AWS EC2
 GPU instances. The setup creates a vLLM server running the Qwen/Qwen3-0.6B
 model accessible via OpenAI-compatible endpoints.
 
-DEMO VIDEO: [Deploy vLLM on AWS in under 10 Minutes!](https://www.youtube.com/w^atch?v=X00lavDEV9w)
+DEMO VIDEO: [Deploy vLLM on AWS in under 10 Minutes!](https://www.youtube.com/watch?v=X00lavDEV9w)
 
 ## Overview
 
@@ -24,14 +24,9 @@ pip install ansible
 NOTE: Ensure you are on Ansible 2.18 or greater.
 
 **Install Required Ansible Collections:**
+
 ```bash
-ansible-galaxy collection install amazon.aws:10.1.1
-```
-```bash
-ansible-galaxy collection install community.general
-```
-```bash
-ansible-galaxy collection install community.docker
+ansible-galaxy collection install amazon.aws:10.1.1 community.general:10.4.0 community.docker:4.4.0
 ```
 
 **NOTE:** The following versions tested amazon.aws 10.1.1, community.general 10.4.0 and community.docker 4.4
@@ -166,13 +161,21 @@ key_path: ~/.ssh/my-keypair.pem
 
 ### Step 2: Deploy vLLM
 
+Export your `HF_TOKEN`:
+
+```
+export HF_TOKEN="YOUR_HUGGING_FACE_TOKEN"
+```
+
 Run the main deployment playbook:
 
 ```bash
-ansible-playbook vllm-installer.yml -e "hf_token=YOUR_HUGGINGFACE_TOKEN"
+ansible-playbook vllm-installer.yml
 ```
 
-Replace `YOUR_HUGGINGFACE_TOKEN` with your Hugging Face access token.
+NOTE: You will need to verify and accept the host’s RSA key fingerprint on first connection.
+
+Replace `YOUR_HUGGING_FACE_TOKEN` with your Hugging Face access token.
 
 ### Step 3: Test the API
 Once deployment completes, test the vLLM API:

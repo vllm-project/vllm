@@ -58,6 +58,7 @@
     - community.general
     - community.docker
   vars:
+    hf_token: "{{ lookup('env', 'HF_TOKEN') }}"
     NVIDIA_CONTAINER_TOOLKIT_VERSION: "1.17.8-1"
   vars_files:
     - vars.yml
