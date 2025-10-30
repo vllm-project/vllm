@@ -16,8 +16,11 @@ from typing_extensions import runtime_checkable
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
+
+    from vllm.config import VllmConfig
 else:
     DataclassInstance = Any
+    VllmConfig = object
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)
@@ -158,11 +161,16 @@ class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
 
-def resolve_config_value(value: Any, config: Any) -> Any:
+def resolve_config_value(value: Any, config: "VllmConfig") -> Any:
     """Resolve a config value, evaluating callables if needed.
 
     This allows config defaults to be either static values or callables
-    that compute values based on the config state.
+    that compute values based on the VllmConfig state.
+
+    Args:
+        value: The value to resolve. Can be a static value or a callable
+            that takes a VllmConfig and returns the resolved value.
+        config: The VllmConfig instance to pass to callable values.
 
     Returns:
         The resolved value. If value is callable, returns value(config).
