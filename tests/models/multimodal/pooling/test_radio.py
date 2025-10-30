@@ -42,11 +42,14 @@ def run_radio_test(
 
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
+    # RADIO model on HF does not properly handle torch_dtype argument
+    # And relies on args["dtype"] which we have to patch manually:
+    config.args["dtype"] = torch_dtype
+
     hf_model = AutoModel.from_pretrained(
         model_id,
         config=config,
-        args=dict(dtype=torch_dtype),  # RADIO does not respect
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         trust_remote_code=True,
     ).to("cuda")
     hf_model.eval()
