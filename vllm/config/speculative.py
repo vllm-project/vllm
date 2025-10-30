@@ -78,10 +78,6 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
-    disable_logprobs: bool = True
-    """If set to True, token log probabilities are not returned during
-    speculative decoding. If set to False, token log probabilities are returned
-    according to the log probability settings in SamplingParams."""
 
     # Draft model configuration
     quantization: me_quant.QuantizationMethods | None = None
