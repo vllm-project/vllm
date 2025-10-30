@@ -103,7 +103,6 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 def maybe_get_vit_flash_attn_backend(
     attn_backend: _MHA_Backend,
-    use_upstream_fa: bool,
 ) -> tuple[_MHA_Backend, Callable | None]:
     # At this point,
     # we already have the attn_backend,
@@ -112,16 +111,12 @@ def maybe_get_vit_flash_attn_backend(
     # Just return the attn_backend and use_upstream_fa.
 
     if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_cuda_alike():
-        use_upstream_fa = True
+        from flash_attn import flash_attn_varlen_func
 
-    if attn_backend in {_MHA_Backend.FLASH_ATTN, _MHA_Backend.ROCM_AITER_FA}:
-        if attn_backend == _MHA_Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
-        else:
-            if use_upstream_fa:
-                from flash_attn import flash_attn_varlen_func
-            else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
+    elif attn_backend == _MHA_Backend.VLLM_FLASH_ATTN:
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+    elif attn_backend == _MHA_Backend.ROCM_AITER_FA:
+        from aiter import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
@@ -506,11 +501,6 @@ class MultiHeadAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        # Some auto-selected backends can be upgraded
-        # to upstream flash attention if available.
-        # If vllm native fa is selected, we use it directly.
-        use_upstream_fa = False
-
         if current_platform.is_xpu():
             # currently, only torch_sdpa is supported on xpu
             self.attn_backend = _MHA_Backend.TORCH_SDPA
@@ -531,7 +521,6 @@ class MultiHeadAttention(nn.Module):
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                use_upstream_fa,
             )
         )
 
@@ -544,17 +533,10 @@ class MultiHeadAttention(nn.Module):
         self.is_flash_attn_backend = self.attn_backend in {
             _MHA_Backend.FLASH_ATTN,
             _MHA_Backend.ROCM_AITER_FA,
+            _MHA_Backend.VLLM_FLASH_ATTN,
         }
 
-        # this condition is just to make sure that the
-        # use_upstream_fa in the log is correct
-        if current_platform.is_rocm() and self.attn_backend == _MHA_Backend.FLASH_ATTN:
-            use_upstream_fa = True
-
-        logger.info_once(
-            f"MultiHeadAttention attn_backend: {self.attn_backend}, "
-            f"use_upstream_fa: {use_upstream_fa}"
-        )
+        logger.info_once(f"MultiHeadAttention attn_backend: {self.attn_backend}, ")
 
     def forward(
         self,

@@ -366,12 +366,10 @@ class Qwen2VisionAttention(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        self.use_upstream_fa = False
 
         self.attn_backend, self.flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
-                self.use_upstream_fa,
             )
         )
 
@@ -385,6 +383,7 @@ class Qwen2VisionAttention(nn.Module):
         self.is_flash_attn_backend = self.attn_backend in {
             _MHA_Backend.FLASH_ATTN,
             _MHA_Backend.ROCM_AITER_FA,
+            _MHA_Backend.VLLM_FLASH_ATTN,
         }
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:

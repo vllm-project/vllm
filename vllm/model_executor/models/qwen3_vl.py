@@ -50,7 +50,6 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.attention.backends.registry import _MHA_Backend
-from vllm.attention.layer import check_upstream_fa_availability
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -199,7 +198,6 @@ class Qwen3_VisionBlock(nn.Module):
         prefix: str = "",
         use_data_parallel: bool = False,
         attn_backend: _MHA_Backend = _MHA_Backend.TORCH_SDPA,
-        use_upstream_fa: bool = False,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -214,7 +212,6 @@ class Qwen3_VisionBlock(nn.Module):
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -370,16 +367,9 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        use_upstream_fa = False
-        if (
-            self.attn_backend != _MHA_Backend.FLASH_ATTN
-            and self.attn_backend != _MHA_Backend.ROCM_AITER_FA
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            self.attn_backend = _MHA_Backend.FLASH_ATTN
-            use_upstream_fa = True
 
         if self.attn_backend not in {
+            _MHA_Backend.VLLM_FLASH_ATTN,
             _MHA_Backend.FLASH_ATTN,
             _MHA_Backend.TORCH_SDPA,
             _MHA_Backend.XFORMERS,
@@ -400,7 +390,6 @@ class Qwen3_VisionTransformer(nn.Module):
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
                     attn_backend=self.attn_backend,
-                    use_upstream_fa=use_upstream_fa,
                 )
                 for layer_idx in range(vision_config.depth)
             ]
