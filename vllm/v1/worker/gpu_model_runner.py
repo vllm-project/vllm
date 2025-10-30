@@ -4218,6 +4218,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         for supported_size in sorted(all_int_supported_sizes, reverse=True):
+            if kv_manager_block_size % supported_size != 0:
+                continue
             if block_size_is_supported(backends, supported_size):
                 return supported_size
         raise ValueError(f"No common block size for {kv_manager_block_size}. ")
@@ -4340,7 +4342,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # all backends in the group.
                 attn_groups = self.attn_groups[kv_cache_group_id]
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
-                print(f"kv_manager_block_size: {kv_manager_block_size}")
                 selected_kernel_size = self._select_common_block_size(
                     kv_manager_block_size, attn_groups
                 )
