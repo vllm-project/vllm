@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Annotated, Any, Optional
+from typing import Annotated, Any, Optional
 
 import msgspec
 
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.config.pooler import get_use_activation
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig, PoolerConfig
 
 
 class PoolingParams(
@@ -25,10 +24,12 @@ class PoolingParams(
             Set to -1 to use the model's default truncation size.
             Set to k to keep only the last k tokens (left truncation).
             Set to None to disable truncation.
-        normalize: Whether to normalize the embeddings outputs.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
-        activation: Whether to apply activation function to
+        normalize: Whether to normalize the embeddings outputs.
+        softmax: softmax will be deprecated, please use use_activation instead.
+        activation: activation will be deprecated, please use use_activation instead.
+        use_activation: Whether to apply activation function to
             the classification outputs.
     """
 
@@ -44,7 +45,9 @@ class PoolingParams(
 
     ## for classification, scoring and rerank
     # --8<-- [start:classification-pooling-params]
+    softmax: bool | None = None
     activation: bool | None = None
+    use_activation: bool | None = None
     # --8<-- [end:classification-pooling-params]
 
     ## for step pooling models
@@ -59,16 +62,16 @@ class PoolingParams(
 
     @property
     def all_parameters(self) -> list[str]:
-        return ["dimensions", "normalize", "activation"]
+        return ["dimensions", "normalize", "use_activation"]
 
     @property
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "normalize"],
-            "classify": ["activation"],
-            "score": ["activation"],
+            "classify": ["use_activation"],
+            "score": ["use_activation"],
             "token_embed": ["dimensions", "normalize"],
-            "token_classify": ["activation"],
+            "token_classify": ["use_activation"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -83,6 +86,9 @@ class PoolingParams(
         elif self.task != task:
             msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
             raise ValueError(msg)
+
+        # raise deprecated warning for softmax and activation
+        self.use_activation = get_use_activation(self)
 
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
@@ -168,8 +174,8 @@ class PoolingParams(
                     raise ValueError("Dimensions must be greater than 0")
 
         elif self.task in ["classify", "score", "token_classify"]:
-            if self.activation is None:
-                self.activation = True
+            if self.use_activation is None:
+                self.use_activation = True
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
@@ -197,7 +203,7 @@ class PoolingParams(
             f"task={self.task}, "
             f"normalize={self.normalize}, "
             f"dimensions={self.dimensions}, "
-            f"activation={self.activation}, "
+            f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "

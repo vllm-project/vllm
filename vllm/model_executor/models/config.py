@@ -53,8 +53,8 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         pooler_config = vllm_config.model_config.pooler_config
-        if pooler_config.activation is None:
-            pooler_config.activation = False
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
 
 
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):

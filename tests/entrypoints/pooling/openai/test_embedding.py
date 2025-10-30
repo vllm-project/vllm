@@ -562,12 +562,40 @@ async def test_normalize(server: RemoteOpenAIServer, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-async def test_pooling(server: RemoteOpenAIServer, model_name: str):
+async def test_pooling_embed(server: RemoteOpenAIServer, model_name: str):
+    task = "embed"
     input_text = ["The chef prepared a delicious meal."]
 
     response = requests.post(
         server.url_for("pooling"),
-        json={"model": model_name, "input": input_text, "encoding_format": "float"},
+        json={
+            "model": model_name,
+            "input": input_text,
+            "encoding_format": "float",
+            "task": task,
+        },
+    )
+
+    poolings = PoolingResponse.model_validate(response.json())
+
+    assert len(poolings.data) == 1
+    assert len(poolings.data[0].data) == 384
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_pooling_token_embed(server: RemoteOpenAIServer, model_name: str):
+    task = "token_embed"
+    input_text = ["The chef prepared a delicious meal."]
+
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": input_text,
+            "encoding_format": "float",
+            "task": task,
+        },
     )
 
     poolings = PoolingResponse.model_validate(response.json())
@@ -575,3 +603,24 @@ async def test_pooling(server: RemoteOpenAIServer, model_name: str):
     assert len(poolings.data) == 1
     assert len(poolings.data[0].data) == 11
     assert len(poolings.data[0].data[0]) == 384
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("task", ["classify", "token_classify", "plugin"])
+async def test_pooling_not_supported(
+    server: RemoteOpenAIServer, model_name: str, task: str
+):
+    response = requests.post(
+        server.url_for("pooling"),
+        json={
+            "model": model_name,
+            "input": "test",
+            "encoding_format": "float",
+            "task": task,
+        },
+    )
+    assert response.json()["error"]["type"] == "BadRequestError"
+    assert response.json()["error"]["message"].startswith(
+        f"Task {task} is not supported"
+    )
