@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
+
+from typing_extensions import deprecated
 
 from vllm._bc_linter import bc_linter_include
 
@@ -96,16 +99,16 @@ class NewRequestData:
 @dataclass
 class CachedRequestData:
     req_ids: list[str]
-    # If resumed_from_preemption is False, new_block_ids will be appended to
-    # the request's block IDs. If True, new_block_ids will be used as the
+    # For request ids not in resumed_req_ids, new_block_ids will be appended to
+    # the request's block IDs. For those in the set, new_block_ids will be used as the
     # request's block IDs instead of appending to the existing block IDs.
-    resumed_from_preemption: list[bool]
+    resumed_req_ids: set[str]
     # NOTE(woosuk): new_token_ids is only used for pipeline parallelism.
     # When PP is not used, new_token_ids will be empty.
     new_token_ids: list[list[int]]
-    # If resumed_from_preemption is True, propogate the token ids to the
-    # connector, otherwise will be empty.
-    resumed_req_token_ids: list[list[int] | None]
+    # For requests not scheduled in the last step, propagate the token ids to the
+    # connector. Won't contain requests that were scheduled in the prior step.
+    all_token_ids: dict[str, list[int]]
     new_block_ids: list[tuple[list[int], ...] | None]
     num_computed_tokens: list[int]
     num_output_tokens: list[int]
@@ -114,13 +117,26 @@ class CachedRequestData:
     def num_reqs(self) -> int:
         return len(self.req_ids)
 
+    @cached_property
+    @deprecated("use resumed_req_ids field")
+    def resumed_from_preemption(self) -> list[bool]:
+        return [req_id in self.resumed_req_ids for req_id in self.req_ids]
+
+    @cached_property
+    @deprecated("use all_token_ids field")
+    def resumed_req_token_ids(self) -> list[list[int] | None]:
+        return [
+            self.all_token_ids[req_id] if req_id in self.resumed_req_ids else None
+            for req_id in self.req_ids
+        ]
+
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
-            resumed_from_preemption=[],
+            resumed_req_ids=set(),
             new_token_ids=[],
-            resumed_req_token_ids=[],
+            all_token_ids={},
             new_block_ids=[],
             num_computed_tokens=[],
             num_output_tokens=[],

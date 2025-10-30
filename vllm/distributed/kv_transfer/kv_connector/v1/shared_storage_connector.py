@@ -336,7 +336,7 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
+            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
             if not resumed_from_preemption or req_id not in self._requests_need_load:
                 continue
 
