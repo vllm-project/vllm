@@ -22,7 +22,6 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
 
     On entry: waits for the KV layer from the connector.
     On exit: saves the KV layer to the connector.
-
     """
 
     @wraps(func)
