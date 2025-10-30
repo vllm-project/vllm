@@ -11,9 +11,9 @@ from pydantic.dataclasses import dataclass
 from vllm.config.utils import config
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import _MHA_Backend
 else:
-    _Backend = Any
+    _MHA_Backend = Any
 
 
 @dataclass
@@ -125,10 +125,10 @@ class MultiModalConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
-    mm_encoder_attn_backend: _Backend | None = None
+    mm_encoder_attn_backend: _MHA_Backend | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
-    `vllm.attention.backends.registry._Backend` (e.g. `FLASH_ATTN`)."""
+    `vllm.attention.backends.registry._MHA_Backend` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -167,9 +167,9 @@ class MultiModalConfig:
 
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
-    def _validate_mm_encoder_attn_backend(cls, value: object) -> _Backend | None:
+    def _validate_mm_encoder_attn_backend(cls, value: object) -> _MHA_Backend | None:
         from vllm.attention.backends.registry import (
-            _Backend as BackendEnum,
+            _MHA_Backend as BackendEnum,
         )
         from vllm.attention.backends.registry import (
             backend_name_to_enum,

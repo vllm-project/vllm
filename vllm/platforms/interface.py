@@ -7,7 +7,7 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, Optional
 
 import numpy as np
 import torch
@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import _Backend, _MHA_Backend
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
@@ -173,11 +173,45 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        # Import _Backend here to avoid circular import.
-        from vllm.attention.backends.registry import _Backend
+    def get_supported_vit_attn_backends(cls) -> list["_MHA_Backend"]:
+        from vllm.attention.backends.registry import _MHA_Backend
 
-        return _Backend.TORCH_SDPA
+        return [
+            _MHA_Backend.TORCH_SDPA,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        backend: Optional["_MHA_Backend"] = None,
+    ) -> "_MHA_Backend":
+        # ViT Attention should be checked and override
+        # in the platform-specific implementation.
+        # we should not override this in any other places,
+        # like the model_executor/models/<model_name>.py
+
+        # So the steps are:
+        # 1. Check if the backend is None or not:
+        #    a. If not, check if the backend is supported by the platform.
+        #    b. If None, continue to the default selection logic.
+
+        # Import _Backend here to avoid circular import.
+        from vllm.attention.backends.registry import _MHA_Backend
+
+        if backend is not None:
+            assert backend in [_MHA_Backend.TORCH_SDPA], (
+                f"Backend {backend} is not supported for vit attention"
+                f"Supported backends are: {_MHA_Backend.TORCH_SDPA}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
+
+        logger.info_once(
+            f"Using default backend {_MHA_Backend.TORCH_SDPA} for vit attention"
+        )
+        return _MHA_Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(

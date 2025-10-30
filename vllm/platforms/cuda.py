@@ -22,10 +22,11 @@ from vllm.utils.torch_utils import cuda_device_count_stateless
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import _Backend, _MHA_Backend
     from vllm.config import VllmConfig
 else:
     _Backend = None
+    _MHA_Backend = None
 
 logger = init_logger(__name__)
 
@@ -216,16 +217,51 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        from vllm.attention.backends.registry import _Backend
+    def get_supported_vit_attn_backends(cls) -> list["_MHA_Backend"]:
+        from vllm.attention.backends.registry import _MHA_Backend
+
+        return [
+            _MHA_Backend.TORCH_SDPA,
+            _MHA_Backend.XFORMERS,
+            _MHA_Backend.VLLM_FLASH_ATTN,
+            _MHA_Backend.FLASH_ATTN,
+        ]
+
+    @classmethod
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype, backend: "_MHA_Backend" | None = None
+    ) -> "_MHA_Backend":
+        # ViT Attention should be checked and override
+        # in the platform-specific implementation.
+        # we should not override this in any other places,
+        # like the model_executor/models/<model_name>.py
+
+        # So the steps are:
+        # 1. Check if the backend is None or not:
+        #    a. If not, check if the backend is supported by the platform.
+        #    b. If None, continue to the default selection logic.
+
+        from vllm.attention.backends.registry import _MHA_Backend
+
+        if backend is not None:
+            assert backend in cls.get_supported_vit_attn_backends(), (
+                f"Backend {backend} is not supported for vit attention. "
+                f"Supported backends are: {cls.get_supported_vit_attn_backends()}"
+            )
+            logger.info_once(f"Using backend {backend} for vit attention")
+            return backend
 
         # For Blackwell GPUs, force TORCH_SDPA for now.
         # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
         if cls.has_device_capability(100):
-            return _Backend.TORCH_SDPA
+            logger.info_once(
+                f"Using backend {_MHA_Backend.TORCH_SDPA} for vit attention"
+            )
+            return _MHA_Backend.TORCH_SDPA
 
         if dtype not in (torch.float16, torch.bfloat16):
-            return _Backend.XFORMERS
+            logger.info_once(f"Using backend {_MHA_Backend.XFORMERS} for vit attention")
+            return _MHA_Backend.XFORMERS
 
         if cls.has_device_capability(80):
             FLASH_ATTN_V1 = (
@@ -236,14 +272,29 @@ class CudaPlatformBase(Platform):
             is_default_fa_supported = is_attn_backend_supported(
                 FLASH_ATTN_V1, head_size, dtype, allow_import_error=False
             )
-            if is_default_fa_supported:
-                return _Backend.FLASH_ATTN
+            # lazy import to avoid circular import
+            from vllm.attention.layer import check_upstream_fa_availability
+
+            if is_default_fa_supported and check_upstream_fa_availability(dtype=dtype):
+                logger.info_once(
+                    f"Using backend {_MHA_Backend.FLASH_ATTN} for vit attention"
+                )
+                return _MHA_Backend.FLASH_ATTN
+            elif is_default_fa_supported:
+                logger.info_once(
+                    f"Using backend {_MHA_Backend.VLLM_FLASH_ATTN} for vit attention"
+                )
+                return _MHA_Backend.VLLM_FLASH_ATTN
             else:
                 # Fallback to XFORMERS
-                return _Backend.XFORMERS
+                logger.info_once(
+                    f"Using backend {_MHA_Backend.XFORMERS} for vit attention"
+                )
+                return _MHA_Backend.XFORMERS
         else:
             # Fallback for Volta/Turing GPUs or FA not supported
-            return _Backend.XFORMERS
+            logger.info_once(f"Using backend {_MHA_Backend.XFORMERS} for vit attention")
+            return _MHA_Backend.XFORMERS
 
     @classmethod
     def get_attn_backend_cls(

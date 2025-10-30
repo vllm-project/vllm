@@ -10,7 +10,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import _MHA_Backend
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -82,22 +82,15 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     *,
-    attn_backend_override: _Backend | None = None,
-) -> _Backend:
+    attn_backend_override: _MHA_Backend | None = None,
+) -> _MHA_Backend:
     """
     Get the available attention backend for Vision Transformer.
     """
-    if attn_backend_override is not None:
-        return attn_backend_override
 
-    # Lazy import to avoid circular dependency
-    from vllm.attention.selector import get_env_variable_attn_backend
-
-    selected_backend: _Backend | None = get_env_variable_attn_backend()
-    if selected_backend is not None:
-        return selected_backend
-
-    return current_platform.get_vit_attn_backend(head_size, dtype)
+    return current_platform.get_vit_attn_backend(
+        head_size, dtype, backend=attn_backend_override
+    )
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]

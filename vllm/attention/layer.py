@@ -12,7 +12,10 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.backends.registry import (
+    _MHA_Backend,
+    backend_name_to_enum,
+)
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -99,35 +102,20 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _Backend,
+    attn_backend: _MHA_Backend,
     use_upstream_fa: bool,
-    attn_backend_override: _Backend | None = None,
-) -> tuple[_Backend, Callable | None]:
-    if current_platform.is_rocm():
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            attn_backend = _Backend.ROCM_AITER_FA
+) -> tuple[_MHA_Backend, Callable | None]:
+    # At this point,
+    # we already have the attn_backend,
+    # overriding logic is done in the platform-specific implementation.
+    # so we don't need to override backend here.
+    # Just return the attn_backend and use_upstream_fa.
 
-        elif (
-            check_upstream_fa_availability(torch.get_default_dtype())
-            and on_gfx9()
-            and attn_backend_override is None
-        ):
-            attn_backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
-        else:
-            return _Backend.TORCH_SDPA, None
+    if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_cuda_alike():
+        use_upstream_fa = True
 
-    elif current_platform.is_cuda():
-        if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
-        ):
-            attn_backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
-    else:
-        return _Backend.TORCH_SDPA, None
-
-    if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
-        if attn_backend == _Backend.ROCM_AITER_FA:
+    if attn_backend in {_MHA_Backend.FLASH_ATTN, _MHA_Backend.ROCM_AITER_FA}:
+        if attn_backend == _MHA_Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
             if use_upstream_fa:
@@ -137,6 +125,8 @@ def maybe_get_vit_flash_attn_backend(
     else:
         flash_attn_varlen_func = None
 
+    # if attn_backend is TORCH_SDPA,
+    # it will reach here and the flash_attn_varlen_func will be None.
     return attn_backend, flash_attn_varlen_func
 
 
@@ -523,40 +513,42 @@ class MultiHeadAttention(nn.Module):
 
         if current_platform.is_xpu():
             # currently, only torch_sdpa is supported on xpu
-            self.attn_backend = _Backend.TORCH_SDPA
+            self.attn_backend = _MHA_Backend.TORCH_SDPA
         else:
             self.attn_backend = (
                 backend
                 if backend
                 in {
-                    _Backend.TORCH_SDPA,
-                    _Backend.XFORMERS,
-                    _Backend.PALLAS,
-                    _Backend.ROCM_AITER_FA,
-                    _Backend.FLASH_ATTN,
+                    _MHA_Backend.TORCH_SDPA,
+                    _MHA_Backend.XFORMERS,
+                    _MHA_Backend.PALLAS,
+                    _MHA_Backend.ROCM_AITER_FA,
+                    _MHA_Backend.FLASH_ATTN,
                 }
-                else _Backend.TORCH_SDPA
+                else _MHA_Backend.TORCH_SDPA
             )
 
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 use_upstream_fa,
-                attn_backend_override=attn_backend_override,
             )
         )
 
-        if self.attn_backend == _Backend.XFORMERS and not check_xformers_availability():
-            self.attn_backend = _Backend.TORCH_SDPA
+        if (
+            self.attn_backend == _MHA_Backend.XFORMERS
+            and not check_xformers_availability()
+        ):
+            self.attn_backend = _MHA_Backend.TORCH_SDPA
 
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            _MHA_Backend.FLASH_ATTN,
+            _MHA_Backend.ROCM_AITER_FA,
         }
 
         # this condition is just to make sure that the
         # use_upstream_fa in the log is correct
-        if current_platform.is_rocm() and self.attn_backend == _Backend.FLASH_ATTN:
+        if current_platform.is_rocm() and self.attn_backend == _MHA_Backend.FLASH_ATTN:
             use_upstream_fa = True
 
         logger.info_once(
@@ -605,17 +597,17 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
             )
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == _MHA_Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(
                 query, key, value, scale=self.scale
             )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == _MHA_Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS:
+        elif self.attn_backend == _MHA_Backend.PALLAS:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
 

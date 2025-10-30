@@ -30,6 +30,15 @@ class _Backend(enum.Enum):
     ROCM_AITER_UNIFIED_ATTN = enum.auto()
 
 
+class _MHA_Backend(enum.Enum):
+    VLLM_FLASH_ATTN = enum.auto()  # CUDA-only
+    FLASH_ATTN = enum.auto()  # CUDA/ROCm
+    XFORMERS = enum.auto()  # CUDA
+    ROCM_AITER_FA = enum.auto()  # ROCM-only
+    TORCH_SDPA = enum.auto()  # CUDA/ROCm/TPU/XPU/CPU
+    PALLAS = enum.auto()
+
+
 BACKEND_MAP = {
     _Backend.FLASH_ATTN: "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
     _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
