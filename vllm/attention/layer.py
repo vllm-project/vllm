@@ -514,6 +514,7 @@ class MultiHeadAttention(nn.Module):
                     _MHA_Backend.PALLAS,
                     _MHA_Backend.ROCM_AITER_FA,
                     _MHA_Backend.FLASH_ATTN,
+                    _MHA_Backend.VLLM_FLASH_ATTN,
                 }
                 else _MHA_Backend.TORCH_SDPA
             )

@@ -21,6 +21,8 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
 from vllm import LLM, SamplingParams
+from vllm.attention.backends.registry import _MHA_Backend
+from vllm.platforms import current_platform
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, FullAttentionSpec
 
@@ -598,6 +600,9 @@ def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
 )
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("tp,ep", [(2, True)])
+@pytest.mark.parametrize(
+    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+)
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_dummy_maverick(
     monkeypatch,
@@ -608,6 +613,7 @@ def test_dummy_maverick(
     enforce_eager: bool,
     tp: int,
     ep: bool,
+    mm_encoder_attn_backend: _MHA_Backend,
     output_dir: str = "/tmp/reduced_maverick",
     force_recreate: bool = True,
     profile: bool = False,
@@ -636,6 +642,7 @@ def test_dummy_maverick(
         enforce_eager=enforce_eager,
         tensor_parallel_size=tp,
         enable_expert_parallel=ep,
+        mm_encoder_attn_backend=mm_encoder_attn_backend,
     )
 
     check_attention_spec_interleaved_rope(
