@@ -281,14 +281,13 @@ class OuroDecoderLayer(nn.Module):
         hidden_states = self.self_attn(
             positions=positions, hidden_states=hidden_states, current_ut=current_ut
         )
-        hidden_states = self.input_layernorm_2(hidden_states)
+        hidden_states, residual = self.input_layernorm_2(hidden_states, residual)
 
-        hidden_states = residual + hidden_states
-        residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = self.post_attention_layernorm_2(hidden_states)
-        hidden_states = residual + hidden_states
+        hidden_states, residual = self.post_attention_layernorm_2(
+            hidden_states, residual
+        )
 
         return hidden_states, None
 
