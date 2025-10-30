@@ -19,7 +19,7 @@ The available APIs depend on the model type:
 - [Pooling models](../models/pooling_models.md) output their hidden states directly.
 
 !!! info
-    [API Reference][offline-inference-api]
+    [API Reference](../api/README.md#offline-inference)
 
 ## Ray Data LLM API
 
