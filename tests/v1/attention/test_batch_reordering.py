@@ -53,7 +53,7 @@ REORDER_TEST_CASES = {
         expected_modified=True,
     ),
     "already_ordered": ReorderTestCase(
-        requests=[(1, 10), (1, 20), (100, 100), (200, 200)],
+        requests=[(1, 10), (1, 20), (100, 100), (200, 0)],
         expected_order=[0, 1, 2, 3],
         expected_modified=False,
     ),
@@ -74,13 +74,28 @@ REORDER_TEST_CASES = {
         expected_modified=True,
     ),
     "decode_extend_prefill": ReorderTestCase(
-        requests=[(100, 100), (10, 50), (1, 10)],
+        requests=[(100, 0), (10, 50), (1, 10)],
         expected_order=[2, 1, 0],
         expected_modified=True,
     ),
     "extend_prefill_only": ReorderTestCase(
-        requests=[(100, 100), (10, 50), (200, 200), (20, 75)],
+        requests=[(100, 0), (10, 50), (200, 0), (20, 75)],
         expected_order=[3, 1, 2, 0],  # Only swap 0↔3, keep 1 and 2 in place
+        expected_modified=True,
+    ),
+    "complicated_mixed_interleaved": ReorderTestCase(
+        requests=[
+            (1, 20),
+            (1, 50),
+            (374, 0),
+            (300, 20),
+            (1, 20),
+            (256, 0),
+            (1, 5),
+            (27, 0),
+            (1, 4),
+        ],
+        expected_order=[0, 1, 6, 8, 4, 3, 2, 7, 5],
         expected_modified=True,
     ),
 }
