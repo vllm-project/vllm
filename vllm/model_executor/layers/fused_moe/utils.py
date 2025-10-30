@@ -6,9 +6,8 @@ from math import prod
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8,
-)
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
     per_token_quant_int8,
@@ -23,6 +22,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
 from vllm.triton_utils import tl, triton
+from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
@@ -132,19 +132,21 @@ def _fp8_quantize(
     is provided, the output will be blocked.
     """
     if block_shape is None:
-        # TODO(luka): use QuantFP8 custom op
-        #  https://github.com/vllm-project/vllm/issues/20711
-        A, A_scale = ops.scaled_fp8_quant(
-            A, A_scale, use_per_token_if_dynamic=per_act_token
-        )
+        group_shape = GroupShape.PER_TOKEN if per_act_token else GroupShape.PER_TENSOR
+        quant_op = QuantFP8(static=A_scale is not None, group_shape=group_shape)
+        return quant_op(A, A_scale)
+
     else:
         assert not per_act_token
         assert len(block_shape) == 2
-        _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
-        assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
-
-    return A, A_scale
+        block_k = block_shape[1]
+        quant_op = QuantFP8(
+            static=False,
+            group_shape=GroupShape(1, block_k),
+            column_major_scales=False,
+            use_ue8m0=is_deep_gemm_e8m0_used(),
+        )
+        return quant_op(A)
 
 
 def _int8_quantize(

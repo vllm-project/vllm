@@ -46,9 +46,11 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
     moe_kernel_quantize_input,
 )
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_Scheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1972,6 +1974,46 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(quant_config)
+        self._init_mid_activation_quantizers()
+
+    def _init_mid_activation_quantizers(self) -> None:
+        self.qfp8_mid_group: QuantFP8 | None = None
+        self.qfp8_mid_dynamic: QuantFP8 | None = None
+        self.qfp8_mid_static: QuantFP8 | None = None
+
+        if self.block_shape:
+            block_k = self.block_shape[1]
+            self.qfp8_mid_group = QuantFP8(
+                static=False,
+                group_shape=GroupShape(1, block_k),
+                column_major_scales=False,
+                use_ue8m0=is_deep_gemm_e8m0_used(),
+            )
+            return
+
+        group_shape = (
+            GroupShape.PER_TOKEN if self.per_act_token_quant else GroupShape.PER_TENSOR
+        )
+        self.qfp8_mid_dynamic = QuantFP8(static=False, group_shape=group_shape)
+
+        if not self.per_act_token_quant:
+            self.qfp8_mid_static = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+
+    def quantize_mid(
+        self, x: torch.Tensor, a_scale: torch.Tensor | None
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.qfp8_mid_group is not None:
+            assert a_scale is None, "Grouped FP8 activations are always dynamic."
+            return self.qfp8_mid_group(x)
+
+        assert self.qfp8_mid_dynamic is not None
+        if a_scale is None:
+            return self.qfp8_mid_dynamic(x, None)
+
+        assert self.qfp8_mid_static is not None, (
+            "Static FP8 activations require per-tensor scales."
+        )
+        return self.qfp8_mid_static(x, a_scale)
 
     @property
     def activation_formats(
@@ -2109,14 +2151,8 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             activation, intermediate_cache2, intermediate_cache1.view(-1, N)
         )
 
-        a2q_scale: torch.Tensor | None = None
-
-        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-            intermediate_cache2,
-            a2_scale,
-            self.quant_dtype,
-            self.per_act_token_quant,
-            self.block_shape,
+        qintermediate_cache2, a2q_scale = self.quantize_mid(
+            intermediate_cache2, a2_scale
         )
 
         invoke_fused_moe_kernel(
