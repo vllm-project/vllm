@@ -2,21 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from collections.abc import Callable
-
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig, FP8ScaledMMLinearLayerConfig, FP8ScaledMMLinearKernel, Int8ScaledMMLinearKernel
+from .ScaledMMLinearKernel import (
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
+    Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
+)
 from .utils import apply_weights_fp8
+
 
 def cutlass_w8a8_scaled_mm_fp8(
     *,
@@ -34,6 +36,7 @@ def cutlass_w8a8_scaled_mm_fp8(
     )
     return output.view(*output_shape)
 
+
 class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
     def get_min_capability(cls) -> int:
@@ -47,9 +50,7 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = (
-            self.layer_param_names
-        )
+        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
         config = self.config
         # WEIGHT
         # Cutlass kernels need transposed weight.
@@ -105,7 +106,6 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                     layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
                 )
 
-
         # azp_adj is the AZP adjustment term, used to account for weights.
         # It does not depend on scales or azp, so it is the same for
         # static and dynamic quantization.
@@ -123,7 +123,6 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 azp_adj_name,
                 torch.nn.Parameter(azp_adj, requires_grad=False),
             )
-
 
     def apply_weights(
         self,
@@ -161,7 +160,6 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-
     def get_ouput_padding(self) -> int | None:
         return None
 
@@ -191,5 +189,5 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
-            self.config.out_dtype
+            self.config.out_dtype,
         )

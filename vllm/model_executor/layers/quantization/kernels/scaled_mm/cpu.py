@@ -14,7 +14,10 @@ from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-from .ScaledMMLinearKernel import Int8ScaledMMLinearKernel, Int8ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import (
+    Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
+)
 
 
 class CPUScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -49,9 +52,7 @@ class CPUScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def process_weights_for_onednn(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # Transpose to [K, N] for convenience
-        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = (
-            self.layer_param_names
-        )
+        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
         weight = getattr(layer, w_q_name)
         replace_parameter(
             layer,

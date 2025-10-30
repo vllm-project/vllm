@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
+    FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 from .utils import apply_weights_fp8
@@ -32,7 +29,6 @@ def flashinfer_w8a8_scaled_mm(
 
 
 class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-
     def get_ouput_padding(self) -> int | None:
         return None
 
@@ -41,7 +37,7 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return 100
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
         per_tensor_weight_scales = (
             c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR
@@ -90,5 +86,5 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
-            self.config.out_dtype
+            self.config.out_dtype,
         )

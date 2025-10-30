@@ -7,10 +7,18 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    _POSSIBLE_FP8_KERNELS,
+    choose_scaled_mm_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearLayerConfig,
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
@@ -23,8 +31,17 @@ from vllm.platforms import current_platform
 
 __all__ = ["QuarkW8A8Fp8"]
 
+logger = init_logger(__name__)
+
+QUANT_STRATEGY_MAP = {
+    "per_tensor": ScaledMMLinearQuantStrategy.TENSOR,
+    "per_channel": ScaledMMLinearQuantStrategy.CHANNEL,
+}
+
 
 class QuarkW8A8Fp8(QuarkScheme):
+    _kernel_backends_being_used: set[str] = set()
+
     def __init__(
         self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
     ):
@@ -40,10 +57,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         )
         self.act_quant_group_shape = (
             GroupShape.PER_TOKEN if per_token else GroupShape.PER_TENSOR
-        )
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.is_static_input_scheme,
-            act_quant_group_shape=self.act_quant_group_shape,
         )
         self.out_dtype = torch.get_default_dtype()
 
@@ -163,17 +176,32 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
+        layer_param_names = ["weight", "weight_scale", "input_scale"]
+        weight_quant_strategy = QUANT_STRATEGY_MAP[self.weight_qscheme]
+        scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+            is_static_input_scheme=self.is_static_input_scheme,
+            weight_quant_strategy=weight_quant_strategy,
+            activation_group_shape=self.act_quant_group_shape,
+            out_dtype=self.out_dtype,
+        )
+        kernel_type = choose_scaled_mm_linear_kernel(
+            scaled_mm_linear_kernel_config,
+            _POSSIBLE_FP8_KERNELS,
+        )
+
+        if kernel_type.__name__ not in self._kernel_backends_being_used:
+            logger.info("Using %s for QuarkW8A8FP8", kernel_type.__name__)
+            self._kernel_backends_being_used.add(kernel_type.__name__)
+
+        layer_param_names = ["weight", "weight_scale", "input_scale"]
+        self.kernel = kernel_type(
+            c=scaled_mm_linear_kernel_config, layer_param_names=layer_param_names
+        )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.kernel.apply_weights(layer, x, bias)

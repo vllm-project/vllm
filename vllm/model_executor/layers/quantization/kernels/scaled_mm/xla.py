@@ -12,7 +12,10 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import Int8ScaledMMLinearKernel, Int8ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import (
+    Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
+)
 
 
 class XLAScaledMMLinearKernel(Int8ScaledMMLinearKernel):
@@ -42,9 +45,7 @@ class XLAScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
-        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = (
-            self.layer_param_names
-        )
+        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
         weight = getattr(layer, w_q_name)
         replace_parameter(
             layer, w_q_name, torch.nn.Parameter(weight.data, requires_grad=False)

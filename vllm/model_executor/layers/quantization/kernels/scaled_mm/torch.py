@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 
 import torch
 from packaging import version
 
 from vllm.config import CompilationMode, get_current_vllm_config
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 
 from .ScaledMMLinearKernel import (
@@ -15,8 +12,8 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
-
 from .utils import apply_weights_fp8
+
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
 TORCH_DEVICE_IDENTITY = None
@@ -142,6 +139,7 @@ class TorchScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_padding = 17 if pad_output else None
         return output_padding
 
+
 class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
@@ -173,8 +171,9 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
-            self.config.out_dtype
+            self.config.out_dtype,
         )
+
 
 class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
@@ -199,7 +198,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             return (
                 False,
                 "RowWiseTorchScaledMMLinearKernel is only supported "
-                + "in ROCm platforms.",
+                + "on ROCm platforms.",
             )
 
         if not version.parse(torch.__version__) >= version.parse("2.7"):
@@ -225,7 +224,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
-            self.config.out_dtype
+            self.config.out_dtype,
         )
 
 
@@ -265,5 +264,5 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
-            self.config.out_dtype
+            self.config.out_dtype,
         )

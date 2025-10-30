@@ -6,8 +6,8 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 from torch.nn import Parameter
-from vllm.logger import init_logger
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -15,10 +15,9 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     _POSSIBLE_FP8_KERNELS,
     choose_scaled_mm_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (
-    FP8ScaledMMLinearLayerConfig,
-    ScaledMMLinearQuantStrategy,
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
     QUANT_STRATEGY_MAP,
+    FP8ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -52,6 +51,7 @@ strategy_to_parameter_type = {
 }
 
 logger = init_logger(__name__)
+
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     _kernel_backends_being_used: set[str] = set()
@@ -92,17 +92,20 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 activation_group_shape=self.act_q_group_shape,
                 out_dtype=self.out_dtype,
             )
-            kernel = choose_scaled_mm_linear_kernel(
+            kernel_type = choose_scaled_mm_linear_kernel(
                 scaled_mm_linear_kernel_config,
                 _POSSIBLE_FP8_KERNELS,
             )
-            self.fp8_linear = kernel(
-                scaled_mm_linear_kernel_config, layer_param_names = layer_param_names
-            )
 
-            if kernel.__name__ not in self._kernel_backends_being_used:
-                logger.info("Using %s for CompressedTensorsW8A8FP8", kernel.__name__)
-                self._kernel_backends_being_used.add(kernel.__name__)
+            if kernel_type.__name__ not in self._kernel_backends_being_used:
+                logger.info(
+                    "Using %s for CompressedTensorsW8A8FP8", kernel_type.__name__
+                )
+                self._kernel_backends_being_used.add(kernel_type.__name__)
+
+            self.kernel = kernel_type(
+                scaled_mm_linear_kernel_config, layer_param_names=layer_param_names
+            )
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -217,4 +220,4 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply_weights(layer, x, bias)
+        return self.kernel.apply_weights(layer, x, bias)

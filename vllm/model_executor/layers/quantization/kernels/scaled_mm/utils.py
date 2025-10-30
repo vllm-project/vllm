@@ -1,20 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
-import torch 
+
+import torch
+
 from vllm.platforms import current_platform
 
 FP8ScaledMMCallBack = Callable[..., torch.Tensor]
 FP8QuantCallback = Callable[..., tuple[torch.Tensor, torch.Tensor]]
 
+
 def apply_weights_fp8(
-  scaled_mm_func: FP8ScaledMMCallBack,
-  quant_fp8_func: FP8QuantCallback,
-  w:torch.Tensor,
-  x:torch.Tensor,
-  w_s:torch.Tensor,
-  x_s:torch.Tensor,
-  bias:torch.Tensor,
-  maybe_out_dtype: torch.dtype | None,
- ) -> torch.Tensor:
+    scaled_mm_func: FP8ScaledMMCallBack,
+    quant_fp8_func: FP8QuantCallback,
+    w: torch.Tensor,
+    x: torch.Tensor,
+    w_s: torch.Tensor,
+    x_s: torch.Tensor,
+    bias: torch.Tensor,
+    maybe_out_dtype: torch.dtype | None,
+) -> torch.Tensor:
     #   ops.scaled_fp8_quant supports both dynamic and static quant.
     #   If dynamic, layer.input_scale is None and x_s computed from x.
     #   If static, layer.input_scale is scalar and x_s is input_scale.

@@ -1,13 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable
 
 import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -17,6 +14,7 @@ from .ScaledMMLinearKernel import (
     ScaledMMLinearQuantStrategy,
 )
 from .utils import apply_weights_fp8
+
 
 def rocm_per_tensor_float_w8a8_scaled_mm_impl(
     A: torch.Tensor,
@@ -40,7 +38,7 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
             current_platform.get_cu_count(),
             bias,
         )
-    # Fallabck
+    # Fallback
     else:
         output = torch._scaled_mm(
             A,
@@ -143,5 +141,5 @@ class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
-            self.config.out_dtype
+            self.config.out_dtype,
         )
