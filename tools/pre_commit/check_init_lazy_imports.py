@@ -6,13 +6,12 @@ i.e: appears only within the `if typing.TYPE_CHECKING:` guard,
 """
 
 import ast
-import pathlib
 import sys
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Final
 
-REPO_ROOT: Final = pathlib.Path(__file__).resolve().parent.parent
-INIT_PATH: Final = REPO_ROOT / "vllm" / "__init__.py"
+INIT_PATH: Final = Path("vllm/__init__.py")
 
 # If you need to add items to whitelist, do it here.
 ALLOWED_IMPORTS: Final[frozenset[str]] = frozenset(

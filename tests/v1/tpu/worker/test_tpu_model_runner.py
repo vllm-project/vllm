@@ -212,10 +212,12 @@ def test_update_states_request_resumed(model_runner):
     # resume req
     cached_req_data = CachedRequestData(
         req_ids=[req_id],
-        resumed_from_preemption=[False],
+        resumed_req_ids={req_id},
         new_token_ids=[[]],
+        all_token_ids={req_id: scheduler_output.scheduled_new_reqs[0].prompt_token_ids},
         new_block_ids=[([],)],
         num_computed_tokens=[0],
+        num_output_tokens=[0],
     )
 
     scheduler_output = SchedulerOutput(

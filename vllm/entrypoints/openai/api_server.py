@@ -40,7 +40,7 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import Device, EngineClient
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -107,8 +107,8 @@ from vllm.entrypoints.utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
@@ -241,6 +241,7 @@ async def build_async_engine_client_from_engine_args(
         )
 
         # Don't keep the dummy data in memory
+        assert async_llm is not None
         await async_llm.reset_mm_cache()
 
         yield async_llm
@@ -1749,12 +1750,7 @@ async def init_app_state(
                 log_error_stack=args.log_error_stack,
             )
         )
-        if (
-            any(
-                task in supported_tasks
-                for task in ["token_embed", "token_classify", "plugin"]
-            )
-        )
+        if any(task in POOLING_TASKS for task in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (

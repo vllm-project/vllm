@@ -361,13 +361,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     && uv pip install --system dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
 
-# TODO (huydhn): Remove this once xformers is released for 2.9.0
-RUN --mount=type=cache,target=/root/.cache/uv bash - <<'BASH'
-    . /etc/environment
-    export TORCH_CUDA_ARCH_LIST='7.5 8.0+PTX 9.0a'
-    uv pip install --system --no-build-isolation "git+https://github.com/facebookresearch/xformers@v0.0.32.post2"
-BASH
-
 # Install FlashInfer pre-compiled kernel cache and binaries
 # https://docs.flashinfer.ai/installation.html
 RUN --mount=type=cache,target=/root/.cache/uv \
@@ -495,7 +488,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="0.46.1"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.14.0'
+    uv pip install --system accelerate hf_transfer modelscope "bitsandbytes>=${BITSANDBYTES_VERSION}" 'timm>=1.0.17' 'runai-model-streamer[s3,gcs]>=0.15.0'
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 
