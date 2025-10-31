@@ -176,7 +176,7 @@ def test_splitting_ops_dynamic():
     # partition rules
     assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
 
-    # When attn_fusion pass enabled, splitting_ops now default to attention ops.
+    # When attn_fusion pass enabled.
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -185,10 +185,9 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
     )
-    # With the new simplified logic, attention fusion works with splitting_ops
-    assert config.compilation_config.splitting_ops_contain_attention()
-    # cudagraph mode remains PIECEWISE
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    assert config.compilation_config.splitting_ops == []
+    # cudagraph mode also fall back to FULL
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
     config = VllmConfig(
