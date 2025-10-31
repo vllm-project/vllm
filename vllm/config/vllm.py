@@ -513,12 +513,10 @@ class VllmConfig:
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning("Enforce eager set, overriding optimization level to -O0")
             self.optimization_level = OptimizationLevel.O0
-        print("outside")
         if (
             self.compilation_config.mode is not None
             and self.compilation_config.mode < CompilationMode.VLLM_COMPILE
         ):
-            print("inside")
             logger.warning_once(
                 "Compilation Mode is not VLLM_COMPILE, so optimization will be"
                 "set to level 0. This may result in reduced performance."

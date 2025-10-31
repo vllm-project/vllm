@@ -863,6 +863,3 @@ def test_vllm_config_explicit_overrides():
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
-
-
-test_vllm_config_explicit_overrides()
