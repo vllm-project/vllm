@@ -13,7 +13,7 @@ from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
 
-CPU_BLOCK_SIZES = [16, 48]
+CPU_BLOCK_SIZES = [32, 48]
 
 
 class MockSubscriber:
