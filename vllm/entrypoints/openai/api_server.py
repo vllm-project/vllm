@@ -635,7 +635,14 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         )
 
     if isinstance(generator, ErrorResponse):
-        return JSONResponse(content=generator.model_dump())
+        anthropic_error = AnthropicErrorResponse(
+            error=AnthropicError(
+                type=generator.error.type,
+                message=generator.error.message,
+            )
+        )
+        return JSONResponse(status_code=generator.error.code,
+                            content=anthropic_error.model_dump())
 
     elif isinstance(generator, AnthropicMessagesResponse):
         logger.debug(
