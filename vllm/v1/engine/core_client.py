@@ -26,7 +26,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.utils import run_method
+from vllm.v1.serial_utils import run_method
 from vllm.utils.async_utils import in_loop
 from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
