@@ -192,7 +192,7 @@ class Mxfp4Config(QuantizationConfig):
             raise NotImplementedError("Mxfp4 linear layer is not implemented")
         elif isinstance(layer, FusedMoE):
             if current_platform.is_xpu():
-                return IpexFp4MoeMethod(layer.moe_config)
+                return IpexMxfp4MoEMethod(layer.moe_config)
             else:
                 return Mxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
@@ -1157,7 +1157,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
 
-class IpexFp4MoeMethod(Mxfp4MoEMethod):
+class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
     def __init__(self, moe_config: FusedMoEConfig):
         super().__init__(moe_config)
         self.moe_config = moe_config
@@ -1221,6 +1221,9 @@ class IpexFp4MoeMethod(Mxfp4MoEMethod):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert activation == "swigluoai", (
+            "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
+        )  # noqa:
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
         hidden_states = layer.ipex_fusion(
