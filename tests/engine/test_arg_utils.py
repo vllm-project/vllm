@@ -8,7 +8,6 @@ from dataclasses import dataclass, field
 from typing import Annotated, Literal
 
 import pytest
-from pydantic import Field
 
 from vllm.config import CompilationConfig, config
 from vllm.engine.arg_utils import (
@@ -116,9 +115,9 @@ class NestedConfig:
 class DummyConfig:
     regular_bool: bool = True
     """Regular bool with default True"""
-    optional_bool: bool = Field(default=None)
+    optional_bool: bool | None = None
     """Optional bool with default None"""
-    optional_literal: Literal["x", "y"] = Field(default=None)
+    optional_literal: Literal["x", "y"] | None = None
     """Optional literal with default None"""
     tuple_n: tuple[int, ...] = field(default_factory=lambda: (1, 2, 3))
     """Tuple with variable length"""
@@ -173,7 +172,7 @@ def test_get_kwargs():
     assert kwargs["regular_bool"].get("type") is None
     assert kwargs["optional_bool"].get("type") is None
     # optional literals should have None as a choice
-    assert kwargs["optional_literal"]["choices"] == ["x", "y"]
+    assert kwargs["optional_literal"]["choices"] == ["x", "y", "None"]
     # tuples should have the correct nargs
     assert kwargs["tuple_n"]["nargs"] == "+"
     assert kwargs["tuple_2"]["nargs"] == 2

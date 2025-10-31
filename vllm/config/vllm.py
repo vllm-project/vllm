@@ -76,6 +76,23 @@ def build_defaults(
     compilation_config: CompilationConfig,
     model_config: ModelConfig | None = None,
 ):
+    # If user does not set custom ops via none or all set it here based on
+    # compilation mode and backend. Since mode may depend on optmization level
+    # we handle this case separately here.
+
+    mode = compilation_config.mode
+    if mode is None:
+        if optimization_level.value > OptimizationLevel.O0.value:
+            mode = CompilationMode.VLLM_COMPILE
+        else:
+            mode = CompilationMode.NONE
+
+    if all(s not in compilation_config.custom_ops for s in ("all", "none")):
+        if compilation_config.backend == "inductor" and mode > CompilationMode.NONE:
+            compilation_config.custom_ops.append("none")
+        else:
+            compilation_config.custom_ops.append("all")
+
     is_rms_norm_enabled = compilation_config.is_custom_op_enabled("rms_norm")
     is_quant_fp8_enabled = compilation_config.is_custom_op_enabled("quant_fp8")
     is_quantized = False
@@ -86,6 +103,7 @@ def build_defaults(
     #     is_quantized = model_config.is_quantized()
     #     is_sequential = not model_config.is_model_moe()
     # See https://github.com/vllm-project/vllm/issues/25689.
+
     optimization_level_00 = {
         "general": {
             "pass_config": {
@@ -93,7 +111,7 @@ def build_defaults(
                 "enable_fusion": False,
                 "enable_fi_allreduce_fusion": False,
             },
-            "mode": CompilationMode.NONE,
+            "mode": mode,
             "cudagraph_mode": CUDAGraphMode.NONE,
             "use_inductor_graph_partition": False,
         },
@@ -112,7 +130,7 @@ def build_defaults(
                 "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
                 "enable_fi_allreduce_fusion": False,
             },
-            "mode": CompilationMode.VLLM_COMPILE,
+            "mode": mode,
             "cudagraph_mode": CUDAGraphMode.PIECEWISE,
             "use_inductor_graph_partition": False,
         },
@@ -131,7 +149,7 @@ def build_defaults(
                 "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
                 "enable_fi_allreduce_fusion": False,
             },
-            "mode": CompilationMode.VLLM_COMPILE,
+            "mode": mode,
             "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
             "use_inductor_graph_partition": False,
         },
@@ -150,7 +168,7 @@ def build_defaults(
                 "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
                 "enable_fi_allreduce_fusion": False,
             },
-            "mode": CompilationMode.VLLM_COMPILE,
+            "mode": mode,
             "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
             "use_inductor_graph_partition": False,
         },
@@ -520,17 +538,6 @@ class VllmConfig:
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
-
-        # If user does not set custom ops via none or all set it here based on
-        # compilation mode and backend.
-        if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
-            if (
-                self.compilation_config.backend == "inductor"
-                and self.compilation_config.mode > CompilationMode.NONE
-            ):
-                self.compilation_config.custom_ops.append("none")
-            else:
-                self.compilation_config.custom_ops.append("all")
 
         # async tp is built on top of sequence parallelism
         # and requires it to be enabled.

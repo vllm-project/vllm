@@ -600,16 +600,20 @@ def test_s3_url_different_models_create_different_directories(mock_pull_files):
 @pytest.mark.parametrize(
     ("backend", "custom_ops", "expected"),
     [
+        ("eager", [], True),
         ("eager", ["+fused_layernorm"], True),
-        ("eager", ["-fused_layernorm"], False),
-        ("inductor", ["+fused_layernorm"], True),
-        ("inductor", ["-fused_layernorm"], False),
+        ("eager", ["all", "-fused_layernorm"], False),
+        ("inductor", [], False),
+        ("inductor", ["none", "+fused_layernorm"], True),
+        ("inductor", ["none", "-fused_layernorm"], False),
     ],
 )
 def test_is_custom_op_enabled(backend: str, custom_ops: list[str], expected: bool):
     """Test that is_custom_op_enabled works correctly."""
-    config = CompilationConfig(backend=backend, custom_ops=custom_ops)
-    assert config.is_custom_op_enabled("fused_layernorm") is expected
+    config = VllmConfig(
+        compilation_config=CompilationConfig(backend=backend, custom_ops=custom_ops)
+    )
+    assert config.compilation_config.is_custom_op_enabled("fused_layernorm") is expected
 
 
 def test_vllm_config_defaults_are_none():
