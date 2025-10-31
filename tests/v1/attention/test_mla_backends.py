@@ -19,7 +19,7 @@ from tests.v1.attention.utils import (
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.config.vllm import set_current_vllm_config
 from vllm.utils.math_utils import cdiv
@@ -28,19 +28,19 @@ from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.CUTLASS_MLA,
-    _Backend.FLASHMLA,
-    _Backend.FLASH_ATTN_MLA,
-    _Backend.TRITON_MLA,
+    AttentionBackendEnum.CUTLASS_MLA,
+    AttentionBackendEnum.FLASHMLA,
+    AttentionBackendEnum.FLASH_ATTN_MLA,
+    AttentionBackendEnum.TRITON_MLA,
 ]
 
 # Remove CUTLASS_MLA from the list if not using sm100
 if not torch.cuda.is_available() or torch.cuda.get_device_properties(0).major < 10:
-    BACKENDS_TO_TEST.remove(_Backend.CUTLASS_MLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.CUTLASS_MLA)
 
 # Remove FLASHMLA from the list if not supported
 if not is_flashmla_dense_supported()[0]:
-    BACKENDS_TO_TEST.remove(_Backend.FLASHMLA)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHMLA)
 
 torch.manual_seed(42)
 
@@ -239,7 +239,7 @@ class MockAttentionLayer:
 
 
 def run_attention_backend(
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     kv_cache_spec: FullAttentionSpec,
     layer_names: list[str],
     vllm_config,
@@ -357,7 +357,10 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")
-    spec_decode_backends = {_Backend.FLASH_ATTN_MLA, _Backend.FLASHMLA}
+    spec_decode_backends = {
+        AttentionBackendEnum.FLASH_ATTN_MLA,
+        AttentionBackendEnum.FLASHMLA,
+    }
 
     block_size = 16
     required_blocks = sum(

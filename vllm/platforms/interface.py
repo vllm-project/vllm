@@ -17,7 +17,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
@@ -198,16 +198,18 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        # Import _Backend here to avoid circular import.
-        from vllm.attention.backends.registry import _Backend
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype
+    ) -> "AttentionBackendEnum":
+        # Import AttentionBackendEnum here to avoid circular import.
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
-        return _Backend.TORCH_SDPA
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,

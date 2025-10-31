@@ -10,7 +10,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.logger import init_logger
 from vllm.utils import STR_BACKEND_ENV_VAR
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -18,18 +18,18 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 
-def get_env_variable_attn_backend() -> _Backend | None:
+def get_env_variable_attn_backend() -> AttentionBackendEnum | None:
     """
     Get the backend override specified by the vLLM attention
     backend environment variable, if one is specified.
 
     Returns:
 
-    * _Backend enum value if an override is specified
+    * AttentionBackendEnum value if an override is specified
     * None otherwise
     """
     backend_name = os.environ.get(STR_BACKEND_ENV_VAR)
-    return None if backend_name is None else _Backend[backend_name]
+    return None if backend_name is None else AttentionBackendEnum[backend_name]
 
 
 # Global state allows a particular choice of backend
@@ -39,10 +39,10 @@ def get_env_variable_attn_backend() -> _Backend | None:
 #
 # THIS SELECTION TAKES PRECEDENCE OVER THE
 # VLLM_ATTENTION_BACKEND ENVIRONMENT VARIABLE
-forced_attn_backend: _Backend | None = None
+forced_attn_backend: AttentionBackendEnum | None = None
 
 
-def global_force_attn_backend(attn_backend: _Backend | None) -> None:
+def global_force_attn_backend(attn_backend: AttentionBackendEnum | None) -> None:
     """
     Force all attention operations to use a specified backend.
 
@@ -57,7 +57,7 @@ def global_force_attn_backend(attn_backend: _Backend | None) -> None:
     forced_attn_backend = attn_backend
 
 
-def get_global_forced_attn_backend() -> _Backend | None:
+def get_global_forced_attn_backend() -> AttentionBackendEnum | None:
     """
     Get the currently-forced choice of attention backend,
     or None if auto-selection is currently enabled.
@@ -108,7 +108,9 @@ def _cached_get_attn_backend(
     # THIS SELECTION OVERRIDES THE VLLM_ATTENTION_BACKEND
     # ENVIRONMENT VARIABLE.
     selected_backend = None
-    backend_by_global_setting: _Backend | None = get_global_forced_attn_backend()
+    backend_by_global_setting: AttentionBackendEnum | None = (
+        get_global_forced_attn_backend()
+    )
     if backend_by_global_setting is not None:
         selected_backend = backend_by_global_setting
     else:
@@ -125,11 +127,11 @@ def _cached_get_attn_backend(
                 )
                 backend_by_env_var = backend_by_env_var.removesuffix("_VLLM_V1")
             try:
-                selected_backend = _Backend[backend_by_env_var]
+                selected_backend = AttentionBackendEnum[backend_by_env_var]
             except KeyError as e:
                 raise ValueError(
-                    f"Invalid attention backend: '{backend_by_env_var}'. "
-                    f"Valid backends are: {list(_Backend.__members__.keys())}"
+                    f"Invalid attention backend: '{backend_by_env_var}'. Valid "
+                    f"backends are: {list(AttentionBackendEnum.__members__.keys())}"
                 ) from e
 
     # get device-specific attn_backend
@@ -170,7 +172,7 @@ def _cached_get_attn_backend(
 
 @contextmanager
 def global_force_attn_backend_context_manager(
-    attn_backend: _Backend,
+    attn_backend: AttentionBackendEnum,
 ) -> Generator[None, None, None]:
     """
     Globally force a vLLM attention backend override within a

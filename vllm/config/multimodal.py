@@ -11,9 +11,9 @@ from pydantic.dataclasses import dataclass
 from vllm.config.utils import config
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
 else:
-    _Backend = Any
+    AttentionBackendEnum = Any
 
 
 @dataclass
@@ -125,10 +125,10 @@ class MultiModalConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
-    mm_encoder_attn_backend: _Backend | None = None
+    mm_encoder_attn_backend: AttentionBackendEnum | None = None
     """Optional override for the multi-modal encoder attention backend when
     using vision transformers. Accepts any value from
-    `vllm.attention.backends.registry._Backend` (e.g. `FLASH_ATTN`)."""
+    `vllm.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -167,25 +167,16 @@ class MultiModalConfig:
 
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
-    def _validate_mm_encoder_attn_backend(cls, value: object) -> _Backend | None:
-        from vllm.attention.backends.registry import (
-            _Backend as BackendEnum,
-        )
-
-        if value is None or isinstance(value, BackendEnum):
+    def _validate_mm_encoder_attn_backend(
+        cls, value: object
+    ) -> AttentionBackendEnum | None:
+        if value is None or isinstance(value, AttentionBackendEnum):
             return value
 
         assert isinstance(value, str), (
-            "mm_encoder_attn_backend must be a string or a BackendEnum."
+            "mm_encoder_attn_backend must be a string or an AttentionBackendEnum."
         )
-        try:
-            return BackendEnum[value.upper()]
-        except KeyError as exc:
-            valid_backends = ", ".join(sorted(BackendEnum.__members__.keys()))
-            raise ValueError(
-                f"Invalid mm encoder attention backend. "
-                f"Expected one of: {valid_backends}."
-            ) from exc
+        return AttentionBackendEnum[value.upper()]
 
     @model_validator(mode="after")
     def _validate_multimodal_config(self):

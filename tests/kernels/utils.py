@@ -15,7 +15,7 @@ from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils import (
@@ -878,7 +878,7 @@ def make_block_tables_slot_mapping(
 
 
 def make_test_metadata(
-    attn_backend: _Backend,
+    attn_backend: AttentionBackendEnum,
     is_prompt: bool,
     seq_lens: list[int] | None,
     decoder_test_params: PhaseTestParameters | None,

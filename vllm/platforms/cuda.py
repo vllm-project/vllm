@@ -16,16 +16,16 @@ from typing_extensions import ParamSpec
 import vllm._C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.import_utils import import_pynvml, resolve_obj_by_qualname
+from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
-    _Backend = None
+    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -43,9 +43,9 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 def _get_backend_priorities(
     use_mla: bool,
     device_capability: DeviceCapability | None = None,
-) -> dict[_Backend, int]:
+) -> dict[AttentionBackendEnum, int]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
 
     if use_mla:
         if (
@@ -54,19 +54,19 @@ def _get_backend_priorities(
             and device_capability < DeviceCapability(11, 0)
         ):
             return {
-                _Backend.CUTLASS_MLA: 0,
-                _Backend.FLASHINFER_MLA: 1,
-                _Backend.FLASHMLA: 2,
-                _Backend.FLASH_ATTN_MLA: 3,
-                _Backend.TRITON_MLA: 4,
-                _Backend.FLASHMLA_SPARSE: 5,
+                AttentionBackendEnum.CUTLASS_MLA: 0,
+                AttentionBackendEnum.FLASHINFER_MLA: 1,
+                AttentionBackendEnum.FLASHMLA: 2,
+                AttentionBackendEnum.FLASH_ATTN_MLA: 3,
+                AttentionBackendEnum.TRITON_MLA: 4,
+                AttentionBackendEnum.FLASHMLA_SPARSE: 5,
             }
         else:
             return {
-                _Backend.FLASHMLA: 0,
-                _Backend.FLASH_ATTN_MLA: 1,
-                _Backend.FLASHINFER_MLA: 2,
-                _Backend.TRITON_MLA: 3,
+                AttentionBackendEnum.FLASHMLA: 0,
+                AttentionBackendEnum.FLASH_ATTN_MLA: 1,
+                AttentionBackendEnum.FLASHINFER_MLA: 2,
+                AttentionBackendEnum.TRITON_MLA: 3,
             }
     else:
         if (
@@ -75,17 +75,17 @@ def _get_backend_priorities(
             and device_capability < DeviceCapability(11, 0)
         ):
             return {
-                _Backend.FLASHINFER: 0,
-                _Backend.FLASH_ATTN: 1,
-                _Backend.TRITON_ATTN: 2,
-                _Backend.FLEX_ATTENTION: 3,
+                AttentionBackendEnum.FLASHINFER: 0,
+                AttentionBackendEnum.FLASH_ATTN: 1,
+                AttentionBackendEnum.TRITON_ATTN: 2,
+                AttentionBackendEnum.FLEX_ATTENTION: 3,
             }
         else:
             return {
-                _Backend.FLASH_ATTN: 0,
-                _Backend.FLASHINFER: 1,
-                _Backend.TRITON_ATTN: 2,
-                _Backend.FLEX_ATTENTION: 3,
+                AttentionBackendEnum.FLASH_ATTN: 0,
+                AttentionBackendEnum.FLASHINFER: 1,
+                AttentionBackendEnum.TRITON_ATTN: 2,
+                AttentionBackendEnum.FLEX_ATTENTION: 3,
             }
 
 
@@ -266,28 +266,30 @@ class CudaPlatformBase(Platform):
         return torch.cuda.max_memory_allocated(device)
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        from vllm.attention.backends.registry import _Backend, backend_to_class
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype
+    ) -> "AttentionBackendEnum":
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
         # For Blackwell GPUs, force TORCH_SDPA for now.
         # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
         if cls.has_device_capability(100):
-            return _Backend.TORCH_SDPA
+            return AttentionBackendEnum.TORCH_SDPA
 
         if dtype not in (torch.float16, torch.bfloat16):
-            return _Backend.XFORMERS
+            return AttentionBackendEnum.XFORMERS
 
         if cls.has_device_capability(80):
-            backend_class = backend_to_class(_Backend.FLASH_ATTN)
+            backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
             if backend_class.supports_head_size(
                 head_size
             ) and backend_class.supports_dtype(dtype):
-                return _Backend.FLASH_ATTN
+                return AttentionBackendEnum.FLASH_ATTN
             else:
-                return _Backend.XFORMERS
+                return AttentionBackendEnum.XFORMERS
         else:
             # Fallback for Volta/Turing GPUs or FA not supported
-            return _Backend.XFORMERS
+            return AttentionBackendEnum.XFORMERS
 
     @classmethod
     def get_valid_backends(
@@ -300,15 +302,17 @@ class CudaPlatformBase(Platform):
         has_sink,
         use_sparse,
         device_capability,
-    ) -> tuple[list[tuple["_Backend", int]], dict["_Backend", list[str]]]:
+    ) -> tuple[
+        list[tuple["AttentionBackendEnum", int]],
+        dict["AttentionBackendEnum", list[str]],
+    ]:
         valid_backends_priorities = []
         invalid_reasons = {}
-        from vllm.attention.backends.registry import backend_to_class
 
         backend_priorities = _get_backend_priorities(use_mla, device_capability)
         for backend, priority in backend_priorities.items():
             try:
-                backend_class = backend_to_class(backend)
+                backend_class = backend.get_class()
                 invalid_reasons_i = backend_class.validate_configuration(
                     head_size,
                     dtype,
@@ -331,7 +335,7 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
@@ -347,15 +351,12 @@ class CudaPlatformBase(Platform):
                 "to select a supported backend."
             )
 
-        from vllm.attention.backends.registry import backend_to_class_str
-
         device_capability = cls.get_device_capability()
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
-            backend_class_str = backend_to_class_str(selected_backend)
             try:
-                backend_class = resolve_obj_by_qualname(backend_class_str)
+                backend_class = selected_backend.get_class()
                 invalid_reasons = backend_class.validate_configuration(
                     head_size,
                     dtype,
@@ -375,7 +376,7 @@ class CudaPlatformBase(Platform):
                 )
             else:
                 logger.info("Using %s backend.", selected_backend)
-                return backend_class_str
+                return selected_backend.get_path()
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
@@ -423,13 +424,12 @@ class CudaPlatformBase(Platform):
         )
         selected_index = sorted_indices[0]
         selected_backend = valid_backends_priorities[selected_index][0]
-        selected_backend_class_str = backend_to_class_str(selected_backend)
         logger.info(
             "Using %s backend.",
             selected_backend.name,
         )
 
-        return selected_backend_class_str
+        return selected_backend.get_path()
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

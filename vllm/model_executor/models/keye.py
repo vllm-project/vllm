@@ -16,7 +16,7 @@ from transformers.feature_extraction_utils import BatchFeature
 from transformers.modeling_outputs import BaseModelOutput, BaseModelOutputWithPooling
 from transformers.utils import torch_int
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -353,7 +353,7 @@ class KeyeSiglipAttention(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -399,13 +399,17 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         self.use_upstream_fa = False
-        if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
+        if (
+            self.attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
         ):
-            self.attn_backend = _Backend.FLASH_ATTN
+            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
             self.use_upstream_fa = True
 
-        if self.attn_backend not in {_Backend.FLASH_ATTN, _Backend.XFORMERS}:
+        if self.attn_backend not in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.XFORMERS,
+        }:
             raise RuntimeError(
                 f"Keye-VL does not support {self.attn_backend} backend now."
             )
@@ -457,7 +461,7 @@ class KeyeSiglipAttention(nn.Module):
                 self.head_dim,
             )
 
-        if self.attn_backend == _Backend.FLASH_ATTN:
+        if self.attn_backend == AttentionBackendEnum.FLASH_ATTN:
             if self.use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
             else:
@@ -477,7 +481,7 @@ class KeyeSiglipAttention(nn.Module):
                 softmax_scale=self.scale,
             )
             context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -524,7 +528,7 @@ class KeyeSiglipEncoderLayer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.embed_dim = config.hidden_size
@@ -578,7 +582,7 @@ class KeyeSiglipEncoder(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -673,7 +677,7 @@ class KeyeSiglipVisionTransformer(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
         self.config = config
@@ -756,7 +760,7 @@ class KeyeSiglipVisionModel(nn.Module):
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
 
