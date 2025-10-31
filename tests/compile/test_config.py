@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from contextlib import nullcontext
+from unittest.mock import patch
 
 import pytest
 from pydantic import ValidationError
@@ -288,7 +289,10 @@ def test_cudagraph_sizes_post_init(
     if expected_max_size == ValidationError:
         ctx = pytest.raises(expected_max_size)
 
-    with ctx:
+    with (
+        ctx,
+        patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
+    ):
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
