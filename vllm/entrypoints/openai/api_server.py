@@ -614,11 +614,22 @@ async def cancel_responses(response_id: str, raw_request: Request):
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    def translate_error_response(response: ErrorResponse) -> JSONResponse:
+        anthropic_error = AnthropicErrorResponse(
+            error=AnthropicError(
+                type=response.error.type,
+                message=response.error.message,
+            )
+        )
+        return JSONResponse(status_code=response.error.code,
+                            content=anthropic_error.model_dump())
+
     handler = messages(raw_request)
     if handler is None:
-        return base(raw_request).create_error_response(
+        error = base(raw_request).create_error_response(
             message="The model does not support Messages API"
         )
+        return translate_error_response(error)
 
     try:
         generator = await handler.create_messages(request, raw_request)
@@ -635,14 +646,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         )
 
     if isinstance(generator, ErrorResponse):
-        anthropic_error = AnthropicErrorResponse(
-            error=AnthropicError(
-                type=generator.error.type,
-                message=generator.error.message,
-            )
-        )
-        return JSONResponse(status_code=generator.error.code,
-                            content=anthropic_error.model_dump())
+        return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
         logger.debug(
