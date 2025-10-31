@@ -302,6 +302,15 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   for (auto i = 0; i < num_chunks; ++i) {
     p_memHandle[i] = (CUmemGenericAllocationHandle*)malloc(
         sizeof(CUmemGenericAllocationHandle));
+    if (p_memHandle[i] == nullptr) {
+      std::cerr << "ERROR: malloc failed for p_memHandle[" << i << "].\n";
+      for (auto j = 0; j < i; ++j) {
+        free(p_memHandle[j]);
+      }
+      free(p_memHandle);
+      free(chunk_sizes);
+      return nullptr;
+    }
     chunk_sizes[i] = (unsigned long long)my_min(
         (unsigned long long)(alignedSize - i * aligned_chunk_size),
         (unsigned long long)aligned_chunk_size);
@@ -407,8 +416,17 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   CUmemGenericAllocationHandle** p_memHandle =
       (CUmemGenericAllocationHandle**)malloc(
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
+  if (p_memHandle == nullptr) {
+    std::cerr << "ERROR: malloc failed for p_memHandle in my_free.\n";
+    return;
+  }
   unsigned long long* chunk_sizes =
       (unsigned long long*)malloc(num_chunks * sizeof(unsigned long long));
+  if (chunk_sizes == nullptr) {
+    std::cerr << "ERROR: malloc failed for chunk_sizes in my_free.\n";
+    free(p_memHandle);
+    return;
+  }
   for (auto i = 0; i < num_chunks; ++i) {
     PyObject* item = PyList_GetItem(recv_p_memHandle, i);
     PyObject* addr_py = PyTuple_GetItem(item, 0);
@@ -423,9 +441,6 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 
   // free address and the handle
   CUDA_CHECK(cuMemAddressFree(d_mem, size));
-  if (error_code != 0) {
-    return;
-  }
 #ifndef USE_ROCM
   free(p_memHandle);
 #else
@@ -494,8 +509,17 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
   CUmemGenericAllocationHandle** p_memHandle =
       (CUmemGenericAllocationHandle**)malloc(
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
+  if (p_memHandle == nullptr) {
+    PyErr_SetString(PyExc_MemoryError, "malloc failed for p_memHandle");
+    return nullptr;
+  }
   unsigned long long* chunk_sizes =
       (unsigned long long*)malloc(num_chunks * sizeof(unsigned long long));
+  if (chunk_sizes == nullptr) {
+    free(p_memHandle);
+    PyErr_SetString(PyExc_MemoryError, "malloc failed for chunk_sizes");
+    return nullptr;
+  }
   for (auto i = 0; i < num_chunks; ++i) {
     PyObject* item = PyList_GetItem(recv_p_memHandle, i);
     PyObject* addr_py = PyTuple_GetItem(item, 0);
@@ -552,8 +576,17 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
   CUmemGenericAllocationHandle** p_memHandle =
       (CUmemGenericAllocationHandle**)malloc(
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
+  if (p_memHandle == nullptr) {
+    PyErr_SetString(PyExc_MemoryError, "malloc failed for p_memHandle");
+    return nullptr;
+  }
   unsigned long long* chunk_sizes =
       (unsigned long long*)malloc(num_chunks * sizeof(unsigned long long));
+  if (chunk_sizes == nullptr) {
+    free(p_memHandle);
+    PyErr_SetString(PyExc_MemoryError, "malloc failed for chunk_sizes");
+    return nullptr;
+  }
   for (auto i = 0; i < num_chunks; ++i) {
     PyObject* item = PyList_GetItem(recv_p_memHandle, i);
     PyObject* addr_py = PyTuple_GetItem(item, 0);
