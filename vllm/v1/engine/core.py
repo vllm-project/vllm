@@ -1621,6 +1621,8 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
     def engine_finish_requests(self):
+
+        assert isinstance(self.scheduler, V1Scheduler)
         engine_finish_outputs = EngineCoreOutputs()
         engine_finish_outputs.engine_index = self.engine_index
         for id in list(self.scheduler.requests.keys()):
