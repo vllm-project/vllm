@@ -26,6 +26,7 @@ import os
 import random
 import shutil
 import time
+import uuid
 import warnings
 from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
@@ -1160,7 +1161,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--request-id-prefix",
         type=str,
         required=False,
-        default="benchmark-serving",
+        default=f"bench-{uuid.uuid4().hex[:8]}-",
         help="Specify the prefix of request id.",
     )
 
