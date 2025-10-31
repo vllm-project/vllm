@@ -186,7 +186,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
         --network=host \
         --shm-size=16gb \
-	--group-add render \
+	--group-add $(getent group render | cut -d: -f3) \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
@@ -218,7 +218,7 @@ else
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --network=host \
           --shm-size=16gb \
-          --group-add render \
+          --group-add $(getent group render | cut -d: -f3) \
 	  --rm \
           -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
