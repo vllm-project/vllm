@@ -133,6 +133,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         )
         self.poller = zmq.Poller()
         self.communicator_aborted = False
+        self.engine_running = True
 
     def run(self) -> None:
         """
@@ -154,6 +155,7 @@ class EngineCoreGuard(threading.Thread):  # changed
                         "[EngineCoreGuard] Detected exception %s",
                         engine_exception,
                     )
+                    self.engine_running = False
                     self._report_client_exception(engine_exception)
             except queue.Empty:
                 pass
@@ -294,7 +296,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             abort the communicator
         """
         logger.info("[EngineCoreGuard] Start pausing EngineCore")
-        if self.busy_loop_active.is_set():
+        if self.engine_running:
             # Clear the flag to signal busy loop should pause
             self.busy_loop_active.clear()
             # Put a sentinel (empty request) to unblock the busy loop
@@ -306,6 +308,7 @@ class EngineCoreGuard(threading.Thread):  # changed
                 exception = self.fault_signal_q.get(timeout=timeout)
                 self.fault_signal_q.put(exception)
                 success = True
+                self.engine_running = False
             except queue.Empty:
                 # Timeout waiting for pause acknowledgment
                 success = False
@@ -328,6 +331,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.cmd_q.put(None)
         # Ensure busy loop has been recovered.
         success = self.busy_loop_active.wait(timeout=timeout)
+        self.engine_running = success
         return success
 
     def _send_execution_result(self, success: bool):

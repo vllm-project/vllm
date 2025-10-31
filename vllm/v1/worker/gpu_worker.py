@@ -148,8 +148,7 @@ class WorkerGuard:
                 method, method_params = deserialize_method_call(cmd_str)
                 self.logger("Executing command: %s", method)
                 try:
-                    success = run_method(self, method, args=(), kwargs=method_params)
-                    self.logger(" Command (%s) succeeded: %s", method, success)
+                    run_method(self, method, args=(), kwargs=method_params)
 
                     # todo: need to send results back to engine core guard.
 
@@ -163,6 +162,7 @@ class WorkerGuard:
 
     def pause_by_signal(self):
         self.pause_event.set()
+        self.logger("Pause signal sent.")
         return True
 
     def pause_by_abort_communicators(self, timeout=5):
@@ -224,7 +224,11 @@ class WorkerGuard:
                 )
 
         self.communicator_aborted = True
-        return len(not_done) == 0
+        success = len(not_done) == 0
+        if success:
+            self.logger("Communicators are aborted.")
+        else:
+            self.logger("Communicators did not abort in time.", level="warning")
 
     def restart_worker(self):
         if self.communicator_aborted:

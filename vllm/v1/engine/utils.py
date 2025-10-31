@@ -5,6 +5,7 @@ import contextlib
 import json
 import multiprocessing
 import os
+import time
 import uuid
 import weakref
 from collections.abc import Callable, Iterator
@@ -1226,24 +1227,25 @@ class FaultHandler:
     def __init__(
         self,
         cmd_socket: zmq.Socket,
-        client_cmd_registry: list,
+        client_cmd_registry: list[bytes],
         engine_exception_q: asyncio.Queue[FaultInfo],
         engine_exception_q_lock: asyncio.Lock,
         engine_status_dict: ThreadSafeDict[int, str],
     ) -> None:
         self.cmd_socket = cmd_socket
-        self.client_cmd_registry = client_cmd_registry
+        # self.client_cmd_registry = client_cmd_registry
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
         self.engine_status_dict = engine_status_dict
+        self.engine_identity_to_index: dict[bytes:int] = {
+            identity: i for i, identity in enumerate(client_cmd_registry)
+        }
 
     async def handle_fault(self, instruction: str, timeout, **kwargs) -> bool:
         # TODO: Implement a thread-safe dictionary to mark statuses
-        unhealthy_engine_list = await get_queue_snapshot(
+        unhealthy_engines = await get_queue_snapshot(
             self.engine_exception_q, self.engine_exception_q_lock
         )
-
-        client_cmd_registry_copy = self.client_cmd_registry.copy()
 
         if instruction == "retry" and "Dead" in self.engine_status_dict.values():
             logger.info(
@@ -1252,20 +1254,22 @@ class FaultHandler:
             )
             return False
 
-        if instruction == "pause":
-            unhealthy_ids = {int(e.engine_id) for e in unhealthy_engine_list}
-            client_cmd_registry_copy = [
-                identity
-                for i, identity in enumerate(client_cmd_registry_copy)
-                if int(i) not in unhealthy_ids
-            ]
+        excluded_engines = set()
 
-        await self.send_fault_tolerance_instruction(
-            client_cmd_registry_copy, instruction, timeout, **kwargs
+        if instruction == "pause":
+            unhealthy_indices = [int(e.engine_id) for e in unhealthy_engines]
+            excluded_engines = {
+                identity
+                for identity, index in self.engine_identity_to_index.items()
+                if index in unhealthy_indices
+            }
+
+        self.send_fault_tolerance_instruction(
+            excluded_engines, instruction, timeout, **kwargs
         )
 
-        execute_result = await self.process_instruction_result(
-            client_cmd_registry_copy, timeout
+        execute_result = self.process_instruction_result(
+            excluded_engines, instruction, timeout
         )
 
         if instruction == "retry" and execute_result:
@@ -1273,40 +1277,71 @@ class FaultHandler:
                 self.engine_status_dict[engine_id] = "Healthy"
         return execute_result
 
-    async def send_fault_tolerance_instruction(
-        self, client_cmd_registry_copy, instruction, timeout, **kwargs
+    def send_fault_tolerance_instruction(
+        self, excluded_engines: set[str], instruction: str, timeout: int, **kwargs
     ):
-        kwargs["timeout"] = timeout
-        for identity in client_cmd_registry_copy:
-            serialized_instruction = serialize_method_call(instruction, **kwargs)
+        payload = {**kwargs, "timeout": timeout}
+
+        for identity, index in self.engine_identity_to_index.items():
+            if identity in excluded_engines:
+                continue
+
+            serialized_instruction = serialize_method_call(instruction, **payload)
             self.cmd_socket.send_multipart(
                 [identity, b"", serialized_instruction.encode("utf-8")]
             )
 
-    async def process_instruction_result(self, client_cmd_registry_copy, timeout):
+    def process_instruction_result(
+        self, excluded_engines: set[str], instruction: str, timeout: int
+    ):
+        """Wait for all targeted engines to return acknowledgment."""
         poller = zmq.Poller()
         poller.register(self.cmd_socket, zmq.POLLIN)
 
-        while client_cmd_registry_copy:
-            socks = dict(poller.poll(timeout * 1000))
+        expected_engines = {
+            identity
+            for identity in self.engine_identity_to_index
+            if identity not in excluded_engines
+        }
+
+        start = time.monotonic()
+        while expected_engines:
+            remaining = timeout - (time.monotonic() - start)
+            if remaining <= 0:
+                logger.error(
+                    'Timeout waiting for responses of command "%s" from '
+                    "EngineCoreGuard(s): %s",
+                    instruction,
+                    [self.engine_identity_to_index[e] for e in expected_engines],
+                )
+                return False
+
+            socks = dict(poller.poll(remaining * 1000))
             if self.cmd_socket not in socks:
-                logger.error(
-                    "Timeout while waiting for responses from engines: %s",
-                    client_cmd_registry_copy,
-                )
+                continue  # still waiting
+
+            try:
+                identity, response = recv_msg(self.cmd_socket)
+                if isinstance(identity, str):
+                    identity = identity.encode("utf-8")
+
+                expected_engines.discard(identity)
+
+                response_dict = json.loads(response)
+                engine_id = response_dict.get("engine_index")
+                success = response_dict.get("success", False)
+
+                if not success:
+                    logger.error(
+                        'EngineCoreGuard[%s] fail to execute command "%s" '
+                        "with reason: %s",
+                        engine_id,
+                        instruction,
+                        response_dict.get("reason", "unknown"),
+                    )
+                    return False
+            except Exception as e:
+                logger.error("Error processing engine response: %s", e)
                 return False
-            identity, response = recv_msg(self.cmd_socket)
-            if identity.encode("utf-8") in client_cmd_registry_copy:
-                client_cmd_registry_copy.remove(identity.encode("utf-8"))
-            assert response is not None
-            response_dict = json.loads(response)
-            engine_id = response_dict.get("engine_index")
-            success = response_dict.get("success", False)
-            if not success:
-                logger.error(
-                    "Engine %s reported failure: %s",
-                    engine_id,
-                    response_dict.get("reason", "unknown"),
-                )
-                return False
+
         return True
