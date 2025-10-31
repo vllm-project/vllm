@@ -247,6 +247,8 @@ class EplbState:
         from vllm import envs
 
         eplb_state_path = envs.VLLM_EPLB_STATE_PATH
+        map_is_loaded = False
+        physical_to_logical_map = None
         if (
             eplb_state_path is not None
             and global_expert_load is None
@@ -257,16 +259,17 @@ class EplbState:
                 eplb_state_path,
             )
             try:
-                global_expert_load, old_global_expert_indices = load_eplb_state(
+                physical_to_logical_map = load_eplb_state(
                     file_path=eplb_state_path,
                     num_moe_layers=model.num_moe_layers,
                     num_logical_experts=model.num_routed_experts,
                     num_physical_experts=model.num_physical_experts,
                     device=self.device,
                 )
+                map_is_loaded = True
             except Exception:
-                global_expert_load = None
-                old_global_expert_indices = None
+                logger.exception("Failed to load experts mapping from %s")
+                pass
         # Build mapping: use loaded mapping if available; otherwise use default
         if old_global_expert_indices is not None:
             # Loaded mapping is per-layer
@@ -399,7 +402,7 @@ class EplbState:
         )
         # If we loaded a mapping from file, realign weights from the initial
         # default mapping to the loaded mapping and start from step 0
-        if old_global_expert_indices is not None:
+        if map_is_loaded:
             ep_group = get_ep_group().device_group
             init_map_list = cls.build_initial_global_physical_to_logical_map(
                 model.num_routed_experts,
@@ -802,7 +805,6 @@ def _node_count_with_rank_mapping(
 
 def save_eplb_state(
     file_path: str,
-    global_expert_load: torch.Tensor | None,
     physical_to_logical_map: torch.Tensor,
     num_moe_layers: int,
     num_logical_experts: int,
@@ -832,9 +834,6 @@ def save_eplb_state(
         return
 
     state = {
-        "global_expert_load": (
-            None if global_expert_load is None else global_expert_load.cpu().tolist()
-        ),
         "physical_to_logical_map": physical_to_logical_map.cpu().tolist(),
         "num_moe_layers": num_moe_layers,
         "num_logical_experts": num_logical_experts,
@@ -857,7 +856,7 @@ def load_eplb_state(
     num_logical_experts: int,
     num_physical_experts: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
     Load EPLB state from a file and distribute it across the EP group.
 
@@ -873,9 +872,7 @@ def load_eplb_state(
         device: Device to load the tensors onto.
 
     Returns:
-        A tuple of (global_expert_load, physical_to_logical_map):
-        - global_expert_load: Shape (num_moe_layers, num_logical_experts)
-        - physical_to_logical_map: Shape (num_moe_layers, num_physical_experts)
+        physical_to_logical_map: Shape (num_moe_layers, num_physical_experts)
     """
     ep_group = get_ep_group()
     ep_rank = ep_group.device_group.rank()
@@ -891,7 +888,6 @@ def load_eplb_state(
             state = json.load(f)
 
         # Extract arrays and metadata
-        global_expert_load_list = state.get("global_expert_load")
         physical_to_logical_map_list = state["physical_to_logical_map"]
         saved_num_moe_layers = state["num_moe_layers"]
         saved_num_logical_experts = state["num_logical_experts"]
@@ -917,23 +913,6 @@ def load_eplb_state(
             )
 
         # Verify array shapes
-        if global_expert_load_list is None:
-            raise ValueError(
-                "Saved EPLB state does not contain expert load. "
-                "It was likely saved with save_expert_load=False and cannot be used "
-                "for loading."
-            )
-        if (
-            len(global_expert_load_list) != num_moe_layers
-            or (len(global_expert_load_list[0]) if num_moe_layers > 0 else 0)
-            != num_logical_experts
-        ):
-            raise ValueError(
-                "Shape mismatch: global_expert_load has shape "
-                f"({len(global_expert_load_list)}, "
-                f"{len(global_expert_load_list[0]) if num_moe_layers > 0 else 0}), "
-                f"expected ({num_moe_layers}, {num_logical_experts})"
-            )
         if (
             len(physical_to_logical_map_list) != num_moe_layers
             or (len(physical_to_logical_map_list[0]) if num_moe_layers > 0 else 0)
@@ -959,19 +938,11 @@ def load_eplb_state(
         )
 
         # Convert to tensors and move to device
-        global_expert_load = torch.tensor(
-            global_expert_load_list, dtype=torch.int64, device=device
-        )
         physical_to_logical_map = torch.tensor(
             physical_to_logical_map_list, dtype=torch.int64, device=device
         )
     else:
         # Create empty tensors on other ranks
-        global_expert_load = torch.empty(
-            (num_moe_layers, num_logical_experts),
-            dtype=torch.int64,
-            device=device,
-        )
         physical_to_logical_map = torch.empty(
             (num_moe_layers, num_physical_experts),
             dtype=torch.int64,
@@ -979,9 +950,8 @@ def load_eplb_state(
         )
 
     # Broadcast from rank 0 to all other ranks
-    torch.distributed.broadcast(global_expert_load, src=0, group=ep_group.device_group)
     torch.distributed.broadcast(
         physical_to_logical_map, src=0, group=ep_group.device_group
     )
 
-    return global_expert_load, physical_to_logical_map
+    return physical_to_logical_map
