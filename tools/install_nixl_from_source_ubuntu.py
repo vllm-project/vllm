@@ -147,6 +147,8 @@ def build_and_install_prerequisites(args):
     print("\n[2/3] Building NIXL wheel from source...", flush=True)
     if not os.path.exists(NIXL_DIR):
         run_command(["git", "clone", NIXL_REPO_URL, NIXL_DIR])
+    else:
+        run_command(["git", "fetch", "--tags"], cwd=NIXL_DIR)
     run_command(["git", "checkout", NIXL_VERSION], cwd=NIXL_DIR)
 
     build_env = os.environ.copy()
