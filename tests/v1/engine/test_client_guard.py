@@ -105,14 +105,14 @@ def test_fault_receiver():
         ctx = zmq.Context()
         sub_socket = ctx.socket(zmq.SUB)
         sub_socket.connect(FAULT_PUB_ADDR)
-        sub_socket.setsockopt_string(zmq.SUBSCRIBE, "FAULT_PUB_TOPIC")
+        sub_socket.setsockopt_string(zmq.SUBSCRIBE, FAULT_PUB_TOPIC)
 
         message = sub_socket.recv_string()
         sub_socket.close()
         ctx.term()
 
         prefix, data = message.split("|", 1)
-        assert prefix == "FAULT_PUB_TOPIC"
+        assert prefix == FAULT_PUB_TOPIC
         assert json.loads(data) == {"1": "Dead"}
 
     check_thread = threading.Thread(target=check_published_message)
