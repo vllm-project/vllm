@@ -5,14 +5,16 @@
 import copy
 import os
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, NewType, Optional, Union
+from typing import Any, NewType, TypeAlias
 
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, cdiv, sha256_cbor
+from vllm.utils.hashing import sha256_cbor
+from vllm.utils.math_utils import cdiv
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -24,27 +26,28 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+from vllm.v1.utils import tensor_data
 
 # BlockHash represents the hash of a single KV-cache block used for
-# prefix caching.  Treating it as a distinct type from ``bytes`` helps
+# prefix caching.  Treating it as a distinct type from `bytes` helps
 # catch accidental misuse when passing around raw byte strings.
 BlockHash = NewType("BlockHash", bytes)
 
-# ``BlockHashWithGroupId`` combines a ``BlockHash`` with its KV cache group ID.
+# `BlockHashWithGroupId` combines a `BlockHash` with its KV cache group ID.
 # It is represented as raw bytes for compactness and efficiency. The helper
-# functions below pack/unpack the ``BlockHash`` and group id into/from the key.
+# functions below pack/unpack the `BlockHash` and group id into/from the key.
 BlockHashWithGroupId = NewType("BlockHashWithGroupId", bytes)
 
 # ExternalBlockHash is used for reproducible prefix-cache block hashing.
-# It's a union of ``bytes`` and ``int`` to keep backward compatibility
+# It's a union of `bytes` and `int` to keep backward compatibility
 # after we default block hashing to use sha256 bytes.
-ExternalBlockHash = Union[bytes, int]
+ExternalBlockHash: TypeAlias = bytes | int
 
 
 def make_block_hash_with_group_id(
     block_hash: BlockHash, group_id: int
 ) -> BlockHashWithGroupId:
-    """Pack a ``BlockHash`` and group id into a ``BlockHashWithGroupId``.
+    """Pack a `BlockHash` and group id into a `BlockHashWithGroupId`.
 
     The group id is encoded using 4 bytes in big-endian order and appended to
     the block hash bytes.  This representation avoids creating tuples while
@@ -54,12 +57,12 @@ def make_block_hash_with_group_id(
 
 
 def get_block_hash(key: BlockHashWithGroupId) -> BlockHash:
-    """Extract the ``BlockHash`` from a ``BlockHashWithGroupId``."""
+    """Extract the `BlockHash` from a `BlockHashWithGroupId`."""
     return BlockHash(key[:-4])
 
 
 def get_group_id(key: BlockHashWithGroupId) -> int:
-    """Extract the group id from a ``BlockHashWithGroupId``."""
+    """Extract the group id from a `BlockHashWithGroupId`."""
     return int.from_bytes(key[-4:], "big", signed=False)
 
 
@@ -110,18 +113,18 @@ class KVCacheBlock:
     ref_cnt: int = 0
     # The hash key (block hash + group id) of the block, only available
     # when the block is full and cached.
-    _block_hash: Optional[BlockHashWithGroupId] = None
+    _block_hash: BlockHashWithGroupId | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
-    prev_free_block: Optional["KVCacheBlock"] = None
-    next_free_block: Optional["KVCacheBlock"] = None
+    prev_free_block: "KVCacheBlock | None" = None
+    next_free_block: "KVCacheBlock | None" = None
 
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
     @property
-    def block_hash(self) -> Optional[BlockHashWithGroupId]:
+    def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash
 
     @block_hash.setter
@@ -371,7 +374,7 @@ def need_extra_keys(request: Request) -> bool:
     """
 
     # Multimodal requests need to include the MM hash.
-    # LoRA requests need to include the LoRA ID.
+    # LoRA requests need to include the LoRA name.
     # Request with provided cache salt need to include the salt.
     return (
         bool(request.mm_features)
@@ -444,26 +447,48 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[int]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
         request: The request object.
 
     Returns:
-        Return LoRA id of the request if it is a LoRA request. Return empty
+        Return LoRA name of the request if it is a LoRA request. Return empty
         list otherwise.
     """
     if not request.lora_request:
         return []
-    return [request.lora_request.lora_int_id]
+    return [request.lora_request.lora_name]
+
+
+def _gen_prompt_embeds_extra_hash_keys(
+    request: Request, start_token_idx: int, end_token_idx: int
+) -> list[bytes]:
+    """Generate extra keys related to prompt embeds for block hash computation.
+
+    Args:
+        request: The request object.
+        start_token_idx: The start token index of the block.
+        end_token_idx: The end token index of the block.
+
+    Returns:
+        Return prompt embeddings data of the request if it has prompt embeds.
+        Return empty list otherwise.
+    """
+    if request.prompt_embeds is None:
+        return []
+    block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+    embeds_bytes = tensor_data(block_prompt_embeds).tobytes()
+    return [embeds_bytes]
 
 
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
-) -> tuple[Optional[tuple[Any, ...]], int]:
+) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
-    the multi-modal inputs and request specific metadata (e.g., LoRA ID).
+    the multi-modal inputs, request specific metadata (e.g., LoRA names), and
+    data from prompt embeddings.
 
     Args:
         request: The request object.
@@ -478,12 +503,17 @@ def generate_block_hash_extra_keys(
     mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
         request, start_token_idx, end_token_idx, start_mm_idx
     )
-    lora_extra_keys: list[int] = _gen_lora_extra_hash_keys(request)
+    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
     cache_salt_keys: list[str] = (
         [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
     )
+    prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
+        request, start_token_idx, end_token_idx
+    )
 
-    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys + cache_salt_keys
+    extra_keys: list[Any] = (
+        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+    )
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -493,9 +523,9 @@ def generate_block_hash_extra_keys(
 
 def hash_block_tokens(
     hash_function: Callable[[Any], bytes],
-    parent_block_hash: Optional[BlockHash],
+    parent_block_hash: BlockHash | None,
     curr_block_token_ids: Sequence[int],
-    extra_keys: Optional[tuple[Any, ...]] = None,
+    extra_keys: tuple[Any, ...] | None = None,
 ) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
@@ -1196,7 +1226,7 @@ def _report_kv_cache_config(
             vllm_config.parallel_config.decode_context_parallel_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info("GPU KV cache size: %s tokens", num_tokens_str)
+    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config

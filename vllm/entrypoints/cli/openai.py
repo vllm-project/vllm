@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import os
 import signal
@@ -15,7 +13,9 @@ from openai.types.chat import ChatCompletionMessageParam
 from vllm.entrypoints.cli.types import CLISubcommand
 
 if TYPE_CHECKING:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 def _register_signal_handlers():

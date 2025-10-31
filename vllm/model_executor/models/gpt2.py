@@ -22,7 +22,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 from torch import nn
@@ -51,7 +50,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from ..layers.pooler import DispatchPooler, Pooler
-from .interfaces import SupportsPP
+from .interfaces import SupportsCrossEncoding, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     is_pp_missing_parameter,
@@ -65,8 +64,8 @@ class GPT2Attention(nn.Module):
     def __init__(
         self,
         config: GPT2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -118,7 +117,7 @@ class GPT2MLP(nn.Module):
         self,
         intermediate_size: int,
         config: GPT2Config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -150,8 +149,8 @@ class GPT2Block(nn.Module):
     def __init__(
         self,
         config: GPT2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -221,9 +220,9 @@ class GPT2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor],
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
                 inputs_embeds = self.get_input_embeddings(input_ids)
@@ -301,9 +300,9 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -312,7 +311,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -322,7 +321,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         return loader.load_weights(weights)
 
 
-class GPT2ForSequenceClassification(nn.Module):
+class GPT2ForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """GPT2 Model for sequence classification.
 
     This class expands GPT2Model with pooling and score functions - last token
@@ -354,10 +353,20 @@ class GPT2ForSequenceClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
-                "classify": Pooler.for_classify(pooler_config, classifier=self.score),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
+                "classify": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
+                ),
             }
         )
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -367,8 +376,8 @@ class GPT2ForSequenceClassification(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids=input_ids,

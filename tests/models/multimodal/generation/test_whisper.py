@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 
@@ -92,7 +91,7 @@ def run_test(
     model: str,
     *,
     tensor_parallel_size: int,
-    distributed_executor_backend: Optional[str] = None,
+    distributed_executor_backend: str | None = None,
 ) -> None:
     prompt_list = PROMPTS * 10
     expected_list = EXPECTED[model] * 10

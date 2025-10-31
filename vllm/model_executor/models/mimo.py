@@ -28,7 +28,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -64,9 +63,9 @@ class MiMoModel(Qwen2Model):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -185,7 +184,7 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         hidden_states = self.model.norm(hidden_states)
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits

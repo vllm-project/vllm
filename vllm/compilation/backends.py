@@ -3,12 +3,13 @@
 
 import ast
 import dataclasses
+import hashlib
 import os
 import pprint
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from typing import Any, Callable, Optional
+from typing import Any
 
 import torch
 import torch.fx as fx
@@ -23,8 +24,10 @@ from vllm.compilation.partition_rules import (
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from .caching import VllmSerializableFunction
 from .compiler_interface import (
     CompilerInterface,
     EagerAdaptor,
@@ -39,7 +42,7 @@ logger = init_logger(__name__)
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    if compilation_config.use_inductor:
+    if compilation_config.backend == "inductor":
         # Use standalone compile only if requested, version is new enough,
         # and the symbol actually exists in this PyTorch build.
         if (
@@ -53,6 +56,10 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
+        assert compilation_config.backend == "eager", (
+            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
+        )
+
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
 
@@ -73,7 +80,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: dict[tuple[Optional[int], int, str], Any] = dict()
+        self.cache: dict[tuple[int | None, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -82,7 +89,7 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, runtime_shape: Optional[int] = None):
+    def compile_context(self, runtime_shape: int | None = None):
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
@@ -143,8 +150,8 @@ class CompilerManager:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        runtime_shape: Optional[int] = None,
-    ) -> Optional[Callable]:
+        runtime_shape: int | None = None,
+    ) -> Callable | None:
         if (runtime_shape, graph_index, self.compiler.name) not in self.cache:
             return None
         handle = self.cache[(runtime_shape, graph_index, self.compiler.name)]
@@ -176,7 +183,7 @@ class CompilerManager:
         compilation_config: CompilationConfig,
         graph_index: int = 0,
         num_graphs: int = 1,
-        runtime_shape: Optional[int] = None,
+        runtime_shape: int | None = None,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -195,6 +202,7 @@ class CompilerManager:
                 # there can be multiple graphs due to piecewise compilation.
                 now = time.time()
                 elapsed = now - compilation_start_time
+                compilation_config.compilation_time += elapsed
                 if runtime_shape is None:
                     logger.info(
                         "Directly load the compiled graph(s) for dynamic shape "
@@ -237,10 +245,14 @@ class CompilerManager:
             if graph_index == 0:
                 # adds some info logging for the first graph
                 if runtime_shape is None:
-                    logger.info("Cache the graph for dynamic shape for later use")
+                    logger.info_once(
+                        "Cache the graph for dynamic shape for later use", scope="local"
+                    )
                 else:
-                    logger.info(
-                        "Cache the graph of shape %s for later use", str(runtime_shape)
+                    logger.info_once(
+                        "Cache the graph of shape %s for later use",
+                        str(runtime_shape),
+                        scope="local",
                     )
             if runtime_shape is None:
                 logger.debug(
@@ -264,12 +276,17 @@ class CompilerManager:
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
             if runtime_shape is None:
-                logger.info("Compiling a graph for dynamic shape takes %.2f s", elapsed)
+                logger.info_once(
+                    "Compiling a graph for dynamic shape takes %.2f s",
+                    elapsed,
+                    scope="local",
+                )
             else:
-                logger.info(
+                logger.info_once(
                     "Compiling a graph for shape %s takes %.2f s",
                     runtime_shape,
                     elapsed,
+                    scope="local",
                 )
 
         return compiled_graph
@@ -474,7 +491,7 @@ def set_model_tag(tag: str):
 
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
+    It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
     where we customize the compilation.
 
     The major work of this backend is to split the graph into
@@ -549,7 +566,11 @@ class VllmBackend:
                 self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
-    def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+    def __call__(
+        self, graph: fx.GraphModule, example_inputs
+    ) -> VllmSerializableFunction:
+        from .caching import _compute_code_hash, compilation_config_hash_factors
+
         vllm_config = self.vllm_config
         if not self.compilation_config.cache_dir:
             # no provided cache dir, generate one based on the known factors
@@ -557,39 +578,11 @@ class VllmBackend:
             # the cache dir will be the same so that we can reuse the compiled
             # graph.
 
-            factors = []
-            # 0. factors come from the env, for example, The values of
-            # VLLM_PP_LAYER_PARTITION will affect the computation graph.
-            env_hash = envs.compute_hash()
-            factors.append(env_hash)
-
-            # 1. factors come from the vllm_config (it mainly summarizes how the
-            #    model is created)
-            config_hash = vllm_config.compute_hash()
-            factors.append(config_hash)
-
+            factors = compilation_config_hash_factors(vllm_config)
             # 2. factors come from the code files that are traced by Dynamo (
             #    it mainly summarizes how the model is used in forward pass)
-            forward_code_files = list(sorted(self.compilation_config.traced_files))
+            code_hash = _compute_code_hash(self.compilation_config.traced_files)
             self.compilation_config.traced_files.clear()
-            logger.debug(
-                "Traced files (to be considered for compilation cache):\n%s",
-                "\n".join(forward_code_files),
-            )
-            hash_content = []
-            for filepath in forward_code_files:
-                hash_content.append(filepath)
-                if filepath == "<string>":
-                    # This means the function was dynamically generated, with
-                    # e.g. exec(). We can't actually check these.
-                    continue
-                with open(filepath) as f:
-                    hash_content.append(f.read())
-            import hashlib
-
-            code_hash = hashlib.md5(
-                "\n".join(hash_content).encode(), usedforsecurity=False
-            ).hexdigest()
             factors.append(code_hash)
 
             # 3. compiler hash
@@ -620,10 +613,12 @@ class VllmBackend:
         disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
 
         if disable_cache:
-            logger.info("vLLM's torch.compile cache is disabled.")
+            logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
         else:
-            logger.info(
-                "Using cache directory: %s for vLLM's torch.compile", local_cache_dir
+            logger.info_once(
+                "Using cache directory: %s for vLLM's torch.compile",
+                local_cache_dir,
+                scope="local",
             )
 
         self.compiler_manager.initialize_cache(
@@ -636,7 +631,9 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        logger.info_once(
+            "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
+        )
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
@@ -677,7 +674,8 @@ class VllmBackend:
 
         graph_path = os.path.join(local_cache_dir, "computation_graph.py")
         if not os.path.exists(graph_path):
-            # code adapted from https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30 # noqa
+            # code adapted from
+            # https://github.com/thuml/depyf/blob/dab831108a752d1facc00acdd6d4243891845c37/depyf/explain/patched_lazy_format_graph_code.py#L30
             # use `print_readable` because it can include submodules
             src = (
                 "from __future__ import annotations\nimport torch\n"
@@ -687,7 +685,9 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug("Computation graph saved to %s", graph_path)
+            logger.debug_once(
+                "Computation graph saved to %s", graph_path, scope="local"
+            )
 
         self._called = True
 
@@ -695,7 +695,9 @@ class VllmBackend:
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
         ):
-            return self.split_gm
+            return VllmSerializableFunction(
+                graph, example_inputs, self.prefix, self.split_gm
+            )
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
@@ -740,4 +742,6 @@ class VllmBackend:
                 list_args[index] = static_tensor
             return self.split_gm(*list_args)
 
-        return copy_and_call
+        return VllmSerializableFunction(
+            graph, example_inputs, self.prefix, copy_and_call
+        )

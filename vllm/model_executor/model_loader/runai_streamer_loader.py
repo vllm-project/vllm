@@ -3,7 +3,6 @@
 # ruff: noqa: SIM117
 import os
 from collections.abc import Generator
-from typing import Optional
 
 import torch
 from torch import nn
@@ -28,8 +27,15 @@ class RunaiModelStreamerLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+
+        self._is_distributed = False
         if load_config.model_loader_extra_config:
             extra_config = load_config.model_loader_extra_config
+
+            if "distributed" in extra_config and isinstance(
+                extra_config.get("distributed"), bool
+            ):
+                self._is_distributed = extra_config.get("distributed")
 
             if "concurrency" in extra_config and isinstance(
                 extra_config.get("concurrency"), int
@@ -51,7 +57,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
 
     def _prepare_weights(
-        self, model_name_or_path: str, revision: Optional[str]
+        self, model_name_or_path: str, revision: str | None
     ) -> list[str]:
         """Prepare weights for the model.
 
@@ -93,8 +99,7 @@ class RunaiModelStreamerLoader(BaseModelLoader):
         """Get an iterator for the model weights based on the load format."""
         hf_weights_files = self._prepare_weights(model_or_path, revision)
         return runai_safetensors_weights_iterator(
-            hf_weights_files,
-            self.load_config.use_tqdm_on_load,
+            hf_weights_files, self.load_config.use_tqdm_on_load, self._is_distributed
         )
 
     def download_model(self, model_config: ModelConfig) -> None:
