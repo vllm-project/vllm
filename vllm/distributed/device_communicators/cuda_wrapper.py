@@ -14,6 +14,7 @@ import torch  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -127,8 +128,6 @@ class CudaRTLibrary:
     #  to the corresponding dictionary
     path_to_dict_mapping: dict[str, dict[str, Any]] = {}
 
-    is_rocm = False
-
     def __init__(self, so_file: str | None = None):
         if so_file is None:
             so_file = find_loaded_library("libcudart")
@@ -138,7 +137,6 @@ class CudaRTLibrary:
                 # should be safe to assume now that we are using ROCm
                 # as the following assertion should error out if the
                 # libhiprtc library is also not loaded
-                self.is_rocm = True
                 if so_file is None:
                     so_file = envs.VLLM_CUDART_SO_PATH  # fallback to env var
             assert so_file is not None, (
@@ -156,7 +154,7 @@ class CudaRTLibrary:
                 f = getattr(
                     self.lib,
                     CudaRTLibrary.cuda_to_hip_mapping[func.name]
-                    if self.is_rocm
+                    if current_platform.is_rocm()
                     else func.name,
                 )
                 f.restype = func.restype
