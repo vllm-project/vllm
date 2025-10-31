@@ -162,7 +162,7 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        w, w_s, x_s = self._get_layer_params(layer)
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
         return apply_weights_fp8(
             torch_per_tensor_w8a8_scaled_mm,
             self.quant_fp8,
@@ -171,6 +171,7 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
+            x_s_ub,
             self.config.out_dtype,
         )
 
@@ -215,7 +216,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        w, w_s, x_s = self._get_layer_params(layer)
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
         return apply_weights_fp8(
             torch_row_wise_w8a8_scaled_mm,
             self.quant_fp8,
@@ -224,6 +225,7 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
+            x_s_ub,
             self.config.out_dtype,
         )
 
@@ -255,7 +257,7 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        w, w_s, x_s = self._get_layer_params(layer)
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
         return apply_weights_fp8(
             torch_channelwise_w8a8_scaled_mm,
             self.quant_fp8,
@@ -264,5 +266,6 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
+            x_s_ub,
             self.config.out_dtype,
         )

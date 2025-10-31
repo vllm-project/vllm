@@ -77,7 +77,7 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ):
-        w, w_s, x_s = self._get_layer_params(layer)
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
         return apply_weights_fp8(
             flashinfer_w8a8_scaled_mm,
             self.quant_fp8,
@@ -86,5 +86,6 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             w_s,
             x_s,
             bias,
+            x_s_ub,
             self.config.out_dtype,
         )

@@ -18,6 +18,7 @@ def apply_weights_fp8(
     w_s: torch.Tensor,
     x_s: torch.Tensor,
     bias: torch.Tensor,
+    x_s_ub: torch.Tensor | None,
     maybe_out_dtype: torch.dtype | None,
 ) -> torch.Tensor:
     #   ops.scaled_fp8_quant supports both dynamic and static quant.
@@ -36,6 +37,7 @@ def apply_weights_fp8(
         x_2d_q, x_s = quant_fp8_func(
             x_2d,
             x_s,
+            x_s_ub,
         )
 
     return scaled_mm_func(
