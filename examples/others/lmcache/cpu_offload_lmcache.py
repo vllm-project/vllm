@@ -144,6 +144,9 @@ def main():
         print_output(llm, first_prompt, sampling_params, "first")
 
         time.sleep(1)
+        # Clear vLLM's internal prefix cache to force the second request
+        # to fetch cached KVs from LMCache
+        llm.reset_prefix_cache()
 
         # print the second output
         print_output(llm, second_prompt, sampling_params, "second")
