@@ -345,22 +345,7 @@ class OpenAIServing:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
-        else:
-            processed_inputs = processor.input_preprocessor._prompt_to_llm_inputs(
-                prompt
-            )
 
-        if processed_inputs["type"] == "embeds":
-            raise NotImplementedError
-
-        # This is a workaround to fix multimodal beam search; this is a
-        # bandaid fix for 2 small problems:
-        # 1. Multi_modal_data on the processed_inputs currently resolves to
-        #    `None`.
-        # 2. preprocessing above expands the multimodal placeholders. However,
-        #    this happens again in generation, so the double expansion causes
-        #    a mismatch.
-        # TODO - would be ideal to handle this more gracefully.
         prompt_text: str | None
         prompt_token_ids: list[int]
         multi_modal_data: MultiModalDataDict | None
@@ -373,9 +358,16 @@ class OpenAIServing:
             prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
             multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
-        mm_processor_kwargs: dict[str, Any] | None = processed_inputs.get(
-            "mm_processor_kwargs"
-        )  # type: ignore
+        mm_processor_kwargs: dict[str, Any] | None = None
+
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
 
         tokenized_length = len(prompt_token_ids)
 
