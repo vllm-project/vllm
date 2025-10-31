@@ -168,7 +168,7 @@ class MultiModalConfig:
     @field_validator("mm_encoder_attn_backend", mode="before")
     @classmethod
     def _validate_mm_encoder_attn_backend(
-        cls, value: object
+        cls, value: str | AttentionBackendEnum | None
     ) -> AttentionBackendEnum | None:
         if value is None or isinstance(value, AttentionBackendEnum):
             return value
