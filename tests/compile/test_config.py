@@ -78,9 +78,17 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
 @pytest.mark.parametrize(
-    "cudagraph_mode", [CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.NONE]
+    "cudagraph_mode,num_cudagraph_captured",
+    [
+        (CUDAGraphMode.NONE, 0),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1),
+        (CUDAGraphMode.PIECEWISE, 13),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, 14),
+    ],
 )
-def test_use_cudagraphs(vllm_runner, monkeypatch, cudagraph_mode):
+def test_use_cudagraphs(
+    vllm_runner, monkeypatch, cudagraph_mode, num_cudagraph_captured
+):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -89,7 +97,6 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, cudagraph_mode):
         "cudagraph_mode": cudagraph_mode,
     }
     num_gpu_runner_capture_triggers = 1 if cudagraph_mode != CUDAGraphMode.NONE else 0
-    num_cudagraph_captured = 14 if cudagraph_mode != CUDAGraphMode.NONE else 0
     with (
         compilation_counter.expect(
             num_graphs_seen=1,
