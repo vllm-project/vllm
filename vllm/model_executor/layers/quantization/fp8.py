@@ -398,7 +398,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 act_q_group_shape=self.act_q_group_shape,
                 weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
                 out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__
+                module_name=self.__class__.__name__,
             )
 
     def create_weights(

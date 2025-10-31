@@ -86,7 +86,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 act_q_group_shape=self.act_q_group_shape,
                 weight_quant_strategy=weight_quant_strategy,
                 out_dtype=self.out_dtype,
-                module_name=self.__class__.__name__
+                module_name=self.__class__.__name__,
             )
 
     @classmethod

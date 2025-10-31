@@ -178,7 +178,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             act_q_group_shape=self.act_quant_group_shape,
             weight_quant_strategy=weight_quant_strategy,
             out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__
+            module_name=self.__class__.__name__,
         )
 
     def apply_weights(

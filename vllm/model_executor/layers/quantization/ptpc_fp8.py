@@ -108,9 +108,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
             act_q_group_shape=GroupShape.PER_TOKEN,
             weight_quant_strategy=ScaledMMLinearQuantStrategy.CHANNEL,
             out_dtype=self.out_dtype,
-            module_name=self.__class__.__name__
+            module_name=self.__class__.__name__,
         )
-
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
@@ -136,6 +135,4 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear_kernel.apply_weights(
-            layer, x, bias
-        )
+        return self.fp8_linear_kernel.apply_weights(layer, x, bias)
