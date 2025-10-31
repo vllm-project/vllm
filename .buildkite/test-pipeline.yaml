@@ -1234,3 +1234,21 @@ steps:
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
+
+- label: DeepSeek V2-Lite Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep.sh 0.8 200 8020
