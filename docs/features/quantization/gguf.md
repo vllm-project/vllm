@@ -1,7 +1,4 @@
----
-title: GGUF
----
-[](){ #gguf }
+# GGUF
 
 !!! warning
     Please note that GGUF support in vLLM is highly experimental and under-optimized at the moment, it might be incompatible with other features. Currently, you can use GGUF as a way to reduce memory footprint. If you encounter any issues, please report them to the vLLM team.
@@ -41,7 +38,7 @@ vllm serve ./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf \
 
 You can also use the GGUF model directly through the LLM entrypoint:
 
-??? Code
+??? code
 
       ```python
       from vllm import LLM, SamplingParams
@@ -50,15 +47,15 @@ You can also use the GGUF model directly through the LLM entrypoint:
       conversation = [
          {
             "role": "system",
-            "content": "You are a helpful assistant"
+            "content": "You are a helpful assistant",
          },
          {
             "role": "user",
-            "content": "Hello"
+            "content": "Hello",
          },
          {
             "role": "assistant",
-            "content": "Hello! How can I assist you today?"
+            "content": "Hello! How can I assist you today?",
          },
          {
             "role": "user",
@@ -70,8 +67,10 @@ You can also use the GGUF model directly through the LLM entrypoint:
       sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
       # Create an LLM.
-      llm = LLM(model="./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
-               tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+      llm = LLM(
+         model="./tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
+         tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+      )
       # Generate texts from the prompts. The output is a list of RequestOutput objects
       # that contain the prompt, generated text, and other information.
       outputs = llm.chat(conversation, sampling_params)

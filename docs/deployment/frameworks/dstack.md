@@ -1,7 +1,4 @@
----
-title: dstack
----
-[](){ #deployment-dstack }
+# dstack
 
 <p align="center">
     <img src="https://i.ibb.co/71kx6hW/vllm-dstack.png" alt="vLLM_plus_dstack"/>
@@ -12,7 +9,7 @@ vLLM can be run on a cloud based GPU machine with [dstack](https://dstack.ai/), 
 To install dstack client, run:
 
 ```bash
-pip install "dstack[all]
+pip install dstack[all]
 dstack server
 ```
 
@@ -26,7 +23,7 @@ dstack init
 
 Next, to provision a VM instance with LLM of your choice (`NousResearch/Llama-2-7b-chat-hf` for this example), create the following `serve.dstack.yml` file for the dstack `Service`:
 
-??? Config
+??? code "Config"
 
     ```yaml
     type: service
@@ -48,7 +45,7 @@ Next, to provision a VM instance with LLM of your choice (`NousResearch/Llama-2-
 
 Then, run the following CLI for provisioning:
 
-??? Command
+??? console "Command"
 
     ```console
     $ dstack run . -f serve.dstack.yml
@@ -79,14 +76,14 @@ Then, run the following CLI for provisioning:
 
 After the provisioning, you can interact with the model by using the OpenAI SDK:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
 
     client = OpenAI(
         base_url="https://gateway.<gateway domain>",
-        api_key="<YOUR-DSTACK-SERVER-ACCESS-TOKEN>"
+        api_key="<YOUR-DSTACK-SERVER-ACCESS-TOKEN>",
     )
 
     completion = client.chat.completions.create(
@@ -96,7 +93,7 @@ After the provisioning, you can interact with the model by using the OpenAI SDK:
                 "role": "user",
                 "content": "Compose a poem that explains the concept of recursion in programming.",
             }
-        ]
+        ],
     )
 
     print(completion.choices[0].message.content)

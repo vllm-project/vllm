@@ -31,7 +31,8 @@ def test_version_tuple():
         ((1, 0, 0), "1.-1", True),
         ((1, 0, 0), "0.9", False),
         ((1, 0, 0), "0.17", False),
-    ])
+    ],
+)
 def test_prev_minor_version_was(version_tuple, version_str, expected):
     with patch("vllm.version.__version_tuple__", version_tuple):
         assert version._prev_minor_version_was(version_str) == expected

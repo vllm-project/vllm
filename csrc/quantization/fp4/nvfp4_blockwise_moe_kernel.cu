@@ -1,3 +1,21 @@
+/*
+ * Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "core/registration.h"
+
 #include <torch/all.h>
 #include <cutlass/arch/arch.h>
 
@@ -335,8 +353,10 @@ void run_fp4_blockwise_scaled_group_mm(
   TORCH_CHECK(status == cutlass::Status::kSuccess, "Failed to run GEMM");
 }
 
+#if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
 constexpr auto FLOAT4_E2M1X2 = at::ScalarType::Byte;
 constexpr auto SF_DTYPE = at::ScalarType::Float8_e4m3fn;
+#endif
 
 #define CHECK_TYPE(x, st, m) \
   TORCH_CHECK(x.scalar_type() == st, ": Inconsistency of Tensor type:", m)
@@ -354,7 +374,7 @@ void cutlass_fp4_group_mm(
     const torch::Tensor& a_blockscale, const torch::Tensor& b_blockscales,
     const torch::Tensor& alphas, const torch::Tensor& problem_sizes,
     const torch::Tensor& expert_offsets, const torch::Tensor& sf_offsets) {
-#if defined ENABLE_NVFP4 && ENABLE_NVFP4
+#if defined ENABLE_NVFP4_SM100 && ENABLE_NVFP4_SM100
   // Input validation
   CHECK_INPUT(a, FLOAT4_E2M1X2, "a");
   CHECK_INPUT(b, FLOAT4_E2M1X2, "b");
@@ -396,7 +416,11 @@ void cutlass_fp4_group_mm(
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
       "No compiled cutlass_fp4_group_mm kernel, vLLM must "
-      "be compiled with ENABLE_NVFP4 for SM100+ and CUDA "
+      "be compiled with ENABLE_NVFP4_SM100 for SM100+ and CUDA "
       "12.8 or above.");
 #endif
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("cutlass_fp4_group_mm", &cutlass_fp4_group_mm);
 }

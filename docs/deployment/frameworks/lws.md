@@ -1,7 +1,4 @@
----
-title: LWS
----
-[](){ #deployment-lws }
+# LWS
 
 LeaderWorkerSet (LWS) is a Kubernetes API that aims to address common deployment patterns of AI/ML inference workloads.
 A major use case is for multi-host/multi-node distributed inference.
@@ -17,7 +14,7 @@ vLLM can be deployed with [LWS](https://github.com/kubernetes-sigs/lws) on Kuber
 
 Deploy the following yaml file `lws.yaml`
 
-??? Yaml
+??? code "Yaml"
 
     ```yaml
     apiVersion: leaderworkerset.x-k8s.io/v1
@@ -25,7 +22,7 @@ Deploy the following yaml file `lws.yaml`
     metadata:
       name: vllm
     spec:
-      replicas: 2
+      replicas: 1
       leaderWorkerTemplate:
         size: 2
         restartPolicy: RecreateGroupOnPodRestart
@@ -38,13 +35,13 @@ Deploy the following yaml file `lws.yaml`
               - name: vllm-leader
                 image: docker.io/vllm/vllm-openai:latest
                 env:
-                  - name: HUGGING_FACE_HUB_TOKEN
+                  - name: HF_TOKEN
                     value: <your-hf-token>
                 command:
                   - sh
                   - -c
                   - "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE); 
-                    python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline_parallel_size 2"
+                    vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline_parallel_size 2"
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
@@ -86,7 +83,7 @@ Deploy the following yaml file `lws.yaml`
                     ephemeral-storage: 800Gi
                     cpu: 125
                 env:
-                  - name: HUGGING_FACE_HUB_TOKEN
+                  - name: HF_TOKEN
                     value: <your-hf-token>
                 volumeMounts:
                   - mountPath: /dev/shm
@@ -129,8 +126,6 @@ Should get an output similar to this:
 NAME       READY   STATUS    RESTARTS   AGE
 vllm-0     1/1     Running   0          2s
 vllm-0-1   1/1     Running   0          2s
-vllm-1     1/1     Running   0          2s
-vllm-1-1   1/1     Running   0          2s
 ```
 
 Verify that the distributed tensor-parallel inference works:
@@ -177,7 +172,7 @@ curl http://localhost:8080/v1/completions \
 
 The output should be similar to the following
 
-??? Output
+??? console "Output"
 
     ```text
     {

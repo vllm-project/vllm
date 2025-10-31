@@ -6,6 +6,7 @@ import argparse
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams
+from vllm.assets.image import ImageAsset
 
 # This script is an offline demo for running Mistral-Small-3.1
 #
@@ -67,18 +68,20 @@ def run_simple_demo(args: argparse.Namespace):
         max_model_len=4096,
         max_num_seqs=2,
         tensor_parallel_size=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=0 if args.disable_mm_processor_cache else 4,
     )
 
     prompt = "Describe this image in one sentence."
-    image_url = "https://picsum.photos/id/237/200/300"
 
     messages = [
         {
             "role": "user",
             "content": [
                 {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": image_url}},
+                {
+                    "type": "image_pil",
+                    "image_pil": ImageAsset("cherry_blossom").pil_image,
+                },
             ],
         },
     ]
@@ -102,7 +105,7 @@ def run_advanced_demo(args: argparse.Namespace):
         limit_mm_per_prompt={"image": max_img_per_msg},
         max_model_len=max_img_per_msg * max_tokens_per_img,
         tensor_parallel_size=2,
-        disable_mm_preprocessor_cache=args.disable_mm_preprocessor_cache,
+        mm_processor_cache_gb=0 if args.disable_mm_processor_cache else 4,
     )
 
     prompt = "Describe the following image."
@@ -161,9 +164,9 @@ def parse_args():
     )
 
     parser.add_argument(
-        "--disable-mm-preprocessor-cache",
+        "--disable-mm-processor-cache",
         action="store_true",
-        help="If True, disables caching of multi-modal preprocessor/mapper.",
+        help="If True, disables caching of multi-modal processor.",
     )
     return parser.parse_args()
 

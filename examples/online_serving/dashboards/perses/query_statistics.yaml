@@ -1,0 +1,392 @@
+kind: PersesDashboard
+metadata:
+  name: query-statistics
+  createdAt: 0001-01-01T00:00:00Z
+  updatedAt: 0001-01-01T00:00:00Z
+  version: 0
+  project: ""
+spec:
+  display:
+    name: Query Statistics_New
+
+  variables:
+    - kind: ListVariable
+      spec:
+        name: NS
+        display: { name: Namespace }
+        allowMultiple: false
+        defaultValue: llm-d
+        plugin:
+          kind: PrometheusLabelValuesVariable
+          spec:
+            datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+            labelName: namespace
+            matchers:
+              - up{service=~".*vllm.*"}
+
+    - kind: ListVariable
+      spec:
+        name: SVC
+        display: { name: Service }
+        allowMultiple: false
+        defaultValue: vllm-qwen2-0-5b-sim
+        plugin:
+          kind: PrometheusLabelValuesVariable
+          spec:
+            datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+            labelName: service
+            matchers:
+              - up{namespace="$NS",service=~".*vllm.*"}
+
+    - kind: ListVariable
+      spec:
+        name: MODEL
+        display: { name: Model (real vLLM) }
+        allowAllValue: true
+        allowMultiple: true
+        defaultValue: ["$__all"]
+        plugin:
+          kind: PrometheusLabelValuesVariable
+          spec:
+            datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+            labelName: model_name
+            matchers:
+              - vllm:request_success_total{namespace="$NS",service="$SVC"}
+
+  panels:
+
+    # --- Core (works on Simulator & Real) ---
+    core_running_now:
+      kind: Panel
+      spec:
+        display: { name: Running Requests (now) }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum(vllm:num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    core_waiting_now:
+      kind: Panel
+      spec:
+        display: { name: Waiting Requests (now) }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum(vllm:num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    core_kv_usage_now:
+      kind: Panel
+      spec:
+        display: { name: KV Cache Usage (0–1) }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: avg(vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    core_running_ts:
+      kind: Panel
+      spec:
+        display: { name: Running Over Time }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (service) (vllm:num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    core_waiting_ts:
+      kind: Panel
+      spec:
+        display: { name: Waiting Over Time }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (service) (vllm:num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    core_targets_up:
+      kind: Panel
+      spec:
+        display: { name: Scrape Targets Up }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: count(up{namespace="$NS",service="$SVC"} == 1) or vector(0)
+                  minStep: "15s"
+
+    # --- KV Cache as Percent (works on Simulator & Real) ---
+    core_kv_usage_pct_now:
+      kind: Panel
+      spec:
+        display: { name: KV Cache Usage (%) – now }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  # multiply by 100 to present percentage; omit format.unit to avoid schema conflicts
+                  query: (avg(vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  minStep: "15s"
+
+    core_kv_usage_pct_ts:
+      kind: Panel
+      spec:
+        display: { name: KV Cache Usage (%) – over time }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: (avg by (service) (vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  minStep: "15s"
+
+    # --- Per-Pod breakdowns (works on Simulator & Real) ---
+    per_pod_running_ts:
+      kind: Panel
+      spec:
+        display: { name: Running by Pod }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (pod) (vllm:num_requests_running{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    per_pod_waiting_ts:
+      kind: Panel
+      spec:
+        display: { name: Waiting by Pod }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (pod) (vllm:num_requests_waiting{namespace="$NS",service="$SVC"}) or vector(0)
+                  minStep: "15s"
+
+    per_pod_kv_pct_ts:
+      kind: Panel
+      spec:
+        display: { name: KV Cache (%) by Pod }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  # if your exporter labels kv metric with pod (the sim does), this works; otherwise it will just return empty
+                  query: (avg by (pod) (vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  minStep: "15s"
+
+    # --- Real vLLM only (zeros on simulator) ---
+    real_req_rate_ts:
+      kind: Panel
+      spec:
+        display: { name: Request Rate (real vLLM) }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (model_name) (rate(vllm:request_success_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
+                  minStep: "15s"
+
+    real_p50:
+      kind: Panel
+      spec:
+        display: { name: p50 Latency (real vLLM) }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: histogram_quantile(0.50, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
+                  minStep: "15s"
+
+    real_p90:
+      kind: Panel
+      spec:
+        display: { name: p90 Latency (real vLLM) }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: histogram_quantile(0.90, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
+                  minStep: "15s"
+
+    real_p99:
+      kind: Panel
+      spec:
+        display: { name: p99 Latency (real vLLM) }
+        plugin: { kind: StatChart, spec: { calculation: last-number } }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: histogram_quantile(0.99, sum by (le, model_name) (rate(vllm:e2e_request_latency_seconds_bucket{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval]))) or vector(0)
+                  minStep: "15s"
+
+    real_input_tokens_ts:
+      kind: Panel
+      spec:
+        display: { name: Input Tokens / sec (real vLLM) }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (model_name) (rate(vllm:prompt_tokens_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
+                  minStep: "15s"
+
+    real_output_tokens_ts:
+      kind: Panel
+      spec:
+        display: { name: Output Tokens / sec (real vLLM) }
+        plugin:
+          kind: TimeSeriesChart
+          spec:
+            legend: { mode: table, position: bottom }
+            visual: { display: line, lineWidth: 1, areaOpacity: 0.3 }
+        queries:
+          - kind: TimeSeriesQuery
+            spec:
+              plugin:
+                kind: PrometheusTimeSeriesQuery
+                spec:
+                  datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
+                  query: sum by (model_name) (rate(vllm:generation_tokens_total{namespace="$NS",service="$SVC",model_name=~"$MODEL"}[$__interval])) or vector(0)
+                  minStep: "15s"
+
+  layouts:
+    - kind: Grid
+      spec:
+        display: { title: Core (Sim & Real) }
+        items:
+          - { x: 0,  y: 0,  width: 6,  height: 3, content: { $ref: '#/spec/panels/core_running_now' } }
+          - { x: 6,  y: 0,  width: 6,  height: 3, content: { $ref: '#/spec/panels/core_waiting_now' } }
+          - { x: 12, y: 0,  width: 6,  height: 3, content: { $ref: '#/spec/panels/core_kv_usage_now' } }
+          - { x: 18, y: 0,  width: 6,  height: 3, content: { $ref: '#/spec/panels/core_targets_up' } }
+          - { x: 0,  y: 3,  width: 12, height: 6, content: { $ref: '#/spec/panels/core_running_ts' } }
+          - { x: 12, y: 3,  width: 12, height: 6, content: { $ref: '#/spec/panels/core_waiting_ts' } }
+
+    - kind: Grid
+      spec:
+        display: { title: KV Cache (%) }
+        items:
+          - { x: 0,  y: 9,  width: 6,  height: 3, content: { $ref: '#/spec/panels/core_kv_usage_pct_now' } }
+          - { x: 6,  y: 9,  width: 18, height: 6, content: { $ref: '#/spec/panels/core_kv_usage_pct_ts' } }
+
+    - kind: Grid
+      spec:
+        display: { title: Per-Pod breakdowns }
+        items:
+          - { x: 0,  y: 15, width: 12, height: 6, content: { $ref: '#/spec/panels/per_pod_running_ts' } }
+          - { x: 12, y: 15, width: 12, height: 6, content: { $ref: '#/spec/panels/per_pod_waiting_ts' } }
+          - { x: 0,  y: 21, width: 24, height: 6, content: { $ref: '#/spec/panels/per_pod_kv_pct_ts' } }
+
+    - kind: Grid
+      spec:
+        display: { title: Real vLLM only (shows 0 on simulator) }
+        items:
+          - { x: 0,  y: 27, width: 12, height: 6, content: { $ref: '#/spec/panels/real_req_rate_ts' } }
+          - { x: 12, y: 27, width: 4,  height: 3, content: { $ref: '#/spec/panels/real_p50' } }
+          - { x: 16, y: 27, width: 4,  height: 3, content: { $ref: '#/spec/panels/real_p90' } }
+          - { x: 20, y: 27, width: 4,  height: 3, content: { $ref: '#/spec/panels/real_p99' } }
+          - { x: 0,  y: 33, width: 12, height: 6, content: { $ref: '#/spec/panels/real_input_tokens_ts' } }
+          - { x: 12, y: 33, width: 12, height: 6, content: { $ref: '#/spec/panels/real_output_tokens_ts' } }
+

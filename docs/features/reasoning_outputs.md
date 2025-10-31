@@ -1,7 +1,4 @@
----
-title: Reasoning Outputs
----
-[](){ #reasoning-outputs }
+# Reasoning Outputs
 
 vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
@@ -13,14 +10,21 @@ vLLM currently supports the following reasoning models:
 
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
 |--------------|-------------|------------------|-------------|
-| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `guided_json`, `guided_regex` | ❌ |
-| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `guided_json`, `guided_regex` | ✅ |
+| [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
+| [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
+| [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
+| [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
+| [GLM-4.5 series](https://huggingface.co/collections/zai-org/glm-45-687c621d34bda8c9e4bf503b) | `glm45` | `json`, `regex` | ✅ |
+| [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
-| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `guided_json`, `guided_regex` | ✅ |
+| [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
+| [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
+| [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
 
 !!! note
-    IBM Granite 3.2 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
+    IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
+    DeepSeek-V3.1 tool calling is supported in non-thinking mode.
 
 ## Quickstart
 
@@ -33,7 +37,7 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
 
 Next, make a request to the model that should return the reasoning content in the response.
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -70,7 +74,7 @@ The `reasoning_content` field contains the reasoning steps that led to the final
 
 Streaming chat completions are also supported for reasoning models. The `reasoning_content` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
 
-??? Json
+??? console "Json"
 
     ```json
     {
@@ -95,7 +99,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
 
 OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
@@ -116,22 +120,23 @@ OpenAI Python client library does not officially support `reasoning_content` att
     # For granite, add: `extra_body={"chat_template_kwargs": {"thinking": True}}`
     # For Qwen3 series, if you want to disable thinking in reasoning mode, add:
     # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
-    stream = client.chat.completions.create(model=model,
-                                            messages=messages,
-                                            stream=True)
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+    )
 
     print("client: Start streaming chat completions...")
     printed_reasoning_content = False
     printed_content = False
 
     for chunk in stream:
-        reasoning_content = None
-        content = None
-        # Check the content is reasoning_content or content
-        if hasattr(chunk.choices[0].delta, "reasoning_content"):
-            reasoning_content = chunk.choices[0].delta.reasoning_content
-        elif hasattr(chunk.choices[0].delta, "content"):
-            content = chunk.choices[0].delta.content
+        # Safely extract reasoning_content and content from delta,
+        # defaulting to None if attributes don't exist or are empty strings
+        reasoning_content = (
+            getattr(chunk.choices[0].delta, "reasoning_content", None) or None
+        )
+        content = getattr(chunk.choices[0].delta, "content", None) or None
 
         if reasoning_content is not None:
             if not printed_reasoning_content:
@@ -146,40 +151,42 @@ OpenAI Python client library does not officially support `reasoning_content` att
             print(content, end="", flush=True)
     ```
 
-Remember to check whether the `reasoning_content` exists in the response before accessing it. You could checkout the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+Remember to check whether the `reasoning_content` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 
 The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning_content`.
 
-??? Code
+??? code
 
     ```python
     from openai import OpenAI
 
     client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
 
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "Get the current weather in a given location",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
-                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
-                },
-                "required": ["location", "unit"]
-            }
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City and state, e.g., 'San Francisco, CA'"},
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location", "unit"],
+                }
+            },
         }
-    }]
+    ]
 
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=[{"role": "user", "content": "What's the weather like in San Francisco?"}],
         tools=tools,
-        tool_choice="auto"
+        tool_choice="auto",
     )
 
     print(response)
@@ -190,7 +197,7 @@ The reasoning content is also available when both tool calling and the reasoning
     print(f"Arguments: {tool_call.arguments}")
     ```
 
-For more examples, please refer to <gh-file:examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py>.
+For more examples, please refer to [examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py](../../examples/online_serving/openai_chat_completion_tool_calls_with_reasoning.py).
 
 ## Limitations
 
@@ -198,9 +205,9 @@ For more examples, please refer to <gh-file:examples/online_serving/openai_chat_
 
 ## How to support a new reasoning model
 
-You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
+You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
 
-??? Code
+??? code
 
     ```python
     # import the required packages
@@ -225,7 +232,7 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
             previous_token_ids: Sequence[int],
             current_token_ids: Sequence[int],
             delta_token_ids: Sequence[int],
-        ) -> Union[DeltaMessage, None]:
+        ) -> DeltaMessage | None:
             """
             Instance method that should be implemented for extracting reasoning
             from an incomplete response; for use when handling reasoning calls and
@@ -235,8 +242,10 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
             """
 
         def extract_reasoning_content(
-                self, model_output: str, request: ChatCompletionRequest
-        ) -> tuple[Optional[str], Optional[str]]:
+            self,
+            model_output: str,
+            request: ChatCompletionRequest | ResponsesRequest,
+        ) -> tuple[str | None, str | None]:
             """
             Extract reasoning content from a complete model-generated string.
 
@@ -256,9 +265,9 @@ You can add a new `ReasoningParser` similar to <gh-file:vllm/reasoning/deepseek_
             """
     ```
 
-Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in <gh-file:vllm/reasoning/deepseek_r1_reasoning_parser.py>.
+Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
 
-??? Code
+??? code
 
     ```python
     @dataclass
@@ -274,10 +283,10 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
 
         @classmethod
         def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
-            return cls(start_token_id=tokenizer.encode(
-                "<think>", add_special_tokens=False)[0],
-                    end_token_id=tokenizer.encode("</think>",
-                                                    add_special_tokens=False)[0])
+            return cls(
+                start_token_id=tokenizer.encode("<think>", add_special_tokens=False)[0],
+                end_token_id=tokenizer.encode("</think>", add_special_tokens=False)[0],
+            )
 
         def is_reasoning_end(self, input_ids: list[int]) -> bool:
             return self.end_token_id in input_ids

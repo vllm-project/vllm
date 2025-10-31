@@ -19,6 +19,13 @@
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...) \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
 
+#define VLLM_DISPATCH_CASE_HALF_TYPES(...)            \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__) \
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+
+#define VLLM_DISPATCH_HALF_TYPES(TYPE, NAME, ...) \
+  AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_HALF_TYPES(__VA_ARGS__))
+
 // ROCm devices might use either fn or fnuz, so set up dispatch table for both.
 // A host-based check at runtime will create a preferred FP8 type for ROCm
 // such that the correct kernel is dispatched.

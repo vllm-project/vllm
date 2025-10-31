@@ -14,10 +14,10 @@ For example:
 ```python
 from vllm import LLM
 
-model = LLM(
+llm = LLM(
     model="cerebras/Cerebras-GPT-1.3B",
     hf_overrides={"architectures": ["GPT2LMHeadModel"]},  # GPT-2
 )
 ```
 
-Our [list of supported models][supported-models] shows the model architectures that are recognized by vLLM.
+Our [list of supported models](../models/supported_models.md) shows the model architectures that are recognized by vLLM.
