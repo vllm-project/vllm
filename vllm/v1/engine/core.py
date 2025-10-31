@@ -276,25 +276,25 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
         if (
-            (smapling_params := request.sampling_params)
+            (sampling_params := request.sampling_params)
             and self.use_spec_decode
             and self.async_scheduling
         ):
             no_penalties = (
-                smapling_params.frequency_penalty == 0.0
-                and smapling_params.presence_penalty == 0.0
-                and smapling_params.repetition_penalty == 1.0
+                sampling_params.frequency_penalty == 0.0
+                and sampling_params.presence_penalty == 0.0
+                and sampling_params.repetition_penalty == 1.0
             )
             if (
                 not no_penalties
-                or smapling_params.bad_words_token_ids
+                or sampling_params.bad_words_token_ids
                 or self.vllm_config.model_config.logits_processors
             ):
                 # TODO(Ronald1995): support this, since 2025-10-31.
                 raise ValueError(
-                    "async scheduling with spec decoding don't support "
+                    "async scheduling with spec decoding doesn't support "
                     "penalties/bad words in sampling parameters "
-                    "and custom logitsprocessors now."
+                    "or custom LogitsProcessors yet."
                 )
 
         self.scheduler.add_request(request)
