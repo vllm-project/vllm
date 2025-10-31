@@ -184,6 +184,7 @@ if [[ $commands == *"--shard-id="* ]]; then
     echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
     docker run \
         --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+        --group-add render \
         --network=host \
         --shm-size=16gb \
         --rm \
@@ -215,6 +216,7 @@ else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+          --group-add render \
           --network=host \
           --shm-size=16gb \
           --rm \
