@@ -7,7 +7,7 @@ import traceback
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
 from typing import Literal
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from pydantic_core import core_schema
 
@@ -33,7 +33,6 @@ noop = lambda *a, **k: None
 sys.modules["vllm._C"] = MagicMock()
 sys.modules["vllm.model_executor.custom_op"] = MagicMock(CustomOp=MockCustomOp)
 sys.modules["vllm.utils.torch_utils"] = MagicMock(direct_register_custom_op=noop)
-sys.modules["vllm.config.DeviceConfig.__post_init__"] = noop
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test.txt") as f:
@@ -164,7 +163,8 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     try:
         parser = FlexibleArgumentParser(add_json_tip=False)
         parser.formatter_class = MarkdownFormatter
-        _parser = add_cli_args(parser, **kwargs)
+        with patch("vllm.config.DeviceConfig.__post_init__"):
+            _parser = add_cli_args(parser, **kwargs)
     except ModuleNotFoundError as e:
         # Auto-mock runtime imports
         if tb_list := traceback.extract_tb(e.__traceback__):
