@@ -90,13 +90,14 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import is_list_of, random_uuid
-from vllm.utils.asyncio import (
+from vllm.utils import random_uuid
+from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
     make_async,
     merge_async_iterators,
 )
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -1296,6 +1297,21 @@ class OpenAIServing:
             return default
 
         return raw_request.headers.get("X-Request-Id", default)
+
+    @staticmethod
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
 
     @staticmethod
     def _get_decoded_token(

@@ -20,9 +20,6 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -32,7 +29,6 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_interleaved,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -41,13 +37,15 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import LayerBlockType, LazyLoader, common_broadcastable_dtype
+from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
+    from vllm.attention.backends.registry import _Backend
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -55,6 +53,7 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
+    _Backend = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -87,6 +86,7 @@ LogprobsMode = Literal[
 ]
 HfOverrides = dict[str, Any] | Callable[[PretrainedConfig], PretrainedConfig]
 ModelImpl = Literal["auto", "vllm", "transformers", "terratorch"]
+LayerBlockType = Literal["attention", "linear_attention", "mamba"]
 
 _RUNNER_TASKS: dict[RunnerType, list[TaskOption]] = {
     "generate": ["generate", "transcription"],
@@ -147,6 +147,10 @@ class ModelConfig:
     seed: int | None = None
     """Random seed for reproducibility. Initialized to None in V0, but
     initialized to 0 in V1."""
+    hf_config: PretrainedConfig = field(init=False)
+    """The Hugging Face config of the model."""
+    hf_text_config: PretrainedConfig = field(init=False)
+    """The Hugging Face config of the text model (same as hf_config for text models)."""
     hf_config_path: str | None = None
     """Name or path of the Hugging Face config to use. If unspecified, model
     name or path will be used."""
@@ -155,7 +159,7 @@ class ModelConfig:
     specified by the server file system. This is a security risk. Should only
     be enabled in trusted environments."""
     allowed_media_domains: list[str] | None = None
-    """If set, only media URLs that belong to this domain can be used for 
+    """If set, only media URLs that belong to this domain can be used for
     multi-modal inputs. """
     revision: str | None = None
     """The specific model version to use. It can be a branch name, a tag name,
@@ -224,8 +228,10 @@ class ModelConfig:
     output will contain token ids."""
     enable_prompt_embeds: bool = False
     """If `True`, enables passing text embeddings as inputs via the
-    `prompt_embeds` key. Note that enabling this will double the time required
-    for graph compilation."""
+    `prompt_embeds` key.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
     served_model_name: str | list[str] | None = None
     """The model name(s) used in the API. If multiple names are provided, the
     server will respond to any of the provided names. The model name in the
@@ -295,12 +301,14 @@ class ModelConfig:
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
+    enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
     mm_processor_kwargs: InitVar[dict[str, Any] | None] = None
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
+    mm_encoder_attn_backend: InitVar[_Backend | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -333,6 +341,7 @@ class ModelConfig:
         factors.append(self.rope_scaling)
         factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
+        factors.append(self.enable_prompt_embeds)
 
         # hf_config can control how the model looks!
         try:
@@ -412,30 +421,25 @@ class ModelConfig:
         self,
         # Multimodal config init vars
         limit_mm_per_prompt: dict[str, int] | None,
+        enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
         mm_processor_kwargs: dict[str, Any] | None,
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
+        mm_encoder_attn_backend: _Backend | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
-        # Enable batch invariance settings if requested
-        if vllm_kernel_override_batch_invariant():
-            self.enforce_eager = True
-
         # Set the default seed to 0 in V1.
-        # NOTE(woosuk): In V0, we set the default seed to None because the
-        # driver worker shares the same process as the user process, and thus
-        # setting a seed affects the user process as well.
-        # In V1, we use separate processes for workers (unless
+        # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
         # doesn't affect the user process. However, without a consistent seed,
         # different tensor parallel workers would sample different tokens,
         # leading to inconsistent results.
-        if envs.VLLM_USE_V1 and self.seed is None:
+        if self.seed is None:
             self.seed = 0
             if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
                 logger.warning(
@@ -688,23 +692,6 @@ class ModelConfig:
             revision=self.revision,
         )
 
-        # Interleaved attention is not supported by some backends in V0
-        if (
-            not self.disable_sliding_window
-            and is_interleaved(self.hf_text_config)
-            and not envs.VLLM_USE_V1
-            and (backend := envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER")
-        ):
-            logger.warning_once(
-                "%s has interleaved attention, which is currently not "
-                "supported by the %s backend. Disabling sliding window and "
-                "capping the max length to the sliding window size (%d).",
-                self.hf_text_config.model_type,
-                backend,
-                self.hf_text_config.sliding_window,
-            )
-            self.disable_sliding_window = True
-
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
         # Init multimodal config if needed
@@ -721,12 +708,14 @@ class ModelConfig:
 
             mm_config_kwargs = dict(
                 limit_per_prompt=limit_mm_per_prompt,
+                enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
                 mm_processor_kwargs=mm_processor_kwargs,
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
+                mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
@@ -771,35 +760,29 @@ class ModelConfig:
     def _get_transformers_backend_cls(self) -> str:
         """Determine which Transformers backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
-        prefix = "Transformers"
-        prefix += "MoE" if self.get_num_experts() > 1 else ""
+        cls = "Transformers"
+        # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
+        cls += "MultiModal" if self.hf_config != self.hf_text_config else ""
+        cls += "MoE" if self.get_num_experts() > 1 else ""
         # Check if the architecture we're wrapping has defaults
         runner = None
-        convert = None
+        task = None
         if defaults := try_match_architecture_defaults(self.architectures[0]):
-            _, (runner, convert) = defaults
-        # Overwrite with user-specified values
+            _, (runner, task) = defaults
+        # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
-        if self.convert not in {"auto", "none"}:
-            convert = self.convert
-        # Fall back to default values if still not set
-        if runner is None:
-            runner = "generate"
-        if convert in {None, "none"}:
-            convert = "embed"
-        # Resolve Transformers backend pooling classes
-        if runner == "pooling":
-            if convert == "embed":
-                return prefix + "EmbeddingModel"
-            if convert == "classify":
-                return prefix + "ForSequenceClassification"
-        # Resolve Transformers backend generate classes
-        if self.hf_config != self.hf_text_config:
-            # If 'hf_text_config' is the same as 'hf_config'. If not, it is
-            # probably a composite config, i.e. multimodal
-            return prefix + "ForMultimodalLM"
-        return prefix + "ForCausalLM"
+        # Only consider Transformers backend pooling classes if we're wrapping an
+        # architecture that defaults to pooling. Otherwise, we return the LM class
+        # and use adapters.
+        if runner == "pooling" and task in {"embed", "classify"}:
+            if task == "embed":
+                cls += "EmbeddingModel"
+            elif task == "classify":
+                cls += "ForSequenceClassification"
+        else:
+            cls += "ForCausalLM"
+        return cls
 
     def using_transformers_backend(self) -> bool:
         """Check if the model is using the Transformers backend class."""
@@ -1254,6 +1237,7 @@ class ModelConfig:
             "deepseek_v32",
             "deepseek_mtp",
             "kimi_k2",
+            "kimi_linear",
             "longcat_flash",
         ):
             return self.hf_text_config.kv_lora_rank is not None
@@ -1430,11 +1414,11 @@ class ModelConfig:
     def get_num_layers_by_block_type(
         self,
         parallel_config: ParallelConfig,
-        block_type: LayerBlockType = LayerBlockType.attention,
+        block_type: LayerBlockType = "attention",
     ) -> int:
         # This function relies on 'layers_block_type' in hf_config,
         # for w/o this attribute, we will need to have workarounds like so
-        attn_block_type = block_type == LayerBlockType.attention
+        attn_block_type = block_type == "attention"
         is_transformer = (
             not self.is_hybrid and not self.has_noops and not self.is_attention_free
         )
@@ -1466,9 +1450,7 @@ class ModelConfig:
                         )
                     else:
                         return self.get_num_layers(parallel_config)
-                return sum(
-                    t == block_type.value for t in layers_block_type_value[start:end]
-                )
+                return sum(t == block_type for t in layers_block_type_value[start:end])
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)
@@ -1478,19 +1460,16 @@ class ModelConfig:
             # Hybrid model Qwen3Next
             layer_types_value = getattr(self.hf_config, "layer_types", None)
             if layer_types_value is not None:
-                if getattr(block_type, "value", block_type) == "attention":
+                if block_type == "attention":
                     return sum(
                         t == "full_attention" for t in layer_types_value[start:end]
                     )
-                elif getattr(block_type, "value", block_type) == "linear_attention":
+                elif block_type == "linear_attention":
                     return sum(
                         t == "linear_attention" for t in layer_types_value[start:end]
                     )
                 else:
-                    return sum(
-                        t == getattr(block_type, "value", block_type)
-                        for t in layer_types_value[start:end]
-                    )
+                    return sum(t == block_type for t in layer_types_value[start:end])
 
             if (
                 layers_block_type_value is None
@@ -1498,10 +1477,9 @@ class ModelConfig:
                 and layer_types_value is None
             ):
                 raise ValueError(
-                    "The model is an hybrid without a"
-                    "layers_block_type or an attn_type_list, or a layer_types "
-                    "in the hf_config, cannot determine the num of "
-                    f"{block_type.value} layers"
+                    "The model is an hybrid without a layers_block_type or an "
+                    "attn_type_list, or a layer_types in the hf_config, "
+                    f"cannot determine the num of {block_type} layers"
                 )
 
     def get_mamba_chunk_size(self) -> int | None:
@@ -1617,6 +1595,29 @@ class ModelConfig:
         return is_encoder_decoder(self.hf_config)
 
     @property
+    def uses_alibi(self) -> bool:
+        cfg = self.hf_text_config
+
+        return (
+            getattr(cfg, "alibi", False)  # Falcon
+            or "BloomForCausalLM" in self.architectures  # Bloom
+            or getattr(cfg, "position_encoding_type", "") == "alibi"  # codellm_1b_alibi
+            or (
+                hasattr(cfg, "attn_config")  # MPT
+                and (
+                    (
+                        isinstance(cfg.attn_config, dict)
+                        and cfg.attn_config.get("alibi", False)
+                    )
+                    or (
+                        not isinstance(cfg.attn_config, dict)
+                        and getattr(cfg.attn_config, "alibi", False)
+                    )
+                )
+            )
+        )
+
+    @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
 
@@ -1653,6 +1654,10 @@ class ModelConfig:
     @property
     def has_inner_state(self):
         return self._model_info.has_inner_state
+
+    @property
+    def supports_mamba_prefix_caching(self) -> bool:
+        return self._model_info.supports_mamba_prefix_caching
 
     @property
     def use_mla(self) -> bool:
@@ -2110,20 +2115,23 @@ def _get_and_verify_max_len(
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
 
+    # If the user didn't specify `max_model_len`, then use that derived from
+    # the model config as a default value.
+    if max_model_len is None:
+        # For LongRoPE, default to original_max_position_embeddings to avoid
+        # performance degradation for shorter sequences
+        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+            max_model_len = int(
+                getattr(
+                    hf_config, "original_max_position_embeddings", derived_max_model_len
+                )
+            )
+        else:
+            max_model_len = int(derived_max_model_len)
+        max_model_len = current_platform.check_max_model_len(max_model_len)
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
-    if max_model_len is None:
-        max_model_len = int(derived_max_model_len)
-        if current_platform.is_tpu():
-            logger.warning(
-                "--max-model-len is not specified, "
-                "it's currently using model's default length %s, "
-                "which might be too large."
-                "Please input with --max-model-len based on your "
-                "request input length and output length, to avoid "
-                "unnecessary degradation.",
-                max_model_len,
-            )
     elif max_model_len > derived_max_model_len:
         # Some models might have a separate key for specifying model_max_length
         # that will be bigger than derived_max_model_len. We compare user input

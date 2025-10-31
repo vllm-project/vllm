@@ -76,7 +76,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--host", type=str, default="localhost")
+    # Always use 127.0.0.1 as localhost binds to IPv6 which is blocked on CI
+    parser.add_argument("--host", type=str, default="127.0.0.1")
 
     # For prefiller instances
     parser.add_argument(

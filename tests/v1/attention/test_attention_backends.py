@@ -18,7 +18,8 @@ from tests.v1.attention.utils import (
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_torch_equal_or_newer
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     set_kv_cache_layout,
@@ -423,32 +424,41 @@ def _test_backend_correctness(
     for backend_name in backend_to_test:
         # FlashAttentionm + FlexAttention:
         #   [2, num_blocks, block_size, num_kv_heads, head_size]
-        # FlashInfer:
+        # FlashInfer + Triton:
         #   [num_blocks, 2, block_size, num_kv_heads, head_size]
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
-        if backend_name == _Backend.FLASHINFER:
+        reset_kv_cache_layout = False
+        if backend_name in (_Backend.FLASHINFER, _Backend.TRITON_ATTN):
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
+        if backend_name == _Backend.FLASHINFER:
             # For FlashInfer default to HND layout and
             kv_cache_for_backend = (
                 kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
             )
             set_kv_cache_layout("HND")
+            reset_kv_cache_layout = True
+        elif backend_name == _Backend.TRITON_ATTN:
+            kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
-        backend_output = run_attention_backend(
-            backend_name,
-            kv_cache_spec,
-            ["placeholder"],
-            vllm_config,
-            device,
-            common_attn_metadata,
-            query_vllm,
-            key_vllm,
-            value_vllm,
-            kv_cache_for_backend,
-            sliding_window=sliding_window,
-        )
+        try:
+            backend_output = run_attention_backend(
+                backend_name,
+                kv_cache_spec,
+                ["placeholder"],
+                vllm_config,
+                device,
+                common_attn_metadata,
+                query_vllm,
+                key_vllm,
+                value_vllm,
+                kv_cache_for_backend,
+                sliding_window=sliding_window,
+            )
+        finally:
+            if reset_kv_cache_layout:
+                set_kv_cache_layout(None)
 
         # Check shape and dtype consistency
         assert backend_output.shape == sdpa_output.shape, (

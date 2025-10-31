@@ -34,8 +34,8 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import as_list
-from vllm.utils.asyncio import merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
 
@@ -141,6 +141,9 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -224,6 +227,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         priority=request.priority,
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 generators.append(generator)
@@ -399,7 +403,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         # has_echoed[i] is reused here to indicate whether
                         # we have already returned the prompt token IDs.
-                        if not has_echoed[i]:
+                        if not has_echoed[i] and request.return_token_ids:
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 

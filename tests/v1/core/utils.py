@@ -17,7 +17,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams
-from vllm.utils import sha256
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -46,6 +46,7 @@ def create_scheduler(
     num_speculative_tokens: int | None = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
+    disable_hybrid_kv_cache_manager: bool = False,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -70,6 +71,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         async_scheduling=async_scheduling,
+        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     model_config = ModelConfig(
         model=model,
