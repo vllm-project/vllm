@@ -230,14 +230,11 @@ class FlashInferBackend(AttentionBackend):
         )
 
     @classmethod
-    def get_required_kv_cache_layout(
-        cls, capability: DeviceCapability
-    ) -> KVCacheLayoutType | None:
-        if (
-            capability is not None
-            and capability >= DeviceCapability(10, 0)
-            and capability <= DeviceCapability(10, 3)
-        ):
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+        from vllm.platforms import current_platform
+
+        capability = current_platform.get_device_capability()
+        if capability is not None and capability.major == 10:
             return "HND"
         return None
 

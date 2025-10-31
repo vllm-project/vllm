@@ -166,8 +166,7 @@ def _cached_get_attn_backend(
     backend = resolve_obj_by_qualname(attention_cls)
 
     # Adjust kv cache layout if the selected backend requires a specific one
-    device_capability = current_platform.get_device_capability()
-    required_layout = backend.get_required_kv_cache_layout(device_capability)
+    required_layout = backend.get_required_kv_cache_layout()
     if required_layout is not None:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 

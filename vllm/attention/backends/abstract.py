@@ -242,13 +242,7 @@ class AttentionBackend(ABC):
         return invalid_reasons
 
     @classmethod
-    def get_required_kv_cache_layout(
-        cls, capability: "DeviceCapability"
-    ) -> "KVCacheLayoutType | None":
-        """
-        Some backends require a specific kv cache layout.
-        This function returns the required layout if any.
-        """
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return None
 
 

@@ -66,9 +66,7 @@ class FlashInferMLABackend(MLACommonBackend):
         return capability.major == 10
 
     @classmethod
-    def get_required_kv_cache_layout(
-        cls, capability: DeviceCapability
-    ) -> "KVCacheLayoutType | None":
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
         return "HND"
 
 
