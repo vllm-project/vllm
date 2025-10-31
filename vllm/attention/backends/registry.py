@@ -144,8 +144,7 @@ def register_backend(backend: AttentionBackendEnum, class_path: str | None = Non
     """
 
     def decorator(cls):
-        path = class_path or f"{cls.__module__}.{cls.__qualname__}"
-        _OVERRIDES[backend] = path
+        _OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"
         return cls
 
     if class_path is not None:
