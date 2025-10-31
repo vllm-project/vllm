@@ -55,7 +55,9 @@ Max Tokens = num_cpu_blocks × block_size × efficiency_factor
            ≈ 262,144 tokens (256k)
 ```
 
-### Critical Bug Fix
+### Critical Bug Fixes
+
+#### Bug #1: Memory Validation (87% RAM Waste)
 
 **Problem:** Original validation only counted single-layer capacity:
 - Allocated: 50,000 blocks × 48 layers = 73 GB RAM
@@ -66,6 +68,27 @@ Max Tokens = num_cpu_blocks × block_size × efficiency_factor
 ```python
 cpu_offload_bytes = num_cpu_blocks × page_size_bytes × num_layers
 ```
+
+#### Bug #2: Request Deadlock After Preemption (LATEST FIX)
+
+**Problem:** When GPU KV cache fills up (99.6% usage) during large context generation:
+- Requests get preempted to free GPU memory
+- CPU offload connector clears block IDs during preemption
+- If no new blocks are allocated, request has NO blocks to run with
+- Request gets stuck in "Waiting" queue forever (0 running, 1 waiting)
+
+**Symptoms:**
+```
+Engine 000: Running: 1 reqs, GPU KV cache usage: 99.6%  ✅ Normal
+Engine 000: Running: 0 reqs, Waiting: 1 reqs, GPU KV cache usage: 0.0%  ❌ STUCK!
+```
+
+**Solution:** Updated `offloading_connector.py` lines 258-271:
+- Only clear block IDs if new blocks are available to replace them
+- Keep existing block state when resumed request has no new blocks
+- Add debug logging for preemption events to aid troubleshooting
+
+**Impact:** This fix prevents the deadlock that occurs when testing with large context windows (Crush testing), allowing requests to properly resume after preemption.
 
 ### Optimization Examples by RAM Size
 
