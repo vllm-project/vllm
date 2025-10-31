@@ -26,7 +26,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
-from vllm.v1.serial_utils import run_method
 from vllm.utils.async_utils import in_loop
 from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
@@ -54,7 +53,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr, run_method
 
 logger = init_logger(__name__)
 

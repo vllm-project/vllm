@@ -28,7 +28,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.v1.serial_utils import run_method
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -70,6 +69,7 @@ from vllm.v1.serial_utils import (
     MsgpackDecoder,
     MsgpackEncoder,
     deserialize_method_call,
+    run_method,
     serialize_method_call,
 )
 from vllm.v1.structured_output import StructuredOutputManager
@@ -1621,7 +1621,6 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
     def engine_finish_requests(self):
-
         assert isinstance(self.scheduler, V1Scheduler)
         engine_finish_outputs = EngineCoreOutputs()
         engine_finish_outputs.engine_index = self.engine_index
