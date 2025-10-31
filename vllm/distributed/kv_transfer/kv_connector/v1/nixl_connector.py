@@ -955,7 +955,7 @@ class NixlConnectorWorker:
             elif metadata.block_size > self.block_size:
                 # lets steal some blocks at tail as temp block to cache large block_size
                 assigned_num_blocks = self.kv_transfer_config.get_from_extra_config(
-                    "num_buffer_blocks_for_hetero_block_size", 200
+                    "num_buffer_blocks_for_hetero_block_size", 1000
                 )
 
                 self.block_allocator_for_hetero_blksize = (
