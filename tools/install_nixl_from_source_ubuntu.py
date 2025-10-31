@@ -9,6 +9,7 @@ import sys
 
 # --- Configuration ---
 WHEELS_CACHE_HOME = os.environ.get("WHEELS_CACHE_HOME", "/tmp/wheels_cache")
+NIXL_VERSION = os.environ.get("NIXL_VERSION", "0.7.0")
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 UCX_DIR = os.path.join("/tmp", "ucx_source")
 NIXL_DIR = os.path.join("/tmp", "nixl_source")
@@ -37,7 +38,7 @@ def is_pip_package_installed(package_name):
 def find_nixl_wheel_in_cache(cache_dir):
     """Finds a nixl wheel file in the specified cache directory."""
     # The repaired wheel will have a 'manylinux' tag, but this glob still works.
-    search_pattern = os.path.join(cache_dir, "nixl*.whl")
+    search_pattern = os.path.join(cache_dir, f"nixl*{NIXL_VERSION}*.whl")
     wheels = glob.glob(search_pattern)
     if wheels:
         # Sort to get the most recent/highest version if multiple exist
@@ -146,6 +147,7 @@ def build_and_install_prerequisites(args):
     print("\n[2/3] Building NIXL wheel from source...", flush=True)
     if not os.path.exists(NIXL_DIR):
         run_command(["git", "clone", NIXL_REPO_URL, NIXL_DIR])
+    run_command(["git", "checkout", NIXL_VERSION], cwd=NIXL_DIR)
 
     build_env = os.environ.copy()
     build_env["PKG_CONFIG_PATH"] = os.path.join(ucx_install_path, "lib", "pkgconfig")
