@@ -41,6 +41,12 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import Device, EngineClient
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicErrorResponse,
+    AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+)
+from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -115,12 +121,6 @@ from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
-from vllm.entrypoints.anthropic.protocol import (
-    AnthropicErrorResponse,
-    AnthropicMessagesRequest,
-    AnthropicMessagesResponse,
-)
-from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -1870,7 +1870,7 @@ async def init_app_state(
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.reasoning_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
         enable_force_include_usage=args.enable_force_include_usage,
     )
