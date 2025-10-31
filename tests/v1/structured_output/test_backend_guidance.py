@@ -10,7 +10,6 @@ from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import StructuredOutputOptions
-from vllm.v1.structured_output.request import StructuredOutputRequest
 
 TOKENIZER = "gpt2"
 
@@ -90,9 +89,6 @@ def test_grammar_bitmask_with_specdec():
             sampling_params=sampling_params,
             pooling_params=None,
             eos_token_id=tokenizer.eos_token_id,
-            structured_output_request=StructuredOutputRequest(
-                sampling_params=sampling_params,
-            ),
         )
 
         structured_output_manager.grammar_init(request)
