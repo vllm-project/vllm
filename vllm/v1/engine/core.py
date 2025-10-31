@@ -163,6 +163,27 @@ class EngineCore:
             vllm_config, mm_registry
         )
 
+        # If a KV connector is initialized for scheduler, we want to collect
+        # handshake metadata from all workers so the connector in the scheduler
+        # will have the full context
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None:
+            # Collect and store KV connector xfer metadata from workers
+            # (after KV cache registration)
+            xfer_handshake_metadata = (
+                self.model_executor.get_kv_connector_handshake_metadata()
+            )
+
+            if xfer_handshake_metadata:
+                # xfer_handshake_metadata is list of dicts from workers
+                # Each dict already has structure {tp_rank: metadata}
+                # Merge all worker dicts into a single dict
+                content: dict[int, Any] = {}
+                for worker_dict in xfer_handshake_metadata:
+                    if worker_dict is not None:
+                        content.update(worker_dict)
+                kv_connector.set_xfer_handshake_metadata(content)
+
         # Setup batch queue for pipeline parallelism.
         # Batch queue for scheduled batches. This enables us to asynchronously
         # schedule and execute batches, and is required by pipeline parallelism
@@ -178,7 +199,7 @@ class EngineCore:
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
         if (
             self.vllm_config.cache_config.enable_prefix_caching
-            or self.scheduler.get_kv_connector() is not None
+            or kv_connector is not None
         ):
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
