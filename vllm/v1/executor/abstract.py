@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING, Literal, TypeVar, overload
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
@@ -176,6 +179,11 @@ class Executor(ABC):
         self, method, timeout=None, args=(), kwargs=None, non_block: bool = False
     ):
         raise NotImplementedError
+
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> list[dict[int, KVConnectorHandshakeMetadata]]:
+        return self.collective_rpc("get_kv_connector_handshake_metadata")
 
     @overload
     def execute_model(

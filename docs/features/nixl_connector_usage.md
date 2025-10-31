@@ -81,7 +81,7 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
     - Default: 5600
     - **Required for both prefiller and decoder instances**
     - Each vLLM worker needs a unique port on its host; using the same port number across different hosts is fine
-    - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank * tp_size + tp_rank (e.g., with `--tensor-parallel-size=4` and base_port=5600, tp_rank 0..3 use ports 5600, 5601, 5602, 5603 on that node).
+    - For TP/DP deployments, each worker's port on a node is computed as: base_port + dp_rank (e.g., with `--data-parallel-size=2` and base_port=5600, dp_rank 0..1 use port 5600, 5601 on that node).
     - Used for the initial NIXL handshake between the prefiller and the decoder
 
 - `VLLM_NIXL_SIDE_CHANNEL_HOST`: Host for side channel communication
