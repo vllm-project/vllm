@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import InitVar
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -21,8 +22,6 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
-DEFAULT_MAX_MODEL_LEN = 8192
-DEFAULT_MAX_NUM_SEQS = 128
 
 
 @config
@@ -33,19 +32,19 @@ class SchedulerConfig:
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
-    max_num_batched_tokens: int | None = Field(default=None, ge=1)
+    max_num_batched_tokens: int = Field(default=None, ge=1)
     """Maximum number of tokens to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_num_seqs: int | None = Field(default=None, ge=1)
+    max_num_seqs: int = Field(default=None, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    max_model_len: int | None = Field(default=None, ge=1)
+    max_model_len: int = Field(default=None, ge=1)
     """Maximum length of a sequence (including prompt and generated text). This
     is primarily set in `ModelConfig` and that value should be manually
     duplicated here."""
@@ -72,14 +71,6 @@ class SchedulerConfig:
 
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
-
-    cuda_graph_sizes: list[int] = Field(default_factory=list)
-    """Cuda graph capture sizes
-    1. if none provided, then default set to [min(max_num_seqs * 2, 512)]
-    2. if one value is provided, then the capture list would follow the
-    pattern: [1, 2, 4] + [i for i in range(8, cuda_graph_sizes + 1, 8)]
-    3. more than one value (e.g. 1 2 128) is provided, then the capture list
-    will follow the provided list."""
 
     enable_chunked_prefill: bool = Field(default=None)
     """If True, prefill requests can be chunked based
@@ -165,8 +156,27 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    @field_validator(
+        "max_num_batched_tokens",
+        "max_num_seqs",
+        "max_model_len",
+        "enable_chunked_prefill",
+        mode="wrap",
+    )
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        """Skip validation if the value is `None` when initialisation is delayed."""
+        if value is None:
+            return value
+        return handler(value)
+
     def __post_init__(self, is_encoder_decoder: bool) -> None:
-        """Post init to handle init vars."""
+        if self.max_model_len is None:
+            self.max_model_len = 8192
+
+        if self.max_num_seqs is None:
+            self.max_num_seqs = 128
+
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
@@ -178,20 +188,6 @@ class SchedulerConfig:
                 " prefix caching; disabling both."
             )
 
-    @model_validator(mode="after")
-    def _validate_scheduler_config(self) -> Self:
-        if self.max_model_len is None:
-            logger.warning(
-                "max_model_len is not set, using arbitrary value %s.",
-                DEFAULT_MAX_MODEL_LEN,
-            )
-            self.max_model_len = DEFAULT_MAX_MODEL_LEN
-        if self.max_num_seqs is None:
-            logger.warning(
-                "max_num_seqs is not set, using arbitrary value %s.",
-                DEFAULT_MAX_NUM_SEQS,
-            )
-            self.max_num_seqs = DEFAULT_MAX_NUM_SEQS
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
@@ -249,6 +245,8 @@ class SchedulerConfig:
         if self.async_scheduling:
             self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
 
+    @model_validator(mode="after")
+    def _verify_args(self) -> Self:
         if (
             self.max_num_batched_tokens < self.max_model_len
             and not self.chunked_prefill_enabled
@@ -293,9 +291,8 @@ class SchedulerConfig:
 
         if self.max_long_partial_prefills > self.max_num_partial_prefills:
             raise ValueError(
-                f"max_long_partial_prefills ({self.max_long_partial_prefills}) "
-                "must be less than or equal to "
-                f"max_num_partial_prefills ({self.max_num_partial_prefills})."
+                f"{self.max_long_partial_prefills=} must be less than or equal to "
+                f"{self.max_num_partial_prefills=}."
             )
 
         return self
