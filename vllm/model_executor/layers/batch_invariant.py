@@ -140,7 +140,7 @@ def matmul_kernel_persistent(
 
 
 def matmul_persistent(
-    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None
+    a: torch.Tensor, b: torch.Tensor, bias: torch.Tensor | None = None, out = None
 ):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
@@ -213,7 +213,11 @@ def matmul_persistent(
         HAS_BIAS=bias is not None,
         **configs[dtype],
     )
-    return c
+
+    if out is not None:
+        out.copy_(c)
+    else:
+        return c
 
 
 @triton.jit
@@ -465,6 +469,9 @@ def mean_dim(
 
 def mm_batch_invariant(a, b):
     return matmul_persistent(a, b)
+
+def mm_batch_invariant_out(a, b, out=None):
+    return matmul_persistent(a, b, bias=None, out=out)
 
 
 def matmul_batch_invariant(a, b, *, out=None):
@@ -747,6 +754,17 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "CUDA")
     _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
     _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
+
+    # Register batch_invariant matmul as an external kernel choice for Inductor
+    # This ensures Inductor uses the custom kernel instead of torch.mm
+    import torch._inductor.config as inductor_config
+    import torch._inductor.kernel.mm as inductor_mm
+
+    # Also replace the default aten_mm ExternKernelChoice to use our custom kernel
+    # This ensures that even the "default" ATen choice uses our kernel
+    inductor_mm.aten_mm = inductor_mm.ExternKernelChoice(
+        mm_batch_invariant_out, "at::mm_batch_invariant_out", name="mm", op_overload=mm_batch_invariant_out
+    )
 
     # Also monkeypatch torch.bmm directly as a fallback
     _original_torch_bmm = torch.bmm
