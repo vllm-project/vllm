@@ -1252,8 +1252,6 @@ class EngineArgs:
         self,
         target_model_config: ModelConfig,
         target_parallel_config: ParallelConfig,
-        enable_chunked_prefill: bool,
-        disable_log_stats: bool,
     ) -> SpeculativeConfig | None:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
@@ -1273,8 +1271,6 @@ class EngineArgs:
             {
                 "target_model_config": target_model_config,
                 "target_parallel_config": target_parallel_config,
-                "enable_chunked_prefill": enable_chunked_prefill,
-                "disable_log_stats": disable_log_stats,
             }
         )
         return SpeculativeConfig(**self.speculative_config)
@@ -1567,8 +1563,6 @@ class EngineArgs:
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
-            enable_chunked_prefill=self.enable_chunked_prefill,
-            disable_log_stats=self.disable_log_stats,
         )
 
         # make sure num_lookahead_slots is set appropriately depending on
