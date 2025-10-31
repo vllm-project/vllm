@@ -623,12 +623,16 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
     try:
         generator = await handler.create_messages(request, raw_request)
     except Exception as e:
-        error = AnthropicError(type="internal_error", message=str(e))
-        content = AnthropicErrorResponse(error = error)
-        return JSONResponse(content, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+        logger.error("Error in create_messages: %s", e, exc_info=True)
+        return JSONResponse(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            content=AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message=str(e),
+                )
+            ).model_dump(),
+        )
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump())
