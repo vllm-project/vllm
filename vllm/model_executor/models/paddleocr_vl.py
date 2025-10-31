@@ -17,7 +17,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Literal
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -77,10 +77,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils.tensor_schema import TensorSchema
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .ernie45 import Ernie4_5ForCausalLM
-from .interfaces import SupportsMRoPE, SupportsMultiModal
+from .interfaces import MultiModalEmbeddings, SupportsMRoPE, SupportsMultiModal
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -279,9 +279,10 @@ class PaddleOCRVLMultiModalProcessor(
                 dict(text=prompt, **mm_data),
                 dict(**mm_kwargs, **tok_kwargs),
             )
-            processed_outputs["pixel_values"] = processed_outputs[
-                "pixel_values"
-            ].unsqueeze(0)
+            num_patches_per_image = processed_outputs["image_grid_thw"].prod(-1)
+            processed_outputs["pixel_values"] = processed_outputs["pixel_values"].split(
+                num_patches_per_image.tolist()
+            )
         else:
             tokenizer = self.info.get_tokenizer()
             processed_outputs = tokenizer(
@@ -358,7 +359,7 @@ class Projector(nn.Module):
     def forward(
         self,
         image_features: torch.Tensor,
-        image_grid_thw: list[tuple[int, int, int]],
+        image_grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         m1, m2 = self.merge_kernel_size
         if isinstance(image_features, (list, tuple)):
@@ -396,8 +397,14 @@ class Projector(nn.Module):
 
 class PaddleOCRImagePixelInputs(TensorSchema):
     type: Literal["pixel_values"]
-    pixel_values: list[torch.Tensor]
-    image_grid_thw: list[list[tuple[int, int, int]]]
+    pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("bn", "p", 3, "patch_size", "patch_size", dynamic_dims={"p"}),
+    ]
+    image_grid_thw: Annotated[
+        torch.Tensor,
+        TensorShape("bn", 3),
+    ]
 
 
 class SiglipVisionEmbeddings(nn.Module):
@@ -978,9 +985,8 @@ class SiglipVisionTransformer(nn.Module):
         height_position_ids: torch.Tensor | None = None,
         width_position_ids: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
-        image_grid_thw: list[tuple[int, int, int] | list[tuple[int, int, int]]]
-        | None = None,
-    ) -> BaseModelOutputWithPooling:
+        image_grid_thw: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         hidden_states = self.embeddings(
             pixel_values,
             interpolate_pos_encoding=interpolate_pos_encoding,
@@ -997,20 +1003,7 @@ class SiglipVisionTransformer(nn.Module):
         )
 
         last_hidden_state = self.post_layernorm(last_hidden_state)
-
-        sample_hidden_state = list()
-        if cu_seqlens is None:
-            raise ValueError(
-                "cu_seqlens cannot be None for "
-                "SiglipVisionTransformer output processing."
-            )
-        for i in range(cu_seqlens.shape[0] - 1):
-            start = cu_seqlens[i]
-            end = cu_seqlens[i + 1]
-            tensor = last_hidden_state[:, start:end, :].squeeze(0)
-            sample_hidden_state.append(tensor)
-
-        return sample_hidden_state
+        return last_hidden_state
 
 
 class SiglipVisionModel(nn.Module):
@@ -1318,95 +1311,10 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         if pixel_values is None:
             return None
 
-        if isinstance(pixel_values, torch.Tensor):
-            pixel_values_list = [pv for pv in pixel_values]
-        elif isinstance(pixel_values, (list, tuple)):
-            if not all(isinstance(pv, torch.Tensor) for pv in pixel_values):
-                raise TypeError(
-                    "Expected all pixel_values entries to be torch.Tensor, "
-                    f"got {[type(pv) for pv in pixel_values]!r}"
-                )
-            pixel_values_list = list(pixel_values)
-        else:
-            raise TypeError(f"Unsupported pixel_values type: {type(pixel_values)!r}")
-
-        grid_per_item: list[list[torch.Tensor]] = []
-        if image_grid_thw is None:
-            grid_per_item = [[] for _ in pixel_values_list]
-        elif isinstance(image_grid_thw, torch.Tensor):
-            if image_grid_thw.ndim == 3:
-                grid_per_item = [
-                    [grid.to(dtype=torch.int64) for grid in grids]
-                    for grids in image_grid_thw
-                ]
-            elif image_grid_thw.ndim == 2:
-                grid_per_item = [
-                    [grid.to(dtype=torch.int64)] for grid in image_grid_thw
-                ]
-            elif image_grid_thw.ndim == 1:
-                grid_per_item = [[image_grid_thw.to(dtype=torch.int64)]]
-            else:
-                raise ValueError(
-                    f"Unexpected image_grid_thw tensor shape: {image_grid_thw.shape}"
-                )
-        elif isinstance(image_grid_thw, (list, tuple)):
-            for grids in image_grid_thw:
-                if isinstance(grids, torch.Tensor):
-                    if grids.ndim == 1:
-                        grid_per_item.append([grids.to(dtype=torch.int64)])
-                    else:
-                        grid_per_item.append(
-                            [grid.to(dtype=torch.int64) for grid in grids]
-                        )
-                elif isinstance(grids, (list, tuple)):
-                    grid_per_item.append(
-                        [
-                            (
-                                grid
-                                if isinstance(grid, torch.Tensor)
-                                else torch.as_tensor(grid, dtype=torch.int64)
-                            )
-                            for grid in grids
-                        ]
-                    )
-                else:
-                    grid_per_item.append(
-                        [
-                            torch.as_tensor(grids, dtype=torch.int64),
-                        ]
-                    )
-        else:
-            raise TypeError(
-                f"Unsupported image_grid_thw type: {type(image_grid_thw)!r}"
-            )
-
-        if len(grid_per_item) == 0:
-            grid_per_item = [[] for _ in pixel_values_list]
-
-        if len(grid_per_item) != len(pixel_values_list):
-            raise ValueError(
-                "Mismatch between number of pixel value batches and image grids."
-            )
-
-        normalized_grids: list[list[tuple[int, int, int]]] = []
-        for grids in grid_per_item:
-            tuple_list: list[tuple[int, int, int]] = []
-            for grid in grids:
-                if isinstance(grid, torch.Tensor):
-                    if grid.numel() != 3:
-                        raise ValueError(
-                            "Expected image_grid_thw entries with 3 values, got "
-                            f"{grid.numel()}."
-                        )
-                    tuple_list.append(tuple(int(v) for v in grid.tolist()))
-                else:
-                    tuple_list.append(tuple(int(v) for v in grid))
-            normalized_grids.append(tuple_list)
-
         return PaddleOCRImagePixelInputs(
             type="pixel_values",
-            pixel_values=pixel_values_list,
-            image_grid_thw=normalized_grids,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
         )
 
     def forward(
@@ -1443,25 +1351,20 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         raise ValueError("Only image modality is supported")
 
-    def encode_image(self, pixel_values: torch.Tensor, image_grid_thw):
+    def encode_image(
+        self, pixel_values: torch.Tensor, image_grid_thw: torch.Tensor
+    ) -> torch.Tensor:
         pixel_values = pixel_values.type(self.visual.dtype)
         siglip_position_ids = list()
         image_grid_hws = list()
         cu_seqlens = [0]
 
-        for idx, grid in enumerate(image_grid_thw):
-            if isinstance(grid, torch.Tensor):
-                grid_tensor = grid.to(device=pixel_values.device)
-            else:
-                grid_tensor = torch.as_tensor(
-                    grid, dtype=torch.int64, device=pixel_values.device
-                )
-            thw_tuple = tuple(int(v) for v in grid_tensor.tolist())
-            numel = np.prod(thw_tuple)
-            image_grid_hws.append(thw_tuple)
-            image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
-            siglip_position_ids.append(image_position_ids)
-            cu_seqlens.append(cu_seqlens[-1] + numel)
+        thw_tuple = tuple(image_grid_thw.tolist())
+        numel = np.prod(thw_tuple)
+        image_grid_hws.append(thw_tuple)
+        image_position_ids = torch.arange(numel) % np.prod(thw_tuple[1:])
+        siglip_position_ids.append(image_position_ids)
+        cu_seqlens.append(cu_seqlens[-1] + numel)
 
         siglip_position_ids = torch.concat(siglip_position_ids, dim=0).to(
             pixel_values.device
@@ -1475,23 +1378,28 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             interpolate_pos_encoding=True,
             cu_seqlens=cu_seqlens,
         )
-        image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
+        return vision_outputs
 
+    def _process_image_input(
+        self, image_input: PaddleOCRImagePixelInputs
+    ) -> MultiModalEmbeddings:
+        pixel_values = image_input.pixel_values
+        image_grid_thw = image_input.image_grid_thw
+        vision_outputs = tuple(
+            self.encode_image(pixel, grid).squeeze(0)
+            for pixel, grid in zip(pixel_values, image_grid_thw)
+        )
+        image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
         return image_embeds
 
-    def get_multimodal_embeddings(self, **kwargs):
+    def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
-            return []
+            return ()
 
-        multimodal_embeddings: list[torch.Tensor] = []
-        for pixel_values, grids in zip(
-            image_input.pixel_values, image_input.image_grid_thw
-        ):
-            if pixel_values is None or len(grids) == 0:
-                continue
-            image_embeds = self.encode_image(pixel_values, grids)
-            multimodal_embeddings.extend(image_embeds)
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        image_embeds = self._process_image_input(image_input)
+        multimodal_embeddings += tuple(image_embeds)
 
         return multimodal_embeddings
 
