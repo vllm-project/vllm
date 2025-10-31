@@ -204,6 +204,7 @@ def pixel_shuffle(input_tensor, shuffle_ratio):
     return output_tensor
 
 
+@support_torch_compile
 class Llama4VisionPixelShuffleMLP(nn.Module):
     def __init__(
         self,
@@ -234,6 +235,7 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
         return self.mlp(encoded_patches)
 
 
+@support_torch_compile
 class Llama4VisionAttention(nn.Module):
     def __init__(
         self,
@@ -332,6 +334,7 @@ class Llama4VisionAttention(nn.Module):
         return attn_output
 
 
+@support_torch_compile
 class Llama4VisionEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -395,17 +398,20 @@ class Llama4VisionEncoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.layers = nn.ModuleList(
-            [
-                Llama4VisionEncoderLayer(
-                    config=config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{layer_idx}",
-                    use_data_parallel=use_data_parallel,
-                )
-                for layer_idx in range(config.num_hidden_layers)
-            ]
-        )
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("Llama4VisionEncoderLayer"):
+            self.layers = nn.ModuleList(
+                [
+                    Llama4VisionEncoderLayer(
+                        config=config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.layers.{layer_idx}",
+                        use_data_parallel=use_data_parallel,
+                    )
+                    for layer_idx in range(config.num_hidden_layers)
+                ]
+            )
 
     def forward(
         self,
@@ -458,7 +464,6 @@ class Llama4UnfoldConvolution(nn.Module):
         return hidden_states
 
 
-@support_torch_compile(dynamic_arg_dims={"images_flattened": 0})
 class Llama4VisionModel(nn.Module):
     def __init__(
         self,
@@ -500,12 +505,15 @@ class Llama4VisionModel(nn.Module):
             prefix=f"{prefix}.model",
             use_data_parallel=use_data_parallel,
         )
-        self.vision_adapter = Llama4VisionPixelShuffleMLP(
-            config=config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.vision_adapter",
-            use_data_parallel=use_data_parallel,
-        )
+        from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("Llama4VisionPixelShuffleMLP"):
+            self.vision_adapter = Llama4VisionPixelShuffleMLP(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.vision_adapter",
+                use_data_parallel=use_data_parallel,
+            )
 
     def forward(
         self,
@@ -772,15 +780,12 @@ class Llama4ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         if multimodal_config.get_limit_per_prompt("image"):
-            from vllm.compilation.backends import set_model_tag
-
-            with set_model_tag("Llama4VisionModel"):
-                self.vision_model = Llama4VisionModel(
-                    config=config.vision_config,
-                    quant_config=None,
-                    prefix=maybe_prefix(prefix, "vision_model"),
-                    use_data_parallel=self.use_data_parallel,
-                )
+            self.vision_model = Llama4VisionModel(
+                config=config.vision_config,
+                quant_config=None,
+                prefix=maybe_prefix(prefix, "vision_model"),
+                use_data_parallel=self.use_data_parallel,
+            )
             self.multi_modal_projector = Llama4MultiModalProjector(
                 config=self.config,
                 quant_config=None,
