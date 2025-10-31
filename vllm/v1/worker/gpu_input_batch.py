@@ -46,8 +46,7 @@ class CachedRequestState:
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
-    # these are used when both async_scheduling and spec_decode are enabled.
-    # TODO is this still needed?
+    # it's used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
 
     def __post_init__(self):

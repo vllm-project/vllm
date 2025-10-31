@@ -745,6 +745,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_output_tokens = req_data.num_output_tokens[i]
 
             req_index = self.input_batch.req_id_to_index.get(req_id)
+            # prev_num_draft_len is used in async scheduling mode with
+            # spec decode. it indicates if need to update num_computed_tokens
+            # of the request. for example:
+            # fist step: num_computed_tokens = 0, spec_tokens = [],
+            # prev_num_draft_len = 0.
+            # second step: num_computed_tokens = 100(prompt lenth),
+            # spec_tokens = [a,b], prev_num_draft_len = 0.
+            # third step: num_computed_tokens = 100 + 2, spec_tokens = [c,d],
+            # prev_num_draft_len = 2.
+            # num_computed_tokens in first step and second step does't contain
+            # the spec tokens length, but in third step it contains the
+            # spec tokens length. we only need to update num_computed_tokens
+            # when prev_num_draft_len > 0.
             if (
                 self.use_async_scheduling
                 and req_index is not None
@@ -797,8 +810,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # The request is resumed from preemption.
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
-
-                # TODO is this still needed?
                 req_state.prev_num_draft_len = 0
 
             if req_index is None:
@@ -2331,14 +2342,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
-        # TODO make this work, or worst case, validation must be done
-        #  at request level in front-end.
-        # assert not (
-        #     self.use_async_scheduling and self.input_batch.needs_output_token_ids()
-        # ), (
-        #     "async scheduling with spec decoding don't support penalties "
-        #     "and bad words in sampling parameters now."
-        # )
 
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
