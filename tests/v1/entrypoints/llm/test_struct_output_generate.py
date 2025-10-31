@@ -602,6 +602,8 @@ Make the response as short as possible.
                 )
 
     if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -685,6 +687,8 @@ def test_structured_output_with_reasoning_matrices(
     jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
     if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -735,6 +739,8 @@ def test_structured_output_auto_mode(
         assert isinstance(parsed_json, dict)
 
     if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -797,6 +803,8 @@ def test_guidance_no_additional_properties():
     assert "a6" not in generated
 
     if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
 
 
@@ -848,11 +856,10 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
 
     assert outputs is not None
 
-    # Free memory as soon as possible as failed assertions
-    # will short circuit and not free up memory
-    del llm
-    torch.cuda.empty_cache()
-    cleanup_dist_env_and_memory()
+    if current_platform.is_rocm():
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
     for index, output in enumerate(outputs):
         assert output is not None
