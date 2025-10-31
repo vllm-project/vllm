@@ -731,7 +731,7 @@ class VllmConfig:
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
                 cudagraph_capture_sizes = [
-                    i for i in dedup_sizes if i <= max_cudagraph_capture_size
+                    i for i in dedup_sizes if i <= max_num_tokens
                 ]
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
