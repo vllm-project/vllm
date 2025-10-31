@@ -910,6 +910,9 @@ def get_kernel_options(
                     max(1, block_n_candidate // 2), block_n
                 )
 
+        block_m_candidate = max(block_m_candidate, block_m)
+        block_n_candidate = max(block_n_candidate, block_n)
+
         kernel_options["BLOCK_M"] = block_m_candidate
         kernel_options["BLOCK_N"] = block_n_candidate
 
