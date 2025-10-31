@@ -1,5 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import vllm
 from vllm.lora.request import LoRARequest
+
 from ..utils import multi_gpu_test
 
 MODEL_PATH = "openai/gpt-oss-20b"
@@ -37,8 +41,12 @@ EXPECTED_LORA_OUTPUT = [
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
-        PROMPT_TEMPLATE.format(context="What is the average number of working horses of farms with more than 5000 total number of horses?"),  # noqa: E501
-        PROMPT_TEMPLATE.format(context="Give the average number of working horses on farms with more than 5000 total horses."),  # noqa: E501
+        PROMPT_TEMPLATE.format(
+            context="What is the average number of working horses of farms with more than 5000 total number of horses?"  # noqa: E501
+        ),  # noqa: E501
+        PROMPT_TEMPLATE.format(
+            context="Give the average number of working horses on farms with more than 5000 total horses."  # noqa: E501
+        ),  # noqa: E501
         PROMPT_TEMPLATE.format(
             context="What are the maximum and minimum number of cows across all farms."
         ),
@@ -65,49 +73,35 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
 
 
 def test_gpt_oss_lora(gptoss20b_lora_files):
-    # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
-    # Otherwise, the lora-test will fail due to CUDA OOM.
     llm = vllm.LLM(
         MODEL_PATH,
-        max_model_len=512,
-        enable_lora=True,
-        max_loras=2,
-        max_num_seqs=8,
-        max_lora_rank=8,
-    )
-
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
-
-@multi_gpu_test(num_gpus=2)
-def test_gpt_oss_lora(gptoss20b_lora_files):
-    # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
-    # Otherwise, the lora-test will fail due to CUDA OOM.
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=512,
-        enable_lora=True,
-        max_loras=2,
-        max_num_seqs=8,
-        max_lora_rank=8,
-        tensor_parallel_size=2,
-    )
-
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
-    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
-
-@multi_gpu_test(num_gpus=4)
-def test_gpt_oss_lora(gptoss20b_lora_files):
-    # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
-    # Otherwise, the lora-test will fail due to CUDA OOM.
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=512,
+        max_model_len=1024,
         enable_lora=True,
         max_loras=4,
-        max_num_seqs=8,
-        trust_remote_code=True,
-        tensor_parallel_size=4,
+        max_lora_rank=8,
+        gpu_memory_utilization=0.8,
+        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            cudagraph_specialize_lora=False,
+        ),
+    )
+
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
+    generate_and_test(llm, gptoss20b_lora_files, lora_id=2)
+
+
+@multi_gpu_test(num_gpus=2)
+def test_gpt_oss_lora_tp2(gptoss20b_lora_files):
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=2,
+        max_lora_rank=8,
+        gpu_memory_utilization=0.8,
+        tensor_parallel_size=2,
+        compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
+            cudagraph_specialize_lora=False,
+        ),
     )
 
     generate_and_test(llm, gptoss20b_lora_files, lora_id=1)
