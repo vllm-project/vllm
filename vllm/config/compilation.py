@@ -215,7 +215,9 @@ class CompilationConfig:
     """Format for saving torch compile cache:\n
     - "binary": saves as binary file (multiprocess safe)\n
     - "unpacked": saves as directory structure for inspection/debugging
-    (NOT multiprocess safe)"""
+    (NOT multiprocess safe)\n
+    Defaults to `VLLM_COMPILE_CACHE_SAVE_FORMAT` if not specified.
+    """
     backend: str = ""
     """The backend for compilation. It needs to be a string:
 
