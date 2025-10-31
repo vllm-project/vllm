@@ -584,12 +584,12 @@ steps:
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
     # GPU diagnostics
-  - echo '=== GPU Diagnostics ==='
-  - rocm-smi --showid
-  - printenv HIP_VISIBLE_DEVICES
-  - python3 -c 'import torch; print(torch.cuda.device_count())'
-  - ls -la /dev/dri/
-  - echo '=== End GPU Diagnostics ==='
+    #- echo '=== GPU Diagnostics ==='
+    #- rocm-smi --showid
+    #- printenv HIP_VISIBLE_DEVICES
+    #- python3 -c 'import torch; print(torch.cuda.device_count())'
+    #- ls -la /dev/dri/
+    #- echo '=== End GPU Diagnostics ==='
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
