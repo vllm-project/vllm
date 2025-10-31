@@ -1096,43 +1096,8 @@ class NixlConnectorWorker:
 
         # Register local/src descr for NIXL xfer.
         self.seen_base_addresses = seen_base_addresses
-        blocks_data = []
-        for i, base_addr in enumerate(self.seen_base_addresses):
-            kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
-            # NOTE With heter-TP, more blocks are prepared than what are
-            # needed as self.num_blocks >= nixl_agent_meta.num_blocks. We
-            # could create fewer, but then _get_block_descs_ids needs to
-            # select agent_meta.num_blocks instead of self.num_blocks for
-            # local descr, and that makes handling regular flow less clean.
-            for block_id in range(self.num_blocks):
-                block_offset = block_id * self.block_len_per_layer[i]
-                addr = base_addr + block_offset
-                # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.device_id))
+        self.src_xfer_side_handle = self.register_local_xfer_handler(self.block_size)
 
-            if self._use_flashinfer:
-                # Separate and interleave K/V regions to maintain the same
-                # descs ordering. This is needed for selecting contiguous heads
-                # when split across TP ranks.
-                for block_id in range(self.num_blocks):
-                    block_offset = block_id * self.block_len_per_layer[i]
-                    addr = base_addr + block_offset
-                    # Register addresses for V cache (K registered first).
-                    v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, self.device_id))
-        logger.debug(
-            "Created %s blocks for src engine %s and rank %s on device id %s",
-            len(blocks_data),
-            self.engine_id,
-            self.tp_rank,
-            self.device_id,
-        )
-
-        descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
-        # NIXL_INIT_AGENT to be used for preparations of local descs.
-        self.src_xfer_side_handle = self.nixl_wrapper.prep_xfer_dlist(
-            "NIXL_INIT_AGENT", descs
-        )
         self.src_xfer_side_handles[self.block_size] = self.src_xfer_side_handle
 
         # TODO(mgoin): Hybrid memory allocator is currently disabled for
@@ -1191,12 +1156,6 @@ class NixlConnectorWorker:
         self,
         block_size: int,
     ) -> int:
-        """
-        Only serve for use case when local is decode and local block size is larger
-        than prefill block size. In that case, we need to re-register local xfer addr
-        using remote block_len.
-        therwise it can do one on one remote_block <-> local_block transfer.
-        """
         block_size_ratio = self.block_size // block_size
         blocks_data = []
         for i, base_addr in enumerate(self.seen_base_addresses):
