@@ -25,7 +25,7 @@ def get_model_args(
         "dtype": "auto",
         "add_bos_token": True,
         "tensor_parallel_size": tp_size,
-        "gpu_memory_utilization": 0.7,
+        "gpu_memory_utilization": 0.9,
         "speculative_config": speculative_config,
         "enable_expert_parallel": True,
         "num_redundant_experts": tp_size,
@@ -42,7 +42,7 @@ def get_model_args(
     "model_setup",
     [
         pytest.param(
-            ("qwen3_next_mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
         ),
         pytest.param(
             (
