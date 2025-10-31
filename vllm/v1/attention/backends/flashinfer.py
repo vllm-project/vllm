@@ -277,6 +277,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     )
 
     reorder_batch_threshold: int = 1
+    requires_kernel_block_size = True
 
     def __init__(
         self,
@@ -284,6 +285,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        kernel_block_size: int,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.cache_config = vllm_config.cache_config
@@ -302,9 +304,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.disable_split_kv = False
 
         self.compilation_config = vllm_config.compilation_config
-        max_num_pages_per_req = cdiv(
-            self.model_config.max_model_len, self.kv_cache_spec.block_size
-        )
+        max_num_pages_per_req = cdiv(self.model_config.max_model_len, kernel_block_size)
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
         speculative_config = vllm_config.speculative_config
@@ -333,7 +333,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
         FlashInferBackend.validate_head_size(self.head_dim)
-        self.page_size = self.kv_cache_spec.block_size
+        self.page_size = kernel_block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
         if self.cache_dtype.startswith("fp8"):

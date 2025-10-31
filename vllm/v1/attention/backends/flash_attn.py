@@ -62,7 +62,11 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+        # NOTE(tdoublep): while in principle, FA supports
+        # MultipleOf(16), these are the block sizes that do not
+        # suffer from the NaN propagation problem described here:
+        # https://github.com/Dao-AILab/flash-attention/issues/1974
+        return [16, 32, 64]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -198,6 +202,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH
     )
+    requires_kernel_block_size = True
 
     def __init__(
         self,
@@ -205,6 +210,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         layer_names: list[str],
         vllm_config: VllmConfig,
         device: torch.device,
+        kernel_block_size: int,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
@@ -218,7 +224,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.num_heads_kv = self.model_config.get_num_kv_heads(self.parallel_config)
         self.kv_cache_dtype = kv_cache_spec.dtype
         self.headdim = self.model_config.get_head_size()
-        self.block_size = kv_cache_spec.block_size
+        self.block_size = kernel_block_size
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
