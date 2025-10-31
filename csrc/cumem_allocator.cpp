@@ -10,6 +10,7 @@ static const char* PYARGS_PARSE = "KKKK";
 #else
   #include <cstdlib>
   #include <cerrno>
+  #include <climits>
 
 // Default chunk size 256MB. Can be overridden at runtime by the
 // environment variable VLLM_SLEEP_MEM_CHUNK_SIZE, specified in megabytes
@@ -560,7 +561,15 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
 #else
+  if (!PyList_Check(recv_p_memHandle)) {
+    PyErr_SetString(PyExc_TypeError,
+                    "Expected a list for the 4th argument on ROCm");
+    return nullptr;
+  }
   Py_ssize_t num_chunks = PyList_Size(recv_p_memHandle);
+  if (num_chunks < 0) {
+    return nullptr;  // PyList_Size sets an exception on error.
+  }
   CUmemGenericAllocationHandle** p_memHandle =
       (CUmemGenericAllocationHandle**)malloc(
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
@@ -575,13 +584,36 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
     PyErr_SetString(PyExc_MemoryError, "malloc failed for chunk_sizes");
     return nullptr;
   }
-  for (auto i = 0; i < num_chunks; ++i) {
+  for (Py_ssize_t i = 0; i < num_chunks; ++i) {
     PyObject* item = PyList_GetItem(recv_p_memHandle, i);
+    if (item == nullptr || !PyTuple_Check(item) || PyTuple_Size(item) != 2) {
+      free(p_memHandle);
+      free(chunk_sizes);
+      PyErr_SetString(
+          PyExc_TypeError,
+          "List items must be tuples of size 2 (handle_addr, size)");
+      return nullptr;
+    }
     PyObject* addr_py = PyTuple_GetItem(item, 0);
     PyObject* size_py = PyTuple_GetItem(item, 1);
+    if (addr_py == nullptr || size_py == nullptr) {
+      free(p_memHandle);
+      free(chunk_sizes);
+      return nullptr;  // PyTuple_GetItem sets an exception
+    }
     p_memHandle[i] =
         (CUmemGenericAllocationHandle*)PyLong_AsUnsignedLongLong(addr_py);
+    if (PyErr_Occurred()) {
+      free(p_memHandle);
+      free(chunk_sizes);
+      return nullptr;
+    }
     chunk_sizes[i] = (unsigned long long)PyLong_AsUnsignedLongLong(size_py);
+    if (PyErr_Occurred()) {
+      free(p_memHandle);
+      free(chunk_sizes);
+      return nullptr;
+    }
   }
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle, chunk_sizes,
