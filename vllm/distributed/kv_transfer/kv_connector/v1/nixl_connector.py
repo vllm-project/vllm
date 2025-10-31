@@ -1373,7 +1373,7 @@ class NixlConnectorWorker:
                 kv_block_len = int(kv_block_len * block_size_ratio)
                 block_len_per_layer = nixl_agent_meta.block_lens[i]
             else:
-                block_len_per_layer = int(self.block_len_per_layer[i] * tp_ratio)
+                block_len_per_layer = self.block_len_per_layer[i]
             rank_offset = (
                 self.tp_rank % tp_ratio * kv_block_len if not replicates_kv_cache else 0
             )
@@ -1482,6 +1482,12 @@ class NixlConnectorWorker:
         assert self.dst_num_blocks[remote_engine_id] == num_blocks
 
         assert len(nixl_agent_meta.kv_caches_base_addr) == len(self.block_len_per_layer)
+
+        # FIXME: nP > nD + tp_ratio != 1 is much complex, assert for now
+        assert not (block_size_ratio > 1 and tp_ratio != 1), (
+            "Prefill BlockSize > Decode BlockSize with "
+            "heterogenuous TP is not supported yet"
+        )
 
     def sync_recved_kv_to_device(self, req_id: str, meta: ReqMeta):
         """copy recved kv from host buffer to device."""
