@@ -278,7 +278,7 @@ class OpType(Enum):
         self, batch_size: int, seq_length: int, hidden_size: int, lora_rank: int
     ) -> tuple[int, int, int]:
         num_tokens = batch_size * seq_length
-        if self.is_shrink_fn():
+        if self.is_shrink_fn() or self.is_fused_moe_lora_fn():
             m = num_tokens
             k = hidden_size
             n = lora_rank
@@ -286,11 +286,6 @@ class OpType(Enum):
             m = num_tokens
             k = lora_rank
             n = hidden_size
-        else:
-            assert self.is_fused_moe_lora_fn()
-            m = num_tokens
-            n = hidden_size
-            k = lora_rank
         return m, k, n
 
     def matmul_dtypes(
@@ -493,6 +488,11 @@ class BenchmarkTensors:
             f"{dtype_to_str(self.output.dtype)}"
         )
 
+    def get_num_tokens(self, size: int, top_k_num: int, op_type: OpType):
+        return (
+            size * top_k_num if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK] else size
+        )
+
     @staticmethod
     def make(
         ctx: BenchmarkContext, op_type: OpType, device: str = "cuda"
@@ -558,7 +558,6 @@ class BenchmarkTensors:
         """
         Fails asserts when non-conformality is detected.
         """
-        ##TODO test if this works
         num_tokens = (
             self.input.shape[1]
             if op_type.is_fused_moe_lora_expand_fn()
@@ -566,20 +565,15 @@ class BenchmarkTensors:
         )
         # check metadata tensors
         ## In down shrink case, each token is repeated top_k_num times
-        assert (
-            torch.sum(self.seq_lens) * ctx.top_k_num == num_tokens
-            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
-            else torch.sum(self.seq_lens) == num_tokens
+        assert num_tokens == self.get_num_tokens(
+            torch.sum(self.seq_lens), ctx.top_k_num, op_type
         ), f"Expected {num_tokens} tokens, but got {torch.sum(self.seq_lens)}"
         num_seqs = self.seq_lens.shape[0]
         # assert self.seq_start_loc.shape[0] == num_seqs
         ## In down shrink case, each prompt corresponds to top_k_num sequences
         assert self.prompt_lora_mapping.shape[0] == num_seqs
-        assert (
-            self.lora_kernel_meta.token_lora_mapping.shape[0] * ctx.top_k_num
-            == num_tokens
-            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
-            else self.lora_kernel_meta.token_lora_mapping.shape[0] == num_tokens
+        assert self.get_num_tokens(
+            self.lora_kernel_meta.token_lora_mapping.shape[0], ctx.top_k_num, op_type
         )
 
     def to_device(self, device: str):
@@ -614,11 +608,8 @@ class BenchmarkTensors:
         Return num_seqs, num_tokens and max_seq_len
         """
         num_seqs = self.seq_lens.shape[0]
-        ## TODO: test if this works
-        num_tokens = (
-            self.lora_kernel_meta.token_lora_mapping.shape[0] * ctx.top_k_num
-            if op_type in [OpType.FUSED_MOE_LORA_DOWN_SHRINK]
-            else self.lora_kernel_meta.token_lora_mapping.shape[0]
+        num_tokens = self.get_num_tokens(
+            self.lora_kernel_meta.token_lora_mapping.shape[0], ctx.top_k_num, op_type
         )
         max_seq_len = torch.max(self.seq_lens).item()
         num_slices = len(self.lora_weights_lst)
