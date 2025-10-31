@@ -11,6 +11,7 @@ from typing import Literal, TypeAlias, TypeVar, cast
 import numpy as np
 from fastapi import Request
 from transformers import PreTrainedTokenizerBase
+from vllm.transformers_utils.tokenizer_base import TokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -104,6 +105,7 @@ class OpenAISpeechToText(OpenAIServing):
                 tokenizer_mode=self.model_config.tokenizer_mode,
             ),
         )
+        print("self.tokenizer", self.tokenizer, type(self.tokenizer))
 
         if self.default_sampling_params:
             logger.info(
@@ -178,9 +180,9 @@ class OpenAISpeechToText(OpenAIServing):
         self,
         tokens: tuple,
         request: SpeechToTextRequest,
-        segment_class: type[S],
+        segment_class: type[SpeechToTextSegment],
         start_time: float = 0,
-    ) -> list[S]:
+    ) -> list[SpeechToTextSegment]:
         """
         Convert tokens to verbose segments.
 
@@ -194,12 +196,14 @@ class OpenAISpeechToText(OpenAIServing):
             tokens = tokens[:-1]
 
         tokens_with_start = (init_token,) + tokens
-        segments: list[S] = []
+        segments: list[SpeechToTextSegment] = []
         last_timestamp_start = 0
 
         if tokens_with_start[-2] < init_token and tokens_with_start[-1] >= init_token:
             tokens_with_start = tokens_with_start + (tokens_with_start[-1],)
         for idx, token in enumerate(tokens_with_start):
+            # Timestamp tokens (e.g., <|0.00|>) are assumed to be sorted.
+            # If the ordering is violated, this slicing may produce incorrect results.
             if (
                 token >= init_token
                 and idx != 0
@@ -210,15 +214,12 @@ class OpenAISpeechToText(OpenAIServing):
                 end_timestamp = sliced_timestamp_tokens[-1] - init_token
 
                 casting_segment = cast(
-                    S,
+                    SpeechToTextSegment,
                     segment_class(
                         id=len(segments),
-                        avg_logprob=-1.0,
-                        compression_ratio=-1.0,
                         seek=start_time,
                         start=start_time + BASE_OFFSET * start_timestamp,
                         end=start_time + BASE_OFFSET * end_timestamp,
-                        no_speech_prob=-1.0,
                         temperature=request.temperature,
                         text=self.tokenizer.decode(sliced_timestamp_tokens[1:-1]),
                         tokens=sliced_timestamp_tokens[1:-1],
@@ -324,24 +325,22 @@ class OpenAISpeechToText(OpenAIServing):
         text_parts = []
         try:
             assert list_result_generator is not None
+            if request.response_format == "verbose_json":
+                segment_class: type[SpeechToTextSegment] = (
+                    TranscriptionSegment
+                    if self.task_type == "transcribe"
+                    else TranslationSegment
+                )
             text = ""
             for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
                     if request.response_format == "verbose_json":
-                        segment_class: (
-                            type[TranscriptionSegment] | type[TranslationSegment]
-                        ) = (
-                            TranscriptionSegment
-                            if self.task_type == "transcribe"
-                            else TranslationSegment
-                        )
-
-                        segments: list[TranslationSegment | TranscriptionSegment] = (
+                        segments: list[SpeechToTextSegment] = (
                             self._get_verbose_segments(
                                 tokens=tuple(op.outputs[0].token_ids),
                                 segment_class=segment_class,
                                 request=request,
-                                start_time=idx * 30,
+                                start_time=idx * self.asr_config.max_audio_clip_s,
                             )
                         )
 
@@ -386,7 +385,6 @@ class OpenAISpeechToText(OpenAIServing):
                             segments=total_segments,
                         ),
                     )
-                # final_response = cast(response_class, final_response)
             return final_response
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")

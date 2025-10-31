@@ -781,6 +781,9 @@ class SupportsTranscription(Protocol):
     `True`.
     """
     supports_segment_timestamp: ClassVar[bool] = False
+    """
+    Enables the segment timestamp option for supported models by setting this to `True`.
+    """
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -809,6 +812,23 @@ class SupportsTranscription(Protocol):
         The model has control over the construction, as long as it
         returns a valid PromptType."""
         ...
+
+    @classmethod
+    def get_timestamp_init_token(cls):
+        """Get initaial token for timestamp segments."""
+        if not cls.supports_segment_timestamp:
+            raise NotImplementedError(
+                f"{cls.__name__} does not support timestamp segments."
+            )
+        ...
+
+    @classmethod
+    def get_timestamp_offset(cls):
+        """Get the offset value for timestamp segments."""
+        if not cls.supports_segment_timestamp:
+            raise NotImplementedError(
+                f"{cls.__name__} does not support timestamp segments."
+            )
 
     @classmethod
     def get_other_languages(cls) -> Mapping[str, str]:
