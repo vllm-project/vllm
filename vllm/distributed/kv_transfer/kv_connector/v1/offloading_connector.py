@@ -256,7 +256,19 @@ class OffloadingConnectorScheduler:
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             if preempted:
-                self._request_block_ids[req_id] = []
+                logger.debug(
+                    "Request %s was preempted, resetting block state", req_id
+                )
+                # Only clear blocks if we have new ones to replace them
+                if new_block_id_groups:
+                    self._request_block_ids[req_id] = []
+                else:
+                    logger.warning(
+                        "Request %s resumed after preemption but has no new "
+                        "blocks allocated! Keeping existing block state to "
+                        "prevent request from getting stuck.",
+                        req_id
+                    )
 
             if new_block_id_groups:
                 new_block_ids = new_block_id_groups[0]
