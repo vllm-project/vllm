@@ -54,7 +54,13 @@ from vllm.config import (
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.cache import (
+    BlockSize,
+    CacheDType,
+    KVOffloadingBackend,
+    MambaDType,
+    PrefixCachingHashAlgo,
+)
 from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
@@ -555,7 +561,9 @@ class EngineArgs:
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
-    kv_offloading_backend: str | None = CacheConfig.kv_offloading_backend
+    kv_offloading_backend: KVOffloadingBackend | None = (
+        CacheConfig.kv_offloading_backend
+    )
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
