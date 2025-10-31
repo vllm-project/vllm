@@ -208,6 +208,36 @@ def _init_kv_cache_quant(
         layer.quant_method.create_weights(layer)
 
 
+def get_attention_context(
+    layer_name: str,
+) -> tuple[dict | object | None, "Attention | MLAAttention", torch.Tensor]:
+    """Extract attention context for a given layer.
+
+    This helper function extracts the attention metadata, attention layer
+    instance, and KV cache tensor for a specific layer.
+
+    Args:
+        layer_name: The name/identifier of the attention layer.
+
+    Returns:
+        A tuple containing:
+        - attn_metadata: Attention metadata for this specific layer, or None if
+          no metadata available
+        - attn_layer: The attention layer instance (Attention or MLAAttention)
+        - kv_cache: The KV cache tensor for current virtual engine
+
+        Note: attn_metadata may be None, but attn_layer and kv_cache are always
+        extracted from the forward context.
+    """
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    if isinstance(attn_metadata, dict):
+        attn_metadata = attn_metadata[layer_name]
+    attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
+    kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
+    return attn_metadata, attn_layer, kv_cache
+
+
 class Attention(nn.Module, AttentionLayerBase):
     """Attention layer.
 
@@ -879,12 +909,7 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
     return output
@@ -916,12 +941,7 @@ def unified_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
         self,
         query,
@@ -962,12 +982,7 @@ def unified_mla_attention(
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self: MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
     return output
@@ -1001,12 +1016,7 @@ def unified_mla_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    self: MLAAttention = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    attn_metadata, self, kv_cache = get_attention_context(layer_name)
     self.impl.forward(
         self,
         q,

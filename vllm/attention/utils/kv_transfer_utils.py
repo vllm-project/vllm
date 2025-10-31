@@ -10,11 +10,9 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
     is_v1_kv_transfer_group,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
 
 if TYPE_CHECKING:
-    from vllm.attention import Attention
-    from vllm.attention.layer import MLAAttention
+    pass
 
 
 def maybe_transfer_kv_layer(func: Callable) -> Callable:
@@ -24,6 +22,9 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
     On entry: waits for the KV layer from the connector.
     On exit: saves the KV layer to the connector.
     """
+    # Import at runtime to avoid circular dependency
+    from vllm.attention.layer import get_attention_context
+
     # Inspect the signature ONCE when the decorator is applied.
     sig = inspect.signature(func)
     param_names = list(sig.parameters.keys())
@@ -42,11 +43,12 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
             return func(*args, **kwargs)
 
         layer_name: str = args[layer_name_index]
-        forward_context: ForwardContext = get_forward_context()
-        attn_metadata = forward_context.attn_metadata
+
+        # Extract attention context (layer-specific metadata, layer, and kv_cache)
+        attn_metadata, attn_layer, kv_cache = get_attention_context(layer_name)
         if attn_metadata is None:
             return func(*args, **kwargs)
-        assert isinstance(attn_metadata, dict)
+
         # Wait for KV layer on entry
         connector = get_kv_transfer_group()
         connector.wait_for_layer_load(layer_name)
@@ -55,11 +57,7 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
         result = func(*args, **kwargs)
 
         # Save KV cache layer on exit
-        attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[
-            layer_name
-        ]
-        kv_cache = attn_layer.kv_cache[forward_context.virtual_engine]
-        connector.save_kv_layer(layer_name, kv_cache, attn_metadata[layer_name])
+        connector.save_kv_layer(layer_name, kv_cache, attn_metadata)
 
         return result
 
