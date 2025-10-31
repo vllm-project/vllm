@@ -69,6 +69,9 @@ class LoRAConfig:
     per prompt. When run in offline mode, the lora IDs for n modalities
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
+    block_diagonal_sharded_loras: bool = False
+    """Enables BD-LoRA"""
+
 
     def compute_hash(self) -> str:
         """
@@ -89,6 +92,7 @@ class LoRAConfig:
         factors.append(self.lora_dtype)
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
+        factors.append(self.block_diagonal_sharded_loras)
 
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
