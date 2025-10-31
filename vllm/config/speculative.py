@@ -9,7 +9,6 @@ from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -366,12 +365,6 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
-                        raise ValueError(
-                            "Chunked prefill and EAGLE are not compatible "
-                            "when using V0."
-                        )
-
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 
