@@ -354,10 +354,22 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 #else
   create_and_map(device, alignedSize, d_mem, p_memHandle, chunk_sizes,
                  num_chunks);
-
-  free(p_memHandle);
   free(chunk_sizes);
 #endif
+
+  if (error_code != 0) {
+    // free address and the handle
+    CUDA_CHECK(cuMemAddressFree(d_mem, alignedSize));
+#ifndef USE_ROCM
+    free(p_memHandle);
+#else
+    for (size_t i = 0; i < num_chunks; ++i) {
+      free(p_memHandle[i]);
+    }
+    free(p_memHandle);
+#endif
+    return nullptr;
+  }
 
   return (void*)d_mem;
 }
