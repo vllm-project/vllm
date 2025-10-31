@@ -1199,108 +1199,123 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,
         video_grid_thw: list[list[int]] | torch.Tensor,
+        second_per_grid_ts: list[float],
         context_len: int = 0,
         seq_len: int | None = None,
-        second_per_grid_ts: list[float] | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
-        """Get M-RoPE input positions and delta value for PaddleOCR-VL."""
+        """Get mrope input positions and delta value."""
 
         image_token_id = hf_config.image_token_id
+        video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
+        tokens_per_second = getattr(hf_config.vision_config, "tokens_per_second", 1.0)
 
         input_tokens_tensor = torch.tensor(input_tokens)
         vision_start_indices = torch.argwhere(
             input_tokens_tensor == vision_start_token_id
         ).squeeze(1)
-
         vision_tokens = input_tokens_tensor[vision_start_indices + 1]
-        image_count = (
-            (vision_tokens == image_token_id).sum().item()
-            if image_token_id is not None
-            else 0
-        )
+        image_nums = (vision_tokens == image_token_id).sum()
+        video_nums = (vision_tokens == video_token_id).sum()
+        llm_pos_ids_list: list = []
 
-        llm_pos_ids_list: list[torch.Tensor] = []
         st = 0
-        remain_images = image_count
-        current_offset = 0
+        remain_images, remain_videos = image_nums, video_nums
 
-        for image_idx in range(image_count):
-            try:
-                ed_image = (
-                    input_tokens.index(image_token_id, st)
-                    if remain_images > 0 and image_token_id is not None
-                    else len(input_tokens) + 1
-                )
-            except ValueError:
-                ed_image = len(input_tokens) + 1
-            if image_idx < len(image_grid_thw):
-                grid_t, grid_h, grid_w = image_grid_thw[image_idx]
+        image_index, video_index = 0, 0
+        for _ in range(image_nums + video_nums):
+            video_second_per_grid_t = 0.0
+            if remain_images > 0:
+                try:
+                    ed_image = input_tokens.index(image_token_id, st)
+                except ValueError:
+                    ed_image = len(input_tokens) + 1
             else:
-                grid_t, grid_h, grid_w = (1, 1, 1)
-            second_per_grid = 0.0
-            remain_images -= 1
-            ed = ed_image
-
-            llm_grid_t = max(int(grid_t), 1)
-            llm_grid_h = max(int(grid_h) // spatial_merge_size, 1)
-            llm_grid_w = max(int(grid_w) // spatial_merge_size, 1)
-            text_len = max(ed - st, 0)
-
-            if text_len > 0:
-                text_positions = (
-                    torch.arange(text_len, dtype=torch.int64).view(1, -1).expand(3, -1)
-                    + current_offset
+                ed_image = len(input_tokens) + 1
+            if remain_videos > 0:
+                try:
+                    ed_video = input_tokens.index(video_token_id, st)
+                except ValueError:
+                    ed_video = len(input_tokens) + 1
+            else:
+                ed_video = len(input_tokens) + 1
+            if ed_image < ed_video:
+                t, h, w = (
+                    image_grid_thw[image_index][0],
+                    image_grid_thw[image_index][1],
+                    image_grid_thw[image_index][2],
                 )
-                llm_pos_ids_list.append(text_positions)
-                current_offset += text_len
+                image_index += 1
+                remain_images -= 1
+                ed = ed_image
+            else:
+                t, h, w = (
+                    video_grid_thw[video_index][0],
+                    video_grid_thw[video_index][1],
+                    video_grid_thw[video_index][2],
+                )
+                video_second_per_grid_t = 1.0
+                if second_per_grid_ts:
+                    video_second_per_grid_t = second_per_grid_ts[video_index]
+                video_index += 1
+                remain_videos -= 1
+                ed = ed_video
+
+            llm_grid_t, llm_grid_h, llm_grid_w = (
+                t,
+                h // spatial_merge_size,
+                w // spatial_merge_size,
+            )
+            text_len = ed - st
+
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
 
             t_index = (
                 (
-                    torch.arange(llm_grid_t, dtype=torch.float32)
+                    torch.arange(llm_grid_t)
                     .view(-1, 1)
                     .expand(-1, llm_grid_h * llm_grid_w)
-                    * second_per_grid
-                    * hf_config.vision_config.tokens_per_second
+                    * video_second_per_grid_t
+                    * tokens_per_second
                 )
                 .long()
                 .flatten()
             )
+
             h_index = (
-                torch.arange(llm_grid_h, dtype=torch.int64)
+                torch.arange(llm_grid_h)
                 .view(1, -1, 1)
                 .expand(llm_grid_t, -1, llm_grid_w)
                 .flatten()
             )
             w_index = (
-                torch.arange(llm_grid_w, dtype=torch.int64)
+                torch.arange(llm_grid_w)
                 .view(1, 1, -1)
                 .expand(llm_grid_t, llm_grid_h, -1)
                 .flatten()
             )
             llm_pos_ids_list.append(
-                torch.stack([t_index, h_index, w_index], dim=0) + current_offset
+                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
-            grid_tokens = llm_grid_t * llm_grid_h * llm_grid_w
-            current_offset += grid_tokens
-            st = ed + grid_tokens
+            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
+            st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
-            if text_len > 0:
-                text_positions = (
-                    torch.arange(text_len, dtype=torch.int64).view(1, -1).expand(3, -1)
-                    + current_offset
-                )
-                llm_pos_ids_list.append(text_positions)
-                current_offset += text_len
+            llm_pos_ids_list.append(
+                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+            )
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         llm_positions = llm_positions[:, context_len:seq_len]
-        mrope_position_delta = llm_positions.max().item() + 1 - llm_positions.shape[1]
+
         return llm_positions, mrope_position_delta
 
     def get_language_model(self) -> nn.Module:
