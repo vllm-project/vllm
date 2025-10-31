@@ -493,15 +493,13 @@ class Worker(WorkerBase):
 
     @torch.inference_mode()
     def sample_tokens(
-        self,
-        grammar_output: "GrammarOutput",
+        self, grammar_output: "GrammarOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
+        self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0

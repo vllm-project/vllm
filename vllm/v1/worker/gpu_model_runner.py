@@ -220,6 +220,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
 
 class ExecuteModelState(NamedTuple):
+    """Ephemeral cached state transferred between execute_model() and
+    sample_tokens(), after execute_model() returns None."""
+
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None

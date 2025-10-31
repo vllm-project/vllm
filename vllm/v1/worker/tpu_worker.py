@@ -254,15 +254,11 @@ class TPUWorker:
             tpu_kv_cache_bytes = tpu_kv_cache_bytes * head_size // padded_head_size
         return int(tpu_kv_cache_bytes)
 
-    def sample_tokens(
-        self,
-        grammar_output: "GrammarOutput",
-    ) -> ModelRunnerOutput:
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
+        self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
         return self.model_runner.execute_model(scheduler_output)
 

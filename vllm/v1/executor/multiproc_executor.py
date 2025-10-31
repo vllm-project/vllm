@@ -177,28 +177,21 @@ class MultiprocExecutor(Executor):
             self.failure_callback = callback
 
     def execute_model(  # type: ignore[override]
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: bool = False,
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         return self._execute_with_aggregation(
             "execute_model", scheduler_output, non_block=non_block
         )
 
     def sample_tokens(  # type: ignore[override]
-        self,
-        grammar_output: GrammarOutput | None,
-        non_block: bool = False,
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         return self._execute_with_aggregation(  # type: ignore[return-value]
             "sample_tokens", grammar_output, non_block=non_block
         )
 
     def _execute_with_aggregation(
-        self,
-        method: str,
-        *args,
-        non_block: bool = False,
+        self, method: str, *args, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         if not self.has_connector:
             # get output only from a single worker (output_rank)
