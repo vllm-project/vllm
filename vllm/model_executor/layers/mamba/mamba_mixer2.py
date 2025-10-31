@@ -733,8 +733,10 @@ class MambaMixer2(MambaBase, CustomOp):
                     ]
 
                     # Number of blocks that need to be written
-                    n_blocks_to_fill = (
-                        block_idx_last_scheduled_token - block_idx_first_scheduled_token
+                    n_blocks_to_fill = (  # noqa: E501
+                        block_idx_last_scheduled_token
+                        - block_idx_first_scheduled_token
+                        + 1
                     )
 
                     # Skip sequences that don't have any blocks to fill
@@ -742,9 +744,10 @@ class MambaMixer2(MambaBase, CustomOp):
                         continue
 
                     # Look up the state indices
-                    cache_blocks_to_fill = state_indices_tensor_p[
+                    cache_blocks_to_fill = state_indices_tensor_p[  # noqa: E501
                         seq_idx,
-                        block_idx_first_scheduled_token:block_idx_last_scheduled_token,
+                        block_idx_first_scheduled_token : block_idx_last_scheduled_token
+                        + 1,
                     ]
 
                     # First chunk index for this sequence
@@ -754,7 +757,7 @@ class MambaMixer2(MambaBase, CustomOp):
                         first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
 
                     # First chunk that is aligned on the mamba block boundary
-                    first_aligned_chunk = first_chunk + chunk_stride - 1
+                    first_aligned_chunk = first_chunk
 
                     # Calculate the number of computed tokens that were not
                     # already cached
