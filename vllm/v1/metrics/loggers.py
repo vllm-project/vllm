@@ -1052,6 +1052,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
+        if not envs.VLLM_SERVER_DEV_MODE:
+            return
+
         awake = 1
         discard_all = 0
         weights_offloaded = 0
