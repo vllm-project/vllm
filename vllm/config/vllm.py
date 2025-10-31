@@ -291,28 +291,47 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
-    def _apply_extra_kv_connector_config(self) -> None:
+    def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
         Right now, this function reads the offloading settings from
         CacheConfig and configures the KVTransferConfig accordingly.
         """
-        from vllm.distributed.kv_transfer.kv_connector.config_parser import (
-            get_connector_config_parser,
-        )
-
-        parser = get_connector_config_parser(self)
-        if parser is None:
+        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
             return
 
         # If no KVTransferConfig is provided, create a default one.
         if self.kv_transfer_config is None:
             self.kv_transfer_config = KVTransferConfig()
 
-        # Configue the KVTransferConfig in place.
-        parser.configure_kv_transfer(
-            kv_transfer_config=self.kv_transfer_config, vllm_config=self
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
+            raise ValueError(
+                "You must set kv_offloading_size when kv_offloading_backend is set."
+            )
+        num_kv_ranks = (
+            self.parallel_config.tensor_parallel_size
+            * self.parallel_config.pipeline_parallel_size
         )
+
+        if kv_offloading_backend == "native":
+            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
+
+            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
+            # done after the model's KV cache is initialized
+            self.kv_transfer_config.kv_connector_extra_config.update(
+                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+            )
+        elif kv_offloading_backend == "lmcache":
+            self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
+            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
+            self.kv_transfer_config.kv_connector_extra_config = {
+                "lmcache.local_cpu": True,
+                "lmcache.max_local_cpu_size": kv_gb_per_rank,
+            }
+
+        # This is the same for all backends
+        self.kv_transfer_config.kv_role = "kv_both"
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
@@ -691,7 +710,7 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         # Handle the KV connector configs
-        self._apply_extra_kv_connector_config()
+        self._post_init_kv_transfer_config()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
