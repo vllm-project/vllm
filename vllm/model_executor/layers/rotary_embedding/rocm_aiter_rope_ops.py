@@ -5,7 +5,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def is_rocm_triton_rotary_embedding_enabled() -> bool:

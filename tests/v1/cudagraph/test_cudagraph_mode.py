@@ -109,9 +109,9 @@ combo_cases_2 = [
 @pytest.mark.parametrize(
     "backend_name,cudagraph_mode,compilation_mode,supported", combo_cases_2
 )
-def test_cudagraph_compilation_combo(combo_case):
-    backend_name, cudagraph_mode, compilation_mode, supported = combo_case
-
+def test_cudagraph_compilation_combo(
+    backend_name, cudagraph_mode, compilation_mode, supported
+):
     env_vars = backend_configs[backend_name].env_vars
 
     with temporary_environ(env_vars), ExitStack() as stack:
