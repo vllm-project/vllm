@@ -47,8 +47,8 @@ if current_platform.is_rocm():
         k_scale,
         v_scale,
         output_dtype: tl.constexpr,
-        PAD_E_DIM: tl.constexpr,
         E_DIM: tl.constexpr,
+        PADDED_E_DIM: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
     ):
         batch_idx = tl.program_id(0)
@@ -58,7 +58,7 @@ if current_platform.is_rocm():
         batch_query_start, batch_query_end = tl.split(batch_query_indexes)
         query_len = batch_query_end - batch_query_start
 
-        valid = tl.arange(0, PAD_E_DIM) < E_DIM
+        valid_e_dim_indices = tl.arange(0, PADDED_E_DIM) < E_DIM
 
         if query_len <= 1:
             return
@@ -79,7 +79,7 @@ if current_platform.is_rocm():
             kv_buffer_off = (
                 kv_idx * BLOCK_SIZE * E_DIM
                 + tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM
-                + tl.arange(0, PAD_E_DIM)[valid][None, :]
+                + tl.arange(0, PADDED_E_DIM)[valid_e_dim_indices][None, :]
             )
             k_vals = tl.load(k_buffer_ptr + kv_buffer_off, mask=block_mask, other=0.0)
             if k_vals.dtype.is_fp8():
@@ -96,7 +96,7 @@ if current_platform.is_rocm():
                 batch_token_start * E_DIM
                 + block_idx * BLOCK_SIZE * E_DIM
                 + tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM
-                + tl.arange(0, PAD_E_DIM)[valid][None, :]
+                + tl.arange(0, PADDED_E_DIM)[valid_e_dim_indices][None, :]
             )
             tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
             tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
@@ -150,7 +150,7 @@ if current_platform.is_rocm():
             v_scale,
             output_dtype=output_dtype,
             E_DIM=H_KV * D,
-            PAD_E_DIM=next_power_of_2(H_KV * D),
+            PADDED_E_DIM=next_power_of_2(H_KV * D),
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
