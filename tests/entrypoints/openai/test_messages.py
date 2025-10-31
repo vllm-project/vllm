@@ -105,37 +105,37 @@ async def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
 
     print(f"Anthropic response: {resp.model_dump_json()}")
 
-    @pytest.mark.asyncio
-    async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
-        resp = await client.messages.create(
-            model="claude-3-7-sonnet-latest",
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What's the weather like in New York today?",
-                }
-            ],
-            tools=[
-                {
-                    "name": "get_current_weather",
-                    "description": "Useful for querying the weather "
-                    "in a specified city.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "City or region, for example: "
-                                "New York, London, Tokyo, etc.",
-                            }
-                        },
-                        "required": ["location"],
+@pytest.mark.asyncio
+async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": "What's the weather like in New York today?",
+            }
+        ],
+        tools=[
+            {
+                "name": "get_current_weather",
+                "description": "Useful for querying the weather "
+                "in a specified city.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "City or region, for example: "
+                            "New York, London, Tokyo, etc.",
+                        }
                     },
-                }
-            ],
-            stream=True,
-        )
+                    "required": ["location"],
+                },
+            }
+        ],
+        stream=True,
+    )
 
-        async for chunk in resp:
-            print(chunk.model_dump_json())
+    async for chunk in resp:
+        print(chunk.model_dump_json())
