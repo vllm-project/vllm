@@ -33,7 +33,10 @@ from vllm.config import (
 )
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
-from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
+from vllm.distributed.kv_transfer.kv_connector.utils import (
+    copy_kv_blocks,
+    kv_connector_prefers_cross_layer_blocks,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
@@ -4282,6 +4285,86 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 ),
             )
 
+    def _allocate_uniform_kv_caches(
+        self, kv_cache_config: KVCacheConfig
+    ) -> dict[str, torch.Tensor]:
+        """
+        Initializes and reshapes KV caches for the simple case where all
+        layers have the same layout.
+
+        Args:
+            kv_cache_config: The KV cache config
+        Returns:
+            dict[str, torch.Tensor]: A map between layer names to their
+            corresponding memory buffer for KV cache.
+            An empty dictionary is returned if the given KV cache config
+            is incompatible with this simple type of layout.
+        """
+        if not kv_connector_prefers_cross_layer_blocks():
+            return {}
+
+        if len(self.attn_groups) != 1 or len(self.attn_groups[0]) != 1:
+            return {}
+
+        attn_group = self.attn_groups[0][0]
+        kv_cache_spec = attn_group.kv_cache_spec
+        if not isinstance(kv_cache_spec, AttentionSpec):
+            return {}
+
+        tensor_sizes = set(
+            kv_cache_tensor.size for kv_cache_tensor in kv_cache_config.kv_cache_tensors
+        )
+        assert len(tensor_sizes) == 1
+        tensor_size = tensor_sizes.pop()
+
+        page_size = kv_cache_spec.page_size_bytes
+        assert tensor_size % page_size == 0
+        num_blocks = tensor_size // page_size
+        num_tensors = len(kv_cache_config.kv_cache_tensors)
+        total_size = tensor_size * num_tensors
+
+        attn_backend = attn_group.backend
+        kv_cache_shape = attn_backend.get_kv_cache_shape(
+            num_blocks,
+            kv_cache_spec.block_size,
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size,
+            cache_dtype_str=self.cache_config.cache_dtype,
+        )
+
+        # prepend a num_tensors (=num_layers) dimension into the shape
+        kv_cache_shape = (num_tensors,) + kv_cache_shape
+
+        try:
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(True)
+            assert len(kv_cache_stride_order) == len(kv_cache_shape)
+        except (AttributeError, NotImplementedError):
+            return {}
+
+        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+
+        # Maintain original KV shape view.
+        inv_order = [
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+        ]
+
+        logger.info("Allocating a single KV cache buffer for all layers")
+
+        # allocate one contiguous buffer for all layers
+        buffer = (
+            torch.zeros(total_size, dtype=torch.int8, device=self.device)
+            .view(kv_cache_spec.dtype)
+            .view(kv_cache_shape)
+        ).permute(*inv_order)
+
+        kv_caches = {}
+        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            tensor = buffer[i]
+            for layer_name in kv_cache_tensor.shared_by:
+                kv_caches[layer_name] = tensor
+
+        return kv_caches
+
     def _allocate_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig
     ) -> dict[str, torch.Tensor]:
@@ -4508,12 +4591,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             Dict[str, torch.Tensor]: A map between layer names to their
             corresponding memory buffer for KV cache.
         """
-        # Initialize the memory buffer for KV cache
-        kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
-        # Change the memory buffer to the desired shape
-        kv_caches = self._reshape_kv_cache_tensors(
-            kv_cache_config, kv_cache_raw_tensors
-        )
+
+        # Try creating KV caches optimized for kv-connector transfers
+        kv_caches = self._allocate_uniform_kv_caches(kv_cache_config)
+        if not kv_caches:
+            # Fallback to the general case
+            # Initialize the memory buffer for KV cache
+            kv_cache_raw_tensors = self._allocate_kv_cache_tensors(kv_cache_config)
+
+            # Change the memory buffer to the desired shape
+            kv_caches = self._reshape_kv_cache_tensors(
+                kv_cache_config, kv_cache_raw_tensors
+            )
 
         # Set up cross-layer KV cache sharing
         for layer_name, target_layer_name in self.shared_kv_cache_layers.items():

@@ -81,7 +81,7 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def get_kv_cache_stride_order() -> tuple[int, ...]:
+    def get_kv_cache_stride_order(with_layers_dim: bool) -> tuple[int, ...]:
         raise NotImplementedError
 
     @classmethod

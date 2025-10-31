@@ -324,6 +324,13 @@ class MLACommonBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
 
+    @staticmethod
+    def get_kv_cache_stride_order(with_layers_dim: bool) -> tuple[int, ...]:
+        # `stride_order` indicates the permutation that gets
+        # us from `get_kv_cache_shape` to the actual memory layout we want.
+        # (num_blocks, num_layers, block_size, head_size)
+        return (1, 0, 2, 3) if with_layers_dim else (0, 1, 2)
+
     @classmethod
     def get_supported_dtypes(cls) -> list[torch.dtype]:
         return [torch.float16, torch.bfloat16]
