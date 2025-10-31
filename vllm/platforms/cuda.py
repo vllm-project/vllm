@@ -45,17 +45,13 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 @cache
 def _get_backend_priorities(
     use_mla: bool,
-    device_capability: DeviceCapability | None = None,
+    device_capability: DeviceCapability,
 ) -> dict[AttentionBackendEnum, int]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.attention.backends.registry import AttentionBackendEnum
 
     if use_mla:
-        if (
-            device_capability
-            and device_capability >= DeviceCapability(10, 0)
-            and device_capability < DeviceCapability(11, 0)
-        ):
+        if device_capability.major == 10:
             return {
                 AttentionBackendEnum.CUTLASS_MLA: 0,
                 AttentionBackendEnum.FLASHINFER_MLA: 1,
@@ -72,11 +68,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA: 3,
             }
     else:
-        if (
-            device_capability
-            and device_capability >= DeviceCapability(10, 0)
-            and device_capability < DeviceCapability(11, 0)
-        ):
+        if device_capability.major == 10:
             return {
                 AttentionBackendEnum.FLASHINFER: 0,
                 AttentionBackendEnum.FLASH_ATTN: 1,
