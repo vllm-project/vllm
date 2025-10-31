@@ -35,10 +35,7 @@ export VLLM_BATCH_INVARIANT=1
 To start a vLLM server with batch invariance enabled:
 
 ```bash
-VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Llama-3.1-8B-Instruct \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --seed 42
+VLLM_BATCH_INVARIANT=1 vllm serve meta-llama/Llama-3.1-8B-Instruct
 ```
 
 Then use the OpenAI-compatible client:
