@@ -42,6 +42,14 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    _POSSIBLE_FP8_KERNELS,
+    choose_scaled_mm_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa E501
+    FP8ScaledMMLinearLayerConfig,
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -77,7 +85,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     all_close_1d,
     cutlass_block_fp8_supported,
     cutlass_fp8_supported,
@@ -387,9 +394,21 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=self.act_q_static,
-                act_quant_group_shape=self.act_q_group_shape,
+            scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+                is_static_input_scheme=self.act_q_static,
+                weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+                activation_group_shape=self.act_q_group_shape,
+                out_dtype=self.out_dtype,
+            )
+            kernel_type = choose_scaled_mm_linear_kernel(
+                scaled_mm_linear_kernel_config,
+                _POSSIBLE_FP8_KERNELS,
+                module_name=self.__class__.__name__,
+            )
+
+            self.fp8_linear_kernel = kernel_type(
+                scaled_mm_linear_kernel_config,
+                layer_param_names=["weight", "weight_scale", "input_scale"],
             )
 
     def create_weights(
@@ -674,14 +693,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear_kernel.apply_weights(layer, x, bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

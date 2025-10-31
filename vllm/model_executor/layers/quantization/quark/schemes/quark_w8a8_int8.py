@@ -25,8 +25,6 @@ logger = init_logger(__name__)
 
 
 class QuarkW8A8Int8(QuarkScheme):
-    _kernel_backends_being_used: set[str] = set()
-
     def __init__(
         self,
         qscheme: str,
@@ -60,12 +58,10 @@ class QuarkW8A8Int8(QuarkScheme):
         )
 
         kernel_type = choose_scaled_mm_linear_kernel(
-            scaled_mm_linear_kernel_config, possible_kernels=_POSSIBLE_INT8_KERNELS
+            scaled_mm_linear_kernel_config,
+            possible_kernels=_POSSIBLE_INT8_KERNELS,
+            module_name=self.__class__.__name__,
         )
-
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for QuarkW8A8Int8", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
 
         # WEIGHT
         weight = ModelWeightParameter(

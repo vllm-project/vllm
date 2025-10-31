@@ -4,15 +4,15 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.platforms import current_platform
 
 FP8ScaledMMCallBack = Callable[..., torch.Tensor]
-FP8QuantCallback = Callable[..., tuple[torch.Tensor, torch.Tensor]]
 
 
 def apply_weights_fp8(
     scaled_mm_func: FP8ScaledMMCallBack,
-    quant_fp8_func: FP8QuantCallback,
+    quant_fp8_func: QuantFP8,
     w: torch.Tensor,
     x: torch.Tensor,
     w_s: torch.Tensor,

@@ -40,8 +40,6 @@ QUANT_STRATEGY_MAP = {
 
 
 class QuarkW8A8Fp8(QuarkScheme):
-    _kernel_backends_being_used: set[str] = set()
-
     def __init__(
         self, weight_config: dict[str, Any], input_config: dict[str, Any] | None
     ):
@@ -187,11 +185,8 @@ class QuarkW8A8Fp8(QuarkScheme):
         kernel_type = choose_scaled_mm_linear_kernel(
             scaled_mm_linear_kernel_config,
             _POSSIBLE_FP8_KERNELS,
+            module_name=self.__class__.__name__,
         )
-
-        if kernel_type.__name__ not in self._kernel_backends_being_used:
-            logger.info("Using %s for QuarkW8A8FP8", kernel_type.__name__)
-            self._kernel_backends_being_used.add(kernel_type.__name__)
 
         layer_param_names = ["weight", "weight_scale", "input_scale"]
         self.kernel = kernel_type(

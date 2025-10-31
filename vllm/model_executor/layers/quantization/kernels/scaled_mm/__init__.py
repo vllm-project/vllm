@@ -3,6 +3,7 @@
 
 import os
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterScaledMMLinearKernel,
 )
@@ -32,6 +33,8 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
 )
 from vllm.platforms import PlatformEnum, current_platform
 
+logger = init_logger(__name__)
+
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUScaledMMLinearKernel],
@@ -54,6 +57,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
 def choose_scaled_mm_linear_kernel(
     config: ScaledMMLinearLayerConfig,
     possible_kernels: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]],
+    module_name: str,
     compute_capability: int | None = None,
 ) -> type[ScaledMMLinearKernel]:
     """
@@ -105,6 +109,9 @@ def choose_scaled_mm_linear_kernel(
 
         can_implement, failure_reason = kernel.can_implement(config)
         if can_implement:
+            logger.info_once(
+                "Selected %s for %s", kernel.__name__, module_name, scope="global"
+            )
             return kernel
         else:
             failure_reasons.append(

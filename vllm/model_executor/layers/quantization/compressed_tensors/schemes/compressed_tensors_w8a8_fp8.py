@@ -54,8 +54,6 @@ logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
-    _kernel_backends_being_used: set[str] = set()
-
     def __init__(self, weight_quant: QuantizationArgs, is_static_input_scheme: bool):
         self.weight_quant = weight_quant
         self.strategy = weight_quant.strategy
@@ -95,14 +93,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             kernel_type = choose_scaled_mm_linear_kernel(
                 scaled_mm_linear_kernel_config,
                 _POSSIBLE_FP8_KERNELS,
+                module_name=self.__class__.__name__,
             )
-
-            if kernel_type.__name__ not in self._kernel_backends_being_used:
-                logger.info(
-                    "Using %s for CompressedTensorsW8A8FP8", kernel_type.__name__
-                )
-                self._kernel_backends_being_used.add(kernel_type.__name__)
-
             self.kernel = kernel_type(
                 scaled_mm_linear_kernel_config, layer_param_names=layer_param_names
             )
