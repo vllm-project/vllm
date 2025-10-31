@@ -24,8 +24,11 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
 else:
     AttentionBackendEnum = None
+    VllmConfig = None
+    CacheDType = None
 
 logger = init_logger(__name__)
 
@@ -338,7 +341,7 @@ class CudaPlatformBase(Platform):
         selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int | None,
         use_v1: bool,
         use_mla: bool,
@@ -352,6 +355,7 @@ class CudaPlatformBase(Platform):
             )
 
         device_capability = cls.get_device_capability()
+        assert device_capability is not None
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:

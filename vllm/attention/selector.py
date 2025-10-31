@@ -5,12 +5,14 @@ import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from functools import cache
+from typing import cast, get_args
 
 import torch
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils import STR_BACKEND_ENV_VAR
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -79,10 +81,19 @@ def get_attn_backend(
     # value to be returned from the cache if the value changes between calls.
     # To avoid this, we read envs.VLLM_USE_V1 here and pass it explicitly to the
     # private function.
+
+    # Validate kv_cache_dtype is a valid CacheDType value
+    if kv_cache_dtype is not None:
+        valid_cache_dtypes = get_args(CacheDType)
+        assert kv_cache_dtype in valid_cache_dtypes, (
+            f"Invalid kv_cache_dtype: {kv_cache_dtype}. "
+            f"Valid values are: {valid_cache_dtypes}"
+        )
+
     return _cached_get_attn_backend(
         head_size=head_size,
         dtype=dtype,
-        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_dtype=cast(CacheDType | None, kv_cache_dtype),
         block_size=block_size,
         use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
@@ -95,7 +106,7 @@ def get_attn_backend(
 def _cached_get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
-    kv_cache_dtype: str | None,
+    kv_cache_dtype: CacheDType | None,
     block_size: int | None,
     use_v1: bool = False,
     use_mla: bool = False,

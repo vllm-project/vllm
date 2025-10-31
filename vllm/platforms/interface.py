@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
     from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -212,7 +213,7 @@ class Platform:
         selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int,
         use_v1: bool,
         use_mla: bool,
