@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     calculate_tile_tokens_dim,
@@ -30,7 +31,7 @@ def flashinfer_fused_moe_blockscale_fp8(
     local_num_experts: int,
     block_shape: list[int],
     routed_scaling: float | None = 1.0,
-    routing_method_type: int = 2,
+    routing_method_type: int = RoutingMethodType.DeepSeekV3,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
@@ -85,7 +86,7 @@ def flashinfer_fused_moe_blockscale_fp8_fake(
     local_num_experts: int,
     block_shape: list[int],
     routed_scaling: float = 1.0,
-    routing_method_type: int = 2,
+    routing_method_type: int = RoutingMethodType.DeepSeekV3,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
