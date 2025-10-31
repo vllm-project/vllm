@@ -859,17 +859,12 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     }
                     self.cached_req_data[seq_id] = enc_dec_data
             elif self.request_specific_rope:
-                tt_out, rot_mats = outputs
+                tt_out, rope_deltas = outputs
                 # tt_out: [batch_size, seq_len, vocab_size];
-                # rot_mats: List[[batch_size, 1, seq_len, head_dim]]
+                # rope_deltas: [batch_size, 1]
                 for i, seq_id in enumerate(model_input.seq_groups):
                     self.cached_req_data[seq_id] = {
-                        "rot_mats": (
-                            # cos: [1, 1, seq_len, head_dim]
-                            rot_mats[0][i:i + 1],
-                            # sin: [1, 1, seq_len, head_dim]
-                            rot_mats[1][i:i + 1],
-                        )
+                        "rope_deltas": rope_deltas[i].item(),
                     }
             else:
                 # [ batch_size] if sampling on device
@@ -916,13 +911,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 if any(seq_id not in self.previous_seq_ids
                        for seq_id in model_input.seq_groups):
                     enc_dec_kwargs = {
-                        "rot_mats_all_users": [
-                            self.cached_req_data[seq_id]["rot_mats"]
+                        "rope_deltas_all_users": [
+                            self.cached_req_data[seq_id]["rope_deltas"]
                             for seq_id in model_input.seq_groups
                         ]
                     }
                 else:
-                    enc_dec_kwargs = {"rot_mats_all_users": None}
+                    enc_dec_kwargs = {"rope_deltas_all_users": None}
                 self.previous_seq_ids = set(model_input.seq_groups)
             else:
                 enc_dec_kwargs = {}
