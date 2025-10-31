@@ -79,7 +79,6 @@ def test_gpt_oss_lora(gptoss20b_lora_files):
         enable_lora=True,
         max_loras=4,
         max_lora_rank=8,
-        gpu_memory_utilization=0.8,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
         ),
@@ -97,7 +96,6 @@ def test_gpt_oss_lora_tp2(gptoss20b_lora_files):
         enable_lora=True,
         max_loras=2,
         max_lora_rank=8,
-        gpu_memory_utilization=0.8,
         tensor_parallel_size=2,
         compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
             cudagraph_specialize_lora=False,
