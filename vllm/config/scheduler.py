@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar, field
 from typing import Any, Literal
 
-from pydantic import SkipValidation, model_validator
+from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -136,6 +136,12 @@ class SchedulerConfig:
     async scheduling is currently not supported with some features such as
     structured outputs, speculative decoding, and pipeline parallelism.
     """
+
+    stream_interval: int = Field(default=1, ge=1)
+    """The interval (or buffer size) for streaming in terms of token length.
+    A smaller value (1) makes streaming smoother by sending each token immediately,
+    while a larger value (e.g., 10) reduces host overhead and increases throughput
+    by batching multiple tokens before sending."""
 
     def compute_hash(self) -> str:
         """
