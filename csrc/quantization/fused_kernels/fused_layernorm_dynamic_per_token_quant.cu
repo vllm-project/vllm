@@ -75,12 +75,13 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+    token_scale = 1.0f / token_scale;
     vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, true, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   } else {
     // FP8 - Do not invert s_token_scale for exact match with FBGemm
     vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, rms, &token_scale, hidden_size, false, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   }
 }
 
@@ -129,14 +130,18 @@ __global__ void rms_norm_per_block_quant_kernel_3(
   // RMS Norm + Quant
   int token_idx = blockIdx.x * hidden_size / group_size;
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+    for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
+      auto token_group_idx = token_idx + i / group_size;
+      token_scale[token_group_idx] = 1.0f / token_scale[token_group_idx];
+    }
     vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
         out, input, weight, rms[blockIdx.x], token_scale + token_idx,
-        hidden_size, true, residual, group_size);
+        hidden_size, residual, group_size);
   } else {
     // FP8 - Do not invert s_token_scale for exact match with FBGemm
     vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
         out, input, weight, rms[blockIdx.x], token_scale + token_idx,
-        hidden_size, false, residual, group_size);
+        hidden_size, residual, group_size);
   }
 }
 

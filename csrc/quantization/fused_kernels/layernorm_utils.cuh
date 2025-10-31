@@ -133,7 +133,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t const* __restrict__ input,
                                scalar_t const* __restrict__ weight,
                                float const rms, float* const scale,
-                               int32_t const hidden_size, bool invert_scale,
+                               int32_t const hidden_size,
                                scalar_t* __restrict__ residual = nullptr,
                                int32_t const group_size = 0) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
@@ -148,8 +148,7 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     // Norm
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     // Quant
-    auto scale_idx = group_size > 0 ? i / group_size : 0;
-    auto scale_val = invert_scale ? 1.0f / scale[scale_idx] : scale[scale_idx];
+    auto scale_val = (group_size > 0 ? scale[i / group_size] : *scale);
     output[token_offset + i] =
         ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale_val);
   }
