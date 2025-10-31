@@ -261,30 +261,6 @@ def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    model_name = "PaddlePaddle/PaddleOCR-VL"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        max_num_seqs=2,
-        limit_mm_per_prompt={modality: 1},
-    )
-
-    placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
-    prompts = [
-        (f"<|begin_of_sentence|>User: {question}{placeholder}\nAssistant: ")
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Ernie4.5-VL
 def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
     model_name = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
@@ -1257,6 +1233,32 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
 
     prompts = [
         f"<|im_start|>user\n\n{placeholder}\n{question}<|im_end|>\n<|im_start|>assistant\n"
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# PaddleOCR-VL
+def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+    prompts = [
+        (f"<|begin_of_sentence|>User: {question}{placeholder}\nAssistant: ")
         for question in questions
     ]
 

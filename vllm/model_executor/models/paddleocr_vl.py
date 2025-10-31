@@ -17,7 +17,7 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import ClassVar, Literal
+from typing import Literal
 
 import numpy as np
 import torch
@@ -40,7 +40,6 @@ from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_xformers_attn_wrapper,
 )
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
@@ -402,7 +401,7 @@ class PaddleOCRImagePixelInputs(TensorSchema):
 
 
 class SiglipVisionEmbeddings(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config: PretrainedConfig):
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -1013,9 +1012,6 @@ class SiglipVisionTransformer(nn.Module):
 
 
 class SiglipVisionModel(nn.Module):
-    config_class = "PaddleOCRVisionConfig"
-    main_input_name = "pixel_values"
-
     def __init__(
         self,
         config,
@@ -1131,17 +1127,7 @@ class SiglipVisionModel(nn.Module):
     info=PaddleOCRVLProcessingInfo,
     dummy_inputs=PaddleOCRVLDummyInputsBuilder,
 )
-@support_torch_compile(
-    # set dynamic_arg_dims to support mrope
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": -1,
-        "intermediate_tensors": 0,
-        "inputs_embeds": 0,
-    }
-)
 class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsMRoPE):
-    supports_multimodal: ClassVar[Literal[True]] = True
     merge_by_field_config = True
 
     hf_to_vllm_mapper = WeightsMapper(
