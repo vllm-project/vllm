@@ -2323,11 +2323,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
+
+            num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
+
+            if cu_num_accepted_tokens is not None:
+                cu_num_accepted_tokens.append(
+                    cu_num_accepted_tokens[-1] + num_sampled_ids
+                )
+
             if not sampled_ids:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
-            end_idx = start_idx + len(sampled_ids)
+            end_idx = start_idx + num_sampled_ids
             assert end_idx <= self.max_model_len, (
                 "Sampled token IDs exceed the max model length. "
                 f"Total number of tokens: {end_idx} > max_model_len: "
@@ -2342,11 +2350,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_id = req_ids[req_idx]
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
-
-            if cu_num_accepted_tokens is not None:
-                cu_num_accepted_tokens.append(
-                    cu_num_accepted_tokens[-1] + len(sampled_ids)
-                )
 
         logprobs_lists = (
             logprobs_tensors.tolists(cu_num_accepted_tokens)
@@ -4146,6 +4149,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             group.get_metadata_builder().reorder_batch_threshold
             for group in self._attn_group_iterator()
         ]
+        # If there are no attention groups (attention-free model) or no backend
+        # reports a threshold, leave reordering disabled.
+        if len(reorder_batch_thresholds) == 0:
+            self.reorder_batch_threshold = None
+            return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)
 
     def _find_compatible_block_sizes(
