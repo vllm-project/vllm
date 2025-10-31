@@ -82,10 +82,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         else:
             weight_quant_strategy = QUANT_STRATEGY_MAP[self.strategy]
             self.fp8_linear_kernel = init_fp8_linear_kernel(
-                is_static_input_scheme=self.is_static_input_scheme,
+                act_q_static=self.is_static_input_scheme,
+                act_q_group_shape=self.act_q_group_shape,
                 weight_quant_strategy=weight_quant_strategy,
-                activation_group_shape=self.act_q_group_shape,
                 out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__
             )
 
     @classmethod

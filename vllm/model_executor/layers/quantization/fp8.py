@@ -394,10 +394,11 @@ class Fp8LinearMethod(LinearMethodBase):
             )
         else:
             self.fp8_linear_kernel = init_fp8_linear_kernel(
-                is_static_input_scheme=self.act_q_static,
+                act_q_static=self.act_q_static,
+                act_q_group_shape=self.act_q_group_shape,
                 weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
-                activation_group_shape=self.act_q_group_shape,
                 out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__
             )
 
     def create_weights(

@@ -174,10 +174,11 @@ class QuarkW8A8Fp8(QuarkScheme):
 
         weight_quant_strategy = QUANT_STRATEGY_MAP[self.weight_qscheme]
         self.fp8_linear_kernel = init_fp8_linear_kernel(
-            is_static_input_scheme=self.is_static_input_scheme,
+            act_q_static=self.is_static_input_scheme,
+            act_q_group_shape=self.act_quant_group_shape,
             weight_quant_strategy=weight_quant_strategy,
-            activation_group_shape=self.act_quant_group_shape,
             out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__
         )
 
     def apply_weights(

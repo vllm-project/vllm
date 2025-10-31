@@ -25,7 +25,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.torch import (
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
     ChannelWiseTorchScaledMMLinearKernel,
     PerTensorTorchScaledMMLinearKernel,
     RowWiseTorchScaledMMLinearKernel,
@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
     XLAScaledMMLinearKernel,
 )
 from vllm.platforms import PlatformEnum, current_platform
-from vllm.vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
 logger = init_logger(__name__)
 
@@ -133,12 +133,13 @@ def choose_scaled_mm_linear_kernel(
 def init_fp8_linear_kernel(
     act_q_static: bool,
     act_q_group_shape: GroupShape,
+    weight_quant_strategy: ScaledMMLinearQuantStrategy, 
     out_dtype: torch.dtype,
     module_name: str,
 ) -> FP8ScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         is_static_input_scheme=act_q_static,
-        weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+        weight_quant_strategy=weight_quant_strategy,
         activation_group_shape=act_q_group_shape,
         out_dtype=out_dtype,
     )
