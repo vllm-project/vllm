@@ -33,7 +33,7 @@ from vllm.utils.network_utils import (
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
-    recv_msg,
+    recv_router_dealer_message,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -417,7 +417,9 @@ class ClientGuard:
         error information from the engine core is missed.
         """
         while True:
-            sender_identity, message = recv_msg(self.fault_receiver_socket)
+            _, sender_identity, message = recv_router_dealer_message(
+                self.fault_receiver_socket
+            )
             if self.client_guard_dead:
                 logger.info("client guard dead, stop receiving fault")
                 break

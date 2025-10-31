@@ -28,7 +28,7 @@ from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
     get_open_zmq_ipc_path,
     make_zmq_socket,
-    recv_msg,
+    recv_router_dealer_message,
     zmq_socket_ctx,
 )
 from vllm.utils.system_utils import get_mp_context
@@ -1237,16 +1237,11 @@ class FaultHandler:
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
         self.engine_status_dict = engine_status_dict
-        self.engine_identity_to_index: dict[bytes:int] = {
+        self.engine_identity_to_index: dict[bytes, int] = {
             identity: i for i, identity in enumerate(client_cmd_registry)
         }
 
     async def handle_fault(self, instruction: str, timeout, **kwargs) -> bool:
-        # TODO: Implement a thread-safe dictionary to mark statuses
-        unhealthy_engines = await get_queue_snapshot(
-            self.engine_exception_q, self.engine_exception_q_lock
-        )
-
         if instruction == "retry" and "Dead" in self.engine_status_dict.values():
             logger.info(
                 "engine_core dead unexpectedly, retry is impossible,"
@@ -1255,30 +1250,34 @@ class FaultHandler:
             return False
 
         excluded_engines = set()
-
         if instruction == "pause":
-            unhealthy_indices = [int(e.engine_id) for e in unhealthy_engines]
+            fault_engine_indices = {
+                index
+                for index, status in self.engine_status_dict.items()
+                if status != "Healthy"
+            }
             excluded_engines = {
                 identity
                 for identity, index in self.engine_identity_to_index.items()
-                if index in unhealthy_indices
+                if index in fault_engine_indices
             }
 
         self.send_fault_tolerance_instruction(
             excluded_engines, instruction, timeout, **kwargs
         )
 
-        execute_result = self.process_instruction_result(
+        execution_result = self.process_instruction_result(
             excluded_engines, instruction, timeout
         )
 
-        if instruction == "retry" and execute_result:
+        if instruction == "retry" and execution_result:
             for engine_id, _ in self.engine_status_dict.items():
                 self.engine_status_dict[engine_id] = "Healthy"
-        return execute_result
+            # todo: should we also clear the engine_exception_q here?
+        return execution_result
 
     def send_fault_tolerance_instruction(
-        self, excluded_engines: set[str], instruction: str, timeout: int, **kwargs
+        self, excluded_engines: set[bytes], instruction: str, timeout: int, **kwargs
     ):
         payload = {**kwargs, "timeout": timeout}
 
@@ -1292,11 +1291,12 @@ class FaultHandler:
             )
 
     def process_instruction_result(
-        self, excluded_engines: set[str], instruction: str, timeout: int
+        self, excluded_engines: set[bytes], instruction: str, timeout: int
     ):
         """Wait for all targeted engines to return acknowledgment."""
-        poller = zmq.Poller()
-        poller.register(self.cmd_socket, zmq.POLLIN)
+
+        # todo: need to add an unique id for each instruction, incase
+        #  sometimes the other end responds after the timeout.
 
         expected_engines = {
             identity
@@ -1316,30 +1316,31 @@ class FaultHandler:
                 )
                 return False
 
-            socks = dict(poller.poll(remaining * 1000))
-            if self.cmd_socket not in socks:
-                continue  # still waiting
-
             try:
-                identity, response = recv_msg(self.cmd_socket)
-                if isinstance(identity, str):
-                    identity = identity.encode("utf-8")
+                has_msg, identity, response = recv_router_dealer_message(
+                    self.cmd_socket,
+                    use_poller=True,
+                    poll_timeout=int(remaining) * 1000,
+                )
+                if has_msg:
+                    if isinstance(identity, str):
+                        identity = identity.encode("utf-8")
 
-                expected_engines.discard(identity)
+                    expected_engines.discard(identity)
 
-                response_dict = json.loads(response)
-                engine_id = response_dict.get("engine_index")
-                success = response_dict.get("success", False)
+                    response_dict = json.loads(response)
+                    engine_id = response_dict.get("engine_index")
+                    success = response_dict.get("success", False)
 
-                if not success:
-                    logger.error(
-                        'EngineCoreGuard[%s] fail to execute command "%s" '
-                        "with reason: %s",
-                        engine_id,
-                        instruction,
-                        response_dict.get("reason", "unknown"),
-                    )
-                    return False
+                    if not success:
+                        logger.error(
+                            'EngineCoreGuard[%s] fail to execute command "%s" '
+                            "with reason: %s",
+                            engine_id,
+                            instruction,
+                            response_dict.get("reason", "unknown"),
+                        )
+                        return False
             except Exception as e:
                 logger.error("Error processing engine response: %s", e)
                 return False

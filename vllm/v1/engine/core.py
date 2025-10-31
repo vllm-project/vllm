@@ -31,7 +31,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -160,89 +160,12 @@ class EngineCoreGuard(threading.Thread):  # changed
             except queue.Empty:
                 pass
 
-            has_msg, cmd_str = self._recv_cmd(poll_timeout=poll_timeout_ms)
+            has_msg, _, cmd_str = recv_router_dealer_message(
+                self.client_cmd_socket, use_poller=True, poll_timeout=poll_timeout_ms
+            )
             if has_msg:
                 logger.info("[EngineCoreGuard] Received cmd: %s", cmd_str)
                 self._execute_cmd(cmd_str)
-
-    def _send_msg(
-        self, src_socket: zmq.Socket, msg: Any, serialize: bool = True
-    ) -> tuple[bool, str | None]:
-        """
-        Send message to ROUTER via the specified DEALER socket.
-        Args:
-            src_socket: DEALER socket for sending messages
-            msg: Message content
-            serialize: Whether to encode/serialize the message (default: True)
-        Returns:
-            (success, error_msg)
-        """
-        try:
-            if serialize:
-                msg_bytes = json.dumps(msg, ensure_ascii=False).encode("utf-8")
-            elif isinstance(msg, bytes):
-                msg_bytes = msg
-            elif isinstance(msg, str):
-                msg_bytes = msg.encode("utf-8")
-            else:
-                raise TypeError("Non-serialized messages must be str or bytes")
-
-            src_socket.send_multipart([b"", msg_bytes])
-            logger.debug("Sent message via %s: %s", src_socket, msg)
-            return True, None
-        except (zmq.ZMQError, UnicodeEncodeError, TypeError, ValueError) as e:
-            error = f"Send message failed: {e}"
-            logger.error(error)
-            return False, error
-        except Exception as e:
-            logger.exception("Unexpected error while sending message")
-            return False, str(e)
-
-    def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
-        """
-        Receives client guard commands in non-blocking mode via ZMQ Poller.
-        Returns (False, None) on timeout, format error, or exception.
-        Message must follow DEALER format: [empty frame, content].
-
-        Args:
-            poll_timeout: Polling timeout in milliseconds (default: 1000)
-        Returns:
-            (Whether reception succeeded, decoded message string/None)
-        """
-        try:
-            # Use Poller for non-blocking reception
-            self.poller.register(self.client_cmd_socket, zmq.POLLIN)
-            socks = dict(self.poller.poll(poll_timeout))
-
-            # Check if a message has arrived
-            if (
-                self.client_cmd_socket in socks
-                and socks[self.client_cmd_socket] == zmq.POLLIN
-            ):
-                # DEALER message format: [empty frame, message content]
-                parts = self.client_cmd_socket.recv_multipart()
-
-                # Validate message format
-                assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
-
-                empty_frame, message_bytes = parts
-
-                # Validate empty frame
-                assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-
-                # Decode message content
-                message = message_bytes.decode("utf-8")
-                return (True, message)
-
-            # No message received within timeout
-            return (False, None)
-
-        except (zmq.ZMQError, UnicodeDecodeError) as e:
-            logger.error("error occurred while receiving message: %s", e)
-            return (False, None)
-        except Exception as e:
-            logger.error("Unexpected error occurred while receiving message: %s", e)
-            return (False, None)
 
     def _stop_worker_execution(self, soft_pause: bool):
         if soft_pause:
@@ -265,7 +188,8 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def _report_client_exception(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
-        self._send_msg(self.fault_report_socket, msg, serialize=False)
+        msg_bytes = msg.encode("utf-8")
+        self.fault_report_socket.send_multipart([b"", msg_bytes])
 
     def _execute_cmd(self, cmd_str):
         """
@@ -336,7 +260,8 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def _send_execution_result(self, success: bool):
         msg = {"engine_index": self.engine_index, "success": success}
-        self._send_msg(self.client_cmd_socket, msg, serialize=True)
+        msg_bytes = json.dumps(msg).encode("utf-8")
+        self.client_cmd_socket.send_multipart([b"", msg_bytes])
 
     def shutdown(self):
         if self.fault_report_socket is not None:

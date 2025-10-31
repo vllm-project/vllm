@@ -331,37 +331,53 @@ def zmq_socket_ctx(
         ctx.destroy(linger=linger)
 
 
-def recv_msg(socket: zmq.Socket | zmq.asyncio.Socket) -> tuple[None | str, None | str]:
+def recv_router_dealer_message(
+    socket: zmq.Socket,
+    use_poller: bool = False,
+    poll_timeout: int = 1000,
+) -> tuple[bool, None | str, None | str]:
     """
-    Receive messages from socket in blocking mode
-
-    This function will block until a message is received
+    Receive multipart ZMQ messages, automatically inferring message format
+    based on socket type (ROUTER or DEALER).
 
     Returns:
-        Tuple (sender_identity, message), both string types
-        Returns (None, None) if error occurs
+        (success, identity, message)
+        - identity is only set for ROUTER sockets
+        - success=False on timeout or error
     """
     try:
-        # Use blocking receive - will wait until a message arrives
+        sock_type = socket.getsockopt(zmq.TYPE)
+
+        # optional non-blocking receive
+        if use_poller:
+            poller = zmq.Poller()
+            poller.register(socket, zmq.POLLIN)
+            socks = dict(poller.poll(poll_timeout))
+            if socket not in socks:
+                return (False, None, None)
+
         parts = socket.recv_multipart()
 
-        # Verify message format
-        assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+        if sock_type == zmq.ROUTER:
+            # ROUTER message: [identity, empty, message]
+            assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+            identity_bytes, empty_frame, message_bytes = parts
+            identity = identity_bytes.decode("utf-8")
+        elif sock_type == zmq.DEALER:
+            # DEALER message: [empty, message]
+            assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
+            empty_frame, message_bytes = parts
+            identity = None
+        else:
+            raise ValueError(f"Unsupported socket type: {sock_type}")
 
-        identity_bytes, empty_frame, message_bytes = parts
-
-        # Verify empty frame
         assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-
-        # Convert to string
-        sender_identity = identity_bytes.decode("utf-8")
         message = message_bytes.decode("utf-8")
-
-        return (sender_identity, message)
+        return (True, identity, message)
 
     except (zmq.ZMQError, UnicodeDecodeError) as e:
-        logger.error("receive message failed: %s", e)
-        return (None, None)
+        logger.error("ZMQ receive error: %s", e)
+        return (False, None, None)
     except Exception as e:
-        logger.error("Unexpected error occurred while receiving message: %s", e)
-        return (None, None)
+        logger.error("Unexpected receive error: %s", e)
+        return (False, None, None)

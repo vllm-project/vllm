@@ -40,7 +40,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -97,49 +97,11 @@ class WorkerGuard:
 
         return log
 
-    def _recv_cmd(self) -> tuple[bool, None | str]:
-        """
-        Receives engine core guard commands in blocking mode via ZMQ.
-        Returns (False, None) on format error, or exception.
-        Message must follow DEALER format: [empty frame, content].
-
-        Args:
-            N/A
-        Returns:
-            (Whether reception succeeded, decoded message string/None)
-        """
-        try:
-            # DEALER message format: [empty frame, message content]
-            parts = self.cmd_socket.recv_multipart()
-
-            # Validate message format
-            assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
-
-            empty_frame, message_bytes = parts
-
-            # Validate empty frame
-            assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-
-            # Decode message content
-            message = message_bytes.decode("utf-8")
-            return (True, message)
-
-        except (zmq.ZMQError, UnicodeDecodeError) as e:
-            self.logger("error occurred while receiving message: %s", e, level="error")
-            return (False, None)
-        except Exception as e:
-            self.logger(
-                "Unexpected error occurred while receiving message: %s",
-                e,
-                level="error",
-            )
-            return (False, None)
-
     def run(self):
         """Run the message receiving loop and handle control commands"""
         while True:
             # Use blocking receive - will wait until a message arrives
-            has_msg, cmd_str = self._recv_cmd()
+            has_msg, _, cmd_str = recv_router_dealer_message(self.cmd_socket)
             if self.worker_guard_dead:
                 self.logger("Worker guard dead, exiting")
                 break
