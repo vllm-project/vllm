@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar
 from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
 DEFAULT_MAX_MODEL_LEN = 8192
+DEFAULT_MAX_NUM_SEQS = 128
 
 
 @config
@@ -164,14 +165,6 @@ class SchedulerConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    @field_validator("max_num_seqs", mode="before")
-    @classmethod
-    def _validate_max_num_seqs(cls, max_num_seqs: Any | None) -> Any:
-        if max_num_seqs is None:
-            logger.warning("max_num_seqs is not set, using arbitrary value 128.")
-            return 128
-        return max_num_seqs
-
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         """Post init to handle init vars."""
         if is_encoder_decoder:
@@ -193,6 +186,12 @@ class SchedulerConfig:
                 DEFAULT_MAX_MODEL_LEN,
             )
             self.max_model_len = DEFAULT_MAX_MODEL_LEN
+        if self.max_num_seqs is None:
+            logger.warning(
+                "max_num_seqs is not set, using arbitrary value %s.",
+                DEFAULT_MAX_NUM_SEQS,
+            )
+            self.max_num_seqs = DEFAULT_MAX_NUM_SEQS
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
