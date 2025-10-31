@@ -21,6 +21,7 @@ logger = init_logger(__name__)
 
 RunnerType = Literal["generate", "pooling", "draft"]
 SchedulerPolicy = Literal["fcfs", "priority"]
+DEFAULT_MAX_MODEL_LEN = 8192
 
 
 @config
@@ -171,14 +172,6 @@ class SchedulerConfig:
             return 128
         return max_num_seqs
 
-    @field_validator("max_model_len", mode="before")
-    @classmethod
-    def _validate_max_model_len(cls, max_model_len: Any | None) -> Any:
-        if max_model_len is None:
-            logger.warning("max_model_len is not set, using arbitrary value 8192.")
-            return 8192
-        return max_model_len
-
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         """Post init to handle init vars."""
         if is_encoder_decoder:
@@ -194,6 +187,12 @@ class SchedulerConfig:
 
     @model_validator(mode="after")
     def _validate_scheduler_config(self) -> Self:
+        if self.max_model_len is None:
+            logger.warning(
+                "max_model_len is not set, using arbitrary value %s.",
+                DEFAULT_MAX_MODEL_LEN,
+            )
+            self.max_model_len = DEFAULT_MAX_MODEL_LEN
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
