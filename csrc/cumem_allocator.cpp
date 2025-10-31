@@ -120,6 +120,10 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
   for (auto i = 0; i < num_chunks; ++i) {
     CUDA_CHECK(cuMemCreate(p_memHandle[i], chunk_sizes[i], &prop, 0));
     if (error_code != 0) {
+      // Clean up previously created handles
+      for (auto j = 0; j < i; ++j) {
+        cuMemRelease(*(p_memHandle[j]));
+      }
       return;
     }
   }
@@ -169,19 +173,26 @@ void unmap_and_release(unsigned long long device, ssize_t size,
   }
 #else
   unsigned long long allocated_size = 0;
+  CUresult first_error = no_error;
+
   for (auto i = 0; i < num_chunks; ++i) {
     void* map_addr = (void*)((uintptr_t)d_mem + allocated_size);
-    CUDA_CHECK(cuMemUnmap(map_addr, chunk_sizes[i]));
-    if (error_code != 0) {
-      return;
+    CUresult status = cuMemUnmap(map_addr, chunk_sizes[i]);
+    if (status != no_error && first_error == no_error) {
+      first_error = status;
     }
     allocated_size += chunk_sizes[i];
   }
+
   for (auto i = 0; i < num_chunks; ++i) {
-    CUDA_CHECK(cuMemRelease(*(p_memHandle[i])));
-    if (error_code != 0) {
-      return;
+    CUresult status = cuMemRelease(*(p_memHandle[i]));
+    if (status != no_error && first_error == no_error) {
+      first_error = status;
     }
+  }
+
+  if (first_error != no_error) {
+    CUDA_CHECK(first_error);
   }
 #endif
 }
@@ -393,6 +404,8 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
 
   if (!py_result || !PyTuple_Check(py_result) || PyTuple_Size(py_result) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
+    Py_XDECREF(py_result);
+    Py_XDECREF(py_ptr);
     return;
   }
 
@@ -407,39 +420,40 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
   if (!PyArg_ParseTuple(py_result, PYARGS_PARSE, &recv_device, &recv_size,
                         &recv_d_mem, &recv_p_memHandle)) {
     // PyArg_ParseTuple sets an error if it fails
+    Py_XDECREF(py_result);
+    Py_XDECREF(py_ptr);
     return;
   }
 
-  PyGILState_Release(gstate);
-
-  // recv_size == size
-  // recv_device == device
-
-  // Free memory
-
+  // For ROCm, copy the Python list of (addr,size) pairs into C arrays while
+  // holding the GIL. Then release the GIL and call the unmap/release helper
+  // using the copied arrays. This avoids calling PyList_* APIs without the
+  // GIL (which is undefined behavior and can crash when called from other
+  // threads).
   CUdeviceptr d_mem = (CUdeviceptr)recv_d_mem;
-#ifndef USE_ROCM
-  CUmemGenericAllocationHandle* p_memHandle =
-      (CUmemGenericAllocationHandle*)recv_p_memHandle;
-
-  unmap_and_release(device, size, d_mem, p_memHandle);
-#else
+#ifdef USE_ROCM
   Py_ssize_t num_chunks = PyList_Size(recv_p_memHandle);
   CUmemGenericAllocationHandle** p_memHandle =
       (CUmemGenericAllocationHandle**)malloc(
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
   if (p_memHandle == nullptr) {
-    std::cerr << "ERROR: malloc failed for p_memHandle in my_free.\n";
+    PyGILState_Release(gstate);
+    Py_DECREF(py_ptr);
+    Py_DECREF(py_result);
+    std::cerr << "ERROR: malloc failed for p_memHandle in my_free." << std::endl;
     return;
   }
   unsigned long long* chunk_sizes =
       (unsigned long long*)malloc(num_chunks * sizeof(unsigned long long));
   if (chunk_sizes == nullptr) {
-    std::cerr << "ERROR: malloc failed for chunk_sizes in my_free.\n";
     free(p_memHandle);
+    PyGILState_Release(gstate);
+    Py_DECREF(py_ptr);
+    Py_DECREF(py_result);
+    std::cerr << "ERROR: malloc failed for chunk_sizes in my_free." << std::endl;
     return;
   }
-  for (auto i = 0; i < num_chunks; ++i) {
+  for (Py_ssize_t i = 0; i < num_chunks; ++i) {
     PyObject* item = PyList_GetItem(recv_p_memHandle, i);
     PyObject* addr_py = PyTuple_GetItem(item, 0);
     PyObject* size_py = PyTuple_GetItem(item, 1);
@@ -448,7 +462,22 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
     chunk_sizes[i] = (unsigned long long)PyLong_AsUnsignedLongLong(size_py);
   }
 
+  // Now we can release the GIL and drop temporary Python refs.
+  PyGILState_Release(gstate);
+  Py_DECREF(py_ptr);
+  Py_DECREF(py_result);
+
   unmap_and_release(device, size, d_mem, p_memHandle, chunk_sizes, num_chunks);
+#else
+  // Non-ROCm path: simple integer handle already extracted; release GIL and
+  // proceed.
+  PyGILState_Release(gstate);
+  Py_DECREF(py_ptr);
+  Py_DECREF(py_result);
+
+  CUmemGenericAllocationHandle* p_memHandle =
+      (CUmemGenericAllocationHandle*)recv_p_memHandle;
+  unmap_and_release(device, size, d_mem, p_memHandle);
 #endif
 
   // free address and the handle
