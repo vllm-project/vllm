@@ -49,6 +49,7 @@ from vllm.model_executor.models.transformers.utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -92,6 +93,27 @@ ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
     embedding_padding_modules = ["lm_head"]
     embedding_modules = ["embed_tokens"]  # TODO transformers will have a util to get it
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # Add `model.` prefix for base model checkpoints,
+            # handling the case where it is already present
+            "": "model.",
+            "model.model.": "model.",
+            # Heads will be adjacent to `model` (pooling included because of adapters)
+            "model.lm_head.": "lm_head.",
+            "model.score.": "classifier.",
+            "model.classifier.": "classifier.",
+        }
+    )
+
+    def __init_subclass__(cls, *args, **kwargs):
+        """Merge hf_to_vllm_mapper in MRO from most specific to least specific."""
+        super().__init_subclass__(*args, **kwargs)
+        hf_to_vllm_mapper = WeightsMapper()
+        for base in cls.__mro__:
+            if base_hf_to_vllm_mapper := getattr(base, "hf_to_vllm_mapper", None):
+                hf_to_vllm_mapper |= base_hf_to_vllm_mapper
+        cls.hf_to_vllm_mapper = hf_to_vllm_mapper
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__()

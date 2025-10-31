@@ -16,8 +16,8 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import round_up
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
+from vllm.utils.math_utils import round_up
 
 
 def triton_moe(

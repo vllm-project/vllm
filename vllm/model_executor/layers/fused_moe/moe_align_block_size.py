@@ -5,7 +5,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.triton_utils import triton
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 
 def moe_align_block_size(

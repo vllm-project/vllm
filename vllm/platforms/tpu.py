@@ -223,12 +223,6 @@ class TpuPlatform(Platform):
             raise ValueError("Torch XLA does not support per-request seed.")
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: "ModelConfig"
-    ) -> bool:
-        return True
-
-    @classmethod
     @torch.compile(backend="openxla")
     def insert_blocks_to_device(
         cls,
@@ -256,6 +250,22 @@ class TpuPlatform(Platform):
     @classmethod
     def use_sync_weight_loader(cls) -> bool:
         return True
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        logger.warning(
+            "--max-model-len is not specified, "
+            "it's currently using model's default length %d, "
+            "which might be too large."
+            "Please input with --max-model-len based on your "
+            "request input length and output length, to avoid "
+            "unnecessary degradation.",
+            max_model_len,
+        )
+        return max_model_len
 
 
 try:

@@ -899,6 +899,7 @@ def test_kv_connector_basic():
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=True,
+        disable_hybrid_kv_cache_manager=True,
     )
     NUM_TOTAL_BLOCKS = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
     BLOCK_SIZE = scheduler.cache_config.block_size
@@ -1014,6 +1015,67 @@ def test_kv_connector_basic():
     )
 
 
+def test_external_prefix_cache_metrics():
+    """
+    Verify connector prefix cache metrics are updated
+    correctly when the scheduler processes requests with KV connector hits.
+    """
+
+    # Setup Scheduler.
+    scheduler = create_scheduler(
+        enable_prefix_caching=False,
+        use_kv_connector=True,
+        disable_hybrid_kv_cache_manager=True,
+    )
+
+    # Mock connector to simulate a partial external cache hit
+    NUM_MATCHED_NEW_TOKENS = 4
+    scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
+    scheduler.connector.get_num_new_matched_tokens.return_value = (
+        NUM_MATCHED_NEW_TOKENS,
+        False,
+    )
+
+    # --- Prepare simple requests ---
+    NUM_REQUESTS = 2
+    NUM_TOKENS = 8
+    MAX_TOKENS = 2
+    requests = create_requests(
+        num_requests=NUM_REQUESTS,
+        num_tokens=NUM_TOKENS,
+        max_tokens=MAX_TOKENS,
+    )
+
+    for req in requests:
+        scheduler.add_request(req)
+
+    # --- Trigger scheduling and simulate model output ---
+    output = scheduler.schedule()
+    MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+        req_ids=[r.request_id for r in requests],
+        req_id_to_index={r.request_id: i for i, r in enumerate(requests)},
+        sampled_token_ids=[[1000]] * NUM_REQUESTS,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Update scheduler stats
+    ecos = scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+
+    # --- Assertions ---
+    assert ecos is not None and len(ecos) > 0
+    assert ecos[0].scheduler_stats is not None
+
+    external_stats = ecos[0].scheduler_stats.connector_prefix_cache_stats
+    assert external_stats is not None
+
+    assert external_stats.queries == NUM_TOKENS * NUM_REQUESTS
+    assert external_stats.hits == NUM_MATCHED_NEW_TOKENS * NUM_REQUESTS
+    assert external_stats.requests == NUM_REQUESTS
+    assert external_stats.preempted_requests == 0
+
+
 def test_kv_connector_unable_to_allocate():
     """
     Test whether scheduler with KVConnector is able to handle
@@ -1028,6 +1090,7 @@ def test_kv_connector_unable_to_allocate():
         use_kv_connector=True,
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
+        disable_hybrid_kv_cache_manager=True,
     )
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
@@ -1111,6 +1174,7 @@ def test_kv_connector_handles_preemption():
         use_kv_connector=True,
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
+        disable_hybrid_kv_cache_manager=True,
     )
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
@@ -1327,6 +1391,7 @@ def create_scheduler_with_priority(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    disable_hybrid_kv_cache_manager: bool = False,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1351,6 +1416,7 @@ def create_scheduler_with_priority(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         policy="priority",  # Enable priority scheduling
+        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     model_config = ModelConfig(
         model=model,
@@ -1958,6 +2024,7 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
         num_blocks=5,  # Can hold 64 tokens (first block is null)
         block_size=16,  # Standard block size
         use_kv_connector=True,
+        disable_hybrid_kv_cache_manager=True,
     )
 
     # Create a request and schedule it

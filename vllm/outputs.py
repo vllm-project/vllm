@@ -201,14 +201,21 @@ class PoolingRequestOutput(Generic[_O]):
         request_id (str): A unique identifier for the pooling request.
         outputs (PoolingOutput): The pooling results for the given input.
         prompt_token_ids (list[int]): A list of token IDs used in the prompt.
+        num_cached_tokens: The number of tokens with prefix cache hit.
         finished (bool): A flag indicating whether the pooling is completed.
     """
 
     def __init__(
-        self, request_id: str, outputs: _O, prompt_token_ids: list[int], finished: bool
+        self,
+        request_id: str,
+        outputs: _O,
+        prompt_token_ids: list[int],
+        num_cached_tokens: int,
+        finished: bool,
     ):
         self.request_id = request_id
         self.prompt_token_ids = prompt_token_ids
+        self.num_cached_tokens = num_cached_tokens
         self.finished = finished
         self.outputs = outputs
 
@@ -217,6 +224,7 @@ class PoolingRequestOutput(Generic[_O]):
             f"{type(self).__name__}(request_id={self.request_id!r}, "
             f"outputs={self.outputs!r}, "
             f"prompt_token_ids={self.prompt_token_ids}, "
+            f"num_cached_tokens={self.num_cached_tokens}, "
             f"finished={self.finished})"
         )
 
@@ -255,6 +263,7 @@ class EmbeddingRequestOutput(PoolingRequestOutput[EmbeddingOutput]):
             request_id=request_output.request_id,
             outputs=EmbeddingOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
 
@@ -294,6 +303,7 @@ class ClassificationRequestOutput(PoolingRequestOutput[ClassificationOutput]):
             request_id=request_output.request_id,
             outputs=ClassificationOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )
 
@@ -330,5 +340,6 @@ class ScoringRequestOutput(PoolingRequestOutput[ScoringOutput]):
             request_id=request_output.request_id,
             outputs=ScoringOutput.from_base(request_output.outputs),
             prompt_token_ids=request_output.prompt_token_ids,
+            num_cached_tokens=request_output.num_cached_tokens,
             finished=request_output.finished,
         )

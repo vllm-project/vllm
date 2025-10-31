@@ -16,7 +16,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
@@ -94,7 +97,7 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions == 0] = 0
+        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -276,6 +279,10 @@ class DeepSeekMTP(nn.Module, SupportsPP):
                 else:
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
+                        continue
+
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
                         continue
 
                     # According to DeepSeek-V3 Technical Report, MTP modules

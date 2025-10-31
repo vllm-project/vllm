@@ -14,7 +14,7 @@ from vllm import envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import find_nccl_include_paths
+from vllm.utils.nccl import find_nccl_include_paths
 
 logger = init_logger(__name__)
 

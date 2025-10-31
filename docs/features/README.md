@@ -52,7 +52,7 @@ th:not(:first-child) {
 | [mm](multimodal_inputs.md) | ✅ | ✅ | [🟠](https://github.com/vllm-project/vllm/pull/4194)<sup>^</sup> | ❔ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❔ | ✅ | | | |
 | best-of | ✅ | ✅ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://github.com/vllm-project/vllm/issues/7968) | ✅ | ✅ | | |
 | beam-search | ✅ | ✅ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/6137) | ✅ | ❌ | ✅ | ✅ | ✅ | ❔ | [❌](https://github.com/vllm-project/vllm/issues/7968) | ❔ | ✅ | ✅ | |
-| [prompt-embeds](prompt_embeds.md) | ✅ | [❌](https://github.com/vllm-project/vllm/issues/25096) | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ❌ | ❔ | ❔ | ✅ |
+| [prompt-embeds](prompt_embeds.md) | ✅ | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ | ❌ | ❔ | ❔ | ❌ | ❔ | ❔ | ✅ |
 
 \* Chunked prefill and prefix caching are only applicable to last-token pooling.  
 <sup>^</sup> LoRA is only applicable to the language backbone of multimodal models.
@@ -75,4 +75,4 @@ th:not(:first-child) {
 | multi-step                                                | ✅                  | ✅        | ✅        | ✅     | ✅        | [❌](https://github.com/vllm-project/vllm/issues/8477) | ✅     | ❌ | ✅        |
 | best-of                                                   | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
 | beam-search                                               | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ✅     | ❌ | ✅        |
-| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ?     | [❌](https://github.com/vllm-project/vllm/issues/25097) | ✅       |
+| [prompt-embeds](prompt_embeds.md)                         | ✅                  | ✅        | ✅        | ✅     | ✅        | ✅                  | ❔     | [❌](https://github.com/vllm-project/vllm/issues/25097) | ✅       |

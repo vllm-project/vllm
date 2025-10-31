@@ -57,7 +57,7 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 logger = init_logger(__name__)
 

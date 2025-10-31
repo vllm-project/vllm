@@ -9,7 +9,6 @@ from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -105,10 +104,6 @@ class LoRAConfig:
             )
 
         return self
-
-    def verify_with_cache_config(self, cache_config: CacheConfig):
-        if cache_config.cpu_offload_gb > 0 and not envs.VLLM_USE_V1:
-            raise ValueError("V0 LoRA does not support CPU offload, please use V1.")
 
     def verify_with_model_config(self, model_config: ModelConfig):
         if self.lora_dtype in (None, "auto"):

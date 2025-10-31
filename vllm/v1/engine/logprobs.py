@@ -66,7 +66,7 @@ class LogprobsProcessor:
         assert self.logprobs is not None
         assert self.cumulative_logprob is not None
 
-        token_ids_lst, logprobs_lst, ranks_lst = logprobs_lists
+        token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
 
         for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
             # Detokenize (non-incrementally).

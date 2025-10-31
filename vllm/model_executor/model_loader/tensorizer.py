@@ -26,7 +26,7 @@ from vllm.config import ModelConfig, ParallelConfig, VllmConfig, set_current_vll
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 if TYPE_CHECKING:

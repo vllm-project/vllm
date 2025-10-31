@@ -27,7 +27,7 @@ from zmq import (  # type: ignore
 import vllm.envs as envs
 from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
-from vllm.utils import (
+from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
     get_open_zmq_ipc_path,
@@ -312,7 +312,7 @@ class MessageQueue:
             remote_addr_ipv6=remote_addr_ipv6,
         )
 
-        logger.info("vLLM message queue communication handle: %s", self.handle)
+        logger.debug("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
