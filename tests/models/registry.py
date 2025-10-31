@@ -296,6 +296,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "random": "ai21labs/Jamba-tiny-random",
         },
     ),
+    "KimiLinearForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
+    ),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-8B-A1B", min_transformers_version="4.58"
@@ -369,6 +372,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
     ),
+    "OuroForCausalLM": _HfExamplesInfo("ByteDance/Ouro-1.4B", trust_remote_code=True),
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Embedded-7B", trust_remote_code=True
     ),
