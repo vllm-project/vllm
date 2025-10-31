@@ -105,6 +105,7 @@ async def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
 
     print(f"Anthropic response: {resp.model_dump_json()}")
 
+
 @pytest.mark.asyncio
 async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
     resp = await client.messages.create(

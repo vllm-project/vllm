@@ -621,8 +621,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
                 message=response.error.message,
             )
         )
-        return JSONResponse(status_code=response.error.code,
-                            content=anthropic_error.model_dump())
+        return JSONResponse(
+            status_code=response.error.code, content=anthropic_error.model_dump()
+        )
 
     handler = messages(raw_request)
     if handler is None:
@@ -655,7 +656,6 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return JSONResponse(content=generator.model_dump(exclude_none=True))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
-
 
 
 @router.post(
