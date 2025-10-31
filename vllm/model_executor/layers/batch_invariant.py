@@ -11,6 +11,7 @@ import torch
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -716,6 +717,10 @@ def linear_batch_invariant(input, weight, bias=None):
 _batch_invariant_MODE = False
 _batch_invariant_LIB = None
 _original_torch_bmm = None
+_original_fp16_reduction_precision = None
+_original_bf16_reduction_precision = None
+_original_cublas_workspace_cfg = None
+_original_cublaslt_workspace_size = None
 
 
 def is_batch_invariant_mode_enabled():
@@ -724,6 +729,8 @@ def is_batch_invariant_mode_enabled():
 
 def enable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
+    global _original_fp16_reduction_precision, _original_bf16_reduction_precision
+    global _original_cublas_workspace_cfg, _original_cublaslt_workspace_size
     if _batch_invariant_MODE:
         return
 
@@ -745,14 +752,75 @@ def enable_batch_invariant_mode():
     _original_torch_bmm = torch.bmm
     torch.bmm = bmm_batch_invariant
 
+    _original_bf16_reduction_precision = (
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction
+    )
+    _original_fp16_reduction_precision = (
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction
+    )
+
+    reduced_precision_val = (
+        (False, False) if is_torch_equal_or_newer("2.10.0.dev") else False
+    )
+    torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+        reduced_precision_val
+    )
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+        reduced_precision_val
+    )
+    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
+
+    if not is_torch_equal_or_newer("2.10.0.dev"):
+        _original_cublas_workspace_cfg = os.environ.get("CUBLAS_WORKSPACE_CONFIG", None)
+        _original_cublaslt_workspace_size = os.environ.get(
+            "CUBLASLT_WORKSPACE_SIZE", None
+        )
+        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+
 
 def disable_batch_invariant_mode():
     global _batch_invariant_MODE, _batch_invariant_LIB, _original_torch_bmm
+    global _original_fp16_reduction_precision, _original_bf16_reduction_precision
+    global _original_cublas_workspace_cfg, _original_cublaslt_workspace_size
+    if not _batch_invariant_MODE:
+        return
+
     if _batch_invariant_LIB is not None:
         _batch_invariant_LIB._destroy()
     if _original_torch_bmm is not None:
         torch.bmm = _original_torch_bmm
         _original_torch_bmm = None
+
+    if _original_bf16_reduction_precision is not None:
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
+            _original_bf16_reduction_precision
+        )
+        _original_bf16_reduction_precision = None
+    if _original_fp16_reduction_precision is not None:
+        torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (
+            _original_fp16_reduction_precision
+        )
+        _original_fp16_reduction_precision = None
+
+    torch.backends.cuda.preferred_blas_library(backend="default")
+
+    if not is_torch_equal_or_newer("2.10.0.dev"):
+        # Set cublas env vars to previous results. If previous results are None,
+        # that means the env vars were not set, so we should remove them.
+        if _original_cublas_workspace_cfg:
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = _original_cublas_workspace_cfg
+        elif "CUBLAS_WORKSPACE_CONFIG" in os.environ:
+            del os.environ["CUBLAS_WORKSPACE_CONFIG"]
+
+        if _original_cublaslt_workspace_size:
+            os.environ["CUBLASLT_WORKSPACE_SIZE"] = _original_cublaslt_workspace_size
+        elif "CUBLASLT_WORKSPACE_SIZE" in os.environ:
+            del os.environ["CUBLASLT_WORKSPACE_SIZE"]
+
+    _original_cublas_workspace_cfg = None
+    _original_cublaslt_workspace_size = None
+
     _batch_invariant_MODE = False
     _batch_invariant_LIB = None
 
@@ -830,6 +898,9 @@ def override_envs_for_invariance():
     os.environ["NCCL_ALGO"] = "allreduce:tree"
     os.environ["NCCL_NTHREADS"] = "1"
     os.environ["NCCL_SOCKET_NTHREADS"] = "1"
+
+    # torch.compile settings
+    os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
 
 def init_batch_invariance():
