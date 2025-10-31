@@ -172,6 +172,8 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
+        layer.register_parameter("input_scale_ub", None)
+
         weight_quant_strategy = QUANT_STRATEGY_MAP[self.weight_qscheme]
         self.fp8_linear_kernel = init_fp8_linear_kernel(
             act_q_static=self.is_static_input_scheme,

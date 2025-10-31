@@ -146,6 +146,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
+        layer.register_parameter("input_scale_ub", None)
+
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(

@@ -152,5 +152,5 @@ def init_fp8_linear_kernel(
 
     return kernel_type(
         scaled_mm_linear_kernel_config,
-        layer_param_names=["weight", "weight_scale", "input_scale"],
+        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
     )
