@@ -132,10 +132,10 @@ class AttentionBackend(ABC):
                 isinstance(supported_size, MultipleOf)
                 and block_size % supported_size.base == 0
             )
-            is_int_divisor = (
-                isinstance(supported_size, int) and block_size % supported_size == 0
+            is_int_equal = (
+                isinstance(supported_size, int) and block_size == supported_size
             )
-            if is_multiple_of or is_int_divisor:
+            if is_multiple_of or is_int_equal:
                 return True
         return False
 
