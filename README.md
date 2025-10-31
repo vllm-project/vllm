@@ -19,6 +19,20 @@ Join us at the [PyTorch Conference, October 22-23](https://events.linuxfoundatio
 
 ---
 
+## 🚀 Enhanced CPU KV Cache Offloading
+
+This fork includes optimizations for **CPU KV cache offloading** to dramatically increase context window sizes using system RAM:
+
+- **32%+ Context Increase**: Achieve 52k+ tokens on 24GB GPU by offloading KV cache to RAM
+- **Efficient Memory Management**: Automatic validation accounts for both GPU and CPU memory capacity
+- **Optimized Transfers**: Smart pinned/unpinned memory allocation to prevent GPU OOM
+- **Production Ready**: Includes web management interface and systemd service integration
+- **Easy Configuration**: Simple `KVTransferConfig` setup with `OffloadingConnector`
+
+See [CPU Offload Documentation](docs/cpu_offload.md) for setup instructions and examples.
+
+---
+
 *Latest News* 🔥
 
 - [2025/10] We hosted [vLLM Shanghai Meetup](https://mp.weixin.qq.com/s/__xb4OyOsImz-9eAVrdlcg) focused on hands-on vLLM inference optimization! Please find the meetup slides [here](https://drive.google.com/drive/folders/1KqwjsFJLfEsC8wlDugnrR61zsWHt94Q6).
