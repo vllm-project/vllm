@@ -220,7 +220,6 @@ else
           --network=host \
           --shm-size=16gb \
           --rm \
-          -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
           -e AWS_SECRET_ACCESS_KEY \
