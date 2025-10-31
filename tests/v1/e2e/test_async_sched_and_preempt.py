@@ -46,7 +46,7 @@ class TestPreemptAndAsyncScheduling:
         self.preempt_and_async_scheduling_e2e(
             monkeypatch,
             MTP_MODEL,
-            self.sampling_param_tests,
+            [{}],
             spec_config={"method": "mtp", "num_speculative_tokens": 1},
         )
 

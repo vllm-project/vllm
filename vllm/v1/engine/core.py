@@ -276,7 +276,7 @@ class EngineCore:
                 "Disabling KVTransfer for this request."
             )
         if (
-            smapling_params := request.sampling_params
+            (smapling_params := request.sampling_params)
             and self.use_spec_decode
             and self.async_scheduling
         ):
@@ -292,8 +292,9 @@ class EngineCore:
             ):
                 # TODO(Ronald1995): support this, since 2025-10-31.
                 raise ValueError(
-                    "async scheduling with spec decoding don't support penalties/bad words "
-                    "in sampling parameters and custom logitsprocessors now."
+                    "async scheduling with spec decoding don't support "
+                    "penalties/bad words in sampling parameters "
+                    "and custom logitsprocessors now."
                 )
 
         self.scheduler.add_request(request)
