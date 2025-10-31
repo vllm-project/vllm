@@ -752,9 +752,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
 
             # Mirror Attention.forward scale calculation path
-            if self.calculate_kv_scales and getattr(
-                attn_metadata, "enable_kv_scales_calculation", False
-            ):
+            # Only calculate if the layer's calculate_kv_scales flag is True
+            # This flag gets set to False after the first forward pass
+            if self.calculate_kv_scales:
                 self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
@@ -785,14 +785,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                # We can still access forward context to check calculation flag
+                # Only calculate if the layer's calculate_kv_scales flag is True
+                # This flag gets set to False after the first forward pass
                 if self.calculate_kv_scales:
-                    forward_context = get_forward_context()
-                    attn_metadata = forward_context.attn_metadata
-                    if isinstance(attn_metadata, dict):
-                        attn_metadata = attn_metadata[self.layer_name]
-                    if getattr(attn_metadata, "enable_kv_scales_calculation", False):
-                        self.calc_kv_scales(q, kv_c_normed, k_pe)
+                    self.calc_kv_scales(q, kv_c_normed, k_pe)
                 return torch.ops.vllm.unified_mla_attention(
                     q,
                     kv_c_normed,
