@@ -115,6 +115,12 @@ from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicErrorResponse,
+    AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
+)
+from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -305,6 +311,10 @@ def models(request: Request) -> OpenAIServingModels:
 
 def responses(request: Request) -> OpenAIServingResponses | None:
     return request.app.state.openai_serving_responses
+
+
+def messages(request: Request) -> AnthropicServingMessages:
+    return request.app.state.anthropic_serving_messages
 
 
 def chat(request: Request) -> OpenAIServingChat | None:
@@ -588,6 +598,40 @@ async def cancel_responses(response_id: str, raw_request: Request):
             content=response.model_dump(), status_code=response.error.code
         )
     return JSONResponse(content=response.model_dump())
+
+
+@router.post(
+    "/v1/messages",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    handler = messages(raw_request)
+    if handler is None:
+        return messages(raw_request).create_error_response(
+            message="The model does not support Messages API"
+        )
+
+    generator = await handler.create_messages(request, raw_request)
+
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    elif isinstance(generator, AnthropicMessagesResponse):
+        logger.debug(
+            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
+        )
+        return JSONResponse(content=generator.model_dump(exclude_none=True))
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
 
 
 @router.post(
@@ -1815,6 +1859,20 @@ async def init_app_state(
         )
         if "transcription" in supported_tasks
         else None
+    )
+    state.anthropic_serving_messages = AnthropicServingMessages(
+        engine_client,
+        state.openai_serving_models,
+        args.response_role,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.reasoning_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+        enable_force_include_usage=args.enable_force_include_usage,
     )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
