@@ -364,6 +364,8 @@ class Qwen2_5_VisionAttention(nn.Module):
 
         if current_platform.is_rocm() and self.attn_backend == _Backend.FLASH_ATTN:
             self.use_upstream_fa = True
+        if current_platform.is_xpu():
+            self.use_upstream_fa = False
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN,
             _Backend.ROCM_AITER_FA,

@@ -15,7 +15,6 @@ To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 import einops
 import torch
 
-from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
@@ -67,15 +66,11 @@ def flash_attn_maxseqlen_wrapper(
 ) -> torch.Tensor:
     if is_rocm_aiter:
         from aiter import flash_attn_varlen_func
-    elif current_platform.is_xpu():
-        from vllm._ipex_ops import ipex_ops as ops
-
-        flash_attn_varlen_func = ops.flash_attn_varlen_func
     else:
         if use_upstream_fa:
             from flash_attn import flash_attn_varlen_func
         else:
-            from vllm.vllm_flash_attn import flash_attn_varlen_func
+            from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
     output = flash_attn_varlen_func(
         q,

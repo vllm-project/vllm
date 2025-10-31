@@ -127,21 +127,18 @@ def maybe_get_vit_flash_attn_backend(
         assert attn_backend == _Backend.FLASH_ATTN, (
             "XPU platform only supports FLASH_ATTN as vision attention backend."
         )
+        use_upstream_fa = False
     else:
         return _Backend.TORCH_SDPA, None
 
     if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
         if attn_backend == _Backend.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
-        elif current_platform.is_xpu():
-            from vllm._ipex_ops import ipex_ops as ops
-
-            flash_attn_varlen_func = ops.flash_attn_varlen_func
         else:
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
             else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 

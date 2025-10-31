@@ -281,8 +281,8 @@ class ipex_ops:
         out: torch.Tensor | None = None,
         block_table: torch.Tensor | None = None,
         alibi_slopes: torch.Tensor | None = None,
-        window_size: torch.Tensor | None = None,
-        softcap: torch.Tensor | None = 0.0,
+        window_size: list[int] | None = None,
+        softcap: float | None = 0.0,
         seqused_k: torch.Tensor | None = None,
         cu_seqlens_k: torch.Tensor | None = None,
         # passed in qwen vl
