@@ -597,6 +597,20 @@ class VllmConfig:
             if not current_platform.support_hybrid_kv_cache():
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
+            if self.kv_transfer_config is not None:
+                # NOTE(Kuntai): turn HMA off for connector for now.
+                # TODO(Kuntai): have a more elegent solution to check and
+                # turn off HMA for connector that does not support HMA.
+                logger.warning(
+                    "Turning off hybrid kv cache manager because "
+                    "`--kv-transfer-config` is set. This will reduce the "
+                    "performance of vLLM on LLMs with sliding window attention "
+                    "or Mamba attention. If you are a developer of kv connector"
+                    ", please consider supporting hybrid kv cache manager for "
+                    "your connector by making sure your connector is a subclass"
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                )
+                self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True

@@ -14,6 +14,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.protocol import Device
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -26,7 +27,6 @@ from vllm.tasks import SupportedTask
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Device
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -306,9 +306,7 @@ class LLMEngine:
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
-        if self.logger_manager is not None:
-            assert outputs.scheduler_stats is not None
-
+        if self.logger_manager is not None and outputs.scheduler_stats is not None:
             self.logger_manager.record(
                 scheduler_stats=outputs.scheduler_stats,
                 iteration_stats=iteration_stats,
