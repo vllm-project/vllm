@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
-    supports_hma,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
@@ -71,6 +71,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids_dict: dict[int, set[str]] | None = (
             defaultdict(set) if include_finished_set else None
         )
+        self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -92,7 +93,11 @@ class Scheduler(SchedulerInterface):
             )
 
             connector_vllm_config = copy.copy(self.vllm_config)
-            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
+
+            # We're dynamically inserting a kv_cache_config variable into the
+            # connector_vllm_config. This is distinct from the cache_config
+            # that is already in there.
+            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)  # type: ignore[attr-defined]
             self.connector = KVConnectorFactory.create_connector(
                 config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
@@ -166,7 +171,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_caching=bool(self.cache_config.enable_prefix_caching),
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -406,19 +411,21 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = (
+                        ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
                             )
                         )
 
-                        if num_external_computed_tokens is None:
+                        if ext_tokens is None:
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
                             self.waiting.pop_request()
                             skipped_waiting_requests.prepend_request(request)
                             continue
+
+                        num_external_computed_tokens = ext_tokens
 
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
@@ -444,14 +451,9 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
-                    if (
-                        0
-                        < self.scheduler_config.long_prefill_token_threshold
-                        < num_new_tokens
-                    ):
-                        num_new_tokens = (
-                            self.scheduler_config.long_prefill_token_threshold
-                        )
+                    threshold = self.scheduler_config.long_prefill_token_threshold
+                    if 0 < threshold < num_new_tokens:
+                        num_new_tokens = threshold
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -620,6 +622,11 @@ class Scheduler(SchedulerInterface):
         structured_output_request_ids, grammar_bitmask = self.get_grammar_bitmask(
             num_scheduled_tokens.keys(), scheduled_spec_decode_tokens
         )
+
+        # Record the request ids that were scheduled in this step.
+        self.prev_step_scheduled_req_ids.clear()
+        self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -691,14 +698,12 @@ class Scheduler(SchedulerInterface):
         req_ids: list[str] = []
         new_token_ids: list[list[int]] = []
         new_block_ids: list[tuple[list[int], ...] | None] = []
-        resumed_req_token_ids: list[list[int] | None] = []
+        all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        resumed_req_ids = set()
 
-        # Because resumed_reqs is usually empty, it is more efficient to do
-        # in-place appending so that we don't need to allocate a new list.
-        resumed_from_preemption = [False] * len(running_reqs)
-        resumed_from_preemption += [True] * len(resumed_reqs)
+        num_running_reqs = len(running_reqs)
         for idx, req in enumerate(itertools.chain(running_reqs, resumed_reqs)):
             req_id = req.request_id
             req_ids.append(req_id)
@@ -715,12 +720,14 @@ class Scheduler(SchedulerInterface):
                     req.num_computed_tokens : req.num_computed_tokens + num_tokens
                 ]
                 new_token_ids.append(token_ids)
-            resumed_token_ids = None
-            if resumed_from_preemption[idx]:
-                resumed_token_ids = req.all_token_ids[
+            scheduled_in_prev_step = req_id in self.prev_step_scheduled_req_ids
+            if idx >= num_running_reqs:
+                assert not scheduled_in_prev_step
+                resumed_req_ids.add(req_id)
+            if not scheduled_in_prev_step:
+                all_token_ids[req_id] = req.all_token_ids[
                     : req.num_computed_tokens + num_tokens
                 ]
-            resumed_req_token_ids.append(resumed_token_ids)
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
@@ -731,9 +738,9 @@ class Scheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=req_ids,
-            resumed_from_preemption=resumed_from_preemption,
+            resumed_req_ids=resumed_req_ids,
             new_token_ids=new_token_ids,
-            resumed_req_token_ids=resumed_req_token_ids,
+            all_token_ids=all_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
@@ -904,13 +911,13 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
-        kv_connector_stats = (
+        kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
         if kv_connector_stats and self.connector:
-            stats = self.connector.get_kv_connector_stats()
-            if stats:
-                kv_connector_stats = kv_connector_stats.aggregate(stats)
+            kv_stats = self.connector.get_kv_connector_stats()
+            if kv_stats:
+                kv_connector_stats = kv_connector_stats.aggregate(kv_stats)
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1324,15 +1331,15 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
-        if not supports_hma(self.connector):
+        if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
-        else:
-            return self.connector.request_finished(request, block_ids)
+
+        return self.connector.request_finished_all_groups(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
