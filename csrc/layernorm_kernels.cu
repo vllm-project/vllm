@@ -1,14 +1,11 @@
 #include "type_convert.cuh"
 #include "dispatch_utils.h"
+#include "cub_helpers.h"
+#include "core/batch_invariant.hpp"
+#include "quantization/vectorization_utils.cuh"
 
 #include <torch/cuda.h>
 #include <c10/cuda/CUDAGuard.h>
-
-#ifndef USE_ROCM
-  #include <cub/cub.cuh>
-#else
-  #include <hipcub/hipcub.hpp>
-#endif
 
 namespace vllm {
 
@@ -22,15 +19,26 @@ __global__ void rms_norm_kernel(
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
+  const scalar_t* input_row = input + blockIdx.x * input_stride;
 
-  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    const float x = (float)input[blockIdx.x * input_stride + idx];
+  constexpr int VEC_SIZE = 8;
+  auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
+#pragma unroll
+    for (int i = 0; i < VEC_SIZE; ++i) {
+      float x = static_cast<float>(vec.val[i]);
+      variance += x * x;
+    }
+  };
+  auto scalar_op = [&variance](const scalar_t& val) {
+    float x = static_cast<float>(val);
     variance += x * x;
-  }
+  };
+  vllm::vectorize_read_with_alignment<VEC_SIZE>(
+      input_row, hidden_size, threadIdx.x, blockDim.x, vec_op, scalar_op);
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -85,7 +93,7 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -126,7 +134,7 @@ fused_add_rms_norm_kernel(
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
@@ -151,18 +159,26 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   TORCH_CHECK(weight.is_contiguous());
 
   int hidden_size = input.size(-1);
-  int num_tokens = input.numel() / hidden_size;
-  int64_t input_stride = input.stride(-2);
+
+  // We cannot just use `input.stride(-2)` if the tensor is not row-major.
+  // Instead, we use a 2d view to get the second-innermost stride.
+  // That way the dimensions (except the last one) can be arbitrarily permuted.
+  torch::Tensor input_view = input.view({-1, hidden_size});
+
+  int num_tokens = input_view.numel() / hidden_size;
+  int64_t input_stride = input_view.stride(-2);
 
   dim3 grid(num_tokens);
   dim3 block(std::min(hidden_size, 1024));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input_view));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-    vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
-        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), input_stride,
-        weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
-  });
+  VLLM_DISPATCH_FLOATING_TYPES(
+      input_view.scalar_type(), "rms_norm_kernel", [&] {
+        vllm::rms_norm_kernel<scalar_t><<<grid, block, 0, stream>>>(
+            out.data_ptr<scalar_t>(), input_view.data_ptr<scalar_t>(),
+            input_stride, weight.data_ptr<scalar_t>(), epsilon, num_tokens,
+            hidden_size);
+      });
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                    \
@@ -179,6 +195,8 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                         torch::Tensor& residual,  // [..., hidden_size]
                         torch::Tensor& weight,    // [hidden_size]
                         double epsilon) {
+  TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  TORCH_CHECK(input.scalar_type() == residual.scalar_type());
   TORCH_CHECK(residual.is_contiguous());
   TORCH_CHECK(weight.is_contiguous());
   int hidden_size = input.size(-1);
@@ -213,7 +231,9 @@ void fused_add_rms_norm(torch::Tensor& input,     // [..., hidden_size]
                           wt_ptr % req_alignment_bytes == 0;
   bool offsets_are_multiple_of_vector_width =
       hidden_size % vector_width == 0 && input_stride % vector_width == 0;
-  if (ptrs_are_aligned && offsets_are_multiple_of_vector_width) {
+  bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
+  if (ptrs_are_aligned && offsets_are_multiple_of_vector_width &&
+      !batch_invariant_launch) {
     LAUNCH_FUSED_ADD_RMS_NORM(8);
   } else {
     LAUNCH_FUSED_ADD_RMS_NORM(0);

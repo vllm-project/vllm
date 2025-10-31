@@ -55,7 +55,6 @@ launch_pd() {
   UCX_TLS=tcp \
   VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
   VLLM_LOGGING_LEVEL=DEBUG \
-  VLLM_USE_V1=1 \
   VLLM_NIXL_SIDE_CHANNEL_HOST=${PREFILL_HOST} \
   VLLM_NIXL_SIDE_CHANNEL_PORT=${PREFILL_NIXL_SIDE_PORT} \
   PJRT_DEVICE=TPU \
@@ -68,7 +67,6 @@ launch_pd() {
       --block-size ${BLOCK_SIZE} \
       --enforce-eager \
       --gpu-memory-utilization 0.5 \
-      --disable-log-requests \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
 
 
@@ -76,7 +74,6 @@ launch_pd() {
   UCX_TLS=tcp \
   VLLM_MULTIPROC_EXECUTE_MODEL_TIMEOUT_S=200 \
   VLLM_LOGGING_LEVEL=DEBUG \
-  VLLM_USE_V1=1 \
   PJRT_DEVICE=TPU \
   VLLM_WORKER_MULTIPROC_METHOD=spawn \
   VLLM_ENABLE_V1_MULTIPROCESSING=0 vllm serve $MODEL_NAME \
@@ -87,7 +84,6 @@ launch_pd() {
       --block-size ${BLOCK_SIZE} \
       --enforce-eager \
       --gpu-memory-utilization 0.5 \
-      --disable-log-requests \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
 
   echo ${PREFILL_BASE_CMD}

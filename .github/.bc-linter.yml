@@ -1,0 +1,24 @@
+# doc: https://github.com/pytorch/test-infra/blob/main/tools/stronghold/docs/bc_linter_config.md
+version: 1
+paths:
+# We temporarily disable globally, and will only enable with `annotations.include`
+# include:
+#   - "vllm/v1/attetion/*.py"
+#   - "vllm/v1/core/*.py"
+exclude:
+  - "**/*.py"
+
+scan:
+  functions: true        # check free functions and methods
+  classes: true          # check classes/dataclasses
+  public_only: true      # ignore names starting with "_" at any level
+
+annotations:
+  include:               # decorators that force‑include a symbol
+    - name: "bc_linter_include"  # matched by simple name or dotted suffix
+      propagate_to_members: false # for classes, include methods/inner classes
+  exclude:               # decorators that force‑exclude a symbol
+    - name: "bc_linter_skip"     # matched by simple name or dotted suffix
+      propagate_to_members: true  # for classes, exclude methods/inner classes
+
+excluded_violations: []  # e.g. ["ParameterRenamed", "FieldTypeChanged"]

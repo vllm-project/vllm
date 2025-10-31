@@ -7,24 +7,14 @@ mkdocs-awesome-nav
 mkdocs-glightbox
 mkdocs-git-revision-date-localized-plugin
 mkdocs-minify-plugin
-python-markdown-math
 regex
 ruff
 
 # Required for argparse hook only
 -f https://download.pytorch.org/whl/cpu
 cachetools
-cbor2
 cloudpickle
-fastapi
+py-cpuinfo
 msgspec
-openai
-partial-json-parser
-pillow
-psutil
-pybase64
 pydantic
-setproctitle
 torch
-transformers
-zmq

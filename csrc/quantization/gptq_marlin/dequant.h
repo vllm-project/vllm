@@ -470,11 +470,12 @@ __device__ inline void dequant<nv_bfloat162, vllm::kFE2M1f.id(), false>(
   frag_b[0] = __hmul2(frag_b[0], bias_reg);
 }
 
-template <typename scalar_t2>
+template <typename scalar_t2, vllm::ScalarTypeId s_type_id>
 __device__ inline void dequant_fp8_scales(int q, scalar_t2* frag_b);
 
 template <>
-__device__ inline void dequant_fp8_scales<half2>(int q, half2* frag_b) {
+__device__ inline void dequant_fp8_scales<half2, vllm::kFE4M3fn.id()>(
+    int q, half2* frag_b) {
   int Out1 = (q & 0xFF00FF00) >> 1;
   ;
   q <<= 8;
@@ -486,8 +487,8 @@ __device__ inline void dequant_fp8_scales<half2>(int q, half2* frag_b) {
 };
 
 template <>
-__device__ inline void dequant_fp8_scales<nv_bfloat162>(int q,
-                                                        nv_bfloat162* frag_b) {
+__device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
+    int q, nv_bfloat162* frag_b) {
   constexpr int FP8_EXPONENT = 4, BF16_EXPONENT = 8;
   constexpr int RIGHT_SHIFT = BF16_EXPONENT - FP8_EXPONENT;
   constexpr int MASK = 0x7F007F00;
@@ -496,6 +497,20 @@ __device__ inline void dequant_fp8_scales<nv_bfloat162>(int q,
   int Out1 = ((q & 0x80008000) >> 1) | ((q & MASK) >> RIGHT_SHIFT);
   q <<= 8;
   int Out2 = ((q & 0x80008000) >> 1) | ((q & MASK) >> RIGHT_SHIFT);
+
+  // Note: reverse indexing is intentional because weights are permuted
+  frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);
+  frag_b[0] = *reinterpret_cast<const nv_bfloat162*>(&Out2);
+}
+
+template <>
+__device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE8M0fnu.id()>(
+    int q, nv_bfloat162* frag_b) {
+  // In this conversion, 2 ** -127 in FP8E8M0 would become 0 in BF16,
+  // but we assume that such a extreme value would not occur in real models.
+  int Out1 = (q & 0xFF00FF00) >> 1;
+  q <<= 7;
+  int Out2 = q & 0x7F807F80;
 
   // Note: reverse indexing is intentional because weights are permuted
   frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);

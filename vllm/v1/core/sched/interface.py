@@ -2,19 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
-    from vllm.v1.outputs import ModelRunnerOutput
+    from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
 
 
 class SchedulerInterface(ABC):
-
     @abstractmethod
     def schedule(self) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
@@ -62,9 +61,17 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def update_draft_token_ids(
+        self,
+        draft_token_ids: "DraftTokenIds",
+    ) -> None:
+        """Update the draft token ids for the scheduled requests."""
+        raise NotImplementedError
+
+    @abstractmethod
     def add_request(self, request: "Request") -> None:
         """Add a new request to the scheduler's internal queue.
-        
+
         Args:
             request: The new request being added.
         """
@@ -73,7 +80,7 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request
@@ -83,7 +90,7 @@ class SchedulerInterface(ABC):
         1. When the request is aborted by the client.
         2. When the frontend process detects a stop string of the request after
            de-tokenizing its generated tokens.
-           
+
         Args:
             request_ids: A single or a list of request IDs.
             finished_status: The finished status of the given requests.
