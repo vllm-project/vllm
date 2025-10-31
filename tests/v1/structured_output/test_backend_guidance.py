@@ -75,11 +75,10 @@ def test_grammar_bitmask_with_specdec():
     )
     structured_output_manager = StructuredOutputManager(vllm_config)
 
-    for i in range(1, len(prompt)):
+    for i in range(1, 2):
         sampling_params = SamplingParams(
             structured_outputs=StructuredOutputsParams(
                 json='{"type": "object"}',
-                prefix_ids=prompt[:i],
             ),
         )
         sampling_params.structured_outputs._backend = "guidance"
@@ -110,6 +109,10 @@ def test_grammar_bitmask_with_specdec():
         # The grammar might not yet be compiled, so we wait for it
         while not request.structured_output_request._check_grammar_completion():
             continue
+
+        assert request.structured_output_request.grammar.accept_tokens(
+            request.request_id, prompt[:i]
+        )
 
         grammar_bitmask(request, prompt[i:] + [tokenizer.eos_token_id])
         grammar_bitmask(
