@@ -247,6 +247,7 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
     ("model_id", "expected_is_moe_model"),
     [
         ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
+        ("RedHatAI/Llama-3.1-8B-Instruct-NVFP4", False),
         ("RedHatAI/Llama-3.2-1B-FP8", False),
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", False),
         ("RedHatAI/gpt-oss-20b", True),
@@ -265,6 +266,7 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
     ("model_id", "quantized"),
     [
         ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
+        ("RedHatAI/Llama-3.1-8B-Instruct-NVFP4", True),
         ("RedHatAI/Llama-3.2-1B-FP8", True),
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", True),
         ("RedHatAI/gpt-oss-20b", True),
