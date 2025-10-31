@@ -33,6 +33,7 @@ noop = lambda *a, **k: None
 sys.modules["vllm._C"] = MagicMock()
 sys.modules["vllm.model_executor.custom_op"] = MagicMock(CustomOp=MockCustomOp)
 sys.modules["vllm.utils.torch_utils"] = MagicMock(direct_register_custom_op=noop)
+sys.modules["vllm.config.DeviceConfig.__post_init__"] = noop
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test.txt") as f:
