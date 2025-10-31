@@ -197,6 +197,20 @@ def test_splitting_ops_dynamic():
     # cudagraph mode also fall back to FULL
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
+    # splitting_ops can not contain attention ops when attn_fusion
+    # pass enabled.
+    with pytest.raises(ValidationError):
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                pass_config={"enable_attn_fusion": True, "enable_noop": True},
+                custom_ops=["+quant_fp8"],
+                cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                # work around for accessing all attntion ops
+                splitting_ops=CompilationConfig()._attention_ops,
+            )
+        )
+
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
     config = VllmConfig(
         compilation_config=CompilationConfig(
