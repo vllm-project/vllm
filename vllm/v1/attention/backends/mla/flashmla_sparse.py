@@ -314,7 +314,7 @@ def triton_convert_req_index_to_global_index(
 
 
 def split_prefill_chunks(
-    seq_lens_cpu: torch.Tensor, workspace_size: int
+    seq_lens_cpu: torch.Tensor, max_prefill_buffer_size: int
 ) -> list[tuple[int, int]]:
     """
     Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
@@ -330,11 +330,14 @@ def split_prefill_chunks(
     """
     chunk_bounds = []
     i, n = 0, len(seq_lens_cpu)
-    assert torch.all(seq_lens_cpu <= workspace_size).item()
+    assert torch.all(seq_lens_cpu <= max_prefill_buffer_size).item()
 
     while i < n:
         start, total = i, 0
-        while i < n and (total + (cur := seq_lens_cpu[i].item())) <= workspace_size:
+        while (
+            i < n
+            and (total + (cur := seq_lens_cpu[i].item())) <= max_prefill_buffer_size
+        ):
             total += cur
             i += 1
         chunk_bounds.append((start, i))
