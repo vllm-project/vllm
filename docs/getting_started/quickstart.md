@@ -68,7 +68,7 @@ This guide will help you quickly get started with vLLM to perform:
     To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
     
     ```bash
-    pip install vllm-tpu
+    uv pip install vllm-tpu
     ```
 
     !!! note
