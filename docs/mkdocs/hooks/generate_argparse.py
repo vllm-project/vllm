@@ -36,7 +36,7 @@ sys.modules["vllm.utils.torch_utils"] = MagicMock(direct_register_custom_op=noop
 
 # Mock any version checks by reading from compiled CI requirements
 with open(ROOT_DIR / "requirements/test.txt") as f:
-    VERSIONS = dict(line.split("==") for line in f.readlines() if "==" in line)
+    VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 # Make torch.nn.Parameter safe to inherit from
