@@ -333,8 +333,8 @@ class PaddleOCRVLMultiModalProcessor(
 class Projector(nn.Module):
     def __init__(
         self,
-        text_config,
-        vision_config,
+        text_config: PretrainedConfig,
+        vision_config: PretrainedConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -465,7 +465,9 @@ class SiglipVisionEmbeddings(nn.Module):
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return patch_pos_embed
 
-    def fetch_position_embedding_lfu_cache(self, embeddings, h, w, max_cache: int = 20):
+    def fetch_position_embedding_lfu_cache(
+        self, embeddings: torch.Tensor, h: int, w: int, max_cache: int = 20
+    ):
         grid = (h, w)
         if grid in self.cache_position_embedding:
             self.cache_position_count[grid] += 1
@@ -729,7 +731,7 @@ class SigLIPRotaryEmbedding(nn.Module):
 class SiglipMLP(nn.Module):
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
@@ -769,7 +771,7 @@ class SiglipMLP(nn.Module):
 class SiglipEncoderLayer(nn.Module):
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         *,
@@ -831,7 +833,7 @@ class SiglipEncoderLayer(nn.Module):
 class SiglipEncoder(nn.Module):
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_backend_override: _Backend | None = None,
@@ -950,7 +952,7 @@ class SiglipEncoder(nn.Module):
 class SiglipVisionTransformer(nn.Module):
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_backend_override: _Backend | None = None,
@@ -970,7 +972,7 @@ class SiglipVisionTransformer(nn.Module):
 
     def forward(
         self,
-        pixel_values,
+        pixel_values: torch.Tensor,
         interpolate_pos_encoding: bool | None = False,
         position_ids: torch.Tensor | None = None,
         height_position_ids: torch.Tensor | None = None,
@@ -1441,7 +1443,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
         raise ValueError("Only image modality is supported")
 
-    def encode_image(self, pixel_values, image_grid_thw):
+    def encode_image(self, pixel_values: torch.Tensor, image_grid_thw):
         pixel_values = pixel_values.type(self.visual.dtype)
         siglip_position_ids = list()
         image_grid_hws = list()
@@ -1478,7 +1480,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         return image_embeds
 
     def get_multimodal_embeddings(self, **kwargs):
-        image_input = self._parse_and_validate_image_input(**kwargs.copy())
+        image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
 
