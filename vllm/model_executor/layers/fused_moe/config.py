@@ -14,9 +14,9 @@ from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_Scheme,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-from vllm.utils import cdiv
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_triton_kernels
+from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
@@ -824,6 +824,8 @@ class FusedMoEConfig:
     has_bias: bool = False
 
     is_act_and_mul: bool = True
+
+    is_lora_enabled: bool = False
 
     def __post_init__(self):
         if self.dp_size > 1:

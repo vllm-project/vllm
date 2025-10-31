@@ -657,10 +657,22 @@ def multi_thread_safetensors_weights_iterator(
 def runai_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    is_distributed: bool = False,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
     with SafetensorsStreamer() as streamer:
-        streamer.stream_files(hf_weights_files)
+        is_cuda_alike = current_platform.is_cuda_alike()
+        device = (
+            f"cuda:{current_platform.current_device()}"
+            if is_distributed and is_cuda_alike
+            else "cpu"
+        )
+
+        streamer.stream_files(
+            hf_weights_files,
+            device=device,
+            is_distributed=is_distributed,
+        )
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
@@ -672,6 +684,7 @@ def runai_safetensors_weights_iterator(
             desc="Loading safetensors using Runai Model Streamer",
             bar_format=_BAR_FORMAT,
             disable=not enable_tqdm(use_tqdm_on_load),
+            mininterval=2,
         )
 
         yield from tensor_iter

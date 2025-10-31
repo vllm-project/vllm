@@ -55,9 +55,9 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import cdiv, round_up
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
@@ -982,6 +982,7 @@ def maybe_roundup_hidden_size(
     act_dtype: torch.dtype,
     quant_config: QuantizationConfig | None,
     moe_parallel_config: FusedMoEParallelConfig,
+    is_lora_enabled: bool,
 ) -> int:
     """
     Given layer hidden size and MoE configurations, round up hidden_size
@@ -992,6 +993,9 @@ def maybe_roundup_hidden_size(
         act_dtype: Data type of the layer activations.
         quant_config: Fused MoE quantization configuration.
         moe_parallel_config: Fused MoE parallelization strategy configuration.
+        is_lora_enabled: True if the engine is enabled with LoRA. This
+            is used in the case of mxfp4 quantization in selecting the
+            MxFP4Backend.
 
     Return:
         Rounded up hidden_size if rounding up is required based on the configs.
@@ -1015,7 +1019,7 @@ def maybe_roundup_hidden_size(
             get_mxfp4_backend,
         )
 
-        current_mxfp4_backend = get_mxfp4_backend()
+        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
         if (
             current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
@@ -1131,6 +1135,7 @@ class FusedMoE(CustomOp):
         )
 
         self.global_num_experts = num_experts + num_redundant_experts
+        self.logical_num_experts = num_experts
         self.zero_expert_num = zero_expert_num
         self.zero_expert_type = zero_expert_type
 
@@ -1139,7 +1144,11 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size if needed.
         hidden_size = maybe_roundup_hidden_size(
-            hidden_size, moe_in_dtype, quant_config, self.moe_parallel_config
+            hidden_size,
+            moe_in_dtype,
+            quant_config,
+            self.moe_parallel_config,
+            is_lora_enabled=self.vllm_config.lora_config is not None,
         )
 
         # For smuggling this layer into the fused moe custom op
@@ -1270,8 +1279,9 @@ class FusedMoE(CustomOp):
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
+            is_lora_enabled=vllm_config.lora_config is not None,
         )
-        self.moe_config = moe
+        self.moe_config: FusedMoEConfig = moe
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
@@ -1950,6 +1960,8 @@ class FusedMoE(CustomOp):
             if name not in NON_EXPERT_WEIGHTS
             and weight.shape != torch.Size([])
             and not name.startswith("_shared_experts.")
+            # exclude parameters from non-expert submodules (e.g. gate/shared)
+            and not name.startswith("_gate.")
         ]
 
     def set_eplb_state(
@@ -1987,13 +1999,12 @@ class FusedMoE(CustomOp):
 
         moe = self.moe_config
 
-        # Note here we use `num_experts` which is logical expert count
         if self.vllm_config.parallel_config.enable_dbo:
             states_shape = (2, moe.max_num_tokens, self.hidden_size)
-            logits_shape = (2, moe.max_num_tokens, moe.num_experts)
+            logits_shape = (2, moe.max_num_tokens, self.logical_num_experts)
         else:
             states_shape = (moe.max_num_tokens, self.hidden_size)
-            logits_shape = (moe.max_num_tokens, moe.num_experts)
+            logits_shape = (moe.max_num_tokens, self.logical_num_experts)
 
         self.batched_hidden_states = torch.zeros(
             states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()

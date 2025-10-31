@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import hashlib
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
+from pydantic import model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
@@ -56,7 +57,8 @@ class StructuredOutputsConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
+    @model_validator(mode="after")
+    def _validate_structured_output_config(self) -> Self:
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
@@ -67,3 +69,4 @@ class StructuredOutputsConfig:
                 "disable_additional_properties is only supported "
                 "for the guidance backend."
             )
+        return self
