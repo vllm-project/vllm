@@ -119,8 +119,7 @@ async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
         tools=[
             {
                 "name": "get_current_weather",
-                "description": "Useful for querying the weather "
-                "in a specified city.",
+                "description": "Useful for querying the weather in a specified city.",
                 "input_schema": {
                     "type": "object",
                     "properties": {

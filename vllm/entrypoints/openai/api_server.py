@@ -42,6 +42,7 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import Device, EngineClient
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicError,
     AnthropicErrorResponse,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
@@ -619,7 +620,15 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
             message="The model does not support Messages API"
         )
 
-    generator = await handler.create_messages(request, raw_request)
+    try:
+        generator = await handler.create_messages(request, raw_request)
+    except Exception as e:
+        error = AnthropicError(type="internal_error", message=str(e))
+        content = AnthropicErrorResponse(error = error)
+        return JSONResponse(content, status_code=HTTPStatus.INTERNAL_SERVER_ERROR)
+        raise HTTPException(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+        ) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump())
