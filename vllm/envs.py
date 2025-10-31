@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_USE_TRITON_FLASH_ATTN: bool = True
-    VLLM_SLEEP_MEM_CHUNK_SIZE: int = 256
+    VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
@@ -521,8 +521,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1")
     ),
     # flag to control the chunk size (in MB) for sleeping memory allocations under ROCm
-    "VLLM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
-        os.environ.get("VLLM_SLEEP_MEM_CHUNK_SIZE", "256")
+    "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
+        os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
     ),
     # Use separate prefill and decode kernels for V1 attention instead of
     # the unified triton kernel.

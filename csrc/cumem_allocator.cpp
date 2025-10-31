@@ -13,7 +13,7 @@ static const char* PYARGS_PARSE = "KKKK";
   #include <climits>
 
 // Default chunk size 256MB. Can be overridden at runtime by the
-// environment variable VLLM_SLEEP_MEM_CHUNK_SIZE, specified in megabytes
+// environment variable VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE, specified in megabytes
 // (MB). The env value is parsed with strtoull as an integer number of MB
 // (decimal or 0x hex). The parsed MB value is converted to bytes. If
 // parsing fails, the value is 0, or the multiplication would overflow,
@@ -22,7 +22,7 @@ static const unsigned long long DEFAULT_MEMCREATE_CHUNK_SIZE =
     (256ULL * 1024ULL * 1024ULL);
 
 static unsigned long long get_memcreate_chunk_size() {
-  const char* env = getenv("VLLM_SLEEP_MEM_CHUNK_SIZE");
+  const char* env = getenv("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE");
   if (!env) return DEFAULT_MEMCREATE_CHUNK_SIZE;
   char* endptr = nullptr;
   errno = 0;
@@ -310,7 +310,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 #else
   // Make sure chunk size is aligned with hardware granularity. The base
   // chunk size can be configured via environment variable
-  // ``VLLM_SLEEP_MEM_CHUNK_SIZE``; otherwise
+  // ``VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE``; otherwise
   // DEFAULT_MEMCREATE_CHUNK_SIZE is used.
   size_t base_chunk = (size_t)get_memcreate_chunk_size();
   size_t aligned_chunk_size =
