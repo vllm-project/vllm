@@ -93,8 +93,6 @@ def build_defaults(
         else:
             compilation_config.custom_ops.append("all")
 
-    is_rms_norm_enabled = compilation_config.is_custom_op_enabled("rms_norm")
-    is_quant_fp8_enabled = compilation_config.is_custom_op_enabled("quant_fp8")
     is_quantized = False
     is_dense = False
     # The optimizations that depend on these properties currently set to False
@@ -104,10 +102,20 @@ def build_defaults(
     #     is_sequential = not model_config.is_model_moe()
     # See https://github.com/vllm-project/vllm/issues/25689.
 
+    def enable_noop(cfg):
+        """Returns True if optimization level is greater than O0."""
+        return cfg.optimization_level.value > OptimizationLevel.O0.value
+
+    def enable_fusion(cfg):
+        """Returns True if RMS norm or quant FP8 is enabled."""
+        return cfg.compilation_config.is_custom_op_enabled(
+            "rms_norm"
+        ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+
     optimization_level_00 = {
         "general": {
             "pass_config": {
-                "enable_noop": False,
+                "enable_noop": enable_noop,
                 "enable_fusion": False,
                 "enable_fi_allreduce_fusion": False,
             },
@@ -126,8 +134,8 @@ def build_defaults(
     optimization_level_01 = {
         "general": {
             "pass_config": {
-                "enable_noop": True,
-                "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
+                "enable_noop": enable_noop,
+                "enable_fusion": enable_fusion,
                 "enable_fi_allreduce_fusion": False,
             },
             "mode": mode,
@@ -145,8 +153,8 @@ def build_defaults(
     optimization_level_02 = {
         "general": {
             "pass_config": {
-                "enable_noop": True,
-                "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
+                "enable_noop": enable_noop,
+                "enable_fusion": enable_fusion,
                 "enable_fi_allreduce_fusion": False,
             },
             "mode": mode,
@@ -164,8 +172,8 @@ def build_defaults(
     optimization_level_03 = {
         "general": {
             "pass_config": {
-                "enable_noop": True,
-                "enable_fusion": is_rms_norm_enabled or is_quant_fp8_enabled,
+                "enable_noop": enable_noop,
+                "enable_fusion": enable_fusion,
                 "enable_fi_allreduce_fusion": False,
             },
             "mode": mode,
