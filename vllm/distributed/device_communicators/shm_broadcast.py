@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+import math
 import pickle
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
-from threading import Event
 from typing import TYPE_CHECKING, Any
 from unittest.mock import patch
 
@@ -17,6 +17,7 @@ import zmq
 from torch.distributed import ProcessGroup
 from zmq import (  # type: ignore
     IPV6,  # type: ignore
+    PUB,
     SUB,
     SUBSCRIBE,
     XPUB,
@@ -30,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
+    get_open_zmq_inproc_path,
     get_open_zmq_ipc_path,
     is_valid_ipv6_address,
 )
@@ -49,40 +51,140 @@ def to_bytes_big(value: int, size: int) -> bytes:
 logger = init_logger(__name__)
 
 
-class SpinTimer:
-    def record_activity(self):
-        pass
-
-    def spin(self):
-        sched_yield()
-
-
-class SpinSleepTimer(SpinTimer):
+class SpinCondition:
     """
-    In setups which have long inactivity periods it is desirable to reduce
-    system power consumption when vllm does nothing. This would lead to more
-    CPU thermal headroom when a request eventually comes, especially when
-    multiple GPUs are connected as each GPU would otherwise pin one thread at
-    100% CPU usage.
+    This class implements an interface similar to a threading.Condition. It
+    allows a writer to notify readers to wake up and read from the shared memory
+    buffer. This notification is done over a zmq socket.
 
-    The simplest solution is to reduce polling frequency when there is no
-    activity for a certain period of time.
+    For optimal performance under load we don't want the readers to need to poll
+    the zmq socket for every read. So the `wait` method here will return
+    immediately when reads are frequent, and will only enter "idle mode" and
+    await a notification on the zmq socket after a period of inactivity. This
+    allows the readers to spin quickly, hence "SpinCondition".
+
+    To support clean shutdown, a separate thread in the reader's process must be
+    able to wake the reader so that it can exit. A separate cancel() method is
+    implemented with an in-process socket to allow this interruption.
     """
 
-    def __init__(self, busy_loop_s: float = 3.0, wait_sleep_s: float = 0.1):
-        self.last_activity = time.monotonic()
-        self.busy_loop_s = busy_loop_s
-        self.wait_sleep_s = wait_sleep_s
+    def __init__(
+        self,
+        is_reader: bool,
+        local_notify_socket: zmq.Socket,
+        cancel_socket: zmq.Socket | None = None,
+        busy_loop_s: float = 1,
+    ):
+        # Writers should have PUB socket, readers have SUB socket
+        self.local_notify_socket = local_notify_socket
+        self.is_reader = is_reader
 
-    def record_activity(self):
-        self.last_activity = time.monotonic()
+        if is_reader:
+            # Time of last shm buffer read
+            self.last_read = time.monotonic()
 
-    def spin(self):
-        curr_time = time.monotonic()
-        if curr_time >= self.last_activity + self.busy_loop_s:
-            time.sleep(self.wait_sleep_s)
+            # Time to keep busy-looping on the shm buffer before going idle
+            self.busy_loop_s = busy_loop_s
+
+            assert cancel_socket is not None, "Readers require a cancel socket"
+            self.cancel_socket = cancel_socket
+
+            self.poller = zmq.Poller()
+            self.poller.register(self.cancel_socket, zmq.POLLIN)
+            self.poller.register(self.local_notify_socket, zmq.POLLIN)
+
         else:
+            self.last_read = 0
+            self.busy_loop_s = 0
+            self.cancel_socket = None
+            self.poller = None
+
+    @classmethod
+    def create_notifier(
+        cls, context: zmq.Context, notify_address: str
+    ) -> "SpinCondition":
+        """Builds the writer-process side of the SpinCondition which can notify
+        all readers of a write"""
+        local_notify_socket: zmq.Socket = context.socket(PUB)
+        # Set high water mark to 1- we don't need to send a massive amount of
+        # pings during busy operation. PUB sockets will silently drop subsequent
+        # messages after the high water mark is reached.
+        local_notify_socket.setsockopt(zmq.SNDHWM, 1)
+        local_notify_socket.bind(notify_address)
+
+        return cls(is_reader=False, local_notify_socket=local_notify_socket)
+
+    @classmethod
+    def create_waiter(
+        cls, context: zmq.Context, notify_address: str
+    ) -> "SpinCondition":
+        """Builds the reader-process side of the SpinCondition which can wait
+        for notifications from the writer"""
+        local_notify_socket: zmq.Socket = context.socket(SUB)
+        # Set high water mark to 1- we don't need to store a massive amount of
+        # notifications during busy operation. SUB sockets will silently drop
+        # inbound messages after the high water mark is reached.
+        # TODO: maybe instead zmq.ZMQ_CONFLATE
+        # local_notify_socket.setsockopt(zmq.CONFLATE, 1)
+        local_notify_socket.setsockopt(zmq.RCVHWM, 1)
+
+        local_notify_socket.bind(notify_address)
+
+        cancel_path = get_open_zmq_inproc_path()
+        cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
+        cancel_socket.bind(cancel_path)
+
+        print("\n\n\n\n CREATING WAITER WITH NOTIFY ADDR", notify_address)
+
+        return cls(
+            is_reader=True,
+            local_notify_socket=local_notify_socket,
+            cancel_socket=cancel_socket,
+        )
+
+    def record_read(self):
+        self.last_read = time.monotonic()
+
+    def cancel(self):
+        # Sends cancellation ping that will cause the reader to wake up.
+        # This is done from a monitor thread in the same process as the reader.
+        if self.is_reader:
+            self.cancel_socket.send(b"\x00")
+
+    def wait(self, timeout_ms: float | None) -> None:
+        """Wait for data on the shared memory buffer.
+
+        Yields the scheduler then returns immediately if it has been less than
+        self.busy_loop_s since the last read.
+
+        Otherwise, enters idle mode and awaits a socket ping for at most
+        `timeout_ms` milliseconds, or indefinitely if timeout_s is None.
+        """
+        assert self.is_reader, "Only readers can wait"
+
+        current_time = time.monotonic()
+        if current_time <= self.last_read + self.busy_loop_s:
             sched_yield()
+        else:
+            events = dict(self.poller.poll(timeout=timeout_ms))
+
+            if self.cancel_socket in events:
+                # return immediately on cancel
+                return
+
+            if self.local_notify_socket in events:
+                # Read all pings off the socket
+                while True:
+                    try:
+                        self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
+                    except zmq.Again:
+                        # Return when socket has nothing to read
+                        return
+
+    def notify(self):
+        """Notifies all readers to wake up"""
+        assert not self.is_reader, "Only writers can notify"
+        self.local_notify_socket.send(b"\x00")
 
 
 class ShmRingBuffer:
@@ -226,6 +328,7 @@ class Handle:
 
     buffer_handle: tuple[int, int, int, str] | None = None
     local_subscribe_addr: str | None = None
+    local_notify_addr: str | None = None
     remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
 
@@ -249,7 +352,7 @@ class MessageQueue:
         self.n_local_reader = n_local_reader
         n_remote_reader = n_reader - n_local_reader
         self.n_remote_reader = n_remote_reader
-
+        self.shutting_down = False
         context = Context()
 
         if n_local_reader > 0:
@@ -271,11 +374,19 @@ class MessageQueue:
             self.local_socket.bind(local_subscribe_addr)
 
             self.current_idx = 0
+
+            # Create the notification side of the SpinCondition
+            local_notify_addr = get_open_zmq_ipc_path()
+            self._spin_condition: SpinCondition = SpinCondition.create_notifier(
+                context, local_notify_addr
+            )
         else:
             self.buffer = None  # type: ignore
             local_subscribe_addr = None
             self.local_socket = None
             self.current_idx = -1
+            local_notify_addr = None
+            self._spin_condition = None
 
         remote_addr_ipv6 = False
         if n_remote_reader > 0:
@@ -302,12 +413,12 @@ class MessageQueue:
         self.local_reader_rank = -1
         # rank does not matter for remote readers
         self._is_remote_reader = False
-        self._read_spin_timer = SpinTimer()
 
         self.handle = Handle(
             local_reader_ranks=local_reader_ranks,
             buffer_handle=self.buffer.handle() if self.buffer is not None else None,
             local_subscribe_addr=local_subscribe_addr,
+            local_notify_addr=local_notify_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
         )
@@ -341,8 +452,8 @@ class MessageQueue:
 
             self.remote_socket = None
 
-            self._read_spin_timer = (
-                SpinSleepTimer() if envs.VLLM_SLEEP_WHEN_IDLE else SpinTimer()
+            self._spin_condition = SpinCondition.create_waiter(
+                context, handle.local_notify_addr
             )
         else:
             self.buffer = None  # type: ignore
@@ -361,6 +472,7 @@ class MessageQueue:
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
 
+        self.shutting_down = False
         return self
 
     def wait_until_ready(self):
@@ -395,6 +507,13 @@ class MessageQueue:
             # wait for the writer to send a message
             recv = self.remote_socket.recv()
             assert recv == b"READY"
+
+    def shutdown(self):
+        """ "If this is an idle reader, wakes it up so it can clean up and shut
+        down"""
+        self.shutting_down = True
+        if self._spin_condition is not None:
+            self._spin_condition.cancel()
 
     @contextmanager
     def acquire_write(self, timeout: float | None = None):
@@ -458,14 +577,19 @@ class MessageQueue:
     def acquire_read(
         self,
         timeout: float | None = None,
-        cancel: Event | None = None,
         indefinite: bool = False,
     ):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
+        if not indefinite:
+            deadline = start_time + timeout
+        else:
+            deadline = math.inf
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+                # print("buzzy loop read", self.current_idx, indefinite, timeout)
+
                 read_flag = metadata_buffer[self.local_reader_rank + 1]
                 written_flag = metadata_buffer[0]
                 if not written_flag or read_flag:
@@ -477,10 +601,20 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # Release the processor to other threads
-                    self._read_spin_timer.spin()
+                    if not indefinite:
+                        print("timeout spinnin")
+                        self._spin_condition.wait(
+                            timeout_ms=min(
+                                VLLM_RINGBUFFER_WARNING_INTERVAL,
+                                deadline - time.monotonic(),
+                            )
+                            * 1000
+                        )
+                    else:
+                        print("no-timeout spin")
+                        self._spin_condition.wait()
 
-                    if cancel is not None and cancel.is_set():
+                    if self.shutting_down:
                         raise RuntimeError("cancelled")
 
                     # if we time out, raise an exception
@@ -505,6 +639,7 @@ class MessageQueue:
                 # found a block that is not read by this reader
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
+                    logger.info("READ!")
                     yield buf
 
                 # caller has read from the buffer
@@ -512,11 +647,14 @@ class MessageQueue:
                 metadata_buffer[self.local_reader_rank + 1] = 1
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
 
-                self._read_spin_timer.record_activity()
+                self._spin_condition.record_read()
                 break
 
     def enqueue(self, obj, timeout: float | None = None):
         """Write to message queue with optional timeout (in seconds)"""
+
+        logger.info("WRITE!")
+
         assert self._is_writer, "Only writers can enqueue"
         all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
@@ -536,10 +674,14 @@ class MessageQueue:
         )
         if self.n_local_reader > 0:
             if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
+                logger.info("Write over ZMQ!")
+
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send_multipart(all_buffers, copy=False)
             else:
+                logger.info("Write over Buf!")
+
                 # Byte 0: 0
                 # Bytes 1-2: Count of buffers
                 # Then each buffer follows, preceded by 4 bytes containing its length:
@@ -555,18 +697,19 @@ class MessageQueue:
                         buf[offset:buf_offset] = to_bytes_big(buf_len, 4)
                         buf[buf_offset : (offset := buf_offset + buf_len)] = buffer
 
+            self._spin_condition.notify()
+
         if self.n_remote_reader > 0:
             self.remote_socket.send_multipart(all_buffers, copy=False)
 
     def dequeue(
         self,
         timeout: float | None = None,
-        cancel: Event | None = None,
         indefinite: bool = False,
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
-            with self.acquire_read(timeout, cancel, indefinite) as buf:
+            with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
                     offset = 3
