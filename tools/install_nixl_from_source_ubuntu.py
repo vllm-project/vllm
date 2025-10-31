@@ -6,10 +6,11 @@ import glob
 import os
 import subprocess
 import sys
+import json
+import urllib.request
 
 # --- Configuration ---
 WHEELS_CACHE_HOME = os.environ.get("WHEELS_CACHE_HOME", "/tmp/wheels_cache")
-NIXL_VERSION = os.environ.get("NIXL_VERSION", "0.7.0")
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 UCX_DIR = os.path.join("/tmp", "ucx_source")
 NIXL_DIR = os.path.join("/tmp", "nixl_source")
@@ -19,6 +20,17 @@ NIXL_REPO_URL = "https://github.com/ai-dynamo/nixl.git"
 
 
 # --- Helper Functions ---
+def get_latest_nixl_version():
+    """Helper function to get latest release version of NIXL"""
+    try:
+        nixl_release_url = "https://api.github.com/repos/ai-dynamo/nixl/releases/latest"
+        with urllib.request.urlopen(nixl_release_url) as response:
+            data = json.load(response)
+            return data.get("tag_name", "0.7.0")
+    except Exception:
+        return "0.7.0"
+NIXL_VERSION = os.environ.get("NIXL_VERSION", get_latest_nixl_version())
+
 def run_command(command, cwd=".", env=None):
     """Helper function to run a shell command and check for errors."""
     print(f"--> Running command: {' '.join(command)} in '{cwd}'", flush=True)
@@ -150,6 +162,7 @@ def build_and_install_prerequisites(args):
     else:
         run_command(["git", "fetch", "--tags"], cwd=NIXL_DIR)
     run_command(["git", "checkout", NIXL_VERSION], cwd=NIXL_DIR)
+    print(f"--> Checked out NIXL version: {NIXL_VERSION}", flush=True)
 
     build_env = os.environ.copy()
     build_env["PKG_CONFIG_PATH"] = os.path.join(ucx_install_path, "lib", "pkgconfig")
