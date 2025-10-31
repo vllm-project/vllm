@@ -87,13 +87,13 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, cudagraph_mode):
         "cudagraph_capture_sizes": [100],
         "cudagraph_mode": cudagraph_mode,
     }
+    num_gpu_runner_capture_triggers = 1 if cudagraph_mode != CUDAGraphMode.NONE else 0
+    num_cudagraph_captured = 14 if cudagraph_mode != CUDAGraphMode.NONE else 0
     with (
         compilation_counter.expect(
             num_graphs_seen=1,
-            num_gpu_runner_capture_triggers=1
-            if cudagraph_mode != CUDAGraphMode.NONE
-            else 0,
-            num_cudagraph_captured=13 if cudagraph_mode != CUDAGraphMode.NONE else 0,
+            num_gpu_runner_capture_triggers=num_gpu_runner_capture_triggers,
+            num_cudagraph_captured=num_cudagraph_captured,
         ),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
