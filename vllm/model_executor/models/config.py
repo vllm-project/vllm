@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
-from vllm.utils.math_utils import cdiv, next_power_of_2, round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
 
 if TYPE_CHECKING:
@@ -364,6 +365,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             ).page_size_bytes
         else:
             kernel_block_alignment_size = 16
+            if envs.VLLM_ATTENTION_BACKEND == "FLASHINFER":
+                kernel_block_alignment_size = min(
+                    FlashInferBackend.get_supported_kernel_block_size()
+                )
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -410,7 +415,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_tokens_per_mamba_state = cdiv(mamba_page_size, attn_page_size_1_token)
             chunk_size = lcm(base_chunk_size, kernel_block_alignment_size)
             attn_block_size = chunk_size * cdiv(attn_tokens_per_mamba_state, chunk_size)
-            attn_block_size = next_power_of_2(attn_block_size)
             cache_config.mamba_block_size = attn_block_size
         else:
             # Without prefix caching, select minimum valid attention block size
@@ -422,7 +426,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             attn_block_size = kernel_block_alignment_size * cdiv(
                 mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
-            attn_block_size = next_power_of_2(attn_block_size)
 
         # override attention block size if either (a) the
         # user has not set it or (b) the user has set it
