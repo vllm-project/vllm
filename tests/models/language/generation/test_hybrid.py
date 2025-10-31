@@ -30,7 +30,7 @@ SSM_MODELS = [
 ]
 
 HYBRID_MODELS = [
-    "ai21labs/AI21-Jamba-Reasoning-3B",
+    "ai21labs/Jamba-tiny-dev",
     "pfnet/plamo-2-1b",
     "Zyphra/Zamba2-1.2B-instruct",
     "hmellor/tiny-random-BambaForCausalLM",

@@ -54,12 +54,7 @@ from vllm.config import (
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.cache import (
-    BlockSize,
-    CacheDType,
-    MambaDType,
-    PrefixCachingHashAlgo,
-)
+from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
 from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
