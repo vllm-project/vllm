@@ -417,10 +417,8 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            raise RuntimeError(
-                "State error: execute_model() must be called "
-                "prior to calling sample_tokens()."
-            )
+            return None  # noqa
+
         self.scheduler_output = None
 
         # Build the compiled DAG for the first time.

@@ -2620,10 +2620,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.execute_model_state is None:
-            raise RuntimeError(
-                "State error: sample_tokens() must only be called "
-                "after execute_model() returns None"
-            )
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+
         # Unpack ephemeral state.
         (
             scheduler_output,

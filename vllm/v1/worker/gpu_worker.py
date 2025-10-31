@@ -496,9 +496,6 @@ class Worker(WorkerBase):
         self,
         grammar_output: "GrammarOutput",
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if not get_pp_group().is_last_rank:
-            # Only run sampling stage in final PP rank.
-            return None  # noqa
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
