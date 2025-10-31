@@ -3,6 +3,8 @@
 
 import os
 
+import torch
+
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
     AiterScaledMMLinearKernel,
@@ -17,8 +19,11 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
     ScaledMMLinearLayerConfig,
+    ScaledMMLinearQuantStrategy,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.torch import (
     ChannelWiseTorchScaledMMLinearKernel,
@@ -32,6 +37,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
     XLAScaledMMLinearKernel,
 )
 from vllm.platforms import PlatformEnum, current_platform
+from vllm.vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
 logger = init_logger(__name__)
 
@@ -121,4 +127,29 @@ def choose_scaled_mm_linear_kernel(
     raise ValueError(
         "Failed to find a kernel that can implement the "
         "ScaledMM linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
+def init_fp8_linear_kernel(
+    act_q_static: bool,
+    act_q_group_shape: GroupShape,
+    out_dtype: torch.dtype,
+    module_name: str,
+) -> FP8ScaledMMLinearKernel:
+    scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+        is_static_input_scheme=act_q_static,
+        weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+        activation_group_shape=act_q_group_shape,
+        out_dtype=out_dtype,
+    )
+
+    kernel_type = choose_scaled_mm_linear_kernel(
+        scaled_mm_linear_kernel_config,
+        _POSSIBLE_FP8_KERNELS,
+        module_name=module_name,
+    )
+
+    return kernel_type(
+        scaled_mm_linear_kernel_config,
+        layer_param_names=["weight", "weight_scale", "input_scale"],
     )

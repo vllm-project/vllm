@@ -9,11 +9,9 @@ from torch.nn import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    _POSSIBLE_FP8_KERNELS,
-    choose_scaled_mm_linear_kernel,
+    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearLayerConfig,
     ScaledMMLinearQuantStrategy,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
@@ -174,23 +172,12 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
-        layer_param_names = ["weight", "weight_scale", "input_scale"]
         weight_quant_strategy = QUANT_STRATEGY_MAP[self.weight_qscheme]
-        scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
+        self.fp8_linear_kernel = init_fp8_linear_kernel(
             is_static_input_scheme=self.is_static_input_scheme,
             weight_quant_strategy=weight_quant_strategy,
             activation_group_shape=self.act_quant_group_shape,
             out_dtype=self.out_dtype,
-        )
-        kernel_type = choose_scaled_mm_linear_kernel(
-            scaled_mm_linear_kernel_config,
-            _POSSIBLE_FP8_KERNELS,
-            module_name=self.__class__.__name__,
-        )
-
-        layer_param_names = ["weight", "weight_scale", "input_scale"]
-        self.kernel = kernel_type(
-            c=scaled_mm_linear_kernel_config, layer_param_names=layer_param_names
         )
 
     def apply_weights(
@@ -199,4 +186,4 @@ class QuarkW8A8Fp8(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.kernel.apply_weights(layer, x, bias)
+        return self.fp8_linear_kernel.apply_weights(layer, x, bias)
