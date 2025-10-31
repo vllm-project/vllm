@@ -79,7 +79,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 CustomAllreduce as AITERCustomAllreduce,
             )
 
-            logger.info("Using aiter.dist.device_communicators.custom_all_reduce for ROCm platform")
+            logger.info("Using aiter.dist.device_communicators.custom_all_reduce 
+                for ROCm platform"
+            )
         else:
             from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
                 CustomAllreduce,
