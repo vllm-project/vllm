@@ -67,12 +67,8 @@ class FlashMLABackend(MLACommonBackend):
         return ["auto", "fp8", "fp8_e4m3"]
 
     @classmethod
-    def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(9, 0)
-
-    @classmethod
-    def get_max_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(10, 3)
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major in [9, 10]
 
     @classmethod
     def supports_combination(

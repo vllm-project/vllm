@@ -188,20 +188,8 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_min_compute_capability(cls) -> "DeviceCapability | None":
-        return None
-
-    @classmethod
-    def get_max_compute_capability(cls) -> "DeviceCapability | None":
-        return None
-
-    @classmethod
     def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
-        min_capability = cls.get_min_compute_capability()
-        max_capability = cls.get_max_compute_capability()
-        return ((min_capability is None) or (capability >= min_capability)) and (
-            (max_capability is None) or (capability <= max_capability)
-        )
+        return True
 
     @classmethod
     def supports_combination(

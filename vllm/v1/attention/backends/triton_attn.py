@@ -204,12 +204,8 @@ class TritonAttentionBackend(AttentionBackend):
         return True
 
     @classmethod
-    def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return None
-
-    @classmethod
-    def get_max_compute_capability(cls) -> DeviceCapability | None:
-        return None
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return True
 
 
 class TritonAttentionImpl(AttentionImpl):

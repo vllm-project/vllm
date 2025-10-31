@@ -231,12 +231,10 @@ class FlashInferBackend(AttentionBackend):
         return ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 
     @classmethod
-    def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(7, 5)
-
-    @classmethod
-    def get_max_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(12, 1)
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
+            12, 1
+        )
 
     @classmethod
     def get_required_kv_cache_layout(

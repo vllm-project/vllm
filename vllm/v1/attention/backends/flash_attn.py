@@ -123,12 +123,8 @@ class FlashAttentionBackend(AttentionBackend):
         return kv_cache_dtype in ["auto"]
 
     @classmethod
-    def get_min_compute_capability(cls) -> DeviceCapability | None:
-        return DeviceCapability(8, 0)
-
-    @classmethod
-    def get_max_compute_capability(cls) -> DeviceCapability | None:
-        return None
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability >= DeviceCapability(8, 0)
 
     @classmethod
     def supports_combination(
