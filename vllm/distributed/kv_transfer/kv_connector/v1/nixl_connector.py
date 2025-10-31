@@ -1787,12 +1787,10 @@ class NixlConnectorWorker:
                         continue
 
             # Handshake already completed, start async read xfer.
-            # FIXME(Chendi): should store per engine
             self._read_blocks_for_req(req_id, meta)
 
         # Start transfers for requests whose handshakes have now finished.
         while not self._ready_requests.empty():
-            # FIXME(Chendi): should store per engine
             self._read_blocks_for_req(*self._ready_requests.get_nowait())
 
         # Keep around the requests that have been part of a batch. This is
@@ -1841,7 +1839,7 @@ class NixlConnectorWorker:
             remote_block_ids = self.get_mapped_blocks(
                 np.asarray(remote_block_ids) - 1, block_size_ratio
             )
-            # FIXME(Chendi): We need find free blocks to pad for local, because
+            # NOTE: We need find free blocks to pad for local, because
             # when we receive remote buffer with bigger blockSize, it might happen
             # that local n_blocks scheduled less to match n*local_blksize=remote_blksize
             # remote is  |h0-b0......|h1-b0......|h3-b0......|h4-b0......|
