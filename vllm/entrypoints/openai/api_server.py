@@ -615,7 +615,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
     handler = messages(raw_request)
     if handler is None:
-        return messages(raw_request).create_error_response(
+        return base(raw_request).create_error_response(
             message="The model does not support Messages API"
         )
 
