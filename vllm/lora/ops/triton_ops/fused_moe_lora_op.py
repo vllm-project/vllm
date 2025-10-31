@@ -68,8 +68,8 @@ def _fused_moe_lora_kernel(
     stride_cn,
     stride_tl,
     stride_el,
-    slice_a_size: tl.constexpr,
-    slice_c_size: tl.constexpr,
+    slice_a_size,
+    slice_c_size,
     # Meta-parameters
     num_slice_a: tl.constexpr,
     num_slice_c: tl.constexpr,
@@ -85,6 +85,7 @@ def _fused_moe_lora_kernel(
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
     max_loras = tl.num_programs(axis=2)
+    grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
     pid_sk = pid % SPLIT_K
@@ -115,7 +116,7 @@ def _fused_moe_lora_kernel(
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
 
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     token_ind = stride_tl * lora_idx + offs_token_id
@@ -124,39 +125,30 @@ def _fused_moe_lora_kernel(
     )
     token_mask = offs_token < num_valid_tokens
 
-    # Calculate K range for this split_k chunk
-    k_chunk_size = K // SPLIT_K
-    k_remainder = K % SPLIT_K
-    k_start = pid_sk * k_chunk_size + min(pid_sk, k_remainder)
-    actual_k_size = k_chunk_size + (1 if pid_sk < k_remainder else 0)
-
-    # get a_ptrs,b_ptrs starting at k_start
+    # get a_ptrs,b_ptrs
     a_ptrs = cur_a_ptr + (
-        offs_token[:, None] // top_k * stride_am
-        + (k_start + offs_k[None, :]) * stride_ak
+        offs_token[:, None] // top_k * stride_am + offs_k[None, :] * stride_ak
     )
 
     b_ptrs = (
         cur_b_ptr
         + lora_idx * stride_bl
         + expert_id * stride_be
-        + ((k_start + offs_k[:, None]) * stride_bk + offs_bn[None, :] * stride_bn)
+        + offs_k[:, None] * stride_bk
+        + offs_bn[None, :] * stride_bn
     )
 
     # accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    # Loop over K blocks within this split's chunk
-    num_k_blocks = tl.cdiv(actual_k_size, BLOCK_SIZE_K)
-    for k_block in range(num_k_blocks):
-        k_offset = k_block * BLOCK_SIZE_K
-        k_remaining = actual_k_size - k_offset
+    for k in range(0, grid_k):
+        k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
             other=0.0,
         )
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-        accumulator = tl.dot(a, b, accumulator)
+        accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -165,7 +157,8 @@ def _fused_moe_lora_kernel(
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0)
         accumulator = accumulator * moe_weight[:, None]
 
-    # Write back the block of the output with atomic add for split-K accumulation
+    accumulator = accumulator.to(c_ptr.dtype.element_ty)
+    # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
