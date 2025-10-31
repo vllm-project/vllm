@@ -24,6 +24,8 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
 else:
     SchedulerOutput = object
+    GrammarOutput = object
+    AsyncModelRunnerOutput = object
     ModelRunnerOutput = object
 
 logger = init_logger(__name__)
