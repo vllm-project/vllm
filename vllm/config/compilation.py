@@ -430,6 +430,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention",
+        "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
     ]
 

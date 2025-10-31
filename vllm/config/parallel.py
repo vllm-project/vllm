@@ -521,15 +521,11 @@ class ParallelConfig:
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
             ):
-                if not ray_found:
-                    raise ValueError(
-                        "Unable to load Ray: "
-                        f"{ray_utils.ray_import_err}. Ray is "
-                        "required for multi-node inference, "
-                        "please install Ray with `pip install "
-                        "ray`."
-                    )
-                backend = "ray"
+                gpu_count = cuda_device_count_stateless()
+                raise ValueError(
+                    f"Tensor parallel size ({self.world_size}) cannot be "
+                    f"larger than the number of available GPUs ({gpu_count})."
+                )
             elif self.data_parallel_backend == "ray":
                 logger.info(
                     "Using ray distributed inference because "
