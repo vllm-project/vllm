@@ -13,7 +13,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
-    supports_hma,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
@@ -93,7 +93,11 @@ class Scheduler(SchedulerInterface):
             )
 
             connector_vllm_config = copy.copy(self.vllm_config)
-            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)
+
+            # We're dynamically inserting a kv_cache_config variable into the
+            # connector_vllm_config. This is distinct from the cache_config
+            # that is already in there.
+            connector_vllm_config.kv_cache_config = copy.copy(kv_cache_config)  # type: ignore[attr-defined]
             self.connector = KVConnectorFactory.create_connector(
                 config=connector_vllm_config, role=KVConnectorRole.SCHEDULER
             )
@@ -1327,15 +1331,15 @@ class Scheduler(SchedulerInterface):
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
 
-        if not supports_hma(self.connector):
+        if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
             # all connectors to support HMA.
             # Hybrid memory allocator should be already turned off for this
             # code path, but let's double-check here.
             assert len(self.kv_cache_config.kv_cache_groups) == 1
             return self.connector.request_finished(request, block_ids[0])
-        else:
-            return self.connector.request_finished(request, block_ids)
+
+        return self.connector.request_finished_all_groups(request, block_ids)
 
     def _update_waiting_for_remote_kv(self, request: Request) -> bool:
         """
