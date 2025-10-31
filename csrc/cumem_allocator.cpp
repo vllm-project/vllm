@@ -8,8 +8,42 @@
 #ifndef USE_ROCM
 static const char* PYARGS_PARSE = "KKKK";
 #else
-  #define MEMCREATE_CHUNK_SIZE (2 * 1024 * 1024)
-  #define MIN(a, b) (a < b ? a : b)
+  #include <cstdlib>
+  #include <cerrno>
+
+// Default chunk size 256MB. Can be overridden at runtime by the
+// environment variable VLLM_SLEEP_MEM_CHUNK_SIZE, specified in megabytes
+// (MB). The env value is parsed with strtoull as an integer number of MB
+// (decimal or 0x hex). The parsed MB value is converted to bytes. If
+// parsing fails, the value is 0, or the multiplication would overflow,
+// the default (256MB) is used.
+static const unsigned long long DEFAULT_MEMCREATE_CHUNK_SIZE =
+    (256ULL * 1024ULL * 1024ULL);
+
+static unsigned long long get_memcreate_chunk_size() {
+  const char* env = getenv("VLLM_SLEEP_MEM_CHUNK_SIZE");
+  if (!env) return DEFAULT_MEMCREATE_CHUNK_SIZE;
+  char* endptr = nullptr;
+  errno = 0;
+  unsigned long long val_mb = strtoull(env, &endptr, 0);
+  if (endptr == env || errno != 0) {
+    // parsing failed, fallback to default
+    return DEFAULT_MEMCREATE_CHUNK_SIZE;
+  }
+  if (val_mb == 0) return DEFAULT_MEMCREATE_CHUNK_SIZE;
+
+  const unsigned long long MB = 1024ULL * 1024ULL;
+  // guard against overflow when converting MB -> bytes
+  if (val_mb > (ULLONG_MAX / MB)) {
+    return DEFAULT_MEMCREATE_CHUNK_SIZE;
+  }
+  return val_mb * MB;
+}
+
+static inline unsigned long long my_min(unsigned long long a,
+                                        unsigned long long b) {
+  return a < b ? a : b;
+}
 
 static const char* PYARGS_PARSE = "KKKO";
 #endif
@@ -251,9 +285,13 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
       (CUmemGenericAllocationHandle*)malloc(
           sizeof(CUmemGenericAllocationHandle));
 #else
-  // Make sure chunk size is aligned with hardware granularity
+  // Make sure chunk size is aligned with hardware granularity. The base
+  // chunk size can be configured via environment variable
+  // ``VLLM_SLEEP_MEM_CHUNK_SIZE``; otherwise
+  // DEFAULT_MEMCREATE_CHUNK_SIZE is used.
+  size_t base_chunk = (size_t)get_memcreate_chunk_size();
   size_t aligned_chunk_size =
-      ((MEMCREATE_CHUNK_SIZE + granularity - 1) / granularity) * granularity;
+      ((base_chunk + granularity - 1) / granularity) * granularity;
   size_t num_chunks =
       (alignedSize + aligned_chunk_size - 1) / aligned_chunk_size;
   CUmemGenericAllocationHandle** p_memHandle =
@@ -264,8 +302,9 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
   for (auto i = 0; i < num_chunks; ++i) {
     p_memHandle[i] = (CUmemGenericAllocationHandle*)malloc(
         sizeof(CUmemGenericAllocationHandle));
-    chunk_sizes[i] =
-        MIN(alignedSize - i * aligned_chunk_size, aligned_chunk_size);
+    chunk_sizes[i] = (unsigned long long)my_min(
+        (unsigned long long)(alignedSize - i * aligned_chunk_size),
+        (unsigned long long)aligned_chunk_size);
   }
 #endif
 
