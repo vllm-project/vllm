@@ -80,4 +80,7 @@ def test_keye_vl(
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
+        assert len(generated_text) > 10, (
+            f"Generated text is too short: {generated_text}"
+        )
         print("-" * 50)
