@@ -3988,6 +3988,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     kv_cache_spec,
                     kv_cache_group_id,
                 )
+
                 attn_groups.append(attn_group)
             return attn_groups
 
