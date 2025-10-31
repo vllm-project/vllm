@@ -304,7 +304,7 @@ steps:
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -329,7 +329,7 @@ steps:
 
 - label: V1 Test others # 42min
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental,amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -371,7 +371,7 @@ steps:
 
 - label: Examples Test # 30min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
@@ -394,9 +394,10 @@ steps:
     - python3 offline_inference/basic/classify.py
     - python3 offline_inference/basic/embed.py
     - python3 offline_inference/basic/score.py
-    - python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+    # Use AITER FA to test spec decode until triton attention is fixed: https://github.com/vllm-project/vllm/issues/27619
+    - VLLM_ROCM_USE_AITER=1 python3 offline_inference/spec_decode.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
-    - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+    - VLLM_ROCM_USE_AITER=1 python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
     #- python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
 
 - label: Platform Tests (CUDA) # 4min
