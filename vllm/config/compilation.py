@@ -490,11 +490,17 @@ class CompilationConfig:
     @field_validator("cudagraph_mode", mode="before")
     @classmethod
     def validate_cudagraph_mode_before(cls, value: Any) -> Any:
-        """
-        enable parse the `cudagraph_mode` enum type from string
-        """
+        """Enable parsing of the `cudagraph_mode` enum type from string."""
         if isinstance(value, str):
             return CUDAGraphMode[value.upper()]
+        return value
+
+    @field_validator("pass_config", mode="before")
+    @classmethod
+    def validate_pass_config_before(cls, value: Any) -> Any:
+        """Enable parsing of the `pass_config` field from a dictionary."""
+        if isinstance(value, dict):
+            return PassConfig(**value)
         return value
 
     def __post_init__(self) -> None:
@@ -542,9 +548,6 @@ class CompilationConfig:
             self.inductor_compile_config[k] = (
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
-
-        if isinstance(self.pass_config, dict):
-            self.pass_config = PassConfig(**self.pass_config)
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
