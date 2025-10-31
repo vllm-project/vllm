@@ -68,11 +68,11 @@ def _fused_moe_lora_kernel(
     stride_cn,
     stride_tl,
     stride_el,
+    slice_a_size: tl.constexpr,
+    slice_c_size: tl.constexpr,
     # Meta-parameters
     num_slice_a: tl.constexpr,
     num_slice_c: tl.constexpr,
-    slice_a_size: tl.constexpr,
-    slice_c_size: tl.constexpr,
     top_k: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -86,12 +86,11 @@ def _fused_moe_lora_kernel(
     lora_idx = tl.program_id(axis=2)
     max_loras = tl.num_programs(axis=2)
 
-    # Extract split_k index from grid
-    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
+    # calculate pid_m,pid_n
     pid_sk = pid % SPLIT_K
     pid_m_n = pid // SPLIT_K
+    num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
     group_id = pid_m_n // num_pid_in_group
@@ -112,7 +111,7 @@ def _fused_moe_lora_kernel(
 
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
-    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(a_ptr.dtype.element_ty))
+    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
