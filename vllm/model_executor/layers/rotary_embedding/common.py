@@ -4,6 +4,7 @@
 import math
 from collections.abc import Callable
 from functools import cache
+from importlib.util import find_spec
 
 import torch
 
@@ -76,6 +77,20 @@ def dispatch_rotary_emb_function(
     if current_platform.is_cuda():
         return apply_rotary_emb
 
+    # if torch compile is not enabled
+    # use rotary embedding function from flash_attn package
+    # otherwise use the naive pytorch embedding implementation
+    # is faster when torch compile is enabled.
+    if current_platform.is_rocm() and not torch.compiler.is_compiling():
+        if find_spec("flash_attn") is not None:
+            from flash_attn.ops.triton.rotary import apply_rotary
+
+            return apply_rotary
+        else:
+            logger.warning(
+                "flash_attn is not installed. Falling back to PyTorch "
+                "implementation for rotary embeddings."
+            )
     if default is not None:
         return default
 
