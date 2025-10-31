@@ -207,7 +207,6 @@ if TYPE_CHECKING:
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
-    VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = True
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
@@ -247,11 +246,26 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
+def disable_compile_cache() -> bool:
+    return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
+
+
 def use_aot_compile() -> bool:
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_is_batch_invariant,
+    )
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-    default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
-    return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    default_value = (
+        "1"
+        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        else "0"
+    )
+
+    return (
+        not vllm_is_batch_invariant()
+        and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    )
 
 
 def env_with_choices(
@@ -963,9 +977,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
     ),
-    "VLLM_DISABLE_COMPILE_CACHE": lambda: bool(
-        int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))
-    ),
+    "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set, vllm will run in development mode, which will enable
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
@@ -1393,11 +1405,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE", "0"))
     ),
-    # Allow DeepEP to use nvlink for internode_ll kernel, turn this on for
-    # better latency on GB200 like system
-    "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK", "1"))
-    ),
     # Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel,
     # turn this for better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
@@ -1547,3 +1554,30 @@ def compile_factors() -> dict[str, object]:
         factors[factor] = normalize_value(raw)
 
     return factors
+
+    ray_noset_env_vars = [
+        # Refer to
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/nvidia_gpu.py#L11
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/amd_gpu.py#L11
+        # https://github.com/ray-project/ray/blob/b97d21dab233c2bd8ed7db749a82a1e594222b5c/python/ray/_private/accelerators/amd_gpu.py#L10
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/npu.py#L12
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/hpu.py#L12
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/neuron.py#L14
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/tpu.py#L38
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/intel_gpu.py#L10
+        # https://github.com/ray-project/ray/blob/c584b1ea97b00793d1def71eaf81537d70efba42/python/ray/_private/accelerators/rbln.py#L10
+        "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES",
+        "RAY_EXPERIMENTAL_NOSET_HABANA_VISIBLE_MODULES",
+        "RAY_EXPERIMENTAL_NOSET_NEURON_RT_VISIBLE_CORES",
+        "RAY_EXPERIMENTAL_NOSET_TPU_VISIBLE_CHIPS",
+        "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
+        "RAY_EXPERIMENTAL_NOSET_RBLN_RT_VISIBLE_DEVICES",
+    ]
+    factors.extend([os.getenv(var) for var in ray_noset_env_vars])
+
+    hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+
+    return hash_str
