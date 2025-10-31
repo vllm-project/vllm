@@ -27,6 +27,7 @@
 from collections.abc import Iterable
 from itertools import islice
 from typing import Any
+import vllm.envs as envs
 
 import torch
 from torch import nn
@@ -68,6 +69,10 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+from vllm.platforms import current_platform
+if current_platform.is_rocm():
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
 
 
 class LlamaMLP(nn.Module):
@@ -219,6 +224,7 @@ class LlamaAttention(nn.Module):
             per_layer_sliding_window=sliding_window,
             attn_type=attn_type,
             prefix=f"{prefix}.attn",
+            rotary_emb=self.rotary_emb if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE else None,
         )
 
     def forward(
@@ -228,8 +234,14 @@ class LlamaAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+
+        if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+            attn_output = self.attn(q, k, v,
+                positions=positions, cos_sin_cache=self.rotary_emb.cos_sin_cache, is_neox=self.rotary_emb.is_neox_style)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
+
         output, _ = self.o_proj(attn_output)
         return output
 
