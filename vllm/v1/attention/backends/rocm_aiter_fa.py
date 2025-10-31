@@ -58,8 +58,6 @@ if current_platform.is_rocm():
         batch_query_start, batch_query_end = tl.split(batch_query_indexes)
         query_len = batch_query_end - batch_query_start
 
-        valid_e_dim_indices = tl.arange(0, PADDED_E_DIM) < E_DIM
-
         if query_len <= 1:
             return
 
@@ -71,6 +69,7 @@ if current_platform.is_rocm():
             block_mask = (
                 block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)[:, None]
             ) < seq_len
+            e_dim_mask = (tl.arange(0, PADDED_E_DIM) < E_DIM)[None, :]
 
             kv_idx = tl.load(
                 block_table + batch_idx * block_table_stride_0 + block_idx
@@ -79,15 +78,19 @@ if current_platform.is_rocm():
             kv_buffer_off = (
                 kv_idx * BLOCK_SIZE * E_DIM
                 + tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM
-                + tl.arange(0, PADDED_E_DIM)[valid_e_dim_indices][None, :]
+                + tl.arange(0, PADDED_E_DIM)[None, :]
             )
-            k_vals = tl.load(k_buffer_ptr + kv_buffer_off, mask=block_mask, other=0.0)
+            k_vals = tl.load(
+                k_buffer_ptr + kv_buffer_off, mask=block_mask & e_dim_mask, other=0.0
+            )
             if k_vals.dtype.is_fp8():
                 k_vals = (k_vals.to(tl.float32) * tl.load(k_scale)).to(output_dtype)
             else:
                 k_vals = k_vals.to(output_dtype)
 
-            v_vals = tl.load(v_buffer_ptr + kv_buffer_off, mask=block_mask, other=0.0)
+            v_vals = tl.load(
+                v_buffer_ptr + kv_buffer_off, mask=block_mask & e_dim_mask, other=0.0
+            )
             if v_vals.dtype.is_fp8():
                 v_vals = (v_vals.to(tl.float32) * tl.load(v_scale)).to(output_dtype)
             else:
@@ -96,10 +99,10 @@ if current_platform.is_rocm():
                 batch_token_start * E_DIM
                 + block_idx * BLOCK_SIZE * E_DIM
                 + tl.arange(0, BLOCK_SIZE)[:, None] * E_DIM
-                + tl.arange(0, PADDED_E_DIM)[valid_e_dim_indices][None, :]
+                + tl.arange(0, PADDED_E_DIM)[None, :]
             )
-            tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask)
-            tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask)
+            tl.store(k_values_ptr + kv_values_off, k_vals, mask=block_mask & e_dim_mask)
+            tl.store(v_values_ptr + kv_values_off, v_vals, mask=block_mask & e_dim_mask)
 
     def vllm_layout_trans(
         b_query_lens_loc,
