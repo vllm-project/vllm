@@ -1860,19 +1860,23 @@ async def init_app_state(
         if "transcription" in supported_tasks
         else None
     )
-    state.anthropic_serving_messages = AnthropicServingMessages(
-        engine_client,
-        state.openai_serving_models,
-        args.response_role,
-        request_logger=request_logger,
-        chat_template=resolved_chat_template,
-        chat_template_content_format=args.chat_template_content_format,
-        return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-        enable_auto_tools=args.enable_auto_tool_choice,
-        tool_parser=args.tool_call_parser,
-        reasoning_parser=args.structured_outputs_config.reasoning_parser,
-        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-        enable_force_include_usage=args.enable_force_include_usage,
+    state.anthropic_serving_messages = (
+        AnthropicServingMessages(
+            engine_client,
+            state.openai_serving_models,
+            args.response_role,
+            request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            enable_auto_tools=args.enable_auto_tool_choice,
+            tool_parser=args.tool_call_parser,
+            reasoning_parser=args.structured_outputs_config.reasoning_parser,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "generate" in supported_tasks
+        else None
     )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
