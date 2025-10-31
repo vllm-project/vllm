@@ -48,6 +48,7 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
 from vllm.v1.attention.backends.mamba_attn import Mamba2AttentionBackend
 from vllm.v1.attention.backends.utils import (AttentionMetadataBuilder,
                                               CommonAttentionMetadata)
+from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
                                         KVCacheConfig, KVCacheSpec, MambaSpec,
@@ -75,7 +76,8 @@ from vllm.distributed.parallel_state import (
     get_tknp_rank, 
     get_tknp_world_size, 
     get_tknp_group, 
-    is_tknp_initialized
+    is_tknp_initialized,
+    is_root_rank,
 )
 
 import torch.distributed as dist
@@ -327,10 +329,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.shared_kv_cache_layers: dict[str, str] = {}
         
         # TKNP
-        if not is_tknp_initialized():
-            self.root_rank = True
-        else:
-            self.root_rank = get_tknp_rank() == 0
+        self.root_rank = is_root_rank()
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -590,6 +589,224 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         return cu_num_tokens, arange
 
+    def _maybe_reorder_requests_for_token_parallel(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> bool:
+        """Group requests by token-parallel rank for contiguous token layout."""
+        if (not is_tknp_initialized()
+                or get_tknp_world_size() <= 1
+                or not scheduler_output.token_parallel_allocations):
+            return False
+
+        world_size = get_tknp_world_size()
+        rank_to_req_ids: list[list[str]] = [[] for _ in range(world_size)]
+        for alloc in scheduler_output.token_parallel_allocations:
+            rank = alloc.token_parallel_rank % world_size
+            # Skip requests that are no longer in the batch.
+            if alloc.req_id not in self.input_batch.req_id_to_index:
+                continue
+            rank_to_req_ids[rank].append(alloc.req_id)
+
+        ordered_req_ids: list[str] = []
+        seen: set[str] = set()
+        for rank_list in rank_to_req_ids:
+            for req_id in rank_list:
+                if req_id in seen:
+                    continue
+                ordered_req_ids.append(req_id)
+                seen.add(req_id)
+
+        # Append remaining requests (e.g., unscheduled this step) to preserve batch.
+        for req_id in self.input_batch.req_ids:
+            if req_id not in seen and req_id in self.input_batch.req_id_to_index:
+                ordered_req_ids.append(req_id)
+                seen.add(req_id)
+
+        num_reqs = self.input_batch.num_reqs
+        if not ordered_req_ids or len(ordered_req_ids) < num_reqs:
+            return False
+
+        made_swaps = False
+        # Perform in-place swaps to realise the desired ordering.
+        for target_pos, req_id in enumerate(ordered_req_ids[:num_reqs]):
+            current_idx = self.input_batch.req_id_to_index.get(req_id)
+            if current_idx is None or current_idx == target_pos:
+                continue
+            self.input_batch.swap_states(target_pos, current_idx)
+            made_swaps = True
+
+        return made_swaps
+
+    def _build_token_parallel_metadata_prefill(
+        self,
+        scheduler_output: "SchedulerOutput",
+        num_scheduled_tokens: np.ndarray,
+        total_num_scheduled_tokens: int,
+    ) -> TokenParallelMetadata:
+        world_size = get_tknp_world_size()
+        rank_tokens = [0] * world_size
+        rank_request_indices: list[list[int]] = [[] for _ in range(world_size)]
+        request_to_rank: list[int] = []
+        rank_token_spans: list[list[tuple[int, int]]] = [[] for _ in range(world_size)]
+
+        alloc_map: dict[str, int] = {}
+        if scheduler_output.token_parallel_allocations:
+            for alloc in scheduler_output.token_parallel_allocations:
+                alloc_map[alloc.req_id] = alloc.token_parallel_rank % world_size
+
+        req_ids_local = self.input_batch.req_ids[:self.input_batch.num_reqs]
+        for idx, req_id in enumerate(req_ids_local):
+            rank = alloc_map.get(req_id, 0)
+            request_to_rank.append(rank)
+            rank_request_indices[rank].append(idx)
+            length = int(num_scheduled_tokens[idx])
+            rank_tokens[rank] += length
+            start = int(self.query_start_loc_cpu[idx])
+            rank_token_spans[rank].append((start, length))
+
+        rank_start_loc: list[int] = []
+        rank_end_loc: list[int] = []
+        running = 0
+        for count in rank_tokens:
+            rank_start_loc.append(running)
+            running += count
+            rank_end_loc.append(running)
+
+        local_rank = get_tknp_rank()
+        local_num_tokens = rank_tokens[local_rank]
+
+        return TokenParallelMetadata(
+            num_reqs=self.input_batch.num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            stage="prefill",
+            tknp_enabled=True,
+            tknp_rank=get_tknp_rank(),
+            token_parallel_world_size=world_size,
+            tokens_per_rank=rank_tokens,
+            rank_start_loc=rank_start_loc,
+            rank_end_loc=rank_end_loc,
+            request_to_rank=request_to_rank,
+            rank_request_indices=rank_request_indices,
+             rank_token_spans=rank_token_spans,
+             local_num_tokens=local_num_tokens,
+            root_rank=0,
+        )
+
+    def _slice_positions_for_token_parallel(
+        self,
+        positions: torch.Tensor,
+        tknp_metadata: Optional[TokenParallelMetadata],
+        num_input_tokens: int,
+    ) -> torch.Tensor:
+        if (tknp_metadata is None or not tknp_metadata.tknp_enabled
+                or tknp_metadata.rank_start_loc is None
+                or tknp_metadata.rank_end_loc is None):
+            return positions
+
+        rank = (tknp_metadata.tknp_rank
+                if tknp_metadata.tknp_rank is not None else get_tknp_rank())
+        if rank >= len(tknp_metadata.rank_start_loc):
+            return positions
+
+        start = tknp_metadata.rank_start_loc[rank]
+        end = tknp_metadata.rank_end_loc[rank]
+        if start == end:
+            if positions.dim() == 1:
+                return positions.new_empty((0, ))
+            return positions.new_empty(
+                (positions.size(0), 0), dtype=positions.dtype)
+
+        if end > (positions.size(0) if positions.dim() == 1 else
+                  positions.size(1)):
+            end = positions.size(0) if positions.dim() == 1 else positions.size(1)
+        if start < 0:
+            start = 0
+
+        return (positions[start:end] if positions.dim() == 1 else
+                positions[:, start:end])
+
+    def _slice_flash_attention_metadata_for_rank(
+        self,
+        metadata: FlashAttentionMetadata,
+        tknp_metadata: TokenParallelMetadata,
+    ) -> FlashAttentionMetadata:
+        if (tknp_metadata.tokens_per_rank is None
+                or tknp_metadata.rank_request_indices is None
+                or tknp_metadata.rank_start_loc is None
+                or tknp_metadata.rank_end_loc is None):
+            return metadata
+
+        rank = (tknp_metadata.tknp_rank
+                if tknp_metadata.tknp_rank is not None else get_tknp_rank())
+        if rank >= len(tknp_metadata.tokens_per_rank):
+            return metadata
+
+        request_indices = tknp_metadata.rank_request_indices[rank]
+        device = metadata.seq_lens.device
+
+        if not request_indices:
+            empty_seq_lens = metadata.seq_lens.new_zeros((0, ))
+            metadata.seq_lens = empty_seq_lens
+            metadata.query_start_loc = metadata.query_start_loc.new_zeros((1, ))
+            metadata.num_reqs = 0
+            metadata.num_actual_tokens = 0
+            metadata.max_query_len = 0
+            metadata.max_seq_len = 0
+            metadata.slot_mapping = metadata.slot_mapping[:0]
+            metadata.block_table = metadata.block_table[:0]
+            metadata.scheduler_metadata = None
+            metadata.prefix_scheduler_metadata = None
+            metadata.cu_prefix_query_lens = None
+            metadata.prefix_kv_lens = None
+            metadata.suffix_kv_lens = None
+            tknp_metadata.local_seq_lens = empty_seq_lens
+            tknp_metadata.local_query_start_loc = metadata.query_start_loc
+            tknp_metadata.local_num_tokens = 0
+            return metadata
+
+        index_tensor = torch.tensor(request_indices,
+                                    dtype=torch.int64,
+                                    device=device)
+        local_seq_lens = torch.index_select(metadata.seq_lens, 0,
+                                            index_tensor)
+        local_query_start_loc = torch.zeros(
+            (local_seq_lens.numel() + 1, ),
+            dtype=metadata.query_start_loc.dtype,
+            device=metadata.query_start_loc.device,
+        )
+        if local_seq_lens.numel() > 0:
+            torch.cumsum(local_seq_lens,
+                         dim=0,
+                         out=local_query_start_loc[1:])
+
+        metadata.seq_lens = local_seq_lens
+        metadata.query_start_loc = local_query_start_loc
+        metadata.num_reqs = local_seq_lens.numel()
+        metadata.num_actual_tokens = int(local_seq_lens.sum().item())
+        max_len = int(local_seq_lens.max().item()) if local_seq_lens.numel() > 0 else 0
+        metadata.max_query_len = max_len
+        metadata.max_seq_len = max_len
+
+        start = tknp_metadata.rank_start_loc[rank]
+        end = tknp_metadata.rank_end_loc[rank]
+        metadata.slot_mapping = metadata.slot_mapping[start:end]
+        metadata.block_table = metadata.block_table.index_select(
+            0, index_tensor)
+
+        if metadata.scheduler_metadata is not None:
+            metadata.scheduler_metadata = torch.index_select(
+                metadata.scheduler_metadata, 0, index_tensor)
+        if metadata.prefix_scheduler_metadata is not None:
+            metadata.prefix_scheduler_metadata = torch.index_select(
+                metadata.prefix_scheduler_metadata, 0, index_tensor)
+
+        tknp_metadata.local_seq_lens = local_seq_lens
+        tknp_metadata.local_query_start_loc = local_query_start_loc
+        tknp_metadata.local_num_tokens = metadata.num_actual_tokens
+
+        return metadata
+
     def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -607,6 +824,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        reordered = self._maybe_reorder_requests_for_token_parallel(
+            scheduler_output)
+        if reordered:
+            self.input_batch.refresh_metadata()
+
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
@@ -616,6 +838,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
         num_scheduled_tokens = np.array(tokens, dtype=np.int32)
         max_num_scheduled_tokens = max(tokens)
+
+        token_parallel_enabled = (is_tknp_initialized()
+                                  and get_tknp_world_size() > 1)
+        tknp_metadata: Optional[TokenParallelMetadata] = None
+        if token_parallel_enabled:
+            tknp_metadata = self._build_token_parallel_metadata_prefill(
+                scheduler_output,
+                num_scheduled_tokens,
+                int(total_num_scheduled_tokens),
+            )
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
@@ -745,6 +977,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 common_attn_metadata=common_attn_metadata,
             ))
 
+            if (token_parallel_enabled and isinstance(attn_metadata_i,
+                                                      FlashAttentionMetadata)
+                    and tknp_metadata is not None):
+                attn_metadata_i = self._slice_flash_attention_metadata_for_rank(
+                    attn_metadata_i, tknp_metadata)
+
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -780,8 +1018,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.lora_config:
             self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
+        # TKNP metadata
+        if not token_parallel_enabled:
+            tknp_metadata = TokenParallelMetadata(
+                num_reqs=num_reqs,
+                num_actual_tokens=int(total_num_scheduled_tokens),
+                tknp_enabled=is_tknp_initialized(),
+                tknp_rank=get_tknp_rank() if is_tknp_initialized() else None,
+                token_parallel_world_size=get_tknp_world_size()
+                if is_tknp_initialized() else 1,
+            )
+        assert tknp_metadata is not None
+
         return (attn_metadata, attention_cuda_graphs, logits_indices,
-                spec_decode_metadata, num_scheduled_tokens)
+                spec_decode_metadata, num_scheduled_tokens, tknp_metadata)
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -1303,7 +1553,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata,
-         num_scheduled_tokens_np) = (self._prepare_inputs(scheduler_output))
+         num_scheduled_tokens_np, tknp_metadata) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1361,6 +1611,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             positions = self.positions[:num_input_tokens]
 
+        if tknp_metadata and tknp_metadata.tknp_enabled:
+            positions = self._slice_positions_for_token_parallel(
+                positions, tknp_metadata, num_input_tokens)
+
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
         else:
@@ -1380,20 +1634,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 skip_cuda_graphs=skip_cuda_graphs,
+                tknp_metadata=tknp_metadata,
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
             # TKNP DEBUG START
             # print(f"Attention metadata: {attn_metadata}")
-            attn_metadata_keys = list(attn_metadata.keys())
+            # attn_metadata_keys = list(attn_metadata.keys())
             # print all the keys 
             # print(f"Attention metadata keys: {attn_metadata_keys}")
-            print(f"[gpu_model_runner.py] Scheduler output: {scheduler_output}")
-            print(f"[gpu_model_runner.py] Attention metadata [{attn_metadata_keys[0]}]: {attn_metadata[attn_metadata_keys[0]]}")
+            # print(f"[gpu_model_runner.py] Scheduler output: {scheduler_output}")
+            # print(f"[gpu_model_runner.py] Attention metadata [{attn_metadata_keys[0]}]: {attn_metadata[attn_metadata_keys[0]]}")
             # logger.info(f"Input ids shape: {input_ids.shape if input_ids is not None else 'N/A'}")
             # logger.info(f"Positions shape: {positions.shape if positions is not None else 'N/A'}")
             # TKNP DEBUG END
-
 
             model_output = self.model(
                 input_ids=input_ids,
@@ -1985,6 +2239,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                         dtype=np.int32)
 
         attn_metadata: Optional[dict[str, Any]] = None
+        tknp_metadata: Optional[TokenParallelMetadata] = None
+        tknp_metadata: Optional[TokenParallelMetadata] = None
         
         if capture_attn_cudagraph:
             attn_metadata = {}
@@ -2027,34 +2283,56 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 positions = self.mrope_positions[:, :num_tokens]
             else:
                 positions = self.positions[:num_tokens]
-                
-            # DEBUG TKNP START
+
             if is_tknp_initialized():
-                tknp_world_size = get_tknp_world_size()
-                tknp_rank = get_tknp_rank()
-                
-                # Calculate tokens per rank
-                tokens_per_rank = num_tokens // tknp_world_size
-                start_idx = tknp_rank * tokens_per_rank
-                end_idx = start_idx + tokens_per_rank
-                
-                # Handle remainder tokens in the last rank
-                if tknp_rank == tknp_world_size - 1:
-                    end_idx = num_tokens
-                
-                # Slice positions and input_ids/inputs_embeds
+                world_size = get_tknp_world_size()
+                rank = get_tknp_rank()
+                base = num_tokens // world_size
+                remainder = num_tokens % world_size
+                tokens_per_rank = [
+                    base + (1 if r < remainder else 0) for r in range(world_size)
+                ]
+                rank_start_loc: list[int] = []
+                rank_end_loc: list[int] = []
+                offset = 0
+                for count in tokens_per_rank:
+                    rank_start_loc.append(offset)
+                    offset += count
+                    rank_end_loc.append(offset)
+                local_start = rank_start_loc[rank]
+                local_end = rank_end_loc[rank]
+
+                # if input_ids is not None:
+                #     input_ids = input_ids[local_start:local_end]
+                # if inputs_embeds is not None:
+                #     inputs_embeds = inputs_embeds[local_start:local_end]
                 if self.uses_mrope:
-                    positions = self.mrope_positions[:, start_idx:end_idx]
+                    positions = positions[:, local_start:local_end]
                 else:
-                    positions = self.positions[start_idx:end_idx]
-                    
+                    positions = positions[local_start:local_end]
+
+                request_to_rank = [idx % world_size for idx in range(num_reqs)]
+                rank_request_indices = [[] for _ in range(world_size)]
+                for idx, r in enumerate(request_to_rank):
+                    rank_request_indices[r].append(idx)
+
                 tknp_metadata = TokenParallelMetadata(
                     num_reqs=num_reqs,
                     num_actual_tokens=num_tokens,
+                    stage="prefill",
+                    tknp_enabled=True,
+                    tknp_rank=rank,
+                    token_parallel_world_size=world_size,
+                    tokens_per_rank=tokens_per_rank,
+                    rank_start_loc=rank_start_loc,
+                    rank_end_loc=rank_end_loc,
+                    request_to_rank=request_to_rank,
+                    rank_request_indices=rank_request_indices,
+                    rank_token_spans=[[] for _ in range(world_size)],
+                    local_num_tokens=tokens_per_rank[rank],
                     _dummy_run=True,
                 )
-            # DEBUG TKNP END
-
+                
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
@@ -2112,6 +2390,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # The dummy hidden states may contain special values,
         # like `inf` or `nan`.
         # To avoid breaking the sampler, we use a random tensor here instead.
+        if not self.root_rank:
+            return None
+        
         hidden_states = torch.rand_like(hidden_states)
 
         logits = self.model.compute_logits(hidden_states, None)

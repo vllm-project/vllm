@@ -901,6 +901,15 @@ def is_tknp_initialized() -> bool:
     """Check if token parallel is initialized."""
     return _TKNP is not None
 
+def is_root_rank() -> bool:
+    """Check if the current rank is the root rank (rank 0) in the token parallel world group. 
+        If token parallel is not initialized, always return True. 
+    """
+    
+    if not is_tknp_initialized():
+        return True
+    return get_tknp_rank() == 0
+
 @contextmanager
 def graph_capture(device: torch.device):
     """

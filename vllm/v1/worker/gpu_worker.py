@@ -41,7 +41,8 @@ from vllm.distributed.parallel_state import (
     get_tknp_rank, 
     get_tknp_world_size, 
     get_tknp_group, 
-    is_tknp_initialized
+    is_tknp_initialized,
+    is_root_rank,
 )
 
 def _print_worker_rank_info(rank: int) -> None:
@@ -126,10 +127,7 @@ class Worker(WorkerBase):
             self.profiler = None
             
         # TKNP
-        if not is_tknp_initialized():
-            self.root_rank = True
-        else:
-            self.root_rank = get_tknp_rank() == 0
+        self.root_rank = is_root_rank()
 
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator

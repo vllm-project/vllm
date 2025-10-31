@@ -27,13 +27,25 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 @dataclass
 class TokenParallelMetadata:
-    """
-    Metadata for layers using Token Parallelism.
-    """
-    num_reqs: int  # Number of requests (tokens) being processed in the current forward pass.
-    _dummy_run: bool = False  # Internal flag for dummy runs.
-    num_actual_tokens: Optional[int] = None  # Actual number of tokens (if different from num_reqs).
-    stage: str = "prefill"  # Current stage: "prefill" or "decode".
+    """Metadata for layers using Token Parallelism."""
+
+    num_reqs: int
+    num_actual_tokens: Optional[int] = None
+    stage: str = "prefill"
+    tknp_enabled: bool = False
+    tknp_rank: Optional[int] = None
+    token_parallel_world_size: int = 1
+    tokens_per_rank: Optional[list[int]] = None
+    rank_start_loc: Optional[list[int]] = None
+    rank_end_loc: Optional[list[int]] = None
+    request_to_rank: Optional[list[int]] = None
+    rank_request_indices: Optional[list[list[int]]] = None
+    rank_token_spans: Optional[list[list[tuple[int, int]]]] = None
+    local_query_start_loc: Optional[torch.Tensor] = None
+    local_seq_lens: Optional[torch.Tensor] = None
+    local_num_tokens: Optional[int] = None
+    root_rank: int = 0
+    _dummy_run: bool = False
 
 
 @dataclass

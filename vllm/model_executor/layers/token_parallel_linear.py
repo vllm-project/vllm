@@ -26,7 +26,11 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank
 )
 
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import (
+    ForwardContext,
+    TokenParallelMetadata,
+    get_forward_context,
+)
 
 from vllm.logger import init_logger
 
@@ -117,52 +121,112 @@ class TokenParallelQKVLinear(QKVParallelLinear):
             containing the QKV projections for the tokens assigned to the current rank.
         """
         # If token parallelism is not enabled, act as a standard QKVParallelLinear layer.
-        if not self.is_tknp_enabled:
+        if not self.is_tknp_enabled or self.tknp_world_size == 1:
             return super().forward(x)
 
-        # === Token Parallelism is ENABLED ===
-        
-        # 1. Validate input shape for even distribution
-        # num_tokens, _ = x.shape
-        if get_forward_context().tknp_metadata._dummy_run:
-            num_reqs = get_forward_context().tknp_metadata.num_actual_tokens
-        else:
-            num_reqs = get_forward_context().tknp_metadata.num_reqs
-            
-        # TODO: we need to figure out if we are in prefill or decode 
-        # if prefill, we send the all qkv data to respective ranks using their seq lens
-        # if decode, we send only 1 token per rank to respective ranks
-        
-        assert num_reqs % self.tknp_world_size == 0, (
-            f"Number of requests ({num_reqs}) must be divisible by "
-            f"token parallel world size ({self.tknp_world_size})."
-        )
-        
-        # 2. Prepare tensors for the scatter operation
+        metadata = getattr(get_forward_context(), "tknp_metadata", None)
+        if (metadata is None or metadata._dummy_run
+                or metadata.tokens_per_rank is None
+                or metadata.rank_start_loc is None
+                or metadata.stage != "prefill"):
+            return self._fallback_forward(x, metadata)
+
+        tokens_per_rank = metadata.tokens_per_rank
+        total_tokens = sum(tokens_per_rank)
         if self.is_root_rank:
-            # Root rank computes the full QKV projection and chunks it.
-            qkv_full, bias = super().forward(x)
-            qkv_chunks = list(torch.chunk(qkv_full, self.tknp_world_size, dim=0))
-            qkv_local = qkv_chunks[0]
-        else:
-            # Non-root ranks prepare an empty tensor to receive their partition.
-            local_num_tokens = num_reqs // self.tknp_world_size
+            if x is None:
+                raise RuntimeError(
+                    "Root rank must receive hidden states for TKNP prefill.")
+            if total_tokens != x.size(0):
+                return self._fallback_forward(x, metadata)
+        elif x is not None and total_tokens != x.size(0):
+            return self._fallback_forward(x, metadata)
+
+        if self.is_root_rank:
+            qkv_full, _ = super().forward(x)
+            recv_count = tokens_per_rank[self.tknp_rank]
             qkv_local = torch.empty(
-                (local_num_tokens, self.qkv_size_per_partition),
+                (recv_count, qkv_full.size(1)),
+                dtype=qkv_full.dtype,
+                device=qkv_full.device,
+            )
+            send_splits = tokens_per_rank
+            recv_splits = [0] * self.tknp_world_size
+            recv_splits[self.tknp_rank] = recv_count
+            dist.all_to_all_single(
+                qkv_local,
+                qkv_full,
+                output_split_sizes=recv_splits,
+                input_split_sizes=send_splits,
+                group=self.pg,
+            )
+            return qkv_local, None
+        
+        else:
+            recv_count = tokens_per_rank[self.tknp_rank]
+            if recv_count == 0:
+                qkv_local = torch.empty(
+                    (0, self.qkv_size_per_partition),
+                    dtype=self.params_dtype,
+                    device=self.device,
+                )
+            else:
+                qkv_local = torch.empty(
+                    (recv_count, self.qkv_size_per_partition),
+                    dtype=self.params_dtype,
+                    device=self.device,
+                )
+            send_splits = [0] * self.tknp_world_size
+            recv_splits = [0] * self.tknp_world_size
+            recv_splits[metadata.root_rank] = recv_count
+            empty_send = torch.empty(
+                (0, self.qkv_size_per_partition),
                 dtype=self.params_dtype,
                 device=self.device,
             )
-            # The scatter_list is only needed on the source rank.
+            dist.all_to_all_single(
+                qkv_local,
+                empty_send,
+                output_split_sizes=recv_splits,
+                input_split_sizes=send_splits,
+                group=self.pg,
+            )
+            return qkv_local, None
+
+    def _fallback_forward(
+        self,
+        x: torch.Tensor,
+        metadata: Optional[TokenParallelMetadata],
+    ) -> tuple[torch.Tensor, None]:
+        """Fallback path that mimics the legacy even scatter."""
+        if self.is_root_rank:
+            if x is None:
+                raise RuntimeError("Root rank received no input tensors.")
+            qkv_full, _ = super().forward(x)
+            qkv_chunks = list(torch.chunk(qkv_full, self.tknp_world_size, dim=0))
+            qkv_local = qkv_chunks[self.tknp_rank]
+        else:
+            total = 0
+            if metadata and metadata.num_actual_tokens is not None:
+                total = metadata.num_actual_tokens
+            elif x is not None:
+                total = x.size(0)
+            base = total // self.tknp_world_size
+            remainder = total % self.tknp_world_size
+            local_tokens = base + (1 if self.tknp_rank < remainder else 0)
+            qkv_local = torch.empty(
+                (local_tokens, self.qkv_size_per_partition),
+                dtype=self.params_dtype,
+                device=self.device,
+            )
             qkv_chunks = None
-            
-        # 3. Distribute the QKV tensor from the root to all ranks
+
         dist.scatter(
             tensor=qkv_local,
             scatter_list=qkv_chunks,
-            src=0,  # Root rank (0) in the token parallel group
+            src=0,
             group=self.pg,
         )
-
         return qkv_local, None
 
     def extra_repr(self) -> str:
@@ -203,19 +267,16 @@ class TokenParallelRowLinear(RowParallelLinear):
         self.tknp_group = get_tknp_group() if self.is_tknp_enabled else None
         self.pg = self.tknp_group.device_group if hasattr(self.tknp_group, 'device_group') else self.tknp_group
 
+        super().__init__(*args, **kwargs)
+        self.output_size_full = self.output_size
 
-        if self.is_root_rank:
-            # Root rank initializes the full RowParallelLinear layer with weights.
-            super().__init__(*args, **kwargs)
-        else:
-            # Non-root ranks do not have weights. They only participate in the
-            # gather operation. We avoid calling super().__init__() to save memory.
+        if not self.is_root_rank:
             self.register_parameter('weight', None)
-            self.register_parameter('bias', None)
+            if getattr(self, "bias", None) is not None:
+                self.register_parameter('bias', None)
 
         logger.debug(f"TokenParallelRowLinear initialized on rank {self.tknp_rank}, "
                      f"is_root_rank: {self.is_root_rank}")
-
 
     def forward(
         self,
@@ -229,8 +290,8 @@ class TokenParallelRowLinear(RowParallelLinear):
 
         Returns:
             - On the root rank: The final output tensor (or a tuple with bias)
-              of shape (num_global_tokens, output_size).
-            - On non-root ranks: None.
+            of shape (num_global_tokens, output_size).
+            - On non-root ranks: None (or (None, None) if bias is expected).
         """
         # If token parallelism is not enabled, act as a standard RowParallelLinear layer.
         if not self.is_tknp_enabled:
@@ -238,36 +299,76 @@ class TokenParallelRowLinear(RowParallelLinear):
 
         # === Token Parallelism is ENABLED ===
         
-        # 1. Prepare for the gather operation.
+        metadata = getattr(get_forward_context(), "tknp_metadata", None)
+        if (metadata is None or not metadata.tknp_enabled
+                or metadata.tokens_per_rank is None):
+            return super().forward(x)
+
+        tokens_per_rank = metadata.tokens_per_rank
+        root_rank = metadata.root_rank if metadata.root_rank is not None else 0
+        local_count = tokens_per_rank[self.tknp_rank]
+        hidden_size = x.size(-1)
+
+        # Validate input shape
+        if x.size(0) != local_count:
+            logger.warning(
+                f"Rank {self.tknp_rank}: Expected {local_count} tokens, got {x.size(0)}. "
+                f"Falling back to standard forward."
+            )
+            return super().forward(x)
+
+        # Option 1: Use all_to_all_single (More efficient for variable sizes)
+        # This is the RECOMMENDED approach
         if self.is_root_rank:
-            # The root rank prepares a list of tensors to receive data from all ranks.
-            gather_list = [torch.empty_like(x) for _ in range(self.tknp_world_size)]
-        else:
-            # Non-root ranks don't need a receive list.
-            gather_list = None
-
-        # 2. Gather all local input tensors onto the root rank.
-        # This is a blocking operation. All ranks in the group must call it.
-        dist.gather(
-            tensor=x,
-            gather_list=gather_list,
-            dst=0,  # Destination is the root rank (0) in the token parallel group
-            group=self.pg,
-        )
-
-        # 3. Compute and return the result on the root rank.
-        if self.is_root_rank:
-            # The gather_list on the root rank is now populated.
-            # Concatenate the gathered tensors to form the global input.
-            global_input = torch.cat(gather_list, dim=0)
-
-            # Perform the forward pass on the complete tensor.
-            # The base class's forward method will handle tensor-parallel all-reduce.
-            output = super().forward(global_input)
+            # Root rank receives all tokens
+            total_tokens = sum(tokens_per_rank)
+            gathered_input = torch.empty(
+                (total_tokens, hidden_size),
+                dtype=x.dtype,
+                device=x.device,
+            )
+            
+            # Setup splits: root sends nothing, receives from all ranks
+            send_splits = [0] * self.tknp_world_size
+            send_splits[self.tknp_rank] = local_count  # Send own data
+            recv_splits = tokens_per_rank  # Receive from all ranks
+            
+            dist.all_to_all_single(
+                gathered_input,
+                x,
+                output_split_sizes=recv_splits,
+                input_split_sizes=send_splits,
+                group=self.pg,
+            )
+            
+            # Perform the row-parallel linear projection
+            output = super().forward(gathered_input)
             return output
         else:
-            # Non-root ranks have sent their data and are done. They return None.
-            return None, None
+            # Non-root ranks send their data to root
+            send_splits = [0] * self.tknp_world_size
+            send_splits[root_rank] = local_count  # Send to root
+            recv_splits = [0] * self.tknp_world_size  # Receive nothing
+            
+            # Create empty receive buffer (won't be used)
+            empty_recv = torch.empty(
+                (0, hidden_size),
+                dtype=x.dtype,
+                device=x.device,
+            )
+            
+            dist.all_to_all_single(
+                empty_recv,
+                x,
+                output_split_sizes=recv_splits,
+                input_split_sizes=send_splits,
+                group=self.pg,
+            )
+            
+            # Return None (or (None, None) for bias compatibility)
+            # if hasattr(self, 'bias') and self.bias is not None:
+            #     return None, None
+            return None, None 
     
     def extra_repr(self) -> str:
         """String representation for debugging."""
@@ -348,6 +449,21 @@ def init_tknp_layer(cls_to_wrap: type) -> type:
         def __init__(self, *args, **kwargs):
             super().__init__()
 
+            class _TokenParallelIdentityQuantMethod:
+                def __init__(self, wrapper: "TokenParallelWrapper"):
+                    self.wrapper = wrapper
+                    self.quant_config = None
+
+                def apply(self,
+                          layer: nn.Module,
+                          x: torch.Tensor,
+                          bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+                    vocab = self.wrapper.embedding_dim
+                    if vocab is None:
+                        vocab = x.size(-1)
+                    output_shape = (x.size(0), vocab)
+                    return x.new_zeros(output_shape)
+
             # 1. Check for token parallel init and ranks
             self.is_tknp_enabled = is_tknp_initialized()
             self.tknp_rank = get_tknp_rank() if self.is_tknp_enabled else 0
@@ -374,6 +490,9 @@ def init_tknp_layer(cls_to_wrap: type) -> type:
                 self._return_tuple = True
             else:
                 self._return_tuple = False
+
+            if not self.is_root_rank:
+                self.quant_method = _TokenParallelIdentityQuantMethod(self)
             # if self.embedding_dim:
             #     logger.info(f"TKNP RANK {self.tknp_rank}: Initialized TokenParallelWrapper for {cls_to_wrap.__name__} with embedding_dim={self.embedding_dim}")
 
