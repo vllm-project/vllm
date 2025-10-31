@@ -132,6 +132,17 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     void* map_addr = (void*)((uintptr_t)d_mem + allocated_size);
     CUDA_CHECK(cuMemMap(map_addr, chunk_sizes[i], 0, *(p_memHandle[i]), 0));
     if (error_code != 0) {
+      // unmap previously mapped chunks
+      unsigned long long unmapped_size = 0;
+      for (auto j = 0; j < i; ++j) {
+        void* unmap_addr = (void*)((uintptr_t)d_mem + unmapped_size);
+        cuMemUnmap(unmap_addr, chunk_sizes[j]);
+        unmapped_size += chunk_sizes[j];
+      }
+      // release all created handles
+      for (auto j = 0; j < num_chunks; ++j) {
+        cuMemRelease(*(p_memHandle[j]));
+      }
       return;
     }
     allocated_size += chunk_sizes[i];
@@ -437,20 +448,22 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
       (CUmemGenericAllocationHandle**)malloc(
           num_chunks * sizeof(CUmemGenericAllocationHandle*));
   if (p_memHandle == nullptr) {
-    PyGILState_Release(gstate);
     Py_DECREF(py_ptr);
     Py_DECREF(py_result);
-    std::cerr << "ERROR: malloc failed for p_memHandle in my_free." << std::endl;
+    PyGILState_Release(gstate);
+    std::cerr << "ERROR: malloc failed for p_memHandle in my_free."
+              << std::endl;
     return;
   }
   unsigned long long* chunk_sizes =
       (unsigned long long*)malloc(num_chunks * sizeof(unsigned long long));
   if (chunk_sizes == nullptr) {
     free(p_memHandle);
-    PyGILState_Release(gstate);
     Py_DECREF(py_ptr);
     Py_DECREF(py_result);
-    std::cerr << "ERROR: malloc failed for chunk_sizes in my_free." << std::endl;
+    PyGILState_Release(gstate);
+    std::cerr << "ERROR: malloc failed for chunk_sizes in my_free."
+              << std::endl;
     return;
   }
   for (Py_ssize_t i = 0; i < num_chunks; ++i) {
@@ -462,18 +475,19 @@ void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
     chunk_sizes[i] = (unsigned long long)PyLong_AsUnsignedLongLong(size_py);
   }
 
-  // Now we can release the GIL and drop temporary Python refs.
-  PyGILState_Release(gstate);
+  // Drop temporary Python refs, then release the GIL before calling into
+  // non-Python APIs.
   Py_DECREF(py_ptr);
   Py_DECREF(py_result);
+  PyGILState_Release(gstate);
 
   unmap_and_release(device, size, d_mem, p_memHandle, chunk_sizes, num_chunks);
 #else
-  // Non-ROCm path: simple integer handle already extracted; release GIL and
-  // proceed.
-  PyGILState_Release(gstate);
+  // Non-ROCm path: simple integer handle already extracted; drop temporary
+  // Python refs while still holding the GIL, then release it.
   Py_DECREF(py_ptr);
   Py_DECREF(py_result);
+  PyGILState_Release(gstate);
 
   CUmemGenericAllocationHandle* p_memHandle =
       (CUmemGenericAllocationHandle*)recv_p_memHandle;
