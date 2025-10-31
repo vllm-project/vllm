@@ -1717,21 +1717,6 @@ class EngineArgs:
             )
             return False
 
-        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
-        if self.speculative_config is not None:
-            # speculative_config could still be a dict at this point
-            if isinstance(self.speculative_config, dict):
-                method = self.speculative_config.get("method", None)
-            else:
-                method = self.speculative_config.method
-
-            if method == "draft_model":
-                raise NotImplementedError(
-                    "Draft model speculative decoding is not supported yet. "
-                    "Please consider using other speculative decoding methods "
-                    "such as ngram, medusa, eagle, or mtp."
-                )
-
         V1_BACKENDS = [
             "FLASH_ATTN",
             "PALLAS",

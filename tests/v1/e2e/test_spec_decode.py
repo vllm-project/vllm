@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
+from dataclasses import dataclass
 from typing import Any
 
 import pytest
@@ -10,13 +11,17 @@ from tests.utils import get_attn_backend_list_based_on_platform, large_gpu_mark
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
 from vllm.assets.image import VLM_IMAGES_DIR
+from vllm.config.vllm import VllmConfig
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
+from vllm.v1.spec_decode.draft_model import create_vllm_config_for_draft_model
+from vllm.v1.spec_decode.metrics import compute_acceptance_len, compute_acceptance_rate
 
 MTP_SIMILARITY_RATE = 0.8
 
 
-def get_test_prompts(mm_enabled: bool):
+def get_test_prompts(mm_enabled: bool, quiet: bool = False):
     prompt_types = ["repeat", "sentence"]
     if mm_enabled:
         prompt_types.append("mm")
@@ -25,7 +30,9 @@ def get_test_prompts(mm_enabled: bool):
 
     random.seed(0)
     random_prompt_type_choices = random.choices(prompt_types, k=num_prompts)
-    print(f"Prompt types: {random_prompt_type_choices}")
+
+    if not quiet:
+        print(f"Prompt types: {random_prompt_type_choices}")
 
     # Generate a mixed batch of prompts, some of which can be easily
     # predicted by n-gram matching and some which likely cannot.
@@ -67,7 +74,15 @@ def get_test_prompts(mm_enabled: bool):
 
 @pytest.fixture
 def sampling_config():
+    return greedy_sampling()
+
+
+def greedy_sampling() -> SamplingParams:
     return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
+
+
+def stochastic_sampling() -> SamplingParams:
+    return SamplingParams(temperature=1.0, max_tokens=10, ignore_eos=False)
 
 
 @pytest.fixture
@@ -422,3 +437,172 @@ def test_mtp_correctness(
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
+
+
+@dataclass
+class ArgsTest:
+    target_model: str
+    draft_model: str
+    sampling_config: SamplingParams
+    num_speculative_tokens: int
+    expected_acceptance_rate: float
+    expected_acceptance_len: float
+    # Defaults
+    target_tensor_parallel_size: int = 1
+    draft_tensor_parallel_size: int = 1
+    max_model_len: int = 1024
+    gpu_memory_utilization: float = 0.5
+
+
+cases = [
+    # Same model for draft and target, greedy sampling.
+    ArgsTest(
+        target_model="Qwen/Qwen3-0.6B",
+        draft_model="Qwen/Qwen3-0.6B",
+        sampling_config=greedy_sampling(),
+        num_speculative_tokens=3,  # K
+        expected_acceptance_len=3 + 1,  # K + 1
+        expected_acceptance_rate=1.0,
+    ),
+    # Smaller draft model, stochastic sampling.
+    ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        draft_model="Qwen/Qwen3-0.6B",
+        sampling_config=stochastic_sampling(),
+        num_speculative_tokens=3,
+        expected_acceptance_len=2.8 + 1,
+        expected_acceptance_rate=0.9,
+    ),
+]
+
+
+@pytest.mark.parametrize("args", cases)
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
+    assert_draft_model_correctness(args, enforce_eager)
+
+
+@pytest.mark.parametrize(
+    "models",
+    [
+        # target_model,         draft_model
+        ("Qwen/Qwen3-1.7B-FP8", "Qwen/Qwen3-0.6B"),  # target quantized
+        ("Qwen/Qwen3-1.7B", "Qwen/Qwen3-0.6B-FP8"),  # draft quantized
+    ],
+    ids=["target_quantized", "draft_quantized"],
+)
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
+    tgt_model, draft_model = models
+    sd_case = ArgsTest(
+        target_model=tgt_model,
+        draft_model=draft_model,
+        **some_high_acceptance_metrics(),
+    )
+    assert_draft_model_correctness(sd_case, enforce_eager)
+
+
+def test_draft_model_tensor_parallelism():
+    """Ensure spec decode works when running with TP > 1."""
+    sd_case = ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        target_tensor_parallel_size=2,
+        draft_model="Qwen/Qwen3-0.6B",
+        draft_tensor_parallel_size=2,
+        **some_high_acceptance_metrics(),
+    )
+    assert_draft_model_correctness(sd_case, enforce_eager=False)
+
+
+def test_draft_model_engine_args_tensor_parallelism():
+    """Ensure the vllm_config for the draft model is created correctly,
+    and independently of the target model (quantization, TP, etc.)"""
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B-FP8",  # <<< tgt quantized
+        tensor_parallel_size=4,
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",  # <<< draft not quantized
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "draft_tensor_parallel_size": 1,  # <<< valid arg name
+        },
+    )
+    tgt_vllm_config: VllmConfig = engine_args.create_engine_config()
+    assert tgt_vllm_config.parallel_config.tensor_parallel_size == 4
+    assert tgt_vllm_config.quant_config.get_name() == "fp8"
+
+    draft_vllm_config: VllmConfig = create_vllm_config_for_draft_model(tgt_vllm_config)
+    assert draft_vllm_config.parallel_config.tensor_parallel_size == 1
+    assert draft_vllm_config.quant_config is None
+
+
+def test_draft_model_engine_args_rejects_invalid_tp_argname():
+    """The user should pass "draft_tensor_parallel_size" rather than
+    "tensor_parallel_size". We enforce this with validation."""
+
+    engine_args = EngineArgs(
+        model="Qwen/Qwen3-1.7B",
+        tensor_parallel_size=1,
+        speculative_config={
+            "model": "Qwen/Qwen3-0.6B",
+            "method": "draft_model",
+            "num_speculative_tokens": 3,
+            "tensor_parallel_size": 1,  # <<< invalid arg name
+        },
+    )
+    with pytest.raises(ValueError):
+        engine_args.create_engine_config()
+
+
+def assert_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
+    """Compare the outputs using and not using speculative decoding.
+    In the greedy decoding case, the outputs must match EXACTLY."""
+    test_prompts = get_test_prompts(mm_enabled=False, quiet=True)
+
+    spec_llm = LLM(
+        model=args.target_model,
+        speculative_config={
+            "model": args.draft_model,
+            "method": "draft_model",
+            "num_speculative_tokens": args.num_speculative_tokens,
+            "max_model_len": args.max_model_len,
+            "enforce_eager": enforce_eager,
+            "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
+            "disable_padded_drafter_batch": True,
+            "max_num_seqs": 100,  # limit cudagraph capture runtime
+        },
+        max_model_len=args.max_model_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+        tensor_parallel_size=args.target_tensor_parallel_size,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,  # enables get_metrics()
+    )
+    # we don't check the outputs, only check the metrics
+    spec_llm.chat(test_prompts, args.sampling_config)
+    metrics = spec_llm.get_metrics()
+
+    acceptance_rate: float = compute_acceptance_rate(metrics)
+    acceptance_len: float = compute_acceptance_len(metrics)
+    del spec_llm  # CLEANUP
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    assert acceptance_rate >= args.expected_acceptance_rate
+    assert acceptance_len >= args.expected_acceptance_len
+
+    print(
+        f"spec-decode: target={args.target_model}, draft={args.draft_model}, "
+        f"temperature={args.sampling_config.temperature:.2f}, "
+        f"acceptance_rate={acceptance_rate:.2f}, "
+        f"acceptance_len={acceptance_len:.2f}, "
+    )
+
+
+def some_high_acceptance_metrics() -> dict:
+    return {
+        "sampling_config": greedy_sampling(),
+        "num_speculative_tokens": 3,
+        "expected_acceptance_len": 2.95 + 1,
+        "expected_acceptance_rate": 0.95,
+    }
