@@ -330,7 +330,7 @@ class CoreEngineActorManager:
             zmq_addr = get_engine_client_zmq_addr(
                 local_only=False,
                 host=vllm_config.parallel_config.data_parallel_master_ip,
-                port=vllm_config.fault_tolerance_config.fault_report_port,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
             )
             identity = generate_identity_group(
                 "core_engine_actor_manager", "clinet_guard", "report", 1

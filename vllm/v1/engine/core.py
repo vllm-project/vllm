@@ -28,7 +28,6 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import run_method
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -45,9 +44,11 @@ from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -68,6 +69,7 @@ from vllm.v1.serial_utils import (
     MsgpackDecoder,
     MsgpackEncoder,
     deserialize_method_call,
+    run_method,
     serialize_method_call,
 )
 from vllm.v1.structured_output import StructuredOutputManager
@@ -141,7 +143,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             try:
                 engine_exception = self.fault_signal_q.get_nowait()
                 logger.warning(
-                    "[EngineCoreGuard] Detected exception",
+                    "[EngineCoreGuard] Detected exception %s",
                     engine_exception,
                 )
                 self._report_client_exception(engine_exception)
@@ -279,7 +281,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             self.busy_loop_active.clear()
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
-            self.engine_input_q.put(None)
+            self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
             self._stop_worker_execution()
             try:
                 # Wait for engine to acknowledge the pause via fault_signal_q
@@ -349,8 +351,12 @@ def busy_loop_wrapper(busy_loop_func):
                         "instructions."
                     )
                     # Put running requests into waiting list.
-                    while self.scheduler.running:
-                        self.scheduler.preempt_request(time.monotonic())
+                    # while self.scheduler.running:
+                    #     self.scheduler.preempt_request(time.monotonic())
+                    # todo Changed to non-preemptive mode
+
+                    self.engine_finish_requests()
+                    # After pausing, discard the request
 
                     try:
                         # Block until recovery command received
@@ -1166,11 +1172,6 @@ class EngineCoreProc(EngineCore):
                 logger.debug("EngineCore waiting for work.")
                 waited = True
             req = self.input_queue.get()
-            if req is None:
-                # None represents an empty request, which generally indicates
-                # that the busy loop should be paused.
-                self._check_busy_loop_active()
-
             self._handle_client_request(*req)
 
         if waited:
@@ -1204,6 +1205,8 @@ class EngineCoreProc(EngineCore):
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
+        elif request_type == EngineCoreRequestType.PAUSE:
+            self._check_busy_loop_active()
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
@@ -1616,6 +1619,19 @@ class DPEngineCoreProc(EngineCoreProc):
             logger.info(
                 "Distributed environment reinitialized for DP rank %s", self.dp_rank
             )
+
+    def engine_finish_requests(self):
+        assert isinstance(self.scheduler, V1Scheduler)
+        engine_finish_outputs = EngineCoreOutputs()
+        engine_finish_outputs.engine_index = self.engine_index
+        for id in list(self.scheduler.requests.keys()):
+            self.scheduler.finish_requests(id, RequestStatus.FINISHED_ABORTED)
+            engine_finish_outputs.outputs.append(
+                EngineCoreOutput(
+                    request_id=id, finish_reason=FinishReason.ABORT, new_token_ids=[0]
+                )
+            )
+        self.output_queue.put((0, engine_finish_outputs))
 
 
 class DPEngineCoreActor(DPEngineCoreProc):
