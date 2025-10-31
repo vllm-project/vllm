@@ -76,6 +76,9 @@ class Scheduler(SchedulerInterface):
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
+        self.prefill_max_num_scheduled_tokens = (
+            self.scheduler_config.prefill_max_num_batched_tokens
+        )
         self.max_model_len = self.scheduler_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -179,6 +182,30 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
+        # Track whether there are any decode requests in the running queue
+        self._has_decode_reqs: bool = False
+
+    def _check_request_is_decode(self, request: Request) -> bool:
+        """Check if a request is in the decode phase.
+
+        Criteria:
+        The request has completed prompt computation and is generating output tokens
+        i.e., num_computed_tokens >= num_prompt_tokens
+        """
+        return request.num_computed_tokens >= request.num_prompt_tokens
+
+    def _update_has_decode_requests_flag(self) -> None:
+        """Update the _has_decode_reqs flag by checking all running requests.
+
+        This should only be called when we're uncertain about the flag's state,
+        such as after a batch of requests are preempted or resumed.
+        """
+        for request in self.running:
+            if self._check_request_is_decode(request):
+                self._has_decode_reqs = True
+                return
+        self._has_decode_reqs = False
+
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
@@ -198,7 +225,16 @@ class Scheduler(SchedulerInterface):
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
+
         token_budget = self.max_num_scheduled_tokens
+        # Check if there are any requests in the decode phase in the running queue
+        # when hybrid chunked prefill is enabled.
+        has_decode_requests = True
+        if self.scheduler_config.enable_hybrid_chunked_prefill:
+            has_decode_requests = self._has_decode_reqs
+            if not has_decode_requests:
+                token_budget = self.prefill_max_num_scheduled_tokens
+
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
         encoder_compute_budget = self.max_num_encoder_input_tokens
@@ -337,6 +373,10 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_compute_budget = new_encoder_compute_budget
 
+        # Update decode flag after preemptions if any decode requests were preempted
+        if preempted_reqs and self._has_decode_reqs:
+            self._update_has_decode_requests_flag()
+
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
         if self.lora_config:
@@ -459,6 +499,7 @@ class Scheduler(SchedulerInterface):
                     # pooling requests to be chunked
                     if (
                         not self.scheduler_config.chunked_prefill_enabled
+                        and not self.scheduler_config.enable_hybrid_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
                         self.waiting.pop_request()
@@ -584,7 +625,13 @@ class Scheduler(SchedulerInterface):
 
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
+        if (
+            self.scheduler_config.enable_hybrid_chunked_prefill
+            and not has_decode_requests
+        ):
+            assert total_num_scheduled_tokens <= self.prefill_max_num_scheduled_tokens
+        else:
+            assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
         assert len(self.running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
@@ -673,6 +720,13 @@ class Scheduler(SchedulerInterface):
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
             request.num_computed_tokens += num_scheduled_token
+
+            # Check if any request transitioned to decode phase
+            if (
+                not self._has_decode_reqs
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                self._has_decode_reqs = True
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
             # may be updated again in _update_from_output for speculative
@@ -1039,6 +1093,13 @@ class Scheduler(SchedulerInterface):
         # Remove the stopped requests from the running and waiting queues.
         if stopped_running_reqs:
             self.running = remove_all(self.running, stopped_running_reqs)
+            # Update decode flag if we removed any decode requests
+            if self._has_decode_reqs:
+                for req in stopped_running_reqs:
+                    if self._check_request_is_decode(req):
+                        # A decode request was removed, need to re-check the flag
+                        self._update_has_decode_requests_flag()
+                        break
         if stopped_preempted_reqs:
             # This is a rare case and unlikely to impact performance.
             self.waiting.remove_requests(stopped_preempted_reqs)
