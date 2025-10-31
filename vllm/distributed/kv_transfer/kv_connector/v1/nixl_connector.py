@@ -1339,19 +1339,22 @@ class NixlConnectorWorker:
         block_size_ratio = remote_block_size / self.block_size
         self.dst_block_size_ratio[engine_id] = block_size_ratio
         shift_block_0 = remote_block_len if block_size_ratio > 1 else 0
-        if block_size_ratio <= 1:
-            num_blocks = nixl_agent_meta.num_blocks
-        else:
-            num_blocks = int((nixl_agent_meta.num_blocks - 1) * block_size_ratio)
 
+        num_blocks = nixl_agent_meta.num_blocks
+        expanded_num_blocks = math.ceil(block_size_ratio)
+        if block_size_ratio > 1:
+            num_blocks -= 1
+
+        # when block_size_ratio > 1, one prefill block is n decode_block
+        # loop n times of decode block_len to match to prefill
         if engine_id not in self.dst_num_blocks:
-            self.dst_num_blocks[engine_id] = num_blocks
+            self.dst_num_blocks[engine_id] = num_blocks * expanded_num_blocks
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
 
         self._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, num_blocks
+            nixl_agent_meta, remote_tp_size, num_blocks * expanded_num_blocks
         )
 
         # Number of D TP workers reading from a single P TP worker. This is
@@ -1368,34 +1371,48 @@ class NixlConnectorWorker:
         # Register all remote blocks, but only the corresponding kv heads.
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
+            remote_kv_block_len = int(kv_block_len * block_size_ratio)
             if block_size_ratio <= 1:
                 # using remote kv_block_len as transfer unit
-                kv_block_len = int(kv_block_len * block_size_ratio)
-                block_len_per_layer = nixl_agent_meta.block_lens[i]
-            else:
-                block_len_per_layer = int(self.block_len_per_layer[i] * tp_ratio)
+                kv_block_len = remote_kv_block_len
             rank_offset = (
-                self.tp_rank % tp_ratio * kv_block_len if not replicates_kv_cache else 0
+                self.tp_rank % tp_ratio * remote_kv_block_len
+                if not replicates_kv_cache
+                else 0
             )
-
             for block_id in range(num_blocks):
-                block_offset = block_id * block_len_per_layer
-                # For each block, grab the heads chunk belonging to rank_i
-                # of size remote_nheads // tp_ratio, which correspond to
-                # self.block_len == remote_block_len//tp_ratio bytes.
-                addr = base_addr + block_offset + rank_offset + shift_block_0
-                # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, nixl_agent_meta.device_id))
+                block_offset = block_id * nixl_agent_meta.block_lens[i]
+                for sub_block_id in range(expanded_num_blocks):
+                    expanded_block_offset = (
+                        block_offset + sub_block_id * self.block_len_per_layer[i]
+                    )
+                    # For each block, grab the heads chunk belonging to rank_i
+                    # of size remote_nheads // tp_ratio, which correspond to
+                    # self.block_len == remote_block_len//tp_ratio bytes.
+                    addr = (
+                        base_addr + expanded_block_offset + rank_offset + shift_block_0
+                    )
+                    # (addr, len, device id)
+                    blocks_data.append((addr, kv_block_len, nixl_agent_meta.device_id))
 
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(num_blocks):
-                    block_offset = block_id * block_len_per_layer
-                    addr = base_addr + block_offset + rank_offset + shift_block_0
-                    v_addr = addr + block_len_per_layer // 2
-                    blocks_data.append(
-                        (v_addr, kv_block_len, nixl_agent_meta.device_id)
-                    )
+                    block_offset = block_id * nixl_agent_meta.block_lens[i]
+                    for sub_block_id in range(expanded_num_blocks):
+                        expanded_block_offset = (
+                            block_offset + sub_block_id * self.block_len_per_layer[i]
+                        )
+                        addr = (
+                            base_addr
+                            + expanded_block_offset
+                            + rank_offset
+                            + shift_block_0
+                        )
+                        v_addr = addr + nixl_agent_meta.block_lens[i] // 2
+                        blocks_data.append(
+                            (v_addr, kv_block_len, nixl_agent_meta.device_id)
+                        )
 
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
@@ -1610,6 +1627,8 @@ class NixlConnectorWorker:
         split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
         sample_cache = list(self.device_kv_caches.values())[0][0]
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
+            if len(block_ids_list) == 0:
+                continue
             if block_size_ratio < 1:
                 fn = _process_local_gt_remote
                 block_ids_list = [
