@@ -2,17 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
 from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import Llama3JsonToolParser
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 @pytest.fixture
-def parser():
-    # Use a small tokenizer for testing
-    tokenizer = AutoTokenizer.from_pretrained("gpt2")
-    return Llama3JsonToolParser(tokenizer)
+def parser(default_tokenizer: AnyTokenizer):
+    return Llama3JsonToolParser(default_tokenizer)
 
 
 def test_extract_tool_calls_simple(parser):

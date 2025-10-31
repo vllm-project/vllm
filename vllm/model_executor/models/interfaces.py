@@ -673,7 +673,9 @@ class MixtureOfExperts(Protocol):
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
-    return isinstance(model, MixtureOfExperts)
+    return (
+        isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
+    )
 
 
 @runtime_checkable
@@ -693,6 +695,34 @@ def has_noops(
     model: type[object] | object,
 ) -> TypeIs[type[HasNoOps]] | TypeIs[HasNoOps]:
     return getattr(model, "has_noops", False)
+
+
+@runtime_checkable
+class SupportsMambaPrefixCaching(Protocol):
+    """The interface for models whose mamba layers support prefix caching.
+
+    This is currently experimental.
+    """
+
+    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: type[object],
+) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+
+
+def supports_mamba_prefix_caching(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
+    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable
