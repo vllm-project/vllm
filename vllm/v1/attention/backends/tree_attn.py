@@ -4,7 +4,7 @@
 
 import ast
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -31,18 +31,12 @@ logger = init_logger(__name__)
 
 class TreeAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:

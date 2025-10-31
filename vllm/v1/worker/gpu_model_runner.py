@@ -4171,10 +4171,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Raises:
             ValueError: If no compatible block size found
         """
-        supported_block_size = backend_cls.get_supported_kernel_block_sizes()
         compatible_sizes = []
 
-        for block_size in supported_block_size:
+        for block_size in backend_cls.supported_kernel_block_sizes:
             if isinstance(block_size, int):
                 if kv_manager_block_size % block_size == 0:
                     compatible_sizes.append(block_size)

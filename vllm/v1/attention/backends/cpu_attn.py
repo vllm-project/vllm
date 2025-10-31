@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -40,15 +40,16 @@ logger = init_logger(__name__)
 
 class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         attn_impl = _get_paged_attn_impl()
         return attn_impl.get_supported_head_sizes()
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
 
     @staticmethod
     def get_name() -> str:

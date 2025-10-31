@@ -161,6 +161,14 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -214,21 +222,6 @@ class FlashInferBackend(AttentionBackend):
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256]
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms,
-        # but on Blackwell, only support a page size of
-        # 16, 32, 64
-        return [16, 32, 64]
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

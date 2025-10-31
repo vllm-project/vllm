@@ -3,6 +3,7 @@
 """Attention layer with FlashAttention."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -53,6 +54,8 @@ logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
 
     @staticmethod
     def get_name() -> str:
@@ -105,14 +108,6 @@ class FlashAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:

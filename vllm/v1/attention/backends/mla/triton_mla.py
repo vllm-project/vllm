@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import ClassVar
 
 import torch
 
@@ -30,6 +31,9 @@ logger = init_logger(__name__)
 
 
 class TritonMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
@@ -37,14 +41,6 @@ class TritonMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto"]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

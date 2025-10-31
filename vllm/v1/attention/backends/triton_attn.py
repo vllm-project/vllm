@@ -150,6 +150,18 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
 class TritonAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -186,18 +198,6 @@ class TritonAttentionBackend(AttentionBackend):
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
         return head_size >= 32
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
 
     @classmethod
     def supports_sink(cls) -> bool:

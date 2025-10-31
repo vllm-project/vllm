@@ -4,6 +4,7 @@
 
 import math
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch._dynamo.decorators
@@ -73,6 +74,12 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
     @staticmethod
     def get_name() -> str:
@@ -107,14 +114,6 @@ class FlexAttentionBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return []
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto"]
 
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")

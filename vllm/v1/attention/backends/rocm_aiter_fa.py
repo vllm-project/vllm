@@ -3,6 +3,7 @@
 """Attention layer with AiterFlashAttention."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 
@@ -350,10 +351,8 @@ class AiterFlashAttentionMetadataBuilder(
 
 class AiterFlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -386,10 +385,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
 
 
 class AiterFlashAttentionImpl(AttentionImpl):

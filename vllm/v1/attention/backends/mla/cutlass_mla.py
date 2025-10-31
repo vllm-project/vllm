@@ -35,6 +35,14 @@ class CutlassMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
 
 class CutlassMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [128]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "CUTLASS_MLA"
@@ -46,18 +54,6 @@ class CutlassMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["CutlassMLAMetadataBuilder"]:
         return CutlassMLAMetadataBuilder
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [128]
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto", "fp8", "fp8_e4m3"]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

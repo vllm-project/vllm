@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Generic, Protocol, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, cast, get_args
 
 import torch
 
@@ -45,6 +45,9 @@ class AttentionBackend(ABC):
     # calling the custom op. When piecewise cudagraph is enabled, this
     # makes sure the output tensor is allocated inside the cudagraph.
     accept_output_buffer: bool = False
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
+    supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
 
     @staticmethod
     @abstractmethod
@@ -60,10 +63,6 @@ class AttentionBackend(ABC):
     @abstractmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
         raise NotImplementedError
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [MultipleOf(1)]
 
     @classmethod
     def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
@@ -103,25 +102,15 @@ class AttentionBackend(ABC):
         return (not supported_head_sizes) or head_size in supported_head_sizes
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
     def supports_dtype(cls, dtype: torch.dtype) -> bool:
-        supported_dtypes = cls.get_supported_dtypes()
-        return (not supported_dtypes) or dtype in supported_dtypes
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list["CacheDType"]:
-        return ["auto"]
+        return dtype in cls.supported_dtypes
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: "CacheDType | None") -> bool:
         if kv_cache_dtype is None:
             return True
-        supported_kv_cache_dtypes = cls.get_supported_kv_cache_dtypes()
-        return (not supported_kv_cache_dtypes) or (
-            kv_cache_dtype in supported_kv_cache_dtypes
+        return (not cls.supported_kv_cache_dtypes) or (
+            kv_cache_dtype in cls.supported_kv_cache_dtypes
         )
 
     @classmethod
@@ -135,11 +124,10 @@ class AttentionBackend(ABC):
         if block_size not in valid_sizes:
             return False
 
-        supported_block_sizes = cls.get_supported_kernel_block_sizes()
-        if not supported_block_sizes:
+        if not cls.supported_kernel_block_sizes:
             return True
 
-        for supported_size in supported_block_sizes:
+        for supported_size in cls.supported_kernel_block_sizes:
             is_multiple_of = (
                 isinstance(supported_size, MultipleOf)
                 and block_size % supported_size.base == 0
@@ -155,14 +143,13 @@ class AttentionBackend(ABC):
     def get_default_block_size(cls) -> "BlockSize":
         from vllm.config.cache import BlockSize
 
-        supported_block_sizes = cls.get_supported_kernel_block_sizes()
-        if not supported_block_sizes:
+        if not cls.supported_kernel_block_sizes:
             raise ValueError(
                 f"Fallback failed, no explicitly supported block sizes for "
                 f"backend {cls.get_name()}"
             )
 
-        block_size = supported_block_sizes[0]
+        block_size = cls.supported_kernel_block_sizes[0]
         if isinstance(block_size, MultipleOf):
             block_size = block_size.base
 

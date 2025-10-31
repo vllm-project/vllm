@@ -34,6 +34,17 @@ class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
 
 
 class FlashInferMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [
+        32,
+        MultipleOf(64),
+    ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA"
@@ -47,20 +58,8 @@ class FlashInferMLABackend(MLACommonBackend):
         return FlashInferMLAMetadataBuilder
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_kernel_block_sizes(cls) -> list[int | MultipleOf]:
-        return [32, MultipleOf(64)]
-
-    @classmethod
     def get_default_block_size(cls) -> BlockSize:
         return 64
-
-    @classmethod
-    def get_supported_kv_cache_dtypes(cls) -> list[CacheDType]:
-        return ["auto", "fp8", "fp8_e4m3"]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
