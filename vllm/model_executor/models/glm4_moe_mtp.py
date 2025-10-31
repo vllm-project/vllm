@@ -29,7 +29,7 @@ import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
 
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -78,6 +78,7 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         prefix: str,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
+        parallel_config: ParallelConfig | None = None,
     ) -> None:
         super().__init__()
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -86,11 +87,13 @@ class Glm4MoeMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
+        self.enable_eplb = parallel_config.enable_eplb
         self.mtp_block = Glm4MoeDecoderLayer(
             config=config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=prefix,
+            enable_eplb=self.enable_eplb,
         )
 
     def forward(
@@ -132,6 +135,7 @@ class Glm4MoeMultiTokenPredictor(nn.Module):
                     f"{prefix}.layers.{idx}",
                     cache_config=vllm_config.cache_config,
                     quant_config=vllm_config.quant_config,
+                    parallel_config=vllm_config.parallel_config,
                 )
                 for idx in range(
                     self.mtp_start_layer_idx,
@@ -198,14 +202,14 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
         self.moe_mlp_layers: list[Glm4MoE] = []
         example_moe = None
         for layer in self.model.layers.values():
-            assert isinstance(layer, Glm4MoeMultiTokenPredictor)
+            assert isinstance(layer, Glm4MoeMultiTokenPredictorLayer)
             layer = layer.mtp_block
             assert isinstance(layer, Glm4MoeDecoderLayer)
             if isinstance(layer.mlp, Glm4MoE):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
                 self.moe_layers.append(layer.mlp.experts)
-        self.extract_moe_parameters(self, example_moe)
+        self.extract_moe_parameters(example_moe)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
