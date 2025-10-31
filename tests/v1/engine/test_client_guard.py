@@ -47,7 +47,7 @@ def create_client_guard(
 
 
 def test_client_guard_initialization():
-    engine_exception_q = asyncio.Queue()
+    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -65,7 +65,7 @@ def test_client_guard_initialization():
 
 @pytest.mark.asyncio
 async def test_handle_fault():
-    engine_exception_q = asyncio.Queue()
+    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -83,7 +83,7 @@ async def test_handle_fault():
 
 
 def test_fault_receiver():
-    engine_exception_q = asyncio.Queue()
+    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -131,7 +131,7 @@ def test_fault_receiver():
 
 
 def test_fault_receiver_unhealthy():
-    engine_exception_q = asyncio.Queue()
+    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -155,7 +155,7 @@ def test_fault_receiver_unhealthy():
 
 
 def test_shutdown_guard():
-    engine_exception_q = asyncio.Queue()
+    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -182,7 +182,7 @@ def test_shutdown_guard():
 
 @pytest.mark.asyncio
 async def test_handle_fault_async():
-    engine_exception_q = asyncio.Queue()
+    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Unhealthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
