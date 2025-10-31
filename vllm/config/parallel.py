@@ -61,6 +61,16 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
+    # New: control expert rearrangement and telemetry behavior
+    enable_rearrangement: bool = True
+    """Whether to perform expert rearrangement when the interval elapses."""
+
+    load_state_path: str | None = None
+    """Optional path to load an initial EPLB state mapping from file."""
+
+    log_stats_interval: int = 32
+    """Frequency (in steps) to log EPLB stats when logging is enabled."""
+
 
 @config
 @dataclass

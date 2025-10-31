@@ -217,8 +217,6 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
-    VLLM_EPLB_STATE_PATH: str | None = None
-    VLLM_SKIP_EXPERT_REARRANGE: bool = False
 
 
 def get_default_cache_root():
@@ -1417,16 +1415,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
-    # Path to saved EPLB state file. If set, vLLM will attempt to load
-    # the EPLB state from this path during model initialization.
-    "VLLM_EPLB_STATE_PATH": lambda: os.getenv("VLLM_EPLB_STATE_PATH", None),
-    # If set to 1/true, skip expert rearrangement algorithm in EPLB steps.
-    "VLLM_SKIP_EXPERT_REARRANGE": lambda: os.environ.get(
-        "VLLM_SKIP_EXPERT_REARRANGE", ""
-    )
-    .strip()
-    .lower()
-    in ("1", "true"),
+    # (EPLB-related envs moved to config: use ParallelConfig.eplb_config)
 }
 
 # --8<-- [end:env-vars-definition]

@@ -35,7 +35,6 @@ from dataclasses import dataclass
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
-from vllm import envs
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import (
     get_ep_group,
@@ -162,6 +161,13 @@ class EplbState:
     This is a constant and is taken from the config.
     """
 
+    # New: persisted config knobs
+    enable_rearrangement: bool = True
+    """Whether to perform expert rearrangement at configured intervals."""
+
+    log_stats_interval: int = 32
+    """Frequency (in steps) to emit EPLB stats logs when logging is enabled."""
+
     @staticmethod
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
@@ -197,7 +203,7 @@ class EplbState:
         """
         print("eplb_config", parallel_config.eplb_config)
 
-        eplb_state_path = envs.VLLM_EPLB_STATE_PATH
+        eplb_state_path = parallel_config.eplb_config.load_state_path
         map_is_loaded = False
         physical_to_logical_map = None
         if (
@@ -206,7 +212,7 @@ class EplbState:
             and old_global_expert_indices is None
         ):
             logger.info(
-                "VLLM_EPLB_STATE_PATH is set to %s. Loading EPLB state from file.",
+                "EPLB load_state_path is set to %s. Loading EPLB state from file.",
                 eplb_state_path,
             )
             try:
@@ -375,6 +381,8 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
+            enable_rearrangement=parallel_config.eplb_config.enable_rearrangement,
+            log_stats_interval=parallel_config.eplb_config.log_stats_interval,
         )
 
     def step(
@@ -412,8 +420,9 @@ class EplbState:
         if is_dummy:
             # Do not record load metrics for dummy steps
             self.expert_load_pass.zero_()
+        freq = max(1, int(self.log_stats_interval))
 
-        if log_stats:
+        if log_stats and self.expert_rearrangement_step % freq == 0:
             # total_expert_load_pass: (num_moe_layers, num_physical_experts)
             total_expert_load_pass = self.expert_load_pass.clone()
 
@@ -433,8 +442,8 @@ class EplbState:
             # Compute balancedness ratio:
             # for each layer:
             #   (mean load across ranks) / (max load across ranks)
-            avg_tokens_tensor = num_tokens_per_rank.mean(dim=0).sum(dim=0)
-            max_tokens_tensor = num_tokens_per_rank.max(dim=0).values.sum(dim=0)
+            avg_tokens_tensor = num_tokens_per_rank.mean(dim=1).sum(dim=0)
+            max_tokens_tensor = num_tokens_per_rank.max(dim=1).values.sum(dim=0)
 
             # Just to make type checker happy
             tokens_tensors: list[float] = torch.stack(
@@ -445,7 +454,10 @@ class EplbState:
 
             if ep_group.rank() == 0:
                 logger.info(
-                    "EPLB step: avg_tokens=%.2f, max_tokens=%d, balancedness=%.4f",
+                    "EPLB step [%d / %d]: avg_tokens=%.2f,"
+                    "max_tokens=%d, balancedness=%.4f",
+                    self.expert_rearrangement_step,
+                    self.expert_rearrangement_step_interval,
                     avg_tokens,
                     max_tokens,
                     balancedness,
@@ -468,12 +480,10 @@ class EplbState:
         self.expert_rearrangement_step += 1
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             self.expert_rearrangement_step = 0
-            if not envs.VLLM_SKIP_EXPERT_REARRANGE:
+            if self.enable_rearrangement:
                 self.rearrange(model)
             else:
-                logger.info_once(
-                    "Skipping expert rearrangement due to VLLM_SKIP_EXPERT_REARRANGE"
-                )
+                logger.info_once("Skipping expert rearrangement due to configuration")
 
     def rearrange(
         self,
