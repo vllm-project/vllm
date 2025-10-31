@@ -155,6 +155,7 @@ class KimiMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -340,7 +341,7 @@ class KimiDecoderLayer(nn.Module):
             self.block_sparse_moe = KimiMoE(
                 config=config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                prefix=f"{prefix}.block_sparse_moe",
             )
             self.mlp = self.block_sparse_moe
         else:
