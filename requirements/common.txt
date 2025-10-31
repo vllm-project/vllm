@@ -7,7 +7,7 @@ requests >= 2.26.0
 tqdm
 blake3
 py-cpuinfo
-transformers >= 4.55.2
+transformers >= 4.56.0
 tokenizers >= 0.21.1  # Required for fast incremental detokenization.
 protobuf # Required by LlamaTokenizer.
 fastapi[standard] >= 0.115.0 # Required by FastAPI's form models in the OpenAI API server's audio transcriptions endpoint.
@@ -31,7 +31,6 @@ partial-json-parser # used for parsing partial JSON outputs
 pyzmq >= 25.0.0
 msgspec
 gguf >= 0.13.0
-importlib_metadata; python_version < '3.10'
 mistral_common[image,audio] >= 1.8.5
 opencv-python-headless >= 4.11.0    # required for video IO
 pyyaml
@@ -49,3 +48,4 @@ pybase64 # fast base64 implementation
 cbor2 # Required for cross-language serialization of hashable objects
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
+anthropic == 0.71.0

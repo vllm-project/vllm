@@ -16,8 +16,10 @@ from .kimi_k2_tool_parser import KimiK2ToolParser
 from .llama4_pythonic_tool_parser import Llama4PythonicToolParser
 from .llama_tool_parser import Llama3JsonToolParser
 from .longcat_tool_parser import LongcatFlashToolParser
+from .minimax_m2_tool_parser import MinimaxM2ToolParser
 from .minimax_tool_parser import MinimaxToolParser
 from .mistral_tool_parser import MistralToolParser
+from .olmo3_tool_parser import Olmo3PythonicToolParser
 from .openai_tool_parser import OpenAIToolParser
 from .phi4mini_tool_parser import Phi4MiniJsonToolParser
 from .pythonic_tool_parser import PythonicToolParser
@@ -45,6 +47,7 @@ __all__ = [
     "DeepSeekV31ToolParser",
     "Ernie45ToolParser",
     "xLAMToolParser",
+    "Olmo3PythonicToolParser",
     "MinimaxToolParser",
     "KimiK2ToolParser",
     "HunyuanA13BToolParser",
@@ -54,4 +57,5 @@ __all__ = [
     "SeedOssToolParser",
     "Step3ToolParser",
     "OpenAIToolParser",
+    "MinimaxM2ToolParser",
 ]

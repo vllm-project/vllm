@@ -5,10 +5,10 @@ import math
 
 import torch
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 
 
-class Llama4VisionRotaryEmbedding(RotaryEmbedding):
+class Llama4VisionRotaryEmbedding(RotaryEmbeddingBase):
     def __init__(
         self,
         head_size: int,

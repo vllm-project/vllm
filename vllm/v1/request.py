@@ -40,7 +40,6 @@ class Request:
         prompt_embeds: torch.Tensor | None = None,
         mm_features: list[MultiModalFeatureSpec] | None = None,
         lora_request: Optional["LoRARequest"] = None,
-        structured_output_request: Optional["StructuredOutputRequest"] = None,
         cache_salt: str | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
@@ -54,11 +53,12 @@ class Request:
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
-        self.structured_output_request = structured_output_request
+        self.structured_output_request = StructuredOutputRequest.from_sampling_params(
+            sampling_params
+        )
         self.arrival_time = arrival_time if arrival_time is not None else time.time()
 
         self.status = RequestStatus.WAITING
-        self.use_structured_output = False
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
 
@@ -72,9 +72,8 @@ class Request:
             # Generative models.
             assert sampling_params.max_tokens is not None
             self.max_tokens = sampling_params.max_tokens
-            if sampling_params.structured_outputs is not None:
+            if self.structured_output_request is not None:
                 self.status = RequestStatus.WAITING_FOR_FSM
-                self.use_structured_output = True
 
             if sampling_params.extra_args is not None:
                 self.kv_transfer_params = sampling_params.extra_args.get(
@@ -145,11 +144,6 @@ class Request:
             eos_token_id=request.eos_token_id,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
-            structured_output_request=StructuredOutputRequest(
-                sampling_params=request.sampling_params
-            )
-            if request.sampling_params
-            else None,
             cache_salt=request.cache_salt,
             priority=request.priority,
             trace_headers=request.trace_headers,
@@ -169,6 +163,10 @@ class Request:
 
         if self.get_hash_new_full_blocks is not None:
             self.block_hashes.extend(self.get_hash_new_full_blocks())
+
+    @property
+    def use_structured_output(self) -> bool:
+        return self.structured_output_request is not None
 
     @property
     def is_output_corrupted(self) -> bool:
