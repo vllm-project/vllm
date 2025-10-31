@@ -211,11 +211,7 @@ def test_embed_loading(vllm_runner, model):
 def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
     model = get_model(arch)
 
-    vllm_kwargs = dict(
-        max_model_len=None,
-        model_impl="transformers",
-        compilation_config=dict(cudagraph_capture_sizes=[8]),
-    )
+    vllm_kwargs = dict(max_model_len=None, model_impl="transformers")
 
     hf_kwargs = dict()
     if arch == "TransformersEmbeddingModel":

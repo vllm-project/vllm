@@ -37,15 +37,17 @@ def llm():
 
 @pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
-    def get_outputs(activation):
+    def get_outputs(use_activation):
         outputs = llm.classify(
-            prompts, pooling_params=PoolingParams(activation=activation), use_tqdm=False
+            prompts,
+            pooling_params=PoolingParams(use_activation=use_activation),
+            use_tqdm=False,
         )
         return torch.tensor([x.outputs.probs for x in outputs])
 
-    default = get_outputs(activation=None)
-    w_activation = get_outputs(activation=True)
-    wo_activation = get_outputs(activation=False)
+    default = get_outputs(use_activation=None)
+    w_activation = get_outputs(use_activation=True)
+    wo_activation = get_outputs(use_activation=False)
 
     assert torch.allclose(default, w_activation, atol=1e-2), (
         "Default should use activation."
@@ -63,7 +65,7 @@ def test_encode_api(llm: LLM):
     # chunked prefill does not support all pooling
     err_msg = "pooling_task must be one of.+"
     with pytest.raises(ValueError, match=err_msg):
-        llm.encode(prompts, use_tqdm=False)
+        llm.encode(prompts, pooling_task="token_classify", use_tqdm=False)
 
 
 def test_score_api(llm: LLM):

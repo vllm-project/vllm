@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import deepcopy
-from typing import TYPE_CHECKING, Annotated, Any, Optional
+from typing import Annotated, Any, Optional
 
 import msgspec
 
+from vllm.config import ModelConfig, PoolerConfig
+from vllm.config.pooler import get_use_activation
 from vllm.sampling_params import RequestOutputKind
 from vllm.tasks import PoolingTask
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
 
 
 class PoolingParams(
@@ -25,12 +24,13 @@ class PoolingParams(
             Set to -1 to use the model's default truncation size.
             Set to k to keep only the last k tokens (left truncation).
             Set to None to disable truncation.
-        normalize: Whether to normalize the embeddings outputs.
         dimensions: Reduce the dimensions of embeddings
             if model support matryoshka representation.
-        activation: Whether to apply activation function to
+        normalize: Whether to normalize the embeddings outputs.
+        softmax: softmax will be deprecated, please use use_activation instead.
+        activation: activation will be deprecated, please use use_activation instead.
+        use_activation: Whether to apply activation function to
             the classification outputs.
-        softmax: Whether to apply softmax to the reward outputs.
     """
 
     # --8<-- [start:common-pooling-params]
@@ -45,43 +45,33 @@ class PoolingParams(
 
     ## for classification, scoring and rerank
     # --8<-- [start:classification-pooling-params]
+    softmax: bool | None = None
     activation: bool | None = None
+    use_activation: bool | None = None
     # --8<-- [end:classification-pooling-params]
 
-    ## for reward models
-    softmax: bool | None = None
+    ## for step pooling models
     step_tag_id: int | None = None
     returned_token_ids: list[int] | None = None
 
+    ## Internal use only
     task: PoolingTask | None = None
-    """Internal use only."""
-
     requires_token_ids: bool = False
-    """Internal use only."""
-
     extra_kwargs: dict[str, Any] | None = None
-    """Internal use only."""
-
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
     @property
     def all_parameters(self) -> list[str]:
-        return [
-            "dimensions",
-            "normalize",
-            "activation",
-            "softmax",
-            "step_tag_id",
-            "returned_token_ids",
-        ]
+        return ["dimensions", "normalize", "use_activation"]
 
     @property
     def valid_parameters(self):
         return {
             "embed": ["dimensions", "normalize"],
-            "classify": ["activation"],
-            "score": ["activation"],
-            "encode": ["softmax", "step_tag_id", "returned_token_ids"],
+            "classify": ["use_activation"],
+            "score": ["use_activation"],
+            "token_embed": ["dimensions", "normalize"],
+            "token_classify": ["use_activation"],
         }
 
     def clone(self) -> "PoolingParams":
@@ -97,10 +87,17 @@ class PoolingParams(
             msg = f"You cannot overwrite {self.task=!r} with {task=!r}!"
             raise ValueError(msg)
 
+        # raise deprecated warning for softmax and activation
+        self.use_activation = get_use_activation(self)
+
+        # plugin task uses io_processor.parse_request to verify inputs,
+        # skipping PoolingParams verify
+        if self.task == "plugin":
+            return
+
         # NOTE: Task validation needs to done against the model instance,
         # which is not available in model config. So, it's not included
         # in this method
-
         self._merge_default_parameters(model_config)
         self._set_default_parameters(model_config)
         self._verify_valid_parameters()
@@ -125,8 +122,34 @@ class PoolingParams(
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
 
+        self._verify_step_pooling(pooler_config, valid_parameters)
+
+    def _verify_step_pooling(
+        self, pooler_config: "PoolerConfig", valid_parameters: list[str]
+    ):
+        step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
+        if pooler_config.pooling_type != "STEP":
+            invalid_parameters = []
+            for k in step_pooling_parameters:
+                if getattr(self, k, None) is not None:
+                    invalid_parameters.append(k)
+
+            if invalid_parameters:
+                raise ValueError(
+                    f"Task {self.task} only supports {valid_parameters} "
+                    f"parameters, does not support "
+                    f"{invalid_parameters} parameters"
+                )
+        else:
+            for k in step_pooling_parameters:
+                if getattr(pooler_config, k, None) is None:
+                    continue
+
+                if getattr(self, k, None) is None:
+                    setattr(self, k, getattr(pooler_config, k))
+
     def _set_default_parameters(self, model_config: Optional["ModelConfig"]):
-        if self.task == "embed":
+        if self.task in ["embed", "token_embed"]:
             if self.normalize is None:
                 self.normalize = True
 
@@ -150,13 +173,9 @@ class PoolingParams(
                 elif self.dimensions < 1:
                     raise ValueError("Dimensions must be greater than 0")
 
-        elif self.task in ["classify", "score"]:
-            if self.activation is None:
-                self.activation = True
-
-        elif self.task == "encode":
-            if self.softmax is None:
-                self.softmax = True
+        elif self.task in ["classify", "score", "token_classify"]:
+            if self.use_activation is None:
+                self.use_activation = True
         else:
             raise ValueError(f"Unknown pooling task: {self.task}")
 
@@ -184,8 +203,7 @@ class PoolingParams(
             f"task={self.task}, "
             f"normalize={self.normalize}, "
             f"dimensions={self.dimensions}, "
-            f"activation={self.activation}, "
-            f"softmax={self.softmax}, "
+            f"use_activation={self.use_activation}, "
             f"step_tag_id={self.step_tag_id}, "
             f"returned_token_ids={self.returned_token_ids}, "
             f"requires_token_ids={self.requires_token_ids}, "

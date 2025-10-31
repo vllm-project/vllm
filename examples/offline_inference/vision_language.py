@@ -22,7 +22,7 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.image import convert_image_mode
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 class ModelRequestData(NamedTuple):
@@ -30,6 +30,7 @@ class ModelRequestData(NamedTuple):
     prompts: list[str]
     stop_token_ids: list[int] | None = None
     lora_requests: list[LoRARequest] | None = None
+    sampling_params: list[SamplingParams] | None = None
 
 
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
@@ -90,6 +91,33 @@ def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Bee-8B
+def run_bee(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "Open-Bee/Bee-8B-RL"
+
+    prompts = [
+        (
+            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<image>\n{question}<|im_end|>"
+            f"<|im_start|>assistant\n<think>\n"
+        )
+        for question in questions
+    ]
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=16384,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # BLIP-2
 def run_blip2(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -118,23 +146,6 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=2,
         limit_mm_per_prompt={modality: 1},
-    )
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-# Dots-OCR
-def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
-    engine_args = EngineArgs(
-        model="rednote-hilab/dots.ocr",
-        limit_mm_per_prompt={modality: 1},
-        trust_remote_code=True,
     )
 
     return ModelRequestData(
@@ -183,6 +194,66 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
     prompts = [
         f"<|User|>: <image>\n{question}\n\n<|Assistant|>:" for question in questions
     ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
+
+    assert modality == "image"
+
+    model_name = "deepseek-ai/DeepSeek-OCR"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        limit_mm_per_prompt={modality: 1},
+        logits_processors=[NGramPerReqLogitsProcessor],
+    )
+
+    # deepseek-ocr use plain prompt template
+    prompts = [f"<image>\n{question}" for question in questions]
+
+    # The following sampling params config is taken from
+    # the official Deepseek-OCR inference example.
+    # (IMPORTANT) Use the custom logits processor and avoid skipping
+    # special tokens for this model for the optimal OCR performance.
+    sampling_params = [
+        SamplingParams(
+            temperature=0.0,
+            max_tokens=8192,
+            # ngram logit processor args
+            extra_args=dict(
+                ngram_size=30,
+                window_size=90,
+                # whitelist: <td>, </td>
+                whitelist_token_ids={128821, 128822},
+            ),
+            skip_special_tokens=False,
+        )
+        for _ in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+        sampling_params=sampling_params,
+    )
+
+
+# Dots-OCR
+def run_dots_ocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [f"<|img|><|imgpad|><|endofimg|>{question}" for question in questions]
+    engine_args = EngineArgs(
+        model="rednote-hilab/dots.ocr",
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
 
     return ModelRequestData(
         engine_args=engine_args,
@@ -724,6 +795,26 @@ def run_kimi_vl(questions: list[str], modality: str) -> ModelRequestData:
         model="moonshotai/Kimi-VL-A3B-Instruct",
         trust_remote_code=True,
         max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+# LightOnOCR
+def run_lightonocr(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    prompts = [
+        "<|im_start|>system<|im_end|>\n<|im_start|>user\n<|image_pad|><|im_end|>\n<|im_start|>assistant\n"
+        for _ in questions
+    ]
+
+    engine_args = EngineArgs(
+        model="lightonai/LightOnOCR-1B",
         limit_mm_per_prompt={modality: 1},
     )
 
@@ -1687,11 +1778,13 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
 model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
+    "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
-    "dots_ocr": run_dots_ocr,
     "command_a_vision": run_command_a_vision,
     "deepseek_vl_v2": run_deepseek_vl2,
+    "deepseek_ocr": run_deepseek_ocr,
+    "dots_ocr": run_dots_ocr,
     "ernie45_vl": run_ernie45_vl,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
@@ -1708,6 +1801,7 @@ model_example_map = {
     "keye_vl": run_keye_vl,
     "keye_vl1_5": run_keye_vl1_5,
     "kimi_vl": run_kimi_vl,
+    "lightonocr": run_lightonocr,
     "llama4": run_llama4,
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -1953,8 +2047,12 @@ def main(args):
 
     # We set temperature to 0.2 so that outputs can be different
     # even when all prompts are identical when running batch inference.
-    sampling_params = SamplingParams(
-        temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
+    sampling_params = (
+        SamplingParams(
+            temperature=0.2, max_tokens=64, stop_token_ids=req_data.stop_token_ids
+        )
+        if req_data.sampling_params is None
+        else req_data.sampling_params
     )
 
     assert args.num_prompts > 0

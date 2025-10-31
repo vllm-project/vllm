@@ -64,7 +64,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .idefics2_vision_model import Idefics2VisionTransformer
@@ -72,7 +71,6 @@ from .interfaces import MultiModalEmbeddings, SupportsLoRA, SupportsMultiModal
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -672,7 +670,7 @@ class Phi4MMImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"]
 
-    data: Annotated[
+    pixel_values: Annotated[
         torch.Tensor | list[torch.Tensor],
         TensorShape(
             "bn", "p", 3, "h", "w", dynamic_dims={"p"}
@@ -721,7 +719,7 @@ class Phi4MMAudioFeatureInputs(TensorSchema):
 
     type: Literal["audio_features"]
 
-    data: Annotated[
+    audio_features: Annotated[
         torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "t", 80, dynamic_dims={"t"}),
     ]
@@ -1189,6 +1187,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     Implements the Phi-4-multimodal-instruct model in vLLM.
     """
 
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "qkv_proj",
@@ -1273,7 +1273,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
 
         if audio_features is not None:
             return Phi4MMAudioFeatureInputs(
-                type="audio_features", data=flatten_bn(audio_features)
+                type="audio_features",
+                audio_features=audio_features,
             )
 
         if audio_embeds is not None:
@@ -1298,7 +1299,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         if audio_input["type"] == "audio_embeds":
             return audio_input["data"]
 
-        audio_features = audio_input["data"]
+        audio_features = audio_input["audio_features"]
         # (e.g. multiple examples) and the second dim is the multi-audio dim
         # (e.g. multiple audios in the same example)
 
@@ -1315,8 +1316,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Phi4MMImagePixelInputs | None:
-        image_pixel_values: NestedTensors = kwargs.get("image_pixel_values")
-        if image_pixel_values is None:
+        pixel_values = kwargs.get("image_pixel_values")
+        if pixel_values is None:
             return None
 
         image_sizes = kwargs.get("image_sizes")
@@ -1328,52 +1329,9 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             and num_img_tokens is not None
         ), "Missing image inputs"
 
-        if is_list_of(image_pixel_values, torch.Tensor):
-            assert all(p.dim() == 5 for p in image_pixel_values), (
-                "Incorrect image inputs"
-            )
-            # list len is batch_size.
-            # each tensor has dimension: num_img_per_example, num_hd_patches,
-            # channels, height, width.
-            # need to pad along num_hd_patches.
-            # mask size num_img_per_prompt, num_hd_patches, feat_h, heat_w.
-            image_pixel_values = cat_with_pad(image_pixel_values, dim=0)
-        elif isinstance(image_pixel_values, torch.Tensor):
-            # dimension: batch_size, num_img_per_example, num_hd_patches,
-            # channels, height, width.
-            # we flatten first 2 dims to make it a single large batch for
-            # SigLIP Encoder.
-            assert image_pixel_values.dim() == 6, "Incorrect image inputs"
-            image_pixel_values = image_pixel_values.flatten(0, 1)
-        else:
-            raise ValueError("Incorrect image_pixel_values inputs")
-
-        if isinstance(image_attention_mask, list):
-            image_attention_mask = cat_with_pad(image_attention_mask, dim=0)
-        elif isinstance(image_attention_mask, torch.Tensor):
-            image_attention_mask = image_attention_mask.flatten(0, 1)
-        else:
-            raise ValueError("Incorrect image_attention_mask inputs")
-
-        if isinstance(image_sizes, list):
-            image_sizes = torch.cat(image_sizes, dim=0)
-        elif isinstance(image_sizes, torch.Tensor):
-            image_sizes = image_sizes.flatten(0, 1)
-        else:
-            raise ValueError("Incorrect image_sizes inputs")
-
-        if isinstance(num_img_tokens, list):
-            num_img_tokens = [
-                n for num_tensor in num_img_tokens for n in num_tensor.tolist()
-            ]
-        elif isinstance(num_img_tokens, torch.Tensor):
-            num_img_tokens = num_img_tokens.flatten(0, 1).tolist()
-        else:
-            raise ValueError("Incorrect num_img_tokens inputs")
-
         return Phi4MMImagePixelInputs(
             type="pixel_values",
-            data=image_pixel_values,
+            pixel_values=pixel_values,
             image_sizes=image_sizes,
             image_attention_mask=image_attention_mask,
             num_img_tokens=num_img_tokens,
@@ -1405,7 +1363,7 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             dtype = next(self.image_embed.parameters()).dtype
-            pixel_values = image_input["data"].to(dtype)
+            pixel_values = image_input["pixel_values"].to(dtype)
             image_sizes = image_input["image_sizes"]
             image_attention_mask = image_input["image_attention_mask"]
             image_embeds = self.image_embed(
@@ -1430,8 +1388,8 @@ class Phi4MultimodalForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             if modality == "images":
                 audio_projection_mode = "vision"
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += tuple(vision_embeddings)
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
             if modality == "audios":
                 audio_input = modalities["audios"]
                 audio_embeddings = self._process_audio_input(
