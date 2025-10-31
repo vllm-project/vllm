@@ -233,7 +233,9 @@ def get_quant_config(
 
     # GGUF doesn't have config file
     if model_config.quantization in ("gguf", "inc"):
-        return quant_cls()
+        # Pass model architecture for quantization-specific dtype handling
+        model_arch = model_config.architectures[0] if model_config.architectures else ""
+        return quant_cls(model_arch=model_arch)
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
