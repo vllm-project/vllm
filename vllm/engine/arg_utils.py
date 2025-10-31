@@ -1814,7 +1814,7 @@ class EngineArgs:
             incremental_prefill_supported = (
                 pooling_type is not None
                 and pooling_type.lower() == "last"
-                and is_causal
+                and bool(is_causal)
             )
 
             action = "Enabling" if incremental_prefill_supported else "Disabling"
