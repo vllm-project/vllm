@@ -12,9 +12,9 @@ from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
-from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 
 
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
@@ -369,6 +369,7 @@ class GemmaRMSNorm(CustomOp):
             self._is_compiled = True
         return self.forward_native(x, residual)
 
+
 @CustomOp.register("rms_norm_gated")
 class RMSNormGated(CustomOp):
     """RMS Normalization with optional gating.
@@ -414,7 +415,9 @@ class RMSNormGated(CustomOp):
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
 
-    def forward_native(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+    def forward_native(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
         """
         Native PyTorch implementation of RMS normalization with gating.
 
@@ -454,7 +457,9 @@ class RMSNormGated(CustomOp):
 
         return out
 
-    def forward_cuda(self, x: torch.Tensor, z: torch.Tensor | None = None) -> torch.Tensor:
+    def forward_cuda(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
         return rmsnorm_fn(
             x,
             self.weight,
