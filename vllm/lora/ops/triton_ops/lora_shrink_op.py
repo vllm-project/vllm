@@ -46,9 +46,6 @@ def _lora_shrink_kernel(
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
 ):
-    # GDC launch dependents hints the runtime system to launch dependent kernels.
-    if USE_GDC:
-        tl.extra.cuda.gdc_launch_dependents()
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
 

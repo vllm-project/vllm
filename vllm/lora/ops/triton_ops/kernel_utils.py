@@ -285,7 +285,9 @@ def do_shrink_kernel(
         cur_lora_ptr.dtype.element_ty,
         False,  # USE_GDC is always False in shrink kernel
     )
-
+    # GDC launch dependents hints the runtime system to launch dependent kernels.
+    if USE_GDC:
+        tl.extra.cuda.gdc_launch_dependents()
     # Identify the C output pointers to store the results of the accumulator.
     offset_cn = tl.arange(0, BLOCK_N) + pid_n * BLOCK_N
     offset_cm = tl.arange(0, BLOCK_M)
