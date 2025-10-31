@@ -46,7 +46,7 @@ def mm_k(
         CAST_TYPE: if True, cast the values from the A matrix to the B
           matrix dtype.
         b_dtype: datatype of the B matrix
-        USE_GDC:
+        USE_GDC: Whether to use PDL. True indicates use.
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k in range(tl.cdiv(K, BLOCK_K * SPLIT_K)):

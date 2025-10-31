@@ -28,7 +28,6 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.tp_size = self.base_layer.tp_size
         self.tp_rank = self.base_layer.tp_rank
         self.device = _get_lora_device(self.base_layer)
-        # self.parallel_lora_stream = torch.cuda.Stream()
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
@@ -120,34 +119,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        # self.parallel_lora_stream.wait_stream(current_stream())
-
-        # output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-
-        # with torch.cuda.stream(self.parallel_lora_stream):
-        #     zero_output = torch.zeros(
-        #         (x.size(0), self.output_size), dtype=x.dtype, device=x.device
-        #     )
-        #     lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-        #         zero_output,
-        #         x,
-        #         self.lora_a_stacked,
-        #         self.lora_b_stacked,
-        #         1.0,
-        #         self.output_slices,
-        #     )
-        # current_stream().wait_stream(self.parallel_lora_stream)
-
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
-
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output,
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            1.0,
-            self.output_slices,
-        )
 
         # In transformers backend, x and output have extra batch dimension like
         # (1, seq_len, hidden_dim), while punica expects (seq_len, hidden_dim),
@@ -156,6 +128,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
+            output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
+        )
         if not current_platform.can_update_inplace():
             output = lora_output
 
