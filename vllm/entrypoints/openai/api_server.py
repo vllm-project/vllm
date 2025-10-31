@@ -107,6 +107,7 @@ from vllm.entrypoints.utils import (
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
@@ -1748,12 +1749,7 @@ async def init_app_state(
                 log_error_stack=args.log_error_stack,
             )
         )
-        if (
-            any(
-                task in supported_tasks
-                for task in ["token_embed", "token_classify", "plugin"]
-            )
-        )
+        if any(task in POOLING_TASKS for task in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (
