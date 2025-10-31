@@ -7,7 +7,7 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
-from vllm.attention.backends.abstract import AttentionLayer
+from vllm.attention.backends.abstract import AttentionLayer, MultipleOf
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
@@ -42,6 +42,10 @@ class AiterMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        return [1]
 
 
 @dataclass
@@ -78,14 +82,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         super().__init__(
             kv_cache_spec, layer_names, vllm_config, device, AiterMLAMetadata
         )
-        assert self.kv_cache_spec.block_size == 1, (
-            "AITER MLAonly supports block size 1."
-        )
 
         self.compilation_config = vllm_config.compilation_config
-        max_num_pages_per_req = cdiv(
-            vllm_config.model_config.max_model_len, self.kv_cache_spec.block_size
-        )
+        # kernel block size is always 1.
+        max_num_pages_per_req = vllm_config.model_config.max_model_len
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         max_num_pages = max_num_reqs * max_num_pages_per_req
 
@@ -118,25 +118,23 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         num_decode_tokens: int,
         dcp_tot_seq_lens_device: torch.Tensor | None,
     ) -> AiterMLADecodeMetadata:
-        page_size = self.kv_cache_spec.block_size
-        block_table_bounds = (seq_lens_device + page_size - 1) // page_size
+        # kernel block size is always 1.
         device = self.device
         num_reqs = seq_lens_device.size(0)
 
         mask = torch.arange(
             block_table_tensor.size(1), dtype=block_table_tensor.dtype, device=device
-        ).unsqueeze(0) < block_table_bounds.unsqueeze(1)
+        ).unsqueeze(0) < seq_lens_device.unsqueeze(1)
         paged_kv_indices = block_table_tensor[mask]
 
-        paged_kv_last_page_len = seq_lens_device % page_size
         paged_kv_last_page_len = torch.where(
-            paged_kv_last_page_len == 0, page_size, paged_kv_last_page_len
+            seq_lens_device == 0, 1, seq_lens_device
         )
 
         paged_kv_indptr = torch.cat(
             [
-                torch.zeros(1, dtype=block_table_bounds.dtype, device=device),
-                block_table_bounds.cumsum(dim=0, dtype=torch.int32),
+                torch.zeros(1, dtype=seq_lens_device.dtype, device=device),
+                seq_lens_device.cumsum(dim=0, dtype=torch.int32),
             ]
         )
 
