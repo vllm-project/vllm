@@ -12,7 +12,7 @@ from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
+from vllm.utils.torch_utils import _is_torch_equal_or_newer
 
 
 def test_version():
@@ -165,17 +165,16 @@ def test_splitting_ops_dynamic():
     assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
-    if is_torch_equal_or_newer("2.9.0.dev"):
-        config = VllmConfig(
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                use_inductor_graph_partition=True,
-                splitting_ops=["vllm::unified_attention"],
-            )
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=["vllm::unified_attention"],
         )
-        # with inductor partition we use splitting_ops directly for
-        # partition rules
-        assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
+    )
+    # with inductor partition we use splitting_ops directly for
+    # partition rules
+    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
 
     # When attn_fusion pass enabled, splitting_ops now default to attention ops.
     config = VllmConfig(
@@ -192,23 +191,22 @@ def test_splitting_ops_dynamic():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
-    if is_torch_equal_or_newer("2.9.0.dev"):
-        config = VllmConfig(
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                use_inductor_graph_partition=True,
-                pass_config={"enable_attn_fusion": True, "enable_noop": True},
-                custom_ops=["+quant_fp8"],
-                cudagraph_mode=CUDAGraphMode.PIECEWISE,
-            )
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            custom_ops=["+quant_fp8"],
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
-        # With inductor graph partition, attn_fusion and splitting_ops
-        # work together. Default splitting_ops include attention ops.
-        assert config.compilation_config.splitting_ops_contain_attention()
-        # enable_attn_fusion is directly supported under
-        # use_inductor_graph_partition=True, and cudagraph_mode
-        # is unchanged.
-        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    )
+    # With inductor graph partition, attn_fusion and splitting_ops
+    # work together. Default splitting_ops include attention ops.
+    assert config.compilation_config.splitting_ops_contain_attention()
+    # enable_attn_fusion is directly supported under
+    # use_inductor_graph_partition=True, and cudagraph_mode
+    # is unchanged.
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_resolve_operator_overload():
