@@ -3,6 +3,7 @@
 """Attention backend registry"""
 
 import enum
+from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -114,7 +115,9 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
 _OVERRIDES: dict[AttentionBackendEnum, str] = {}
 
 
-def register_backend(backend: AttentionBackendEnum, class_path: str | None = None):
+def register_backend(
+    backend: AttentionBackendEnum, class_path: str | None = None
+) -> Callable[[type], type]:
     """Register or override a backend implementation.
 
     Args:
@@ -143,7 +146,7 @@ def register_backend(backend: AttentionBackendEnum, class_path: str | None = Non
         )
     """
 
-    def decorator(cls):
+    def decorator(cls: type) -> type:
         _OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"
         return cls
 
