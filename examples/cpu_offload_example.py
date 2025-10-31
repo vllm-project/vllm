@@ -29,7 +29,7 @@ def test_cpu_offloading():
 
     # Initialize LLM with CPU offloading
     llm = LLM(
-        model="/home/richardbrown/local_models/Qwen3-Coder-30B-A3B-Instruct-AWQ-4bit",
+        model="meta-llama/Llama-2-7b-hf",  # Replace with your model path
         dtype="auto",
         max_model_len=52000,
         gpu_memory_utilization=0.88,

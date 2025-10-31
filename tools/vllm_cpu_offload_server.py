@@ -21,7 +21,7 @@ kv_transfer_config = KVTransferConfig(
 # Build command line arguments
 sys.argv = [
     "vllm.entrypoints.openai.api_server",
-    "--model", "/home/richardbrown/local_models/Qwen3-Coder-30B-A3B-Instruct-AWQ-4bit",
+    "--model", "meta-llama/Llama-2-7b-hf",  # Replace with your model path
     "--dtype", "auto",
     "--max-model-len", "52000",  # 32% increase with CPU offload!
     "--gpu-memory-utilization", "0.88",

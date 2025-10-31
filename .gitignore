@@ -221,3 +221,14 @@ csrc/moe/marlin_moe_wna16/kernel_*
 
 # Ignore ep_kernels_workspace folder
 ep_kernels_workspace/
+
+# Personal configurations - do not commit
+*_local.py
+*_personal.py
+*.local
+tools/vllm_*_server_local.py
+examples/*_local.py
+*.service
+vllm.service
+vllm_manager_local.py
+config_local.yaml
