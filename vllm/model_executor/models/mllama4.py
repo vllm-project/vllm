@@ -204,7 +204,7 @@ def pixel_shuffle(input_tensor, shuffle_ratio):
     return output_tensor
 
 
-@support_torch_compile
+@support_torch_compile(dynamic_arg_dims={"encoded_patches": 0})
 class Llama4VisionPixelShuffleMLP(nn.Module):
     def __init__(
         self,
@@ -235,7 +235,6 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
         return self.mlp(encoded_patches)
 
 
-@support_torch_compile
 class Llama4VisionAttention(nn.Module):
     def __init__(
         self,
@@ -334,7 +333,6 @@ class Llama4VisionAttention(nn.Module):
         return attn_output
 
 
-@support_torch_compile
 class Llama4VisionEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -388,6 +386,7 @@ class Llama4VisionEncoderLayer(nn.Module):
         return outputs
 
 
+@support_torch_compile(dynamic_arg_dims={"hidden_states": 0})
 class Llama4VisionEncoder(nn.Module):
     def __init__(
         self,
@@ -398,20 +397,17 @@ class Llama4VisionEncoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        from vllm.compilation.backends import set_model_tag
-
-        with set_model_tag("Llama4VisionEncoderLayer"):
-            self.layers = nn.ModuleList(
-                [
-                    Llama4VisionEncoderLayer(
-                        config=config,
-                        quant_config=quant_config,
-                        prefix=f"{prefix}.layers.{layer_idx}",
-                        use_data_parallel=use_data_parallel,
-                    )
-                    for layer_idx in range(config.num_hidden_layers)
-                ]
-            )
+        self.layers = nn.ModuleList(
+            [
+                Llama4VisionEncoderLayer(
+                    config=config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{layer_idx}",
+                    use_data_parallel=use_data_parallel,
+                )
+                for layer_idx in range(config.num_hidden_layers)
+            ]
+        )
 
     def forward(
         self,
@@ -499,13 +495,15 @@ class Llama4VisionModel(nn.Module):
         self.layernorm_post = nn.LayerNorm(self.hidden_size, eps=1e-5)
 
         # encoders
-        self.model = Llama4VisionEncoder(
-            config=config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.model",
-            use_data_parallel=use_data_parallel,
-        )
         from vllm.compilation.backends import set_model_tag
+
+        with set_model_tag("Llama4VisionEncoderLayer"):
+            self.model = Llama4VisionEncoder(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.model",
+                use_data_parallel=use_data_parallel,
+            )
 
         with set_model_tag("Llama4VisionPixelShuffleMLP"):
             self.vision_adapter = Llama4VisionPixelShuffleMLP(
@@ -520,7 +518,6 @@ class Llama4VisionModel(nn.Module):
         images_flattened: torch.Tensor,
     ) -> torch.Tensor:
         # Patch embedding
-        # print(f"Images flattened looks like: {images_flattened.shape}")
         hidden_state = self.patch_embedding(images_flattened)
         num_tiles, num_patches, hidden_dim = hidden_state.shape
 
