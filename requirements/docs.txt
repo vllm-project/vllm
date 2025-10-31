@@ -9,3 +9,4 @@ mkdocs-git-revision-date-localized-plugin
 mkdocs-minify-plugin
 regex
 ruff
+pydantic
