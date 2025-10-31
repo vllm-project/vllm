@@ -177,7 +177,6 @@ class EngineCoreGuard(threading.Thread):  # changed
             else:
                 raise TypeError("Non-serialized messages must be str or bytes")
 
-            # DEALER 协议格式：[empty frame, message content]
             src_socket.send_multipart([b"", msg_bytes])
             logger.debug("Sent message via %s: %s", src_socket, msg)
             return True, None
