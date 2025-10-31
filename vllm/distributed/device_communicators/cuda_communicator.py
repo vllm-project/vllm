@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     )
 
     try:
-        from aiter.dist.custom_all_reduce import (
+        from aiter.dist.device_communicators.custom_all_reduce import (
             CustomAllreduce as AITERCustomAllreduce,
         )
     except ImportError:
@@ -75,11 +75,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_aiter_custom_allreduce = is_rocm_aiter_custom_allreduce_enabled()
         # lazy import to avoid documentation build error
         if self.use_aiter_custom_allreduce:
-            from aiter.dist.custom_all_reduce import (
+            from aiter.dist.device_communicators.custom_all_reduce import (
                 CustomAllreduce as AITERCustomAllreduce,
             )
 
-            logger.info("Using aiter.dist.custom_all_reduce for ROCm platform")
+            logger.info("""Using aiter.dist.device_communicators.custom_all_reduce 
+                for ROCm platform""")
         else:
             from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa: E501
                 CustomAllreduce,
