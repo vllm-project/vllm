@@ -887,6 +887,18 @@ class NixlConnectorWorker:
                 self.src_xfer_side_handles[metadata.block_size] = (
                     self.register_local_xfer_handler(metadata.block_size)
                 )
+            elif metadata.block_size > self.block_size:
+                # lets steal some blocks at tail as temp block to cache large block_size
+                assigned_num_blocks = self.kv_transfer_config.get_from_extra_config(
+                    "num_buffer_blocks_for_hetero_block_size", 200
+                )
+
+                self.block_allocator_for_hetero_blksize = (
+                    BlockAllocatorForHeteroBlockSize(
+                        total_num_blocks=self.num_blocks,
+                        assigned_num_blocks=assigned_num_blocks,
+                    )
+                )
             setup_agent_time = time.perf_counter()
             logger.debug(
                 "NIXL handshake: add agent took: %s",
@@ -1064,10 +1076,6 @@ class NixlConnectorWorker:
         )
         assert len(self.block_len_per_layer) == len(seen_base_addresses)
         assert self.num_blocks != 0
-
-        self.block_allocator_for_hetero_blksize = BlockAllocatorForHeteroBlockSize(
-            self.num_blocks
-        )
 
         self.kv_caches_base_addr[self.engine_id] = seen_base_addresses
         self.num_regions = len(caches_data)
@@ -1620,10 +1628,10 @@ class NixlConnectorWorker:
                     meta.local_block_ids
                 )
         self.blocksize_post_process(block_ids_for_blocksize_post_process)
-        assert self.block_allocator_for_hetero_blksize is not None
-        self.block_allocator_for_hetero_blksize.free_block(
-            block_ids_for_blocksize_post_process
-        )
+        if self.block_allocator_for_hetero_blksize is not None:
+            self.block_allocator_for_hetero_blksize.free_block(
+                block_ids_for_blocksize_post_process
+            )
         if len(block_ids_to_permute) > 0:
             self.permute_device_kv(block_ids_to_permute)
 
@@ -1798,6 +1806,7 @@ class NixlConnectorWorker:
             remote_block_ids = self.get_mapped_blocks(
                 np.asarray(remote_block_ids) - 1, block_size_ratio
             )
+
             # NOTE: We need find free blocks to pad for local, because
             # when we receive remote buffer with bigger blockSize, it might happen
             # that local n_blocks scheduled less to match n*local_blksize=remote_blksize
@@ -1806,6 +1815,18 @@ class NixlConnectorWorker:
             # In order to get entire buffer, we need to assign free blocks to local,
             # so we can receive entire buffer from remote, And actually after permute
             # done, the free blocks will be all zero and not needed.
+            if self.block_allocator_for_hetero_blksize is not None:
+                buffer_blocks = (
+                    self.block_allocator_for_hetero_blksize.assigned_num_blocks
+                )
+                if max(local_block_ids) >= self.num_blocks - buffer_blocks:
+                    logger.warning(
+                        "assigned block_id %s is overlapping with buffer "
+                        "block_ids range (%d, %d), accuracy will gets impact.",
+                        str(local_block_ids),
+                        (self.num_blocks - buffer_blocks),
+                        self.num_blocks,
+                    )
             if len(local_block_ids) < len(remote_block_ids):
                 assert self.block_allocator_for_hetero_blksize is not None
                 padding_needed = len(remote_block_ids) - len(local_block_ids)
@@ -2085,9 +2106,16 @@ class NixlConnectorWorker:
 
 
 class BlockAllocatorForHeteroBlockSize:
-    def __init__(self, num_blocks: int):
-        assert num_blocks > 0, "No Available blocks"
-        self.available_block_ids: list[int] = [-id for id in range(num_blocks)]
+    def __init__(self, total_num_blocks: int, assigned_num_blocks: int):
+        assert total_num_blocks > 0, "No Available blocks"
+        self.available_block_ids: list[int] = [-id for id in range(total_num_blocks)]
+        self.assigned_num_blocks = assigned_num_blocks
+        logger.info(
+            "BlockAllocatorForHeteroBlockSize is initialized, using %d - %d blocks "
+            "as buffer blocks for temporary remote larger block_size cache",
+            (total_num_blocks - assigned_num_blocks),
+            total_num_blocks,
+        )
 
         heapq.heapify(self.available_block_ids)
 
@@ -2109,11 +2137,12 @@ class BlockAllocatorForHeteroBlockSize:
             return block_ids + padding_blocks
 
         # Check for available blocks
-        if len(self.available_block_ids) < to_pad_len:
+        if self.assigned_num_blocks - len(self.allocated_blocks) < to_pad_len:
+            avaliable = self.assigned_num_blocks - len(self.allocated_blocks)
             raise ValueError(
                 f"Not enough available blocks for hash {key}. "
                 f"Requested {to_pad_len} padding blocks, "
-                f"but only {len(self.available_block_ids)} are available."
+                f"but only {avaliable} are available."
             )
 
         # Allocate new blocks
