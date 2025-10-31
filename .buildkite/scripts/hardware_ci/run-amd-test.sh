@@ -217,7 +217,8 @@ else
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --network=host \
           --shm-size=16gb \
-          --rm \
+          --group-add render \
+	  --rm \
           -e HIP_VISIBLE_DEVICES=0 \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
