@@ -11,11 +11,11 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
-from vllm.config import RunnerOption
+from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -36,7 +36,7 @@ class ParallelSetup(NamedTuple):
 
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
 
 
 @dataclass
@@ -54,7 +54,7 @@ class CPTestSettings:
         dcp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -204,8 +204,11 @@ def _compare_cp_with_tp(
 
 
 CP_TEXT_GENERATION_MODELS = {
-    # [MLA attention only]
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(),
+        CPTestSettings.detailed(tp_base=2),
+    ],
+    "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
     ],
@@ -215,6 +218,7 @@ CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "bigcode/gpt_bigcode-santacoder",
 ]
 
 

@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
@@ -13,24 +14,140 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class PrefixCacheStats:
-    """Stores prefix cache hit statistics."""
+class BaseCacheStats:
+    """Stores cache hit statistics."""
 
-    # Whether reset_prefix_cache was invoked.
     reset: bool = False
-    # The number of new requests in this update.
+    """Whether the cache was reset."""
+
     requests: int = 0
-    # The number of queries in these requests. Note that "queries" here
-    # means the number of tokens that were queried from the cache.
+    """The number of requests in this update."""
+
     queries: int = 0
-    # The number of hits in these requests.
+    """The number of queries in these requests."""
+
     hits: int = 0
-    # The number of previously preempted requests in this update.
+    """The number of hits in these requests."""
+
+
+class CachingMetrics:
+    """Metrics for caching with a hit rate of the most recent N requests.
+    Args:
+        interval: The number of the most recent requests to aggregate.
+            Defaults to 1000.
+    """
+
+    def __init__(self, max_recent_requests: int = 1000) -> None:
+        super().__init__()
+
+        self.max_recent_requests = max_recent_requests
+        # The current aggregated values.
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+
+        # A deque of (requests, queries, hits) for the most recent requests.
+        self.query_queue = deque[tuple[int, int, int]]()
+
+    def observe(self, stats: BaseCacheStats):
+        """Observe the prefix caching for a set of requests.
+
+        This function is called with information gathered when new requests
+        are being scheduled and are looking for computed blocks.
+
+        When there are more than `max_recent_requests` requests, the oldest set
+        of requests are removed from the metrics.
+
+        Args:
+            stats: The prefix cache stats.
+        """
+        # reset_prefix_cache was invoked before the current update.
+        # Reset the metrics before aggregating the current stats.
+        if stats.reset:
+            self.reset()
+
+        # DO NOT appending empty stats to avoid helpful info get kicked out
+        # due to sliding window.
+        if stats.requests == 0:
+            return
+
+        # Update the metrics.
+        self.query_queue.append((stats.requests, stats.queries, stats.hits))
+        self.aggregated_requests += stats.requests
+        self.aggregated_query_total += stats.queries
+        self.aggregated_query_hit += stats.hits
+
+        # Remove the oldest stats until number of requests does not exceed
+        # the limit.
+        # NOTE: We preserve the latest added stats regardless.
+        while (
+            len(self.query_queue) > 1
+            and self.aggregated_requests > self.max_recent_requests
+        ):
+            old_requests, old_queries, old_hits = self.query_queue.popleft()
+            self.aggregated_requests -= old_requests
+            self.aggregated_query_total -= old_queries
+            self.aggregated_query_hit -= old_hits
+
+    def reset(self):
+        """Reset the metrics."""
+        self.aggregated_requests = 0
+        self.aggregated_query_total = 0
+        self.aggregated_query_hit = 0
+        self.query_queue.clear()
+
+    @property
+    def empty(self) -> bool:
+        """Return true if no requests have been observed."""
+        return self.aggregated_requests == 0
+
+    @property
+    def hit_rate(self) -> float:
+        """Calculate the hit rate for the past N requests."""
+        if self.aggregated_query_total == 0:
+            return 0.0
+        return self.aggregated_query_hit / self.aggregated_query_total
+
+
+@dataclass
+class PrefixCacheStats(BaseCacheStats):
+    """
+    Stores prefix cache hit statistics.
+    - `reset`: Whether `reset_prefix_cache` was invoked.
+    - `queries`: Refers to the number of tokens that were queried.
+    """
+
     preempted_requests: int = 0
-    # The `queries` number for preempted requests.
+    """The number of previously preempted requests in this update."""
+
     preempted_queries: int = 0
-    # The `hits` number for preempted requests.
+    """The `queries` number for preempted requests."""
+
     preempted_hits: int = 0
+    """The `hits` number for preempted requests."""
+
+    def record(self, num_tokens: int, num_hits: int, preempted: bool) -> None:
+        """Aggregate request information into the stats."""
+        if preempted:
+            # Previously preempted request
+            self.preempted_requests += 1
+            self.preempted_queries += num_tokens
+            self.preempted_hits += num_hits
+        else:
+            # New request
+            self.requests += 1
+            self.queries += num_tokens
+            self.hits += num_hits
+
+
+@dataclass
+class MultiModalCacheStats(BaseCacheStats):
+    """
+    Stores multi-modal cache hit statistics.
+    - `reset`: Whether `reset_mm_cache` was invoked.
+    - `queries`: Refers to the number of multi-modal data items
+      that were queried.
+    """
 
 
 @dataclass
@@ -47,9 +164,10 @@ class SchedulerStats:
     kv_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
+    connector_prefix_cache_stats: PrefixCacheStats | None = None
 
-    spec_decoding_stats: Optional[SpecDecodingStats] = None
-    kv_connector_stats: Optional[dict[str, Any]] = None
+    spec_decoding_stats: SpecDecodingStats | None = None
+    kv_connector_stats: dict[str, Any] | None = None
 
     num_corrupted_reqs: int = 0
 
@@ -87,7 +205,7 @@ class FinishedRequestStats:
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
-    max_tokens_param: Optional[int] = None
+    max_tokens_param: int | None = None
     queued_time: float = 0.0
     prefill_time: float = 0.0
     inference_time: float = 0.0
@@ -126,7 +244,7 @@ class IterationStats:
         is_prefilling: bool,
         prompt_len: int,
         req_stats: RequestStateStats,
-        lora_stats: Optional[LoRAStats],
+        lora_stats: LoRAStats | None,
     ):
         num_new_generation_tokens = len(output.new_token_ids)
 
@@ -161,7 +279,7 @@ class IterationStats:
         events: list["EngineCoreEvent"],
         is_prefilling: bool,
         req_stats: RequestStateStats,
-        lora_stats: Optional[LoRAStats],
+        lora_stats: LoRAStats | None,
     ):
         # Avoid circular dependency
         from vllm.v1.engine import EngineCoreEventType
@@ -183,7 +301,7 @@ class IterationStats:
         self,
         finish_reason: "FinishReason",
         num_prompt_tokens: int,
-        max_tokens_param: Optional[int],
+        max_tokens_param: int | None,
         req_stats: RequestStateStats,
     ):
         e2e_latency = self._time_since(req_stats.arrival_time)
@@ -231,7 +349,7 @@ class LoRARequestStates:
     def __init__(self):
         self.lora_name_to_stats: dict[str, LoRAStats] = {}
 
-    def get_stats(self, req_state: "RequestState") -> Optional[LoRAStats]:
+    def get_stats(self, req_state: "RequestState") -> LoRAStats | None:
         if req_state.lora_name is None:
             return None
         if req_state.lora_name not in self.lora_name_to_stats:
@@ -258,20 +376,20 @@ class LoRARequestStates:
     # Break the pattern for this lifecycle methods so we can
     # call this from IterationStats.update_from_events()
     @staticmethod
-    def scheduled_request(lora_stats: Optional[LoRAStats], request_id: str):
+    def scheduled_request(lora_stats: LoRAStats | None, request_id: str):
         if lora_stats is None:
             return
         lora_stats.waiting_requests.remove(request_id)
         lora_stats.running_requests.add(request_id)
 
     @staticmethod
-    def preempted_request(lora_stats: Optional[LoRAStats], request_id: str):
+    def preempted_request(lora_stats: LoRAStats | None, request_id: str):
         if lora_stats is None:
             return
         lora_stats.running_requests.remove(request_id)
         lora_stats.waiting_requests.add(request_id)
 
-    def update_iteration_stats(self, iteration_stats: Optional[IterationStats]):
+    def update_iteration_stats(self, iteration_stats: IterationStats | None):
         if iteration_stats is None:
             return
         for lora_name, stats in self.lora_name_to_stats.items():

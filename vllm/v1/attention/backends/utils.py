@@ -4,17 +4,15 @@ import abc
 import enum
 import functools
 from abc import abstractmethod
-from dataclasses import dataclass, fields, make_dataclass
+from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
     Generic,
     Literal,
-    Optional,
     Protocol,
     TypeVar,
-    Union,
     get_args,
 )
 
@@ -23,7 +21,7 @@ import torch
 from typing_extensions import runtime_checkable
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionImpl
@@ -32,17 +30,17 @@ if TYPE_CHECKING:
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
-from vllm.attention.layer import Attention
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.ubatch_utils import UBatchSlice
 
 logger = init_logger(__name__)
 KVCacheLayoutType = Literal["NHD", "HND"]
-_KV_CACHE_LAYOUT_OVERRIDE: Union[KVCacheLayoutType, None] = None
+_KV_CACHE_LAYOUT_OVERRIDE: KVCacheLayoutType | None = None
 
 PAD_SLOT_ID = -1
 
@@ -87,11 +85,14 @@ class CommonAttentionMetadata:
     causal: bool = True
 
     # Needed by FastPrefillAttentionBuilder
-    logits_indices_padded: Optional[torch.Tensor] = None
-    num_logits_indices: Optional[int] = None
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
 
     # Needed by CrossAttentionBuilder
-    encoder_seq_lens: Optional[np.ndarray] = None
+    encoder_seq_lens: np.ndarray | None = None
+
+    dcp_local_seq_lens: torch.Tensor | None = None
+    """Sequence lengths of the local rank in decode context parallelism world"""
 
 
 def slice_query_start_locs(
@@ -233,7 +234,7 @@ class AttentionCGSupport(enum.Enum):
     """Cudagraph always supported; supports mixed-prefill-decode"""
     UNIFORM_BATCH = 2
     """Cudagraph supported for batches the only contain query lengths that are
-    the same, this can be used for spec-decode 
+    the same, this can be used for spec-decode
         i.e. "decodes" are 1 + num_speculative_tokens"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
     """Cudagraph supported for batches the only contain query_len==1 decodes"""
@@ -247,7 +248,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: Optional[int] = None
+    reorder_batch_threshold: int | None = None
 
     @abstractmethod
     def __init__(
@@ -275,8 +276,9 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
-                self.reorder_batch_threshold = (
-                    1 + speculative_config.num_speculative_tokens
+                self.reorder_batch_threshold = max(
+                    self.reorder_batch_threshold,
+                    1 + speculative_config.num_speculative_tokens,
                 )
 
     @abstractmethod
@@ -343,6 +345,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         use_sliding_window: bool,
         use_local_attention: bool,
         num_sms: int,
+        dcp_world_size: int,
     ) -> bool:
         return False
 
@@ -391,9 +394,12 @@ class PerLayerParameters:
     """
 
     window_left: int
-    logits_soft_cap: Optional[float]
+    logits_soft_cap: float | None
     sm_scale: float
     has_sinks: bool = False
+    # has same params for all layers
+    has_same_window_lefts: bool | None = field(default=None, compare=False)
+    has_same_all_params: bool | None = field(default=None, compare=False)
 
 
 def get_per_layer_parameters(
@@ -404,7 +410,7 @@ def get_per_layer_parameters(
     to use during `plan`.
     """
 
-    layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase, layer_names)
     per_layer_params: dict[str, PerLayerParameters] = {}
 
     for key, layer in layers.items():
@@ -445,20 +451,12 @@ def infer_global_hyperparameters(
     param_sets = list(per_layer_params.values())
     global_params = param_sets[0]
 
-    # trtllm attention doesn't need global hyper params so disable the check
-    if not envs.VLLM_USE_TRTLLM_ATTENTION:
-        for params in param_sets:
-            if params.window_left != global_params.window_left:
-                raise ValueError(
-                    "Window left is not the same for all layers. "
-                    "One potential fix is to set disable_sliding_window=True"
-                )
-            assert params == global_params, (
-                "FlashInfer backend currently only supports models in which all"
-                "layers share the same values "
-                "for the following hyperparameters:"
-                "`window_left`, `logits_soft_cap`, `sm_scale`."
-            )
+    global_params.has_same_window_lefts = all(
+        params.window_left == global_params.window_left for params in param_sets
+    )
+    global_params.has_same_all_params = all(
+        params == global_params for params in param_sets
+    )
 
     return global_params
 
@@ -797,51 +795,59 @@ def reorder_batch_to_split_decodes_and_prefills(
     Returns:
         True if the batch was modified, False otherwise.
     """
-    # We now want to reorder the batch so that the "decode" requests are at
-    # the front and the "prefill" requests are at the back using the least
-    # amount of swaps possible. (NOTE for now we loosely use "decode" to mean
-    # requests where attention is likely memory-bound and "prefill" to mean
-    # requests where attention is likely compute-bound, TODO(lucas): figure out
-    # a better naming here)
-    decodes = []
-    prefills = []
-    num_decode_tokens = 0
-    num_prefill_tokens = 0
+    # We now want to reorder the batch into decode → extend → prefill order
+    # where:
+    #   decode: request with num_scheduled_tokens <= decode_threshold
+    #   extend: non-decode request with existing context
+    #   prefill: non-decode request with no existing context
+    # NOTE for now we loosely use "decode" to mean requests where attention is
+    #  likely memory-bound and "prefill" to mean requests where attention is
+    #  likely compute-bound,
+    num_reqs = len(input_batch.req_ids)
+    num_scheduled_tokens = [
+        scheduler_output.num_scheduled_tokens[id] for id in input_batch.req_ids
+    ]
+    num_scheduled_tokens_np = np.array(num_scheduled_tokens)
+    num_computed_tokens_np = input_batch.num_computed_tokens_cpu[:num_reqs]
 
-    for i, req_id in enumerate(input_batch.req_ids):
-        num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-        if num_tokens <= decode_threshold:
-            decodes.append(i)
-            num_decode_tokens += num_tokens
-        else:
-            prefills.append(i)
-            num_prefill_tokens += num_tokens
+    is_decode = num_scheduled_tokens_np <= decode_threshold
+    is_extend = (~is_decode) & (num_computed_tokens_np > 0)
+    is_prefill = (~is_decode) & (num_computed_tokens_np == 0)
 
-    # We hope that this is fairly minimal since decodes
-    # should be around for a number of iterations so hopefully they are
-    # relatively stationary (and new request are generally appended to the
-    # persistent batch so already should be at the back)
-    # To achieve this we loop over the decodes in descending order and
-    # the prefills in ascending order. We swap decodes from the  "back"
-    # i.e. past where the last decode should be in the reodorered with
-    # prefills from the front of the batch.
-    # `decodes` and `prefills` are already in ascending order just based on
-    # the above loop
-    num_decodes = len(decodes)
-    num_prefills = len(prefills)
-    modified_batch = False
+    # Desired order: decode → extend → prefill
+    req_regions = np.zeros(is_decode.shape, dtype=np.int32)  # 0 = decode by default
+    req_regions[is_extend] = 1
+    req_regions[is_prefill] = 2
 
-    for i in range(1, min(num_decodes, num_prefills) + 1):
-        # If the decode is at the "back" of the batch, i, we can swap it
-        # with the prefill closest to the front of the batch
-        decode_idx = decodes[num_decodes - i]
-        if decode_idx < num_decodes:
-            break
+    num_decodes = int(is_decode.sum())
+    num_extends = int(is_extend.sum())
 
-        input_batch.swap_states(prefills[i - 1], decode_idx)
-        modified_batch = True
+    target_regions = np.zeros(num_reqs, dtype=np.int32)
+    target_regions[num_decodes : num_decodes + num_extends] = 1
+    target_regions[num_decodes + num_extends :] = 2
 
-    return modified_batch
+    needs_swap = req_regions != target_regions
+
+    if not needs_swap.any():
+        return False
+
+    # Extract indices that need swapping and sort by target region
+    orig_indices = np.where(needs_swap)[0]
+    sorted_order = np.argsort(req_regions[needs_swap], kind="stable")
+    src_indices = orig_indices[sorted_order]
+
+    src_dest_map = {int(src): int(dst) for src, dst in zip(src_indices, orig_indices)}
+
+    for src in src_dest_map:
+        dst = src_dest_map[src]
+        while src != dst:
+            input_batch.swap_states(src, dst)
+            # Mark dst as done by updating its destination to itself
+            next_dst = src_dest_map.get(dst, dst)
+            src_dest_map[dst] = dst
+            dst = next_dst
+
+    return True
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
@@ -874,7 +880,7 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
 
 
 KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
-    ("logits_indices_padded", Optional[torch.Tensor], None),
+    ("logits_indices_padded", torch.Tensor | None, None),
     ("num_logits_indices", int, 0),
 ]
 
@@ -924,8 +930,8 @@ def create_fast_prefill_custom_backend(
             ):
                 def __init__(self, metadata, common_attn_metadata):
                     # Shallow copy all fields in metadata cls
-                    for field in fields(metadata.__class__):
-                        setattr(self, field.name, getattr(metadata, field.name))
+                    for _field in fields(metadata.__class__):
+                        setattr(self, _field.name, getattr(metadata, _field.name))
 
                     # Set additional fields that will be used in model code
                     assert (

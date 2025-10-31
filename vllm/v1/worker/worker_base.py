@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import os
-from typing import Any, Callable, TypeVar, Union
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
 import torch.nn as nn
@@ -12,16 +11,20 @@ import torch.nn as nn
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (
-    enable_trace_function_call_for_thread,
-    resolve_obj_by_qualname,
-    run_method,
-    update_environment_variables,
-    warn_for_unimplemented_methods,
-)
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
+from vllm.utils import warn_for_unimplemented_methods
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.system_utils import update_environment_variables
 from vllm.v1.kv_cache_interface import KVCacheSpec
-from vllm.v1.outputs import SamplerOutput
+from vllm.v1.serial_utils import run_method
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.outputs import ModelRunnerOutput
+else:
+    SchedulerOutput = object
+    ModelRunnerOutput = object
 
 logger = init_logger(__name__)
 
@@ -103,6 +106,11 @@ class WorkerBase:
         """Initialize the KV cache with the given size in blocks."""
         raise NotImplementedError
 
+    def reset_mm_cache(self) -> None:
+        reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
+        if callable(reset_fn):
+            reset_fn()
+
     def get_model(self) -> nn.Module:
         raise NotImplementedError
 
@@ -114,35 +122,7 @@ class WorkerBase:
         """Load model onto target device."""
         raise NotImplementedError
 
-    def execute_model(
-        self, execute_model_req: ExecuteModelRequest | None = None
-    ) -> list[SamplerOutput] | None:
-        raise NotImplementedError
-
-    def start_worker_execution_loop(self) -> None:
-        """Execute model loop in parallel worker.
-
-        You can stop the loop by executing a driver worker with an empty output.
-        See `stop_remote_worker_execution_loop` for more details.
-        """
-        with self.current_platform.inference_mode():
-            while True:
-                output = self.execute_model(execute_model_req=None)
-                if output is None:
-                    return None
-
-    def determine_num_available_blocks(self) -> tuple[int, int]:
-        """Determine the number of available blocks for the GPU KV cache and
-        swappable CPU KV cache.
-
-        The implementation may run profiling or other heuristics to determine
-        the size of caches.
-
-        Returns a tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
-        are blocks that are "active" on the device and can be appended to.
-        num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
-        appended to.
-        """
+    def execute_model(self, scheduler_output: SchedulerOutput) -> ModelRunnerOutput:
         raise NotImplementedError
 
     def get_cache_block_size_bytes(self) -> int:
@@ -199,19 +179,20 @@ class WorkerWrapperBase:
         """
         self.rpc_rank = rpc_rank
         self.worker: WorkerBase | None = None
-        self.vllm_config: VllmConfig | None = None
-        # do not store this `vllm_config`, `init_worker` will set the final
-        # one. TODO: investigate if we can remove this field in
-        # `WorkerWrapperBase`, `init_cached_hf_modules` should be
-        # unnecessary now.
-        if vllm_config.model_config is not None:
-            # it can be None in tests
-            trust_remote_code = vllm_config.model_config.trust_remote_code
-            if trust_remote_code:
-                # note: lazy import to avoid importing torch before initializing
-                from vllm.utils import init_cached_hf_modules
 
-                init_cached_hf_modules()
+        # do not store this `vllm_config`, `init_worker` will set the final
+        # one.
+        # TODO: investigate if we can remove this field in `WorkerWrapperBase`,
+        # `init_cached_hf_modules` should be unnecessary now.
+        self.vllm_config: VllmConfig | None = None
+
+        # `model_config` can be None in tests
+        model_config = vllm_config.model_config
+        if model_config and model_config.trust_remote_code:
+            # note: lazy import to avoid importing torch before initializing
+            from vllm.utils.import_utils import init_cached_hf_modules
+
+            init_cached_hf_modules()
 
     def shutdown(self) -> None:
         if self.worker is not None:
@@ -248,7 +229,7 @@ class WorkerWrapperBase:
         assert self.vllm_config is not None, (
             "vllm_config is required to initialize the worker"
         )
-        enable_trace_function_call_for_thread(self.vllm_config)
+        self.vllm_config.enable_trace_function_call_for_thread()
 
         from vllm.plugins import load_general_plugins
 
@@ -289,6 +270,28 @@ class WorkerWrapperBase:
                     worker_class,
                     extended_calls,
                 )
+
+        shared_worker_lock = kwargs.pop("shared_worker_lock", None)
+        if shared_worker_lock is None:
+            msg = (
+                "Missing `shared_worker_lock` argument from executor. "
+                "This argument is needed for mm_processor_cache_type='shm'."
+            )
+
+            mm_config = self.vllm_config.model_config.multimodal_config
+            if mm_config and mm_config.mm_processor_cache_type == "shm":
+                raise ValueError(msg)
+            else:
+                logger.warning_once(msg)
+
+            self.mm_receiver_cache = None
+        else:
+            self.mm_receiver_cache = worker_receiver_cache_from_config(
+                self.vllm_config,
+                MULTIMODAL_REGISTRY,
+                shared_worker_lock,
+            )
+
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
@@ -304,7 +307,7 @@ class WorkerWrapperBase:
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
 
-    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+    def execute_method(self, method: str | bytes, *args, **kwargs):
         try:
             # method resolution order:
             # if a method is defined in this class, it will be called directly.
@@ -323,5 +326,34 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
-    def __getattr__(self, attr):
+    def __getattr__(self, attr: str):
         return getattr(self.worker, attr)
+
+    def _apply_mm_cache(self, scheduler_output: SchedulerOutput) -> None:
+        mm_cache = self.mm_receiver_cache
+        if mm_cache is None:
+            return
+
+        for req_data in scheduler_output.scheduled_new_reqs:
+            req_data.mm_features = mm_cache.get_and_update_features(
+                req_data.mm_features
+            )
+
+    def execute_model(
+        self,
+        scheduler_output: SchedulerOutput,
+        *args,
+        **kwargs,
+    ) -> ModelRunnerOutput:
+        self._apply_mm_cache(scheduler_output)
+
+        assert self.worker is not None
+        return self.worker.execute_model(scheduler_output, *args, **kwargs)
+
+    def reset_mm_cache(self) -> None:
+        mm_receiver_cache = self.mm_receiver_cache
+        if mm_receiver_cache is not None:
+            mm_receiver_cache.clear_cache()
+
+        assert self.worker is not None
+        self.worker.reset_mm_cache()
