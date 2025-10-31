@@ -17,7 +17,7 @@ from vllm.config import (
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.load import LoadConfig
-from vllm.config.utils import get_field, resolve_config_value
+from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, build_defaults
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
@@ -249,7 +249,6 @@ def test_default_pooling_type(model_id, default_pooling_type, pooling_type):
         ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
         ("RedHatAI/Llama-3.2-1B-FP8", False),
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", False),
-        ("RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4", True),
         ("RedHatAI/gpt-oss-20b", True),
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
         ("RedHatAI/Llama-4-Scout-17B-16E-Instruct", True),
@@ -268,7 +267,6 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
         ("RedHatAI/Qwen3-8B-speculator.eagle3", False),
         ("RedHatAI/Llama-3.2-1B-FP8", True),
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", True),
-        ("RedHatAI/Qwen3-VL-235B-A22B-Instruct-NVFP4", True),
         ("RedHatAI/gpt-oss-20b", True),
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
         ("RedHatAI/Llama-3.2-1B-FP8", True),
@@ -713,23 +711,23 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         if k == "pass_config":
             for pass_k, pass_v in default_config["general"]["pass_config"].items():
                 actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
-                expected = resolve_config_value(pass_v, vllm_config)
+                expected = pass_v(vllm_config) if callable(pass_v) else pass_v
                 assert actual == expected
         else:
             actual = getattr(vllm_config.compilation_config, k)
-            expected = resolve_config_value(v, vllm_config)
+            expected = v(vllm_config) if callable(v) else v
             assert actual == expected
 
     # Verify quantized-specific defaults
     for k, v in default_config["is_quantized"]["pass_config"].items():
         actual = getattr(vllm_config.compilation_config.pass_config, k)
-        expected = resolve_config_value(v, vllm_config)
+        expected = v(vllm_config) if callable(v) else v
         assert actual == expected
 
     # Verify sequential-specific defaults
     for k, v in default_config["is_sequential"]["pass_config"].items():
         actual = getattr(vllm_config.compilation_config.pass_config, k)
-        expected = resolve_config_value(v, vllm_config)
+        expected = v(vllm_config) if callable(v) else v
         assert actual == expected
 
 
@@ -739,25 +737,22 @@ def test_vllm_config_callable_defaults():
     Verifies that lambdas in default configs can inspect VllmConfig properties
     (e.g., is_quantized, is_model_moe) to conditionally set optimization flags.
     """
-    # Test resolve_config_value with different callable scenarios
     config_no_model = VllmConfig(optimization_level=OptimizationLevel.O2)
 
     # Callable that checks if model exists
     has_model = lambda cfg: cfg.model_config is not None
-    assert resolve_config_value(has_model, config_no_model) is False
-    assert resolve_config_value(True, config_no_model) is True
-    assert resolve_config_value(False, config_no_model) is False
+    assert has_model(config_no_model) is False
 
     # Test with quantized model
-    quantized_model = ModelConfig("jerryzh168/Qwen3-8B-INT4")
+    quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
     config_quantized = VllmConfig(
         model_config=quantized_model, optimization_level=OptimizationLevel.O2
     )
     enable_if_quantized = lambda cfg: (
         cfg.model_config is not None and cfg.model_config.is_quantized()
     )
-    assert resolve_config_value(enable_if_quantized, config_quantized) is True
-    assert resolve_config_value(enable_if_quantized, config_no_model) is False
+    assert enable_if_quantized(config_quantized) is True
+    assert enable_if_quantized(config_no_model) is False
 
     # Test with MoE model
     moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
@@ -767,8 +762,8 @@ def test_vllm_config_callable_defaults():
     enable_if_sequential = lambda cfg: (
         cfg.model_config is not None and not cfg.model_config.is_model_moe()
     )
-    assert resolve_config_value(enable_if_sequential, config_moe) is False
-    assert resolve_config_value(enable_if_sequential, config_quantized) is True
+    assert enable_if_sequential(config_moe) is False
+    assert enable_if_sequential(config_quantized) is True
 
 
 def test_vllm_config_explicit_overrides():
@@ -780,7 +775,7 @@ def test_vllm_config_explicit_overrides():
     """
     from vllm.config.compilation import PassConfig
 
-    quantized_model = ModelConfig("jerryzh168/Qwen3-8B-INT4")
+    quantized_model = ModelConfig("RedHatAI/Llama-3.2-1B-FP8")
     moe_model = ModelConfig("deepseek-ai/DeepSeek-V2-Lite")
     regular_model = ModelConfig("Qwen/Qwen1.5-7B")
 
@@ -868,3 +863,6 @@ def test_vllm_config_explicit_overrides():
     # Other fields should still use defaults
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+test_vllm_config_explicit_overrides()

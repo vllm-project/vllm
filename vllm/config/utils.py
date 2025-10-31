@@ -161,30 +161,6 @@ class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
 
-def resolve_config_value(value: Any, config: "VllmConfig") -> Any:
-    """Resolve a config value, evaluating callables if needed.
-
-    This allows config defaults to be either static values or callables
-    that compute values based on the VllmConfig state.
-
-    Args:
-        value: The value to resolve. Can be a static value or a callable
-            that takes a VllmConfig and returns the resolved value.
-        config: The VllmConfig instance to pass to callable values.
-
-    Returns:
-        The resolved value. If value is callable, returns value(config).
-        Otherwise returns value as-is.
-
-    Example:
-        >>> resolve_config_value(True, config)
-        True
-        >>> resolve_config_value(lambda cfg: cfg.model_config is not None, config)
-        False  # (assuming config.model_config is None)
-    """
-    return value(config) if callable(value) else value
-
-
 def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
     processed_overrides = {}
     for field_name, value in overrides.items():

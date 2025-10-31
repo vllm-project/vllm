@@ -107,11 +107,7 @@ _RUNNER_CONVERTS: dict[RunnerType, list[ConvertType]] = {
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
-    """Configuration for the model.
-
-    This dataclass is only meant to be within the vllm config.
-    If used outside of the vllm config, some fields may be left in an
-    improper state."""
+    """Configuration for the model."""
 
     model: str = "Qwen/Qwen3-0.6B"
     """Name or path of the Hugging Face model to use. It is also used as the

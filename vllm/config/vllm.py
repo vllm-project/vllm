@@ -39,7 +39,7 @@ from .parallel import ParallelConfig
 from .scheduler import SchedulerConfig
 from .speculative import SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, resolve_config_value
+from .utils import SupportsHash, config
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -102,10 +102,6 @@ def build_defaults(
     #     is_sequential = not model_config.is_model_moe()
     # See https://github.com/vllm-project/vllm/issues/25689.
 
-    def enable_noop(cfg):
-        """Returns True if optimization level is greater than O0."""
-        return cfg.optimization_level.value > OptimizationLevel.O0.value
-
     def enable_fusion(cfg):
         """Returns True if RMS norm or quant FP8 is enabled."""
         return cfg.compilation_config.is_custom_op_enabled(
@@ -115,7 +111,7 @@ def build_defaults(
     optimization_level_00 = {
         "general": {
             "pass_config": {
-                "enable_noop": enable_noop,
+                "enable_noop": False,
                 "enable_fusion": False,
                 "enable_fi_allreduce_fusion": False,
             },
@@ -134,7 +130,7 @@ def build_defaults(
     optimization_level_01 = {
         "general": {
             "pass_config": {
-                "enable_noop": enable_noop,
+                "enable_noop": True,
                 "enable_fusion": enable_fusion,
                 "enable_fi_allreduce_fusion": False,
             },
@@ -153,7 +149,7 @@ def build_defaults(
     optimization_level_02 = {
         "general": {
             "pass_config": {
-                "enable_noop": enable_noop,
+                "enable_noop": True,
                 "enable_fusion": enable_fusion,
                 "enable_fi_allreduce_fusion": False,
             },
@@ -172,7 +168,7 @@ def build_defaults(
     optimization_level_03 = {
         "general": {
             "pass_config": {
-                "enable_noop": enable_noop,
+                "enable_noop": True,
                 "enable_fusion": enable_fusion,
                 "enable_fi_allreduce_fusion": False,
             },
@@ -445,7 +441,7 @@ class VllmConfig:
             value: Default value (static or callable).
         """
         if getattr(config_obj, key) is None:
-            setattr(config_obj, key, resolve_config_value(value, self))
+            setattr(config_obj, key, value(self) if callable(value) else value)
 
     def _apply_optimization_level_defaults(self, default_config: dict) -> None:
         """Apply optimization level defaults (O0-O3) to compilation config.
@@ -517,10 +513,12 @@ class VllmConfig:
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning("Enforce eager set, overriding optimization level to -O0")
             self.optimization_level = OptimizationLevel.O0
+        print("outside")
         if (
             self.compilation_config.mode is not None
             and self.compilation_config.mode < CompilationMode.VLLM_COMPILE
         ):
+            print("inside")
             logger.warning_once(
                 "Compilation Mode is not VLLM_COMPILE, so optimization will be"
                 "set to level 0. This may result in reduced performance."
@@ -536,6 +534,23 @@ class VllmConfig:
                 "Optimizations settings that are only active during"
                 "compiliation will be ignored."
             )
+
+        def has_blocked_weights():
+            if self.quant_config is not None:
+                if hasattr(self.quant_config, "weight_block_size"):
+                    return self.quant_config.weight_block_size is not None
+                elif hasattr(self.quant_config, "has_blocked_weights"):
+                    return self.quant_config.has_blocked_weights()
+            return False
+
+        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
+        # On H100 the CUDA kernel is faster than
+        # native implementation
+        # https://github.com/vllm-project/vllm/issues/25094
+        if has_blocked_weights():
+            custom_ops = self.compilation_config.custom_ops
+            if "-quant_fp8" not in custom_ops:
+                custom_ops.append("+quant_fp8")
 
         # Apply optimization level-specific defaults
         default_config = build_defaults(
@@ -555,17 +570,6 @@ class VllmConfig:
             self.compilation_config.custom_ops.append("+rms_norm")
 
         if current_platform.support_static_graph_mode():
-            # if cudagraph_mode is not explicitly set by users, set default
-            # value
-            if self.compilation_config.cudagraph_mode is None:
-                if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
-                    # default to full and piecewise for most models
-                    self.compilation_config.cudagraph_mode = (
-                        CUDAGraphMode.FULL_AND_PIECEWISE
-                    )
-                else:
-                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-
             # if cudagraph_mode has full cudagraphs, we need to check support
             if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
                 # decode context parallel does not support full cudagraphs
@@ -827,23 +831,6 @@ class VllmConfig:
                     env_path,
                 )
             self.compilation_config.debug_dump_path = env_path
-
-        def has_blocked_weights():
-            if self.quant_config is not None:
-                if hasattr(self.quant_config, "weight_block_size"):
-                    return self.quant_config.weight_block_size is not None
-                elif hasattr(self.quant_config, "has_blocked_weights"):
-                    return self.quant_config.has_blocked_weights()
-            return False
-
-        # Enable quant_fp8 CUDA ops (TODO disable in follow up)
-        # On H100 the CUDA kernel is faster than
-        # native implementation
-        # https://github.com/vllm-project/vllm/issues/25094
-        if has_blocked_weights():
-            custom_ops = self.compilation_config.custom_ops
-            if "-quant_fp8" not in custom_ops:
-                custom_ops.append("+quant_fp8")
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
