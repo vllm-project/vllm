@@ -814,23 +814,6 @@ class SupportsTranscription(Protocol):
         ...
 
     @classmethod
-    def get_timestamp_init_token(cls):
-        """Get initaial token for timestamp segments."""
-        if not cls.supports_segment_timestamp:
-            raise NotImplementedError(
-                f"{cls.__name__} does not support timestamp segments."
-            )
-        ...
-
-    @classmethod
-    def get_timestamp_offset(cls):
-        """Get the offset value for timestamp segments."""
-        if not cls.supports_segment_timestamp:
-            raise NotImplementedError(
-                f"{cls.__name__} does not support timestamp segments."
-            )
-
-    @classmethod
     def get_other_languages(cls) -> Mapping[str, str]:
         # other possible language codes from the whisper map
         return {k: v for k, v in LANGUAGES.items() if k not in cls.supported_languages}
