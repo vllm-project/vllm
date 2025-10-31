@@ -34,9 +34,9 @@ def run_radio_test(
     # Using `self.get_nearest_supported_resolution`, for assets 432x642 the
     # nearest supported resolution is 432x640.
     pixel_values = [
-        img_processor(image, return_tensors="pt").pixel_values.to(torch_dtype)[
-            :, :, :, :640
-        ]
+        img_processor(image, return_tensors="pt", do_normalize=True).pixel_values.to(
+            torch_dtype
+        )[:, :, :, :640]
         for image in images
     ]
 
@@ -49,9 +49,12 @@ def run_radio_test(
         trust_remote_code=True,
     ).to("cuda")
     hf_model.eval()
+    # Disable HF's internal normalizer; we normalize in the processor above.
+    hf_model.make_preprocessor_external()
 
     hf_outputs_per_image = [
-        hf_model(pixel_value.to("cuda")).features for pixel_value in pixel_values
+        hf_model(pixel_value.to("cuda").float()).features
+        for pixel_value in pixel_values
     ]
 
     radio_config = RadioConfig(
