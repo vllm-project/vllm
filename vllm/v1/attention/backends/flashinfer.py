@@ -162,6 +162,9 @@ def trtllm_prefill_attn_kvfp8_dequant(
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    # Note: Not sure for all platforms,
+    # but on Blackwell, only support a page size of
+    # 16, 32, 64
     supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
