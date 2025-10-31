@@ -69,14 +69,19 @@ cpu_offload_bytes = num_cpu_blocks × page_size_bytes × num_layers
 
 ### Optimization Examples by RAM Size
 
-| Available RAM | Optimal Blocks | Max Context | Memory Used |
-|--------------|---------------|-------------|-------------|
-| 16 GB        | 10,900        | 171k tokens | 15.9 GB     |
-| 32 GB        | 22,000        | 256k tokens | 24.5 GB     |
-| 64 GB        | 44,000        | 256k tokens | 49.0 GB     |
-| 128 GB       | 88,000        | 256k tokens | 98.0 GB     |
+| Available RAM | Optimal Blocks | Max Context Capacity | Memory Used |
+|--------------|---------------|----------------------|-------------|
+| 16 GB        | 10,923        | **175k tokens**      | 16.0 GB     |
+| 32 GB        | 21,845        | **350k tokens**      | 32.0 GB     |
+| 64 GB        | 43,691        | **699k tokens**      | 64.0 GB     |
+| 128 GB       | 87,381        | **1.4M tokens**      | 128.0 GB    |
 
-**Note:** Context is capped by model's `max_position_embeddings` (e.g., 262,144 for Qwen3-Coder-30B)
+**Important Notes:**
+- These calculations show the **maximum theoretical capacity** based on available RAM
+- Actual usable context is limited by the model's `max_position_embeddings` parameter
+  - Qwen3-Coder-30B: 262,144 tokens (256k) - needs ~22GB RAM
+  - Models supporting 1M+ context can fully utilize 128GB configurations
+- Formula: `Max Tokens = (RAM_GB × 1024 MB / 1.5 MB per block) × 16 tokens/block`
 
 ### Configuration Examples
 
