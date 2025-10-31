@@ -108,7 +108,7 @@ Batch invariance has been tested and verified on the following models:
 - **Qwen3 (MoE)**: `Qwen/Qwen3-30B-A3B`, `Qwen/Qwen3-Next-80B-A3B-Instruct`
 - **Llama 3**: `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.2-1B-Instruct`
 
-Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them at the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/27433).
+Other models may also work, but these have been explicitly validated. If you encounter issues with a specific model, please report them on the [GitHub issue tracker](https://github.com/vllm-project/vllm/issues/new/choose).
 
 ## Implementation Details
 
