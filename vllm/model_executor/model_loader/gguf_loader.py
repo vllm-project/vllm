@@ -132,14 +132,27 @@ class GGUFModelLoader(BaseModelLoader):
             gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
         return gguf_to_hf_name_map
 
-    def _create_mmproj_tensor_mapping(self) -> dict[str, str]:
+    def _create_mmproj_tensor_mapping(self, mmproj_path: str) -> dict[str, str]:
         """
         Create mapping from GGUF mmproj tensor names to HuggingFace parameter names
         for Gemma3 multimodal models.
 
+        Args:
+            mmproj_path: Path to mmproj.gguf file
+
         Returns:
             Dictionary mapping GGUF names to vLLM parameter names
         """
+        # Read layer count from GGUF metadata instead of hardcoding
+        reader = gguf.GGUFReader(mmproj_path)
+        num_layers_field = reader.get_field("clip.vision.block_count")
+        if num_layers_field is None:
+            raise ValueError(
+                "Missing 'clip.vision.block_count' in mmproj.gguf metadata. "
+                "Cannot determine number of vision transformer layers."
+            )
+        num_layers = int(num_layers_field.parts[-1])
+
         mapping = {}
 
         # Multimodal Projector Mappings
@@ -161,8 +174,8 @@ class GGUFModelLoader(BaseModelLoader):
             "vision_tower.vision_model.embeddings.position_embedding.weight"
         )
 
-        # SigLIP-So400m: 27 transformer layers
-        for layer_idx in range(27):
+        # Vision transformer layers (read from GGUF metadata)
+        for layer_idx in range(num_layers):
             # Layer norms
             ln_base = f"vision_tower.vision_model.encoder.layers.{layer_idx}"
             mapping[f"v.blk.{layer_idx}.ln1.weight"] = f"{ln_base}.layer_norm1.weight"
@@ -260,7 +273,7 @@ class GGUFModelLoader(BaseModelLoader):
 
             # 2. Load vision tower + projector weights from mmproj.gguf
             mmproj_path = str(mmproj_files[0])
-            mmproj_mapping = self._create_mmproj_tensor_mapping()
+            mmproj_mapping = self._create_mmproj_tensor_mapping(mmproj_path)
 
             logger.info(
                 "Loading vision tower and projector weights from %s...",
