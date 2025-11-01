@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from importlib.util import find_spec
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -67,30 +68,34 @@ else:
 logger = init_logger(__name__)
 
 
-def _detect_gguf_multimodal_gemma3(model: str) -> bool:
+def _detect_gguf_multimodal_gemma3(model: str) -> Path | None:
     """Check if GGUF model has multimodal projector file for Gemma3.
 
     Args:
         model: Model path string
 
     Returns:
-        True if this is a Gemma3 GGUF model with mmproj file, False otherwise
+        Path to mmproj file if found, None otherwise
     """
     if not model.endswith(".gguf"):
-        return False
+        return None
 
     try:
         from pathlib import Path
 
         model_path = Path(model)
         if not model_path.is_file():
-            return False
+            return None
 
         model_dir = model_path.parent
         mmproj_patterns = ["mmproj.gguf", "mmproj-*.gguf", "*mmproj*.gguf"]
-        return any(list(model_dir.glob(pattern)) for pattern in mmproj_patterns)
+        for pattern in mmproj_patterns:
+            mmproj_files = list(model_dir.glob(pattern))
+            if mmproj_files:
+                return mmproj_files[0]
+        return None
     except Exception:
-        return False
+        return None
 
 
 RunnerOption = Literal["auto", RunnerType]
@@ -554,7 +559,8 @@ class ModelConfig:
 
         # GGUF multimodal: Force Gemma3ForConditionalGeneration architecture
         # when mmproj file is present, before model resolution
-        if _detect_gguf_multimodal_gemma3(self.model):
+        mmproj_path = _detect_gguf_multimodal_gemma3(self.model)
+        if mmproj_path is not None:
             is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
             if is_gemma3:
                 architectures = ["Gemma3ForConditionalGeneration"]
@@ -569,37 +575,19 @@ class ModelConfig:
                     not hasattr(self.hf_config, "vision_config")
                     or self.hf_config.vision_config is None
                 ):
-                    from pathlib import Path
-
                     from vllm.model_executor.model_loader.utils import (
                         extract_vision_config_from_gguf,
                     )
 
-                    # Find mmproj.gguf file to extract config from
-                    vision_config = None
-                    model_path = Path(self.model)
-                    if model_path.suffix.lower() == ".gguf":
-                        model_dir = model_path.parent
-                        mmproj_patterns = [
-                            "mmproj.gguf",
-                            "mmproj-*.gguf",
-                            "*mmproj*.gguf",
-                        ]
-                        for pattern in mmproj_patterns:
-                            mmproj_files = list(model_dir.glob(pattern))
-                            if mmproj_files:
-                                vision_config = extract_vision_config_from_gguf(
-                                    mmproj_files[0]
-                                )
-                                break
+                    vision_config = extract_vision_config_from_gguf(str(mmproj_path))
 
                     # Fail fast if extraction fails - indicates
                     # corrupted/incomplete GGUF
                     if vision_config is None:
                         raise ValueError(
                             "Failed to extract vision config from mmproj.gguf. "
-                            "This may indicate a corrupted or incomplete GGUF file. "
-                            "Please verify your mmproj.gguf file is valid."
+                            "This may indicate a corrupted or incomplete GGUF "
+                            "file. Please verify your mmproj.gguf file is valid."
                         )
 
                     self.hf_config.vision_config = vision_config
