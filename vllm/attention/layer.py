@@ -112,7 +112,8 @@ def maybe_get_vit_flash_attn_backend(
 
     if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_cuda_alike():
         from flash_attn import flash_attn_varlen_func
-
+    if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_xpu():
+        from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     elif attn_backend == _MHA_Backend.VLLM_FLASH_ATTN:
         from vllm.vllm_flash_attn import flash_attn_varlen_func
     elif attn_backend == _MHA_Backend.ROCM_AITER_FA:
@@ -501,23 +502,18 @@ class MultiHeadAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        if current_platform.is_xpu():
-            # currently, only torch_sdpa is supported on xpu
-            self.attn_backend = _MHA_Backend.TORCH_SDPA
-        else:
-            self.attn_backend = (
-                backend
-                if backend
-                in {
-                    _MHA_Backend.TORCH_SDPA,
-                    _MHA_Backend.XFORMERS,
-                    _MHA_Backend.PALLAS,
-                    _MHA_Backend.ROCM_AITER_FA,
-                    _MHA_Backend.FLASH_ATTN,
-                    _MHA_Backend.VLLM_FLASH_ATTN,
-                }
-                else _MHA_Backend.TORCH_SDPA
-            )
+        self.attn_backend = (
+            backend
+            if backend
+            in {
+                _MHA_Backend.TORCH_SDPA,
+                _MHA_Backend.XFORMERS,
+                _MHA_Backend.PALLAS,
+                _MHA_Backend.ROCM_AITER_FA,
+                _MHA_Backend.FLASH_ATTN,
+            }
+            else _MHA_Backend.TORCH_SDPA
+        )
 
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(

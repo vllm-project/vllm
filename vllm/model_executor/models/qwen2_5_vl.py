@@ -844,10 +844,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
         seqlens = torch.zeros(1, device=cu_seqlens.device)
-        if (
-            self.attn_backend == _MHA_Backend.FLASH_ATTN
-            or self.attn_backend == _MHA_Backend.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {_MHA_Backend.FLASH_ATTN, _MHA_Backend.ROCM_AITER_FA}:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == _MHA_Backend.XFORMERS:
             seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
