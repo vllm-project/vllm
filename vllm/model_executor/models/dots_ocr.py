@@ -294,10 +294,8 @@ class DotsVisionAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-            )
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
         if self.attn_backend not in {
             _MHA_Backend.FLASH_ATTN,

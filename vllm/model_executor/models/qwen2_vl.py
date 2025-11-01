@@ -367,10 +367,8 @@ class Qwen2VisionAttention(nn.Module):
             attn_backend_override=attn_backend_override,
         )
 
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-            )
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
 
         from vllm.platforms import current_platform

@@ -102,8 +102,8 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _MHA_Backend,
-) -> tuple[_MHA_Backend, Callable | None]:
+    attn_backend: _MHA_Backend | None,
+) -> Callable | None:
     # At this point,
     # we already have the attn_backend,
     # overriding logic is done in the platform-specific implementation.
@@ -123,7 +123,7 @@ def maybe_get_vit_flash_attn_backend(
 
     # if attn_backend is TORCH_SDPA,
     # it will reach here and the flash_attn_varlen_func will be None.
-    return attn_backend, flash_attn_varlen_func
+    return flash_attn_varlen_func
 
 
 def _init_kv_cache_quant(
@@ -515,10 +515,8 @@ class MultiHeadAttention(nn.Module):
             else _MHA_Backend.TORCH_SDPA
         )
 
-        self.attn_backend, self._flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-            )
+        self._flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
 
         if (
