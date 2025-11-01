@@ -11,7 +11,7 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.attention.layer import Attention, MultiHeadAttention
 from vllm.platforms import current_platform
-from vllm.utils import get_max_shared_memory_bytes
+from vllm.utils.mem_utils import get_max_shared_memory_bytes
 
 if not current_platform.is_rocm():
     from xformers import ops as xops

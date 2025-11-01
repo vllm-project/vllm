@@ -45,6 +45,10 @@ class BatchDescriptor(NamedTuple):
     For non-uniform batches, should set to 0 for uniquely identifying the batch.
     For uniform batches, it is the max_query_len of a uniform batch.
     """
+    has_lora: bool = False
+    """
+    Whether this batch has active LoRA adapters.
+    """
 
     @property
     def non_uniform(self) -> "BatchDescriptor":
@@ -52,7 +56,10 @@ class BatchDescriptor(NamedTuple):
         Return a non-uniform version of current batch descriptor.
         """
         return BatchDescriptor(
-            self.num_tokens, uniform_decode=False, uniform_query_len=0
+            self.num_tokens,
+            uniform_decode=False,
+            uniform_query_len=0,
+            has_lora=self.has_lora,
         )
 
 

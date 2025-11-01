@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from itertools import product
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
@@ -61,6 +62,7 @@ class CudagraphDispatcher:
         )
 
         self.keys_initialized = False
+        self.lora_cases: list[bool] = [False]
 
     def add_cudagraph_key(
         self, runtime_mode: CUDAGraphMode, batch_descriptor: BatchDescriptor
@@ -74,6 +76,16 @@ class CudagraphDispatcher:
         self, cudagraph_mode: CUDAGraphMode, uniform_query_lens: int | list[int]
     ):
         # This should be called only after attention backend is initialized.
+
+        # LoRA activation cases to specialize the cuda graphs on
+        if self.vllm_config.lora_config and not self.is_drafter:
+            if self.compilation_config.cudagraph_specialize_lora:
+                lora_cases = [True, False]
+            else:
+                lora_cases = [True]
+        else:
+            lora_cases = [False]
+        self.lora_cases = lora_cases
 
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
@@ -102,10 +114,14 @@ class CudagraphDispatcher:
                     ), f"Invalid uniform_query_lens: {uniform_query_len}"
 
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-            for bs in self.compilation_config.cudagraph_capture_sizes:
+            for bs, has_lora in product(
+                self.compilation_config.cudagraph_capture_sizes, lora_cases
+            ):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False),
+                    BatchDescriptor(
+                        num_tokens=bs, uniform_decode=False, has_lora=has_lora
+                    ),
                 )
             self.cudagraph_capture_sizes = (
                 self.compilation_config.cudagraph_capture_sizes
@@ -138,13 +154,16 @@ class CudagraphDispatcher:
                     for x in candidate_sizes
                     if x <= max_num_tokens and x >= uniform_query_len
                 ]
-                for bs in cudagraph_capture_sizes_for_decode:
+                for bs, has_lora in product(
+                    cudagraph_capture_sizes_for_decode, lora_cases
+                ):
                     self.add_cudagraph_key(
                         CUDAGraphMode.FULL,
                         BatchDescriptor(
                             num_tokens=bs,
                             uniform_decode=True,
                             uniform_query_len=uniform_query_len,
+                            has_lora=has_lora,
                         ),
                     )
                 self.uniform_cudagraph_capture_sizes[uniform_query_len] = (
@@ -171,14 +190,17 @@ class CudagraphDispatcher:
             capture_sizes = sorted(
                 self.uniform_cudagraph_capture_sizes[uniform_query_len], reverse=True
             )
+        combos = product(capture_sizes, self.lora_cases)
         keys = [
             BatchDescriptor(
                 num_tokens=x,
                 uniform_decode=uniform_decode,
                 uniform_query_len=uniform_query_len,
+                has_lora=has_lora,
             )
-            for x in capture_sizes
+            for x, has_lora in combos
         ]
+        capture_sizes = [x for x, _ in combos]
         return capture_sizes, keys, runtime_mode
 
     def cudagraph_padded_num_tokens(
