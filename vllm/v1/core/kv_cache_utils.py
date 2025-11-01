@@ -701,13 +701,14 @@ def check_enough_kv_cache_memory(vllm_config: VllmConfig,
         extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
         if "num_cpu_blocks" in extra_config:
             num_cpu_blocks = extra_config["num_cpu_blocks"]
-            # Calculate CPU offload capacity
+            # Calculate CPU offload capacity across all layers
             sample_spec = next(iter(kv_cache_spec.values()))
-            cpu_offload_bytes = num_cpu_blocks * sample_spec.page_size_bytes
+            num_layers = len(kv_cache_spec)
+            cpu_offload_bytes = num_cpu_blocks * num_layers * sample_spec.page_size_bytes
             available_memory += cpu_offload_bytes
             logger.info(
                 f"CPU offload enabled: Adding {cpu_offload_bytes / GiB_bytes:.2f} GiB "
-                f"({num_cpu_blocks} blocks) to available KV cache memory. "
+                f"({num_cpu_blocks} blocks × {num_layers} layers) to available KV cache memory. "
                 f"Total available: {available_memory / GiB_bytes:.2f} GiB"
             )
 

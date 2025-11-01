@@ -18,6 +18,8 @@ import aiohttp
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, HttpUrl
+import json
+from collections import deque
 
 # GPU monitoring
 try:
@@ -37,10 +39,64 @@ MODELS_DIR = os.getenv("VLLM_MODELS_DIR", str(Path.home() / ".cache" / "huggingf
 VLLM_PORT = int(os.getenv("VLLM_PORT", "8000"))
 VLLM_HOST = os.getenv("VLLM_HOST", "0.0.0.0")
 
+# Crash loop detection configuration
+CRASH_LOOP_THRESHOLD = 3  # Number of failures before stopping auto-restart
+CRASH_LOOP_WINDOW = 300  # Time window in seconds (5 minutes)
+HEALTH_CHECK_INTERVAL = 10  # Health check every 10 seconds
+RESTART_DELAY = 5  # Wait 5 seconds before restarting
+
+# Crash loop detector class
+class CrashLoopDetector:
+    def __init__(self, threshold: int = CRASH_LOOP_THRESHOLD, window: int = CRASH_LOOP_WINDOW):
+        self.threshold = threshold
+        self.window = window
+        self.failures = deque()
+        self.crash_loop_active = False
+        self.crash_loop_message = ""
+
+    def record_failure(self, reason: str = "Service stopped unexpectedly"):
+        """Record a service failure"""
+        now = datetime.now()
+        self.failures.append((now, reason))
+
+        # Clean old failures outside the window
+        cutoff = now.timestamp() - self.window
+        while self.failures and self.failures[0][0].timestamp() < cutoff:
+            self.failures.popleft()
+
+        # Check if we've hit crash loop threshold
+        if len(self.failures) >= self.threshold:
+            self.crash_loop_active = True
+            self.crash_loop_message = f"Crash loop detected: {len(self.failures)} failures in {self.window}s. Last reason: {reason}"
+            return True
+        return False
+
+    def is_crash_loop(self) -> bool:
+        """Check if we're in a crash loop"""
+        return self.crash_loop_active
+
+    def reset(self):
+        """Reset crash loop state"""
+        self.failures.clear()
+        self.crash_loop_active = False
+        self.crash_loop_message = ""
+
+    def get_status(self) -> dict:
+        """Get current crash loop status"""
+        return {
+            "crash_loop_active": self.crash_loop_active,
+            "message": self.crash_loop_message,
+            "failure_count": len(self.failures),
+            "threshold": self.threshold
+        }
+
 # Global state
 current_model: Optional[str] = None
 context_window: Optional[int] = None
 SERVICE_NAME = "vllm.service"
+crash_detector = CrashLoopDetector()
+auto_restart_enabled = False
+last_known_state = "stopped"  # Track service state
 
 app = FastAPI(
     title="vLLM Manager",
@@ -269,6 +325,98 @@ async def download_model_from_url(url: str, destination: str):
                     if total_size > 0:
                         progress = (downloaded / total_size) * 100
                         print(f"Download progress: {progress:.2f}%")
+
+
+async def check_vllm_health() -> tuple[bool, str]:
+    """Check if vLLM API is responsive"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f'http://localhost:{VLLM_PORT}/health',
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as response:
+                if response.status == 200:
+                    return True, "healthy"
+                else:
+                    return False, f"API returned status {response.status}"
+    except asyncio.TimeoutError:
+        return False, "health check timeout"
+    except aiohttp.ClientConnectorError:
+        return False, "connection refused"
+    except Exception as e:
+        return False, f"health check failed: {str(e)}"
+
+
+async def auto_restart_service():
+    """Attempt to restart the service"""
+    global last_known_state
+
+    if crash_detector.is_crash_loop():
+        print(f"⚠️  Not restarting - crash loop detected: {crash_detector.crash_loop_message}")
+        return False
+
+    print(f"🔄 Auto-restarting vLLM service...")
+    success, output = run_systemctl_command("restart")
+
+    if success:
+        print(f"✅ Service restarted successfully")
+        await asyncio.sleep(RESTART_DELAY)
+        return True
+    else:
+        print(f"❌ Failed to restart service: {output}")
+        crash_detector.record_failure(f"Restart failed: {output}")
+        return False
+
+
+async def monitor_service_health():
+    """Background task to monitor service health and auto-restart if needed"""
+    global last_known_state, auto_restart_enabled
+
+    while True:
+        try:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+
+            # Check if service is running
+            is_running = is_vllm_running()
+
+            if is_running:
+                # Service is running, check API health
+                is_healthy, health_msg = await check_vllm_health()
+
+                if is_healthy:
+                    # Service is healthy
+                    if last_known_state != "running":
+                        print(f"✅ vLLM service is now healthy")
+                        crash_detector.reset()  # Reset crash detector on successful recovery
+                    last_known_state = "running"
+                else:
+                    # Service running but API unhealthy
+                    print(f"⚠️  vLLM API unhealthy: {health_msg}")
+
+                    if auto_restart_enabled and not crash_detector.is_crash_loop():
+                        crash_detector.record_failure(f"API unhealthy: {health_msg}")
+                        await auto_restart_service()
+
+                    last_known_state = "unhealthy"
+            else:
+                # Service not running
+                if last_known_state == "running":
+                    # Service was running but now stopped - unexpected
+                    print(f"❌ vLLM service stopped unexpectedly")
+                    crash_detector.record_failure("Service stopped unexpectedly")
+
+                    if auto_restart_enabled and not crash_detector.is_crash_loop():
+                        await auto_restart_service()
+                    elif crash_detector.is_crash_loop():
+                        print(f"🛑 Crash loop detected - stopping auto-restart")
+                        print(f"   {crash_detector.crash_loop_message}")
+                        # Stop the service to prevent further restart attempts
+                        run_systemctl_command("stop")
+
+                last_known_state = "stopped"
+
+        except Exception as e:
+            print(f"Error in health monitor: {e}")
 
 
 # API Endpoints
@@ -671,6 +819,28 @@ async def root():
         </div>
 
         <div class="section">
+            <div class="section-title">Health Monitoring & Auto-Restart</div>
+            <div id="crashLoopAlert" class="notification error" style="display: none;">
+                <strong>⚠️ Crash Loop Detected!</strong>
+                <p id="crashLoopMessage"></p>
+            </div>
+            <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px; flex-wrap: wrap;">
+                <div style="flex: 1; min-width: 200px;">
+                    <div style="font-weight: 600; margin-bottom: 5px;">Auto-Restart:</div>
+                    <div id="autoRestartStatus" style="font-size: 0.9em; color: #666;">Disabled</div>
+                </div>
+                <div style="flex: 1; min-width: 200px;">
+                    <div style="font-weight: 600; margin-bottom: 5px;">API Health:</div>
+                    <div id="apiHealthStatus" style="font-size: 0.9em; color: #666;">-</div>
+                </div>
+            </div>
+            <div class="button-group">
+                <button id="toggleAutoRestart" class="btn-start" onclick="toggleAutoRestart()">Enable Auto-Restart</button>
+                <button class="btn-refresh" onclick="resetCrashLoop()">Reset Crash Loop</button>
+            </div>
+        </div>
+
+        <div class="section">
             <div class="section-title">Switch Model</div>
             <div class="input-group">
                 <label for="modelSelect">Select Model:</label>
@@ -769,7 +939,7 @@ async def root():
 
                 // Update context window
                 document.getElementById('contextWindow').textContent = data.context_window || '-';
-                
+
                 // Update context window input fields
                 if (data.context_window) {
                     const contextValue = data.context_window.replace(/,/g, '');
@@ -778,6 +948,42 @@ async def root():
                 } else {
                     document.getElementById('startContextWindow').value = '30000';
                     document.getElementById('contextWindow').value = '30000';
+                }
+
+                // Update auto-restart status
+                const autoRestartBtn = document.getElementById('toggleAutoRestart');
+                if (data.auto_restart_enabled) {
+                    document.getElementById('autoRestartStatus').textContent = '✅ Enabled';
+                    document.getElementById('autoRestartStatus').style.color = '#10b981';
+                    autoRestartBtn.textContent = 'Disable Auto-Restart';
+                    autoRestartBtn.className = 'btn-stop';
+                } else {
+                    document.getElementById('autoRestartStatus').textContent = '❌ Disabled';
+                    document.getElementById('autoRestartStatus').style.color = '#ef4444';
+                    autoRestartBtn.textContent = 'Enable Auto-Restart';
+                    autoRestartBtn.className = 'btn-start';
+                }
+
+                // Update API health status
+                if (isRunning) {
+                    if (data.api_healthy) {
+                        document.getElementById('apiHealthStatus').textContent = '✅ Healthy';
+                        document.getElementById('apiHealthStatus').style.color = '#10b981';
+                    } else {
+                        document.getElementById('apiHealthStatus').textContent = '❌ ' + data.health_message;
+                        document.getElementById('apiHealthStatus').style.color = '#ef4444';
+                    }
+                } else {
+                    document.getElementById('apiHealthStatus').textContent = 'Service not running';
+                    document.getElementById('apiHealthStatus').style.color = '#888';
+                }
+
+                // Update crash loop status
+                if (data.crash_loop_status && data.crash_loop_status.crash_loop_active) {
+                    document.getElementById('crashLoopAlert').style.display = 'block';
+                    document.getElementById('crashLoopMessage').textContent = data.crash_loop_status.message;
+                } else {
+                    document.getElementById('crashLoopAlert').style.display = 'none';
                 }
 
                 // Load models
@@ -986,6 +1192,50 @@ async def root():
             }
         }
 
+        async function toggleAutoRestart() {
+            showLoading(true);
+            try {
+                // Check current status to determine action
+                const statusResponse = await fetch('/status');
+                const statusData = await statusResponse.json();
+                const isEnabled = statusData.auto_restart_enabled;
+
+                const endpoint = isEnabled ? '/auto-restart/disable' : '/auto-restart/enable';
+                const response = await fetch(endpoint, { method: 'POST' });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showNotification(data.message, 'success');
+                    refreshStatus();
+                } else {
+                    showNotification('Error: ' + data.detail, 'error');
+                }
+            } catch (error) {
+                showNotification('Error toggling auto-restart: ' + error.message, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        async function resetCrashLoop() {
+            showLoading(true);
+            try {
+                const response = await fetch('/crash-loop/reset', { method: 'POST' });
+                const data = await response.json();
+
+                if (response.ok) {
+                    showNotification(data.message, 'success');
+                    refreshStatus();
+                } else {
+                    showNotification('Error: ' + data.detail, 'error');
+                }
+            } catch (error) {
+                showNotification('Error resetting crash loop: ' + error.message, 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
         // Auto-refresh status every 5 seconds
         setInterval(refreshStatus, 5000);
 
@@ -1025,15 +1275,25 @@ async def get_status():
 
     ctx_window_formatted = f"{ctx_window:,}" if ctx_window else None
 
+    # Check API health
+    api_healthy = False
+    health_msg = "not checked"
+    if is_running:
+        api_healthy, health_msg = await check_vllm_health()
+
     return {
         "vllm_running": is_running,
+        "api_healthy": api_healthy,
+        "health_message": health_msg,
         "current_model": model_name,
         "context_window": ctx_window_formatted,
         "process_info": get_vllm_process_info(),
         "disk_space": get_disk_space(),
         "gpu_info": get_gpu_info(),
         "vllm_port": VLLM_PORT,
-        "models_dir": MODELS_DIR
+        "models_dir": MODELS_DIR,
+        "auto_restart_enabled": auto_restart_enabled,
+        "crash_loop_status": crash_detector.get_status()
     }
 
 
@@ -1283,6 +1543,65 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now().isoformat()
     }
+
+
+@app.post("/auto-restart/enable")
+async def enable_auto_restart():
+    """Enable auto-restart functionality"""
+    global auto_restart_enabled, last_known_state
+    auto_restart_enabled = True
+    last_known_state = "running" if is_vllm_running() else "stopped"
+    print(f"✅ Auto-restart enabled")
+    return {
+        "status": "enabled",
+        "message": "Auto-restart is now enabled"
+    }
+
+
+@app.post("/auto-restart/disable")
+async def disable_auto_restart():
+    """Disable auto-restart functionality"""
+    global auto_restart_enabled
+    auto_restart_enabled = False
+    print(f"⏸️  Auto-restart disabled")
+    return {
+        "status": "disabled",
+        "message": "Auto-restart is now disabled"
+    }
+
+
+@app.post("/crash-loop/reset")
+async def reset_crash_loop():
+    """Reset crash loop detector"""
+    crash_detector.reset()
+    print(f"🔄 Crash loop detector reset")
+    return {
+        "status": "reset",
+        "message": "Crash loop detector has been reset"
+    }
+
+
+@app.get("/crash-loop/status")
+async def get_crash_loop_status():
+    """Get crash loop status"""
+    return crash_detector.get_status()
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background tasks on application startup"""
+    global last_known_state
+
+    # Initialize state
+    last_known_state = "running" if is_vllm_running() else "stopped"
+
+    # Start health monitoring task
+    asyncio.create_task(monitor_service_health())
+
+    print(f"🚀 vLLM Manager started")
+    print(f"📊 Health monitoring active (checking every {HEALTH_CHECK_INTERVAL}s)")
+    print(f"🔄 Auto-restart: {'enabled' if auto_restart_enabled else 'disabled'}")
+    print(f"⚠️  Crash loop threshold: {CRASH_LOOP_THRESHOLD} failures in {CRASH_LOOP_WINDOW}s")
 
 
 if __name__ == "__main__":

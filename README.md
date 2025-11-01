@@ -26,7 +26,7 @@ This fork includes critical optimizations that **unlock massive context windows*
 ### Key Achievements
 
 - **256K Context on 24GB GPU**: Run models at their full context capacity (262,144 tokens) using only 24.5GB of system RAM
-- **5x Context Increase**: From 52k to 256k tokens with **3x LESS RAM** (73GB → 24.5GB)
+- **Highly Efficient CPU Offloading**: Optimized multi-layer KV cache validation enables massive context windows with minimal RAM usage
 - **87% Memory Efficiency Gain**: Fixed critical validation bug that was only recognizing 13% of allocated CPU memory
 - **Production-Grade Solution**: Battle-tested with web management interface, systemd service integration, and auto-restart capabilities
 
@@ -60,9 +60,9 @@ Max Tokens = num_cpu_blocks × block_size × efficiency_factor
 #### Bug #1: Memory Validation (87% RAM Waste)
 
 **Problem:** Original validation only counted single-layer capacity:
-- Allocated: 50,000 blocks × 48 layers = 73 GB RAM
-- Validated: 50,000 blocks × 1 layer = 1.53 GB (only 2%!)
-- Result: 87% of RAM wasted, limited to 52k context
+- Multi-layer models have 48+ attention layers that each need their own KV cache blocks
+- Validation logic only counted one layer's worth of blocks
+- Result: 87% of allocated RAM was rejected as "insufficient" despite being available
 
 **Solution:** Updated `kv_cache_utils.py` to multiply by `num_attention_layers`:
 ```python
@@ -135,7 +135,7 @@ KVTransferConfig(
 ### Why This Matters
 
 1. **Eliminates GPU Memory Bottleneck**: Process entire codebases, long documents, or extensive conversations without truncation
-2. **Cost-Effective Scaling**: Achieve 5x larger contexts at a fraction of the cost of upgrading GPU memory
+2. **Cost-Effective Scaling**: Achieve massive context windows using affordable system RAM instead of expensive GPU upgrades
 3. **No Swap Space Needed**: Direct CPU offloading avoids slow disk swapping and GPU memory pressure
 4. **Production-Ready**: Includes launcher script, systemd service, and web management interface
 
@@ -145,7 +145,7 @@ See [CPU Offload Documentation](docs/cpu_offload.md) for complete setup instruct
 
 *Latest News* 🔥
 
-- **[2025/10] CPU KV Cache Offload Breakthrough**: Fixed critical multi-layer validation bug enabling 256k context with only 24.5GB RAM (5x improvement over previous approach). Production-ready tooling included.
+- **[2025/10] CPU KV Cache Offload Breakthrough**: Fixed critical multi-layer validation bug enabling 256k context with only 24.5GB RAM. Production-ready tooling included.
 
 - [2025/10] We hosted [vLLM Shanghai Meetup](https://mp.weixin.qq.com/s/__xb4OyOsImz-9eAVrdlcg) focused on hands-on vLLM inference optimization! Please find the meetup slides [here](https://drive.google.com/drive/folders/1KqwjsFJLfEsC8wlDugnrR61zsWHt94Q6).
 - [2025/09] We hosted [vLLM Toronto Meetup](https://luma.com/e80e0ymm) focused on tackling inference at scale and speculative decoding with speakers from NVIDIA and Red Hat! Please find the meetup slides [here](https://docs.google.com/presentation/d/1IYJYmJcu9fLpID5N5RbW_vO0XLo0CGOR14IXOjB61V8/edit?usp=sharing).
