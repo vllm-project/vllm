@@ -1245,6 +1245,7 @@ def as_benchmark_contexts(
                 num_active_loras=args.num_active_loras
                 if args.num_active_loras
                 else num_loras,
+                # To be filled based on the OpType to benchmark
                 seq_length=None,
                 sort_by_lora_id=sort_by_lora_id,
                 dtype=args.dtype,
