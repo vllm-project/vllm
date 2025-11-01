@@ -372,7 +372,9 @@ VLM_TEST_SETTINGS = {
     "gemma3": VLMTestInfo(
         models=["google/gemma-3-4b-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        # Keep <start_of_image> off a newline boundary to avoid
+        # tokenizer collapsing "\n\n\n".
+        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user:{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
                 "stop_sign": "<start_of_image>What's the content in the center of the image?",  # noqa: E501
