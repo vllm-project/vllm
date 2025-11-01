@@ -9,7 +9,7 @@ from dataclasses import asdict, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import TypeAdapter, field_validator
+from pydantic import Field, TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
@@ -96,19 +96,24 @@ class PassConfig:
 
     This is separate from general `CompilationConfig` so that inductor passes
     don't all have access to full configuration - that would create a cycle as
-    the `PassManager` is set as a property of config."""
+    the `PassManager` is set as a property of config.
 
-    enable_fusion: bool = False
+    This dataclass is only meant to be within the vllm config.
+    If used outside of the vllm config, some fields may be left in an
+    improper state.
+    """
+
+    enable_fusion: bool = Field(default=None)
     """Whether to enable the custom fusion (RMSNorm/SiluMul+quant) pass."""
-    enable_attn_fusion: bool = False
+    enable_attn_fusion: bool = Field(default=None)
     """Whether to enable the custom attention+quant fusion pass."""
-    enable_noop: bool = False
+    enable_noop: bool = Field(default=None)
     """Whether to enable the custom no-op elimination pass."""
-    enable_sequence_parallelism: bool = False
+    enable_sequence_parallelism: bool = Field(default=None)
     """Whether to enable sequence parallelism."""
-    enable_async_tp: bool = False
+    enable_async_tp: bool = Field(default=None)
     """Whether to enable async TP."""
-    enable_fi_allreduce_fusion: bool = False
+    enable_fi_allreduce_fusion: bool = Field(default=None)
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
@@ -140,7 +145,13 @@ class PassConfig:
 @config
 @dataclass
 class CompilationConfig:
-    """Configuration for compilation. It has three parts:
+    """Configuration for compilation.
+
+    This dataclass is only meant to be within the vllm config.
+    If used outside of the vllm config, some fields will be left in
+    an improper state.
+
+    It has three parts:
 
     - Top-level Compilation control:
         - [`mode`][vllm.config.CompilationConfig.mode]
@@ -181,14 +192,14 @@ class CompilationConfig:
     """
 
     # Top-level Compilation control
-    level: int | None = None
+    level: int = Field(default=None)
     """
     Level is deprecated and will be removed in the next release,
     either 0.12.0 or 0.11.2 whichever is soonest.
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: int | None = None
+    mode: int = Field(default=None)
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -292,7 +303,7 @@ class CompilationConfig:
     constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`."""
 
     # CudaGraph compilation
-    cudagraph_mode: CUDAGraphMode | None = None
+    cudagraph_mode: CUDAGraphMode = Field(default=None)
     """
     The mode of the cudagraph:
 
@@ -375,7 +386,7 @@ class CompilationConfig:
     When `enable_lora` is False, this option has no effect.
     """
 
-    use_inductor_graph_partition: bool = False
+    use_inductor_graph_partition: bool = Field(default=None)
     """Use inductor graph partition to split the graph at cudagraph_unsafe ops.
     This partition happens at inductor codegen time after all passes and fusions
     are finished. It generates a single `call` function which wraps
@@ -867,3 +878,19 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def is_custom_op_enabled(self, op: str) -> bool:
+        """
+        Determine if a custom op is enabled.
+
+        Args:
+            op: The name of the op.
+
+        Returns:
+            A flag indicating if the op is enabled.
+        """
+        if "all" in self.custom_ops:
+            return f"-{op}" not in self.custom_ops
+
+        assert "none" in self.custom_ops
+        return f"+{op}" in self.custom_ops

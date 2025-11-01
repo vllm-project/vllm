@@ -255,16 +255,18 @@ class FlexibleArgumentParser(ArgumentParser):
             elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
                 # -O.<...> handled later
-                # also handle -O=<mode> here
-                mode = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.mode={mode}")
+                # also handle -O=<optimization_level> here
+                optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
+                optimization_level = arg[2]
+                processed_args.append("--optimization-level")
+                processed_args.append(optimization_level)
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.mode <n>
-                processed_args.append("-O.mode")
+                # Convert -O <n> to --optimization-level <n>
+                processed_args.append("--optimization-level")
             else:
                 processed_args.append(arg)
 
