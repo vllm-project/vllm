@@ -672,8 +672,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         elif self.fused_experts is not None:
-            if self.moe.has_bias:
-                raise ValueError("FusedMoEModularKernel does not support bias.")
             result = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,

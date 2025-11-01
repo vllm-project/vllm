@@ -122,6 +122,15 @@ class KVConnectorRole(enum.Enum):
     WORKER = 1
 
 
+class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
+    """
+    Metadata used for out of band connector handshake between
+    P/D workers. This needs to serializeable.
+    """
+
+    pass
+
+
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
     Abstract Metadata used to communicate between the
@@ -320,6 +329,18 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -474,6 +495,17 @@ class KVConnectorBase_V1(ABC):
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
+        """
+        return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
         """
         return None
 

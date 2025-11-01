@@ -54,7 +54,13 @@ from vllm.config import (
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.cache import (
+    BlockSize,
+    CacheDType,
+    KVOffloadingBackend,
+    MambaDType,
+    PrefixCachingHashAlgo,
+)
 from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
@@ -553,6 +559,11 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
+    kv_offloading_size: float | None = CacheConfig.kv_offloading_size
+    kv_offloading_backend: KVOffloadingBackend | None = (
+        CacheConfig.kv_offloading_backend
+    )
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -895,6 +906,12 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
+        )
+        cache_group.add_argument(
+            "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
+        )
+        cache_group.add_argument(
+            "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
         )
 
         # Multimodal related configs
@@ -1246,8 +1263,6 @@ class EngineArgs:
         self,
         target_model_config: ModelConfig,
         target_parallel_config: ParallelConfig,
-        enable_chunked_prefill: bool,
-        disable_log_stats: bool,
     ) -> SpeculativeConfig | None:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
@@ -1267,8 +1282,6 @@ class EngineArgs:
             {
                 "target_model_config": target_model_config,
                 "target_parallel_config": target_parallel_config,
-                "enable_chunked_prefill": enable_chunked_prefill,
-                "disable_log_stats": disable_log_stats,
             }
         )
         return SpeculativeConfig(**self.speculative_config)
@@ -1391,6 +1404,8 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            kv_offloading_size=self.kv_offloading_size,
+            kv_offloading_backend=self.kv_offloading_backend,
         )
 
         ray_runtime_env = None
@@ -1561,8 +1576,6 @@ class EngineArgs:
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
-            enable_chunked_prefill=self.enable_chunked_prefill,
-            disable_log_stats=self.disable_log_stats,
         )
 
         # make sure num_lookahead_slots is set appropriately depending on
@@ -1813,7 +1826,7 @@ class EngineArgs:
             incremental_prefill_supported = (
                 pooling_type is not None
                 and pooling_type.lower() == "last"
-                and is_causal
+                and bool(is_causal)
             )
 
             action = "Enabling" if incremental_prefill_supported else "Disabling"
