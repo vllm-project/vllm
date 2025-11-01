@@ -194,7 +194,7 @@ class MistralTokenizer(TokenizerBase):
         # Cache special tokens for faster access.
         self._special_token_ids = self._get_special_token_ids()
         self._special_token_ids_set = set(self._special_token_ids)
-        self._special_tokens = self._get_special_tokens()
+        self._special_tokens = self._get_special_tokens(self._special_token_ids)
         self._special_tokens_set = set(self._special_tokens)
 
         # Vocab sorted by token id.
@@ -234,12 +234,12 @@ class MistralTokenizer(TokenizerBase):
             raise ValueError(f"Unknown tokenizer type: {type(self.tokenizer)}")
         return sorted(special_ids)
 
-    def _get_special_tokens(self) -> list[str]:
+    def _get_special_tokens(self, all_special_ids: list[int]) -> list[str]:
         from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
         return [
             self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
-            for i in self.all_special_ids
+            for i in all_special_ids
         ]
 
     # the following attributes are set to fit vLLM's design and are used
@@ -289,21 +289,7 @@ class MistralTokenizer(TokenizerBase):
         raise NotImplementedError()
 
     def _is_special_token_id(self, token_id: int) -> bool:
-        from mistral_common.tokens.tokenizers.sentencepiece import (
-            SentencePieceTokenizer,
-        )
-        from mistral_common.tokens.tokenizers.tekken import Tekkenizer
-
-        if self.is_spm:
-            assert isinstance(self.tokenizer, SentencePieceTokenizer), type(
-                self.tokenizer
-            )
-            return token_id in self.tokenizer._control_tokens
-        if self.is_tekken:
-            assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
-            return token_id < self.tokenizer.num_special_tokens
-        else:
-            raise ValueError(f"Unknown tokenizer type: {type(self.tokenizer)}")
+        return token_id in self._special_token_ids_set
 
     def __len__(self) -> int:
         return self.vocab_size
