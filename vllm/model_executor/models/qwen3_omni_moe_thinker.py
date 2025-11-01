@@ -777,7 +777,9 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             hf_inputs["feature_attention_mask"] = [
                 torch.ones(num_frame) for num_frame in audio_num_frames
             ]
-            hf_inputs["audio_feature_lengths"] = torch.tensor(audio_num_frames)
+            hf_inputs["audio_feature_lengths"] = [
+                torch.tensor([num_frame]) for num_frame in audio_num_frames
+            ]
         return hf_inputs
 
     def _maybe_apply_prompt_updates(
@@ -913,7 +915,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             audio_output_lengths = []
         elif audio_feature_lengths is not None:
             _, audio_output_lens = _get_feat_extract_output_lengths(
-                audio_feature_lengths
+                audio_feature_lengths.flatten()
             )
             audio_output_lengths = audio_output_lens.tolist()
         elif feature_attention_mask is not None:
