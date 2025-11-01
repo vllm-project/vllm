@@ -151,17 +151,15 @@ class AttentionGroup:
         kernel_block_size: int,
         num_metadata_builders: int = 1,
     ):
-        builder_cls = self.backend.get_builder_cls()
-        builder_extra_args = {}
-        if builder_cls.requires_kernel_block_size:
-            builder_extra_args["kernel_block_size"] = kernel_block_size
+        kv_cache_spec_kernel = self.kv_cache_spec.copy_with_new_block_size(
+            kernel_block_size
+        )
         self.metadata_builders = [
-            builder_cls(
-                self.kv_cache_spec,
+            self.backend.get_builder_cls()(
+                kv_cache_spec_kernel,
                 self.layer_names,
                 vllm_config,
                 device,
-                **builder_extra_args,
             )
             for _ in range(num_metadata_builders)
         ]

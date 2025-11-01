@@ -249,8 +249,6 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int | None = None
-    # Does the builder need the kernel block size defined
-    requires_kernel_block_size = False
 
     @abstractmethod
     def __init__(
