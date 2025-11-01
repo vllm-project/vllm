@@ -26,7 +26,6 @@ class ModelRequestData(NamedTuple):
     sampling_params: SamplingParams | None = None
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize("question", [QUESTION])
 @pytest.mark.parametrize(
     "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
