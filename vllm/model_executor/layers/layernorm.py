@@ -189,11 +189,11 @@ class RMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         x = x.to(torch.float32)
         if residual is not None:
-            # Handle sequence parallelism: align shapes if they don't match
-            # When SP is enabled, residual is scattered (smaller) while x is not
-            # We slice x to match residual's size to avoid Min() symbolic expression
-            if x.shape[0] != residual.shape[0]:
-                x = x[:residual.shape[0]]
+            # Handle sequence parallelism: always slice x to match residual's size
+            # This ensures symbolic shapes are compatible during tracing
+            # When shapes already match, this is a no-op; when SP scatters residual,
+            # this aligns x to the same size
+            x = x[:residual.shape[0]]
             
             # residual promoted f16->f32 automatically,
             # otherwise Inductor eliminates the casts to and from f16,
