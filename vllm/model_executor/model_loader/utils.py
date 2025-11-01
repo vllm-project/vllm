@@ -89,38 +89,16 @@ def initialize_model(
                         "Gemma3ForConditionalGeneration"
                     ]
 
-                    # Override vision_config for GGUF
-                    # (896x896 vs HF's 576x576)
+                    # Vision config should already be set by ModelConfig.__post_init__
+                    # via extract_vision_config_from_gguf(). Verify it exists.
                     if (
                         not hasattr(model_config.hf_config, "vision_config")
                         or model_config.hf_config.vision_config is None
                     ):
-                        from transformers import SiglipVisionConfig
-
-                        model_config.hf_config.vision_config = SiglipVisionConfig(
-                            hidden_size=1152,
-                            intermediate_size=4304,
-                            num_hidden_layers=27,
-                            num_attention_heads=16,
-                            num_channels=3,
-                            image_size=896,
-                            patch_size=14,
-                            layer_norm_eps=1e-6,
-                            attention_dropout=0.0,
-                            num_image_tokens=256,
-                        )
-                        model_config.hf_config.mm_tokens_per_image = 256
-                        model_config.hf_config.image_token_index = 262144
-                        logger.info(
-                            "Created vision_config for GGUF: "
-                            "image_size=896, patch_size=14"
-                        )
-                    else:
-                        model_config.hf_config.vision_config.image_size = 896
-                        model_config.hf_config.vision_config.patch_size = 14
-                        logger.info(
-                            "Overrode vision_config for GGUF: "
-                            "image_size=896, patch_size=14"
+                        raise RuntimeError(
+                            "vision_config not initialized for Gemma3 GGUF "
+                            "multimodal. ModelConfig should have extracted it "
+                            "from mmproj.gguf or raised an error."
                         )
 
                     # Ensure multimodal_config is set
@@ -396,58 +374,56 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> Optional["SiglipVisionC
         mmproj_path: Path to mmproj.gguf file (str or Path)
 
     Returns:
-        SiglipVisionConfig if extraction succeeds, None otherwise
+        SiglipVisionConfig if extraction succeeds, None if required fields missing
+
+    Raises:
+        Any exceptions from GGUF reading (file not found, corrupted, etc.)
     """
-    try:
-        import gguf
-        from transformers import SiglipVisionConfig
+    import gguf
+    from transformers import SiglipVisionConfig
 
-        reader = gguf.GGUFReader(str(mmproj_path))
+    reader = gguf.GGUFReader(str(mmproj_path))
 
-        # Extract vision config parameters from GGUF metadata
-        hidden_size = reader.get_field("clip.vision.embedding_length")
-        intermediate_size = reader.get_field("clip.vision.feed_forward_length")
-        num_hidden_layers = reader.get_field("clip.vision.block_count")
-        num_attention_heads = reader.get_field("clip.vision.attention.head_count")
-        image_size = reader.get_field("clip.vision.image_size")
-        patch_size = reader.get_field("clip.vision.patch_size")
-        layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
+    # Extract vision config parameters from GGUF metadata
+    hidden_size = reader.get_field("clip.vision.embedding_length")
+    intermediate_size = reader.get_field("clip.vision.feed_forward_length")
+    num_hidden_layers = reader.get_field("clip.vision.block_count")
+    num_attention_heads = reader.get_field("clip.vision.attention.head_count")
+    image_size = reader.get_field("clip.vision.image_size")
+    patch_size = reader.get_field("clip.vision.patch_size")
+    layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
 
-        # Validate all required fields are present
-        if any(
-            field is None
-            for field in [
-                hidden_size,
-                intermediate_size,
-                num_hidden_layers,
-                num_attention_heads,
-                image_size,
-                patch_size,
-                layer_norm_eps,
-            ]
-        ):
-            logger.warning("Missing required vision config fields in mmproj.gguf")
-            return None
-
-        # Extract scalar values from GGUF field parts
-        config = SiglipVisionConfig(
-            hidden_size=int(hidden_size.parts[-1]),
-            intermediate_size=int(intermediate_size.parts[-1]),
-            num_hidden_layers=int(num_hidden_layers.parts[-1]),
-            num_attention_heads=int(num_attention_heads.parts[-1]),
-            image_size=int(image_size.parts[-1]),
-            patch_size=int(patch_size.parts[-1]),
-            layer_norm_eps=float(layer_norm_eps.parts[-1]),
-            # Parameters not in GGUF - use safe defaults
-            num_channels=3,  # Standard RGB
-            attention_dropout=0.0,  # No dropout during inference
-            num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
-            vision_use_head=False,  # Gemma3 doesn't use pooling head
-        )
-
-        logger.info("Extracted vision config from mmproj.gguf metadata")
-        return config
-
-    except Exception as e:
-        logger.warning("Failed to extract vision config from GGUF: %s", e)
+    # Validate all required fields are present
+    if any(
+        field is None
+        for field in [
+            hidden_size,
+            intermediate_size,
+            num_hidden_layers,
+            num_attention_heads,
+            image_size,
+            patch_size,
+            layer_norm_eps,
+        ]
+    ):
+        logger.warning("Missing required vision config fields in mmproj.gguf")
         return None
+
+    # Extract scalar values from GGUF field parts
+    config = SiglipVisionConfig(
+        hidden_size=int(hidden_size.parts[-1]),
+        intermediate_size=int(intermediate_size.parts[-1]),
+        num_hidden_layers=int(num_hidden_layers.parts[-1]),
+        num_attention_heads=int(num_attention_heads.parts[-1]),
+        image_size=int(image_size.parts[-1]),
+        patch_size=int(patch_size.parts[-1]),
+        layer_norm_eps=float(layer_norm_eps.parts[-1]),
+        # Parameters not in GGUF - use safe defaults
+        num_channels=3,  # Standard RGB
+        attention_dropout=0.0,  # No dropout during inference
+        num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
+        vision_use_head=False,  # Gemma3 doesn't use pooling head
+    )
+
+    logger.info("Extracted vision config from mmproj.gguf metadata")
+    return config
