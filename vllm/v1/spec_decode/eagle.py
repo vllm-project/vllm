@@ -1047,7 +1047,7 @@ class EagleProposer:
         force_attention: bool = False,
         uniform_decode: bool = False,
         uniform_query_len: int = 0,
-        allow_microbatching: bool = False,  # unused for drafter
+        **other_kwargs,  # unused but may get passed from caller
     ) -> None:
         assert cudagraph_runtime_mode != CUDAGraphMode.FULL, (
             "Eagle drafter doesn't support full cudagraphs at this moment"
@@ -1108,6 +1108,7 @@ class EagleProposer:
                 num_tokens=num_tokens,
                 uniform_decode=uniform_decode,
                 uniform_query_len=uniform_query_len,
+                has_lora=False,
             )
             # sanity check
             _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
