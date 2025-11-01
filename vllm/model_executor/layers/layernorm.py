@@ -190,11 +190,10 @@ class RMSNorm(CustomOp):
         x = x.to(torch.float32)
         if residual is not None:
             # Handle sequence parallelism: align shapes if they don't match
-            # When SP is enabled, residual may be scattered while x is not
+            # When SP is enabled, residual is scattered (smaller) while x is not
+            # We slice x to match residual's size to avoid Min() symbolic expression
             if x.shape[0] != residual.shape[0]:
-                min_size = min(x.shape[0], residual.shape[0])
-                x = x[:min_size]
-                residual = residual[:min_size]
+                x = x[:residual.shape[0]]
             
             # residual promoted f16->f32 automatically,
             # otherwise Inductor eliminates the casts to and from f16,
