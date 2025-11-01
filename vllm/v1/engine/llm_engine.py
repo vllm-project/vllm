@@ -58,18 +58,9 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "LLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github."
-            )
-
         if stat_loggers is not None:
             raise NotImplementedError(
-                "Passing StatLoggers to LLMEngine in V1 is not yet supported. "
-                "Set VLLM_USE_V1=0 and file and issue on Github."
+                "Passing StatLoggers to LLMEngine is not yet supported."
             )
 
         self.vllm_config = vllm_config
