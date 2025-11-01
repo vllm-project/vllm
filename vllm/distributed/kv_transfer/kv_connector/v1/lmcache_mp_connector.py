@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
     LMCacheMPRequestMetadata,
+    LMCacheMPRequestState,
     LMCacheMPRequestTracker,
     LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
@@ -157,8 +158,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             the same.
 
         """
-        # TODO
-        pass
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, LMCacheMPConnectorMetadata)
+        for meta in metadata.requests:
+            if meta.direction != "RETRIEVE":
+                continue
+            logger.info("HERE! SUBMITTING THE RETRIEVE REQUEST!")
+            self.worker_adapter.submit_retrieve_request(meta.request_id, meta.op)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -208,7 +214,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
-            logger.info("HERE! SUBMITTING THE STORE REQUEST!")
             self.worker_adapter.submit_store_request(meta.request_id, meta.op)
 
     def get_finished(
@@ -302,13 +307,34 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             connectivity issues or eviction), those tokens must not be taken
             into account.
         """
-        self._get_or_create_request_tracker(request)
+        tracker = self._get_or_create_request_tracker(request)
 
-        # TODO: if there is external KV cache hit, we should incorporate that into
-        # the calculation of num_stored_blocks.
-        # num_stored_blocks = num_computed_tokens // self.vllm_block_size
-        # tracker.increase_num_stored_blocks(num_stored_blocks)
-        return 0, False
+        self.scheduler_adapter.maybe_submit_lookup_request(
+            request.request_id, request.block_hashes
+        )
+
+        ret = self.scheduler_adapter.check_lookup_result(request.request_id)
+        if ret is None:
+            return None, True
+
+        if ret == 0:
+            return 0, False
+
+        # TODO: remove this hard-coded value
+        logger.warning("Got %d matched tokens!", ret)
+        assert ret % 256 == 0
+
+        # Update num stored blocks for the tracker
+        num_vllm_blocks = num_computed_tokens // self.vllm_block_size
+        num_lmcache_blocks = ret // self.vllm_block_size
+        tracker.increase_num_stored_blocks(num_lmcache_blocks)
+
+        # Save the vllm and lmcache hit tokens
+        tracker.num_vllm_hit_blocks = num_vllm_blocks
+        tracker.num_lmcache_hit_blocks = num_lmcache_blocks
+
+        need_to_load = max(0, ret - num_computed_tokens)
+        return need_to_load, need_to_load > 0
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -328,17 +354,28 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
         """
+        # NOTE: the `blocks` are NEW BLOCKS allocated for this request.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = reformat_block_ids(blocks.get_block_ids())
 
-        if not tracker.needs_retrieve():
-            # Update the new block ids
-            existing_blocks_in_tracker = len(tracker.allocated_block_ids)
-            new_block_ids = block_ids[existing_blocks_in_tracker:]
-            tracker.update_block_ids(new_block_ids)
-            return
+        # No matter we need to retrieve or not, we need to update
+        # the block ids into the tracker
+        tracker.update_block_ids(block_ids)
 
-        # TODO: get block ids for load
+        # Update the state of the tracker
+        condition = tracker.needs_retrieve()
+        if tracker.state == LMCacheMPRequestState.PREFETCHING:
+            # If need to retrieve, change to WAITING_FOR_LOAD
+            # Otherwise, change to READY
+            tracker.state = (
+                LMCacheMPRequestState.WAITING_FOR_LOAD
+                if condition
+                else LMCacheMPRequestState.READY
+            )
+        # elif tracker.state == LMCacheMPRequestState.WAITING_FOR_LOAD:
+        #    # Second time, the request is ready for inference
+        #    tracker.state = LMCacheMPRequestState.READY
+        logger.warning("Change request tracker state to %s", tracker.state)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -466,7 +503,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
-        pass
+        for request_tracker in self.request_trackers.values():
+            if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
+                continue
+            r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
+                request_tracker, 16
+            )
+            if r_metadata is not None:
+                metadata.add_request_metadata(r_metadata)
+            request_tracker.state = LMCacheMPRequestState.READY
 
     def _process_new_requests(
         self,
@@ -476,10 +521,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
             # TODO: change the hard-coded 16 to a configurable parameter
-            r_metadatas = LMCacheMPRequestMetadata.FromRequestTracker(
-                request_tracker, 16
-            )
-            for r_meta in r_metadatas:
+            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(request_tracker, 16)
+            if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
 
     def _process_cached_requests(
@@ -493,11 +536,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
             request_tracker.update_block_ids(new_block_ids)
 
-            r_metadatas = LMCacheMPRequestMetadata.FromRequestTracker(
-                request_tracker, 16
-            )
+            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(request_tracker, 16)
 
-            for r_meta in r_metadatas:
+            if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
 
     def _get_request_tracker(self, request_id: str) -> LMCacheMPRequestTracker:

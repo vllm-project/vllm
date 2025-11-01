@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 import os
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any, Literal
@@ -42,16 +43,27 @@ def send_lmcache_request(
     return future
 
 
+def striding_block_hashes(
+    block_hashes: list[bytes],
+    blocks_in_chunk,
+) -> Iterable[bytes]:
+    """Striding the block hashes to get the block hashes for each chunk.
+    For example, if blocks_in_chunk is 16, then we will get the block hashes
+    for the 16th, 32nd, 48th, ... blocks.
+    """
+    return islice(block_hashes, blocks_in_chunk - 1, None, blocks_in_chunk)
+
+
 class LMCacheMPRequestState(enum.Enum):
     """
     State machine:
     PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
-    WAITING_FOR_LOAD -- process_loading_requests --> RUNNING
+    WAITING_FOR_LOAD -- process_loading_requests --> READY
     """
 
     PREFETCHING = enum.auto()
     WAITING_FOR_LOAD = enum.auto()
-    RUNNING = enum.auto()
+    READY = enum.auto()
 
 
 @dataclass
@@ -88,8 +100,9 @@ class LMCacheMPRequestTracker:
     # requests.
     num_stored_blocks: int = 0
 
-    # Staging load operation
-    load_op: LoadStoreOp | None = None
+    # Staging load operation -- save vllm and lmcache hit tokens during lookup
+    num_vllm_hit_blocks: int = 0
+    num_lmcache_hit_blocks: int = 0
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -100,7 +113,8 @@ class LMCacheMPRequestTracker:
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
         self.num_stored_blocks = 0
-        self.load_op = None
+        self.num_vllm_hit_blocks = 0
+        self.num_lmcache_hit_blocks = 0
         self.state = LMCacheMPRequestState.PREFETCHING
 
     ####
@@ -109,7 +123,10 @@ class LMCacheMPRequestTracker:
     def needs_retrieve(self) -> bool:
         """Check whether the current request needs retrieve, will be used
         update_stage_after_alloc"""
-        return self.load_op is not None and len(self.load_op) > 0
+        return (
+            self.num_lmcache_hit_blocks > self.num_vllm_hit_blocks
+            and self.state != LMCacheMPRequestState.READY
+        )
 
     def is_ready_for_retrieving(self) -> bool:
         """Check whether the current request is ready for retrieving,
@@ -152,7 +169,9 @@ class LMCacheMPRequestTracker:
             f"num_block_hashes={len(self.block_hashes)}, "
             f"num_allocated_blocks={len(self.allocated_block_ids)}, "
             f"num_stored_blocks={self.num_stored_blocks}, "
-            f"load_op={self.load_op}, state={self.state})"
+            f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
+            f"lmcache_hit_blocks={self.num_lmcache_hit_blocks}, "
+            f"state={self.state})"
         )
 
     def __str__(self) -> str:
@@ -166,32 +185,21 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
 
     @staticmethod
-    def FromRequestTracker(
+    def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
-    ) -> list["LMCacheMPRequestMetadata"]:
+    ) -> "LMCacheMPRequestMetadata | None":
         """
-        Generate the request metadata for the current request tracker.
+        Generate the store metadata for the current request tracker.
 
         Args:
             tracker: The request tracker to generate the metadata from.
             blocks_in_chunk: the number of blocks in a LMCache data chunk
         """
-
-        ret = []
-        # Load requests
-        if tracker.load_op is not None and len(tracker.load_op) > 0:
-            ret.append(
-                LMCacheMPRequestMetadata(
-                    request_id=tracker.request_id,
-                    direction="RETRIEVE",
-                    op=tracker.load_op,
-                )
-            )
-
         # Store the blocks that has block hashes
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
+        # TODO: This should be checked everytime we update the num_stored_blocks
         num_staging_blocks = len(tracker.block_hashes) - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
 
@@ -201,18 +209,60 @@ class LMCacheMPRequestMetadata:
             block_hashes = tracker.block_hashes[start:end]
             block_ids = tracker.allocated_block_ids[start:end]
 
-            ret.append(
-                LMCacheMPRequestMetadata(
-                    request_id=tracker.request_id,
-                    direction="STORE",
-                    op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
-                )
+            ret = LMCacheMPRequestMetadata(
+                request_id=tracker.request_id,
+                direction="STORE",
+                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
             )
 
             # Update the request tracker
             tracker.increase_num_stored_blocks(end - start)
+            return ret
 
-        return ret
+        return None
+
+    @staticmethod
+    def GetRetrieveMetadata(
+        tracker: LMCacheMPRequestTracker,
+        blocks_in_chunk: int,
+    ) -> "LMCacheMPRequestMetadata | None":
+        """
+        Generate the retrieve metadata for the current request tracker.
+
+        Args:
+            tracker: The request tracker to generate the metadata from.
+            blocks_in_chunk: the number of blocks in a LMCache data chunk
+        """
+        if not tracker.is_ready_for_retrieving():
+            return None
+
+        # |---------------------|-----------------|----------------|
+        # | num_vllm_hit_blocks |
+        # | lmcache chunk 1   | lmcache chunk 2   |
+        #                     |  need to retrieve |
+
+        start = tracker.num_vllm_hit_blocks // blocks_in_chunk * blocks_in_chunk
+        end = tracker.num_lmcache_hit_blocks
+        assert end % blocks_in_chunk == 0, (
+            "The number of LMCache hit blocks should be a multiple of the "
+            "number of blocks in a lmcache chunk. "
+        )
+        assert len(tracker.block_hashes) >= end, (
+            "The number of block hashes should be greater than or equal to the "
+            "number of LMCache hit blocks. "
+        )
+        if end > start:
+            block_hashes = tracker.block_hashes[start:end]
+            block_ids = tracker.allocated_block_ids[start:end]
+
+            ret = LMCacheMPRequestMetadata(
+                request_id=tracker.request_id,
+                direction="RETRIEVE",
+                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+            )
+            return ret
+
+        return None
 
 
 StoreResult = bool
@@ -222,7 +272,57 @@ LookupResult = list[bool]
 
 class LMCacheMPSchedulerAdapter:
     def __init__(self, server_url: str, context: zmq.Context):
+        self.mq_client = MessageQueueClient(server_url, context)
+
+        # Request futures
+        self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
+
+        # TODO: metadata is hard-coded for now, please remove
+        self.model_name = "Qwen/Qwen3-0.6B"
+        self.world_size = 1
+        self.worker_id = 0
+
+        self.blocks_in_chunk = 16
+        self.chunk_size = 256  # Chunk size in tokens
+
         pass
+
+    def maybe_submit_lookup_request(self, request_id: str, block_hashes: list[bytes]):
+        if request_id in self.lookup_futures:
+            # Skip if there is already a lookup request
+            return
+
+        s = striding_block_hashes(block_hashes, self.blocks_in_chunk)
+        keys = [self._create_key(block_hash) for block_hash in s]
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.LOOKUP,
+            [keys, True],
+        )
+        self.lookup_futures[request_id] = future
+
+    def check_lookup_result(self, request_id: str) -> int | None:
+        assert request_id in self.lookup_futures, (
+            f"Lookup request for request_id={request_id} has not been submitted"
+        )
+
+        future = self.lookup_futures[request_id]
+        if not future.query():
+            return None
+
+        result = future.result()
+        num_chunks = sum(result)
+        return num_chunks * self.chunk_size
+
+    # Helper functions
+    def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
+        """Convert a block hash to an IPC cache engine key"""
+        return IPCCacheEngineKey(
+            model_name=self.model_name,
+            world_size=self.world_size,
+            worker_id=self.worker_id,
+            chunk_hash=block_hash,
+        )
 
 
 class LMCacheMPWorkerAdapter:
@@ -240,8 +340,8 @@ class LMCacheMPWorkerAdapter:
         self.retrieve_futures: dict[str, MessagingFuture[RetrieveResult]] = {}
 
         self.finished_stores: set[str] = set()
-        self.finished_retrieves: set[str] = set()
         self.previously_finished: set[str] = set()
+        self.debug_finished_retrieves: set[str] = set()
 
         # TODO: metadata is hard-coded for now, please remove
         self.model_name = "Qwen/Qwen3-0.6B"
@@ -269,7 +369,12 @@ class LMCacheMPWorkerAdapter:
         self.store_futures[request_id] = future
 
     def submit_retrieve_request(self, request_id: str, op: LoadStoreOp):
-        pass
+        # TODO: submit the retrieve task
+        keys = self._block_hashes_to_keys(op.block_hashes)
+        future = send_lmcache_request(
+            self.mq_client, RequestType.RETRIEVE, [keys, self.instance_id, op.block_ids]
+        )
+        self.retrieve_futures[request_id] = future
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -313,11 +418,10 @@ class LMCacheMPWorkerAdapter:
 
         # Update the internal states
         self.finished_stores.update(finished_stores)
-        self.finished_retrieves.update(finished_retrieves)
         self.previously_finished.update(finished_req_ids)
 
         # Calculate the final finished stores and finished retrieves
-        return self._update_and_get_finished()
+        return self._update_and_get_finished_store(), finished_retrieves
 
     def shutdown(self):
         # Unregister kv cache
@@ -329,20 +433,16 @@ class LMCacheMPWorkerAdapter:
         self.mq_client.close()
 
     # Helper functions
-    def _update_and_get_finished(
+    def _update_and_get_finished_store(
         self,
-    ) -> tuple[set[str] | None, set[str] | None]:
-        """Converge the internal states about finished stores/retrieves
-        and returns the 'safe finished request ids' back
+    ) -> set[str]:
+        """Converge the internal states about finished stores
+        and returns the 'safe finished store request ids' back
         """
         safe_finished_s = self.finished_stores.intersection(self.previously_finished)
-        safe_finished_r = self.finished_retrieves.intersection(self.previously_finished)
         self.finished_stores.difference_update(self.previously_finished)
-        self.finished_retrieves.difference_update(self.previously_finished)
-        self.previously_finished.difference_update(
-            safe_finished_s.union(safe_finished_r)
-        )
-        return safe_finished_s, safe_finished_r
+        self.previously_finished.difference_update(safe_finished_s)
+        return safe_finished_s
 
     def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
         """Convert a block hash to an IPC cache engine key"""
@@ -357,6 +457,5 @@ class LMCacheMPWorkerAdapter:
         self, block_hashes: list[bytes]
     ) -> list[IPCCacheEngineKey]:
         """Convert block hashes to IPC cache engine keys"""
-
-        s = islice(block_hashes, self.blocks_in_chunk - 1, None, self.blocks_in_chunk)
+        s = striding_block_hashes(block_hashes, self.blocks_in_chunk)
         return [self._create_key(block_hash) for block_hash in s]
