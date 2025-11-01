@@ -187,6 +187,11 @@ class RMSNorm(CustomOp):
         variance_size_override: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        # DEBUG: Mark that we're using torch native
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"[TORCH_NATIVE_RMS] x.shape={x.shape}, residual.shape={residual.shape if residual is not None else None}")
+        
         x = x.to(torch.float32)
         if residual is not None:
             # Handle sequence parallelism: always slice x to match residual's size
