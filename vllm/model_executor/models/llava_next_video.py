@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.models.clip import CLIPVisionModel
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -31,7 +30,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -81,14 +80,6 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(LlavaNextVideoProcessor, **kwargs)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"video": 1}
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        vision_encoder_info = self.get_vision_encoder_info()
-        width = height = vision_encoder_info.get_image_size()
-        return ImageSize(width=width, height=height)
-
     def _get_num_frame_tokens(
         self,
         *,
@@ -118,6 +109,16 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
         return num_frame_tokens * num_frames
 
+
+class LlavaNextVideoProfilingInfo(BaseProfilingInfo[LlavaNextVideoProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"video": 1}
+
+    def get_image_size_with_most_features(self) -> ImageSize:
+        vision_encoder_info = self.processing_info.get_vision_encoder_info()
+        width = height = vision_encoder_info.get_image_size()
+        return ImageSize(width=width, height=height)
+
     def _get_max_video_frames(self, max_tokens: int) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
@@ -125,7 +126,7 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
         while True:
             next_num_frames = num_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
+            next_max_tokens = self.processing_info.get_num_video_tokens(
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
@@ -151,12 +152,12 @@ class LlavaNextVideoProcessingInfo(BaseProcessingInfo):
 
 
 class LlavaNextVideoDummyInputsBuilder(
-    BaseDummyInputsBuilder[LlavaNextVideoProcessingInfo]
+    BaseDummyInputsBuilder[LlavaNextVideoProcessingInfo, LlavaNextVideoProfilingInfo]
 ):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_videos = mm_counts.get("video", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         video_token = processor.video_token
 
         return video_token * num_videos
@@ -169,8 +170,10 @@ class LlavaNextVideoDummyInputsBuilder(
     ) -> MultiModalDataDict:
         num_videos = mm_counts.get("video", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
-        target_num_frames = self.info.get_num_frames_with_most_features(
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
+        target_num_frames = self.processing_info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
@@ -188,7 +191,7 @@ class LlavaNextVideoDummyInputsBuilder(
 
 
 class LlavaNextVideoMultiModalProcessor(
-    BaseMultiModalProcessor[LlavaNextVideoProcessingInfo]
+    BaseMultiModalProcessor[LlavaNextVideoProcessingInfo, LlavaNextVideoProfilingInfo]
 ):
     def _get_mm_fields_config(
         self,
@@ -203,7 +206,7 @@ class LlavaNextVideoMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         video_token_id = hf_config.video_token_index
 
         def get_replacement(item_idx: int):
@@ -293,13 +296,13 @@ class LlavaNextMultiModalProjector(nn.Module):
         return hidden_states
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaNextVideoMultiModalProcessor,
-    info=LlavaNextVideoProcessingInfo,
-    dummy_inputs=LlavaNextVideoDummyInputsBuilder,
-)
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = LlavaNextVideoProcessingInfo
+    profiling_info = LlavaNextVideoProfilingInfo
+    dummy_builder = LlavaNextVideoDummyInputsBuilder
+    processor = LlavaNextVideoMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

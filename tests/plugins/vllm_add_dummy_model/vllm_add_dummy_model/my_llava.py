@@ -4,20 +4,9 @@
 
 import torch
 
-from vllm.model_executor.models.llava import (
-    LlavaDummyInputsBuilder,
-    LlavaForConditionalGeneration,
-    LlavaMultiModalProcessor,
-    LlavaProcessingInfo,
-)
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.model_executor.models.llava import LlavaForConditionalGeneration
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    LlavaMultiModalProcessor,
-    info=LlavaProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
 class MyLlava(LlavaForConditionalGeneration):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
         # this dummy model always predicts the first token

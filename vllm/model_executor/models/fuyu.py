@@ -30,7 +30,6 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -44,7 +43,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -86,9 +85,6 @@ class FuyuProcessingInfo(BaseProcessingInfo):
 
     def get_image_processor(self, **kwargs: object) -> FuyuImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
-
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": 1}
 
     def get_image_feature_grid_size(
         self,
@@ -134,7 +130,14 @@ class FuyuProcessingInfo(BaseProcessingInfo):
         )
 
 
-class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
+class FuyuProfilingInfo(BaseProfilingInfo[FuyuProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": 1}
+
+
+class FuyuDummyInputsBuilder(
+    BaseDummyInputsBuilder[FuyuProcessingInfo, FuyuProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
 
@@ -144,7 +147,9 @@ class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
         num_images = mm_counts.get("image", 0)
 
         image_overrides = mm_options.get("image") if mm_options else None
@@ -159,7 +164,9 @@ class FuyuDummyInputsBuilder(BaseDummyInputsBuilder[FuyuProcessingInfo]):
         }
 
 
-class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
+class FuyuMultiModalProcessor(
+    BaseMultiModalProcessor[FuyuProcessingInfo, FuyuProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -169,7 +176,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
     ) -> BatchFeature:
         if not mm_data:
             # Avoid warning from HF logger for text-only input
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.processing_info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -193,7 +200,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         prompt_tokens: list[int],
     ) -> list[int]:
         # HF processor adds boa_token_id
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         boa_token_id = vocab["<0x04>"]
@@ -222,11 +229,11 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         bos_token_id = hf_config.bos_token_id
         assert isinstance(bos_token_id, int)
 
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         eot_token_id = tokenizer.bos_token_id
         assert isinstance(eot_token_id, int)
 
@@ -234,7 +241,7 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = self.info.get_image_feature_grid_size(
+            ncols, nrows = self.processing_info.get_image_feature_grid_size(
                 image_width=image_size.width,
                 image_height=image_size.height,
             )
@@ -254,13 +261,13 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    FuyuMultiModalProcessor,
-    info=FuyuProcessingInfo,
-    dummy_inputs=FuyuDummyInputsBuilder,
-)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = FuyuProcessingInfo
+    profiling_info = FuyuProfilingInfo
+    dummy_builder = FuyuDummyInputsBuilder
+    processor = FuyuMultiModalProcessor
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

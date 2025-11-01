@@ -11,15 +11,12 @@ from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsMultiModal, SupportsScoreTemplate
 from .qwen2_vl import (
-    Qwen2VLDummyInputsBuilder,
     Qwen2VLForConditionalGeneration,
     Qwen2VLMultiModalProcessor,
-    Qwen2VLProcessingInfo,
 )
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
@@ -62,11 +59,6 @@ class JinaVLMultiModalProcessor(Qwen2VLMultiModalProcessor):
         return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    JinaVLMultiModalProcessor,
-    info=Qwen2VLProcessingInfo,
-    dummy_inputs=Qwen2VLDummyInputsBuilder,
-)
 class JinaVLForSequenceClassification(
     Qwen2VLForConditionalGeneration,
     SupportsCrossEncoding,
@@ -74,6 +66,9 @@ class JinaVLForSequenceClassification(
     SupportsScoreTemplate,
 ):
     is_pooling_model = True
+
+    processor = JinaVLMultiModalProcessor
+
     weight_mapper = WeightsMapper(
         orig_to_new_prefix={
             "score.0.": "score.dense.",

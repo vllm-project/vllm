@@ -17,7 +17,6 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -31,7 +30,7 @@ from vllm.multimodal.processing import (
     PromptInsertion,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -426,15 +425,19 @@ class Blip2ProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config(Blip2Config)
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": 1}
-
     def get_num_image_tokens(self) -> int:
         hf_config = self.get_hf_config()
         return hf_config.num_query_tokens
 
 
-class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
+class Blip2ProfilingInfo(BaseProfilingInfo[Blip2ProcessingInfo]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": 1}
+
+
+class Blip2DummyInputsBuilder(
+    BaseDummyInputsBuilder[Blip2ProcessingInfo, Blip2ProfilingInfo]
+):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         return ""
 
@@ -444,7 +447,7 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         vision_config = hf_config.vision_config
 
         max_image_size = vision_config.image_size
@@ -462,7 +465,9 @@ class Blip2DummyInputsBuilder(BaseDummyInputsBuilder[Blip2ProcessingInfo]):
         }
 
 
-class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
+class Blip2MultiModalProcessor(
+    BaseMultiModalProcessor[Blip2ProcessingInfo, Blip2ProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -472,7 +477,7 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
     ) -> BatchFeature:
         if not mm_data:
             # HF processor always adds placeholders even when there's no image
-            tokenizer = self.info.get_tokenizer()
+            tokenizer = self.processing_info.get_tokenizer()
             prompt_ids = tokenizer.encode(prompt)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -499,11 +504,11 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        tokenizer = self.info.get_tokenizer()
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         image_token_id = vocab["<image>"]
-        num_image_tokens = self.info.get_num_image_tokens()
+        num_image_tokens = self.processing_info.get_num_image_tokens()
         image_tokens = [image_token_id] * num_image_tokens
 
         return [
@@ -515,15 +520,15 @@ class Blip2MultiModalProcessor(BaseMultiModalProcessor[Blip2ProcessingInfo]):
         ]
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    Blip2MultiModalProcessor,
-    info=Blip2ProcessingInfo,
-    dummy_inputs=Blip2DummyInputsBuilder,
-)
 class Blip2ForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
 ):
     merge_by_field_config = True
+
+    processor_info = Blip2ProcessingInfo
+    profiling_info = Blip2ProfilingInfo
+    dummy_builder = Blip2DummyInputsBuilder
+    processor = Blip2MultiModalProcessor
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

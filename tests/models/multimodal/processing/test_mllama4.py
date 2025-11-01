@@ -7,7 +7,6 @@ from torch import prod
 from transformers import Llama4Config
 
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.profiling import MultiModalProfiler
 
 from ...utils import build_model_context
 
@@ -26,13 +25,14 @@ def test_profiling(model_id: str, max_model_len: int):
     )
 
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    profiler = MultiModalProfiler(processor)
+    dummy_builder = processor.dummy_builder
 
-    decoder_dummy_data = profiler.get_decoder_dummy_data(
+    decoder_dummy_data = dummy_builder.get_decoder_dummy_data(
+        processor,
         max_model_len,
         mm_counts=mm_counts,
     )
-    dummy_mm_data = processor.dummy_inputs.get_dummy_processor_inputs(
+    dummy_mm_data = dummy_builder.get_dummy_processor_inputs(
         max_model_len,
         mm_counts=mm_counts,
     )
@@ -60,7 +60,8 @@ def test_profiling(model_id: str, max_model_len: int):
         total_num_patches.item() + num_tiles.item() + 3
     )  # image start, image, image end
 
-    profiled_tokens = profiler.get_mm_max_contiguous_tokens(
+    profiled_tokens = dummy_builder.get_mm_max_contiguous_tokens(
+        processor,
         max_model_len,
         mm_counts=mm_counts,
     )

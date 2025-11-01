@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
+from typing import Annotated, Any, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -23,7 +23,6 @@ from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -46,7 +45,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -172,9 +171,6 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> LlavaLikeProcessor:
         raise NotImplementedError
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"image": None}
-
     def get_num_image_tokens(
         self,
         *,
@@ -192,28 +188,36 @@ class BaseLlavaProcessingInfo(BaseProcessingInfo):
             hf_config.vision_feature_select_strategy,
         )
 
+
+_Proc = TypeVar("_Proc", bound=BaseLlavaProcessingInfo)
+
+
+class BaseLlavaProfilingInfo(BaseProfilingInfo[_Proc]):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
+
     def get_image_size_with_most_features(self) -> ImageSize:
-        vision_encoder_info = self.get_vision_encoder_info()
+        vision_encoder_info = self.processing_info.get_vision_encoder_info()
         width = height = vision_encoder_info.get_image_size()
         return ImageSize(width=width, height=height)
 
     def get_max_image_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
 
-        return self.get_num_image_tokens(
+        return self.processing_info.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
         )
 
 
-_I = TypeVar("_I", bound=BaseLlavaProcessingInfo)
+_Prof = TypeVar("_Prof", bound=BaseLlavaProfilingInfo)
 
 
-class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
+class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_Proc, _Prof]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        processor = self.info.get_hf_processor()
+        processor = self.processing_info.get_hf_processor()
         image_token = processor.image_token
 
         return image_token * num_images
@@ -226,7 +230,9 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
-        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_width, target_height = (
+            self.profiling_info.get_image_size_with_most_features()
+        )
 
         image_overrides = mm_options.get("image") if mm_options else None
 
@@ -251,7 +257,7 @@ class LlavaProcessingInfo(BaseLlavaProcessingInfo):
         return hf_processor
 
 
-class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
+class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_Proc, _Prof]):
     # Copied from BaseMultiModalProcessor
     @abstractmethod
     def _get_mm_fields_config(
@@ -267,7 +273,7 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        hf_config = self.info.get_hf_config()
+        hf_config = self.processing_info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
         def get_replacement(item_idx: int):
@@ -279,7 +285,7 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
                 num_image_tokens = images.get_feature_size(item_idx)
             else:
                 image_size = images.get_image_size(item_idx)
-                num_image_tokens = self.info.get_num_image_tokens(
+                num_image_tokens = self.processing_info.get_num_image_tokens(
                     image_width=image_size.width,
                     image_height=image_size.height,
                 )
@@ -295,7 +301,9 @@ class BaseLlavaMultiModalProcessor(BaseMultiModalProcessor[_I]):
         ]
 
 
-class LlavaMultiModalProcessor(BaseLlavaMultiModalProcessor[LlavaProcessingInfo]):
+class LlavaMultiModalProcessor(
+    BaseLlavaMultiModalProcessor[LlavaProcessingInfo, BaseLlavaProfilingInfo]
+):
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -312,7 +320,9 @@ class PixtralHFProcessingInfo(BaseLlavaProcessingInfo):
         return self.ctx.get_hf_processor(PixtralProcessor, **kwargs)
 
 
-class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingInfo]):
+class PixtralHFMultiModalProcessor(
+    BaseMultiModalProcessor[PixtralHFProcessingInfo, BaseLlavaProfilingInfo]
+):
     def _call_hf_processor(
         self,
         prompt: str,
@@ -356,9 +366,9 @@ class PixtralHFMultiModalProcessor(BaseMultiModalProcessor[PixtralHFProcessingIn
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        hf_config = self.info.get_hf_config()
-        tokenizer = self.info.get_tokenizer()
+        processor = self.processing_info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_config = self.processing_info.get_hf_config()
+        tokenizer = self.processing_info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
         image_break_id = vocab[processor.image_break_token]
@@ -403,26 +413,17 @@ def _build_llava_or_pixtral_hf_info(
 
 
 def _build_llava_or_pixtral_hf_processor(
-    info: _I,
-    dummy_inputs: BaseDummyInputsBuilder[_I],
+    dummy_builder: BaseDummyInputsBuilder[Any],
     *,
     cache: BaseMultiModalProcessorCache | None = None,
 ) -> BaseMultiModalProcessor:
-    if isinstance(info, PixtralHFProcessingInfo):
-        return PixtralHFMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-        )
+    if isinstance(dummy_builder.processing_info, PixtralHFProcessingInfo):
+        return PixtralHFMultiModalProcessor(dummy_builder, cache=cache)
 
-    if isinstance(info, LlavaProcessingInfo):
-        return LlavaMultiModalProcessor(
-            info,
-            dummy_inputs,  # type: ignore
-            cache=cache,
-        )
+    if isinstance(dummy_builder.processing_info, LlavaProcessingInfo):
+        return LlavaMultiModalProcessor(dummy_builder, cache=cache)
 
-    raise NotImplementedError(type(info))
+    raise NotImplementedError(type(dummy_builder.processing_info))
 
 
 def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
@@ -500,13 +501,13 @@ def init_vision_tower_for_llava(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_processor(
-    _build_llava_or_pixtral_hf_processor,
-    info=_build_llava_or_pixtral_hf_info,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     merge_by_field_config = True
+
+    processor_info = _build_llava_or_pixtral_hf_info
+    profiling_info = BaseLlavaProfilingInfo
+    dummy_builder = LlavaDummyInputsBuilder
+    processor = _build_llava_or_pixtral_hf_processor
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -831,12 +832,6 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
 
 
-# To use this model, please use
-# `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
-@MULTIMODAL_REGISTRY.register_processor(
-    MantisMultiModalProcessor,
-    info=MantisProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
 class MantisForConditionalGeneration(LlavaForConditionalGeneration):
-    pass
+    processor_info = MantisProcessingInfo
+    processor = MantisMultiModalProcessor

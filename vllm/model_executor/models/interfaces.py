@@ -4,10 +4,12 @@
 from collections.abc import Callable, Iterable, Mapping, MutableSequence
 from typing import (
     TYPE_CHECKING,
+    Any,
     ClassVar,
     Literal,
     Protocol,
     TypeAlias,
+    TypeVar,
     overload,
     runtime_checkable,
 )
@@ -31,13 +33,40 @@ from .interfaces_base import VllmModel, is_pooling_model
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
+    from vllm.multimodal.cache import BaseMultiModalProcessorCache
+    from vllm.multimodal.processing import (
+        BaseMultiModalProcessor,
+        BaseProcessingInfo,
+        InputProcessingContext,
+    )
+    from vllm.multimodal.profiling import BaseDummyInputsBuilder, BaseProfilingInfo
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
+    BaseMultiModalProcessorCache = object
+    BaseMultiModalProcessor = object
+    BaseProcessingInfo = object
+    InputProcessingContext = object
+    BaseProfilingInfo = object
+    BaseDummyInputsBuilder = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
+
+
+_Proc = TypeVar("_Proc", bound=BaseProcessingInfo[Any])
+_Prof = TypeVar("_Prof", bound="BaseProfilingInfo[Any]")
+
+
+class MultiModalProcessorFactory(Protocol[_Proc, _Prof]):
+    def __call__(
+        self,
+        dummy_builder: BaseDummyInputsBuilder[_Proc, _Prof],
+        *,
+        cache: BaseMultiModalProcessorCache | None = None,
+    ) -> BaseMultiModalProcessor[_Proc, _Prof]: ...
+
 
 MultiModalEmbeddings: TypeAlias = list[Tensor] | Tensor | tuple[Tensor, ...]
 """
@@ -50,7 +79,7 @@ The output embeddings must be one of the following formats:
 
 
 @runtime_checkable
-class SupportsMultiModal(Protocol):
+class SupportsMultiModal(Protocol[_Proc, _Prof]):
     """The interface required for all multi-modal models."""
 
     supports_multimodal: ClassVar[Literal[True]] = True
@@ -61,6 +90,12 @@ class SupportsMultiModal(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+
+    # For multi-modal data processing and profiling
+    processor_info: Callable[[InputProcessingContext], _Proc]
+    profiling_info: Callable[[_Proc], _Prof]
+    dummy_builder: Callable[[_Prof], BaseDummyInputsBuilder[_Proc, _Prof]]
+    processor: MultiModalProcessorFactory[_Proc, _Prof]
 
     supports_multimodal_raw_input_only: ClassVar[bool] = False
     """
@@ -240,7 +275,32 @@ def supports_multimodal(model: object) -> TypeIs[SupportsMultiModal]: ...
 def supports_multimodal(
     model: type[object] | object,
 ) -> TypeIs[type[SupportsMultiModal]] | TypeIs[SupportsMultiModal]:
-    return getattr(model, "supports_multimodal", False)
+    has_flag = getattr(model, "supports_multimodal", False)
+    mm_attrs = (
+        "processor_info",
+        "profiling_info",
+        "dummy_builder",
+        "processor",
+    )
+    missing_attrs = tuple(attr for attr in mm_attrs if not hasattr(model, attr))
+
+    if has_flag:
+        if missing_attrs:
+            logger.warning(
+                "The model (%s) sets `supports_multimodal=True`, "
+                "but is missing MM-specific attributes: %s",
+                model,
+                missing_attrs,
+            )
+    else:
+        if not missing_attrs:
+            logger.warning(
+                "The model (%s) contains all MM-specific attributes, "
+                "but does not set `supports_multimodal=True`.",
+                model,
+            )
+
+    return has_flag and not missing_attrs
 
 
 def supports_multimodal_raw_input_only(model: type[object] | object) -> bool:
