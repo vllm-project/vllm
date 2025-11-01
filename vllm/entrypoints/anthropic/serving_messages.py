@@ -16,6 +16,8 @@ from fastapi import Request
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicDelta,
     AnthropicError,
     AnthropicMessagesRequest,
@@ -456,3 +458,52 @@ class AnthropicServingMessages(OpenAIServingChat):
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
             yield "data: [DONE]\n\n"
+
+    async def count_tokens(
+        self,
+        request: AnthropicCountTokensRequest,
+        raw_request: Request,
+    ) -> AnthropicCountTokensResponse | ErrorResponse:
+        """Count tokens in messages without generating a completion"""
+        # Convert Anthropic format to OpenAI format for processing
+        anthropic_messages_request = AnthropicMessagesRequest(
+            model=request.model,
+            messages=request.messages,
+            max_tokens=1,  # Required but not used for counting
+            system=request.system,
+            tools=request.tools,
+        )
+
+        openai_request = self._convert_anthropic_to_openai_request(
+            anthropic_messages_request
+        )
+
+        # Check model validity
+        error_check_ret = await self._check_model(openai_request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        # Get tokenizer and count tokens
+        try:
+            tokenizer = await self.engine_client.get_tokenizer()
+
+            # Process the messages to get token count
+            conversation, _ = await self._get_prompt_messages(
+                openai_request, tokenizer, []
+            )
+
+            prompt_text = self._apply_chat_template(
+                tokenizer,
+                conversation,
+                chat_template=self.chat_template,
+            )
+
+            # Tokenize to get count
+            token_ids = tokenizer.encode(prompt_text)
+            input_tokens = len(token_ids)
+
+            return AnthropicCountTokensResponse(input_tokens=input_tokens)
+
+        except Exception as e:
+            logger.exception("Error counting tokens")
+            return self.create_error_response(str(e))

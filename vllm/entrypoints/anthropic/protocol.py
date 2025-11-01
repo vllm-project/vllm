@@ -160,3 +160,25 @@ class AnthropicMessagesResponse(BaseModel):
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
+
+
+class AnthropicCountTokensRequest(BaseModel):
+    """Anthropic Count Tokens API request"""
+
+    model: str
+    messages: list[AnthropicMessage]
+    system: str | list[AnthropicContentBlock] | None = None
+    tools: list[AnthropicTool] | None = None
+
+    @field_validator("model")
+    @classmethod
+    def validate_model(cls, v):
+        if not v:
+            raise ValueError("Model is required")
+        return v
+
+
+class AnthropicCountTokensResponse(BaseModel):
+    """Anthropic Count Tokens API response"""
+
+    input_tokens: int

@@ -18,6 +18,8 @@ from starlette.datastructures import State
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicErrorResponse,
     AnthropicMessagesRequest,
     AnthropicMessagesResponse,
@@ -119,6 +121,34 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return JSONResponse(content=generator.model_dump(exclude_none=True))
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/messages/count_tokens",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"model": AnthropicCountTokensResponse},
+        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
+    },
+)
+async def count_tokens(
+    request: AnthropicCountTokensRequest, raw_request: Request
+) -> AnthropicCountTokensResponse | ErrorResponse:
+    """Count tokens in messages without generating a completion"""
+    handler = messages(raw_request)
+    if handler is None:
+        return messages(raw_request).create_error_response(
+            message="The model does not support Messages API"
+        )
+
+    result = await handler.count_tokens(request, raw_request)
+
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump())
+
+    return JSONResponse(content=result.model_dump(exclude_none=True))
 
 
 async def init_app_state(

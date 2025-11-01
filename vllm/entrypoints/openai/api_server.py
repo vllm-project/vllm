@@ -95,6 +95,11 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
 )
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
+    AnthropicMessagesRequest,
+)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.entrypoints.tool_server import DemoToolServer, MCPToolServer, ToolServer
 from vllm.entrypoints.utils import (
@@ -1254,6 +1259,87 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
             )
 
         return Response(status_code=200, content=response)
+
+
+@router.post(
+    "/v1/messages/count_tokens",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"model": AnthropicCountTokensResponse},
+        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
+    },
+)
+async def count_tokens(
+    request: AnthropicCountTokensRequest, raw_request: Request
+) -> AnthropicCountTokensResponse | ErrorResponse:
+    """
+    Count tokens in Anthropic-style messages without generating a completion.
+    This endpoint provides compatibility with Anthropic's API.
+    """
+    handler = chat(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support token counting"
+        )
+
+    try:
+        # Convert Anthropic format to OpenAI format
+        openai_messages = []
+
+        # Add system message if provided
+        if request.system:
+            if isinstance(request.system, str):
+                openai_messages.append({"role": "system", "content": request.system})
+            else:
+                # Handle list of content blocks
+                system_text = " ".join([
+                    block.text for block in request.system if hasattr(block, 'text') and block.text
+                ])
+                if system_text:
+                    openai_messages.append({"role": "system", "content": system_text})
+
+        # Convert Anthropic messages to OpenAI format
+        for msg in request.messages:
+            if isinstance(msg.content, str):
+                openai_messages.append({"role": msg.role, "content": msg.content})
+            else:
+                # Handle list of content blocks
+                content_text = " ".join([
+                    block.text for block in msg.content if hasattr(block, 'text') and block.text
+                ])
+                if content_text:
+                    openai_messages.append({"role": msg.role, "content": content_text})
+
+        # Get tokenizer
+        tokenizer = await handler.engine_client.get_tokenizer()
+
+        # Process messages through chat template
+        conversation, _ = await handler._get_prompt_messages(
+            ChatCompletionRequest(model=request.model, messages=openai_messages),
+            tokenizer,
+            []
+        )
+
+        # Apply chat template
+        prompt_text = handler._apply_chat_template(
+            tokenizer,
+            conversation,
+            chat_template=handler.chat_template,
+        )
+
+        # Count tokens
+        token_ids = tokenizer.encode(prompt_text)
+        input_tokens = len(token_ids)
+
+        return JSONResponse(
+            content=AnthropicCountTokensResponse(input_tokens=input_tokens).model_dump()
+        )
+
+    except Exception as e:
+        logger.exception("Error counting tokens")
+        return base(raw_request).create_error_response(str(e))
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
