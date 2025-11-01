@@ -2036,7 +2036,6 @@ class ClassificationCompletionRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-    activation: bool | None = None
     add_special_tokens: bool = Field(
         default=True,
         description=(
@@ -2051,7 +2050,7 @@ class ClassificationCompletionRequest(OpenAIBaseModel):
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."
         ),
-
+    )
     softmax: bool | None = Field(
         default=None,
         description="softmax will be deprecated, please use use_activation instead.",
