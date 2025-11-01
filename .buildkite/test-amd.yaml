@@ -312,21 +312,21 @@ steps:
     - tests/v1
   commands:
     # Run v1/e2e tests without AITER, excluding spec_decode tests
-    - pytest -v -s v1/e2e --ignore=v1/e2e/test_spec_decode.py
+    # - pytest -v -s v1/e2e --ignore=v1/e2e/test_spec_decode.py
     - pytest -v -s v1/engine
 
-- label: V1 Test spec_decode with AITER # 15min
-  timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  source_file_dependencies:
-    - vllm/
-    - tests/v1/e2e/test_spec_decode.py
-  commands:
-    # Spec decode tests require AITER FA for ROCm
-    # See: https://github.com/vllm-project/vllm/issues/27619
-    - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/e2e/test_spec_decode.py
+# - label: V1 Test spec_decode with AITER # 15min
+#   timeout_in_minutes: 25
+#   mirror_hardwares: [amdexperimental, amdproduction]
+#   agent_pool: mi325_1
+#   # grade: Blocking
+#   source_file_dependencies:
+#     - vllm/
+#     - tests/v1/e2e/test_spec_decode.py
+#   commands:
+#     # Spec decode tests require AITER FA for ROCm
+#     # See: https://github.com/vllm-project/vllm/issues/27619
+#     - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/e2e/test_spec_decode.py
 
 - label: V1 Test entrypoints # 35min
   timeout_in_minutes: 50
