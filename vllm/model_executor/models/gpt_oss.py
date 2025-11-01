@@ -190,6 +190,7 @@ class TransformerBlock(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        quant_config: QuantizationConfig,
         prefix: str = "",
     ):
         super().__init__()
@@ -199,7 +200,10 @@ class TransformerBlock(torch.nn.Module):
 
         self.layer_idx = extract_layer_index(prefix)
         self.attn = OAIAttention(
-            config, prefix=f"{prefix}.attn", cache_config=cache_config
+            config,
+            prefix=f"{prefix}.attn",
+            quant_config=quant_config,
+            cache_config=cache_config,
         )
         self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
@@ -235,6 +239,7 @@ class GptOssModel(nn.Module):
     ):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
         self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
@@ -246,6 +251,7 @@ class GptOssModel(nn.Module):
             lambda prefix: TransformerBlock(
                 vllm_config,
                 prefix=prefix,
+                quant_config=self.quant_config,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -640,7 +646,7 @@ class GptOssModel(nn.Module):
 
 
 class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
-    packed_modules_mapping = {"qkv": ["q_proj", "k_proj", "v_proj"]}
+    packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
