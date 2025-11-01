@@ -1487,7 +1487,7 @@ class ModelConfig:
         # Since Mamba1 does not have a chunk notion
         # we use a default chunk size of 1024.
         if chunk_size is None:
-            chunk_size = 1024
+            chunk_size = 2048
 
         return chunk_size
 
