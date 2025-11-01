@@ -454,7 +454,8 @@ def test_qwen2_vl_multiple_image_embeddings_input(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 @pytest.mark.parametrize(
-    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+    "mm_encoder_attn_backend",
+    [None] + current_platform.get_supported_vit_attn_backends(),
 )
 def test_qwen2_vl_video_embeddings_input(
     vllm_runner,
@@ -464,7 +465,7 @@ def test_qwen2_vl_video_embeddings_input(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    mm_encoder_attn_backend: _MHA_Backend,
+    mm_encoder_attn_backend: _MHA_Backend | None,
 ) -> None:
     num_frames = 4
     sampled_vids = [

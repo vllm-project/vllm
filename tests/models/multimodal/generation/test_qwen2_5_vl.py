@@ -37,7 +37,7 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize(
-    "encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+    "encoder_attn_backend", [None] + current_platform.get_supported_vit_attn_backends()
 )
 def test_qwen2_5_vl_evs_functionality(
     vllm_runner,
@@ -47,7 +47,7 @@ def test_qwen2_5_vl_evs_functionality(
     num_frames: int,
     dtype: str,
     max_tokens: int,
-    encoder_attn_backend: _MHA_Backend,
+    encoder_attn_backend: _MHA_Backend | None,
 ) -> None:
     """Test EVS (Efficient Video Sampling) functionality with different
     pruning rates.

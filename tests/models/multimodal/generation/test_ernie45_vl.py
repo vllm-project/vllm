@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import asdict
-from typing import NamedTuple
 
 import pytest
-from PIL.Image import Image
 from transformers import AutoProcessor
 
 from vllm import LLM, EngineArgs, SamplingParams
@@ -19,24 +17,16 @@ MODEL_NAME = "baidu/ERNIE-4.5-VL-28B-A3B-PT"
 QUESTION = "What is the content of each image?"
 
 
-class ModelRequestData(NamedTuple):
-    engine_args: EngineArgs
-    prompt: str
-    image_data: list[Image]
-    stop_token_ids: list[int] | None = None
-    chat_template: str | None = None
-    sampling_params: SamplingParams | None = None
-
-
 @large_gpu_test(min_gb=80)
 @pytest.mark.parametrize("question", [QUESTION])
 @pytest.mark.parametrize(
-    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+    "mm_encoder_attn_backend",
+    [None] + current_platform.get_supported_vit_attn_backends(),
 )
-def test_ernie45_vl(
+def test_ernie45_vl_vit_attn_backend_functionality(
     image_assets,
     question: str,
-    mm_encoder_attn_backend: _MHA_Backend,
+    mm_encoder_attn_backend: _MHA_Backend | None,
 ):
     images = [asset.pil_image for asset in image_assets]
 

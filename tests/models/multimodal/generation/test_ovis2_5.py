@@ -21,10 +21,10 @@ QUESTION = "What is the content of each image?"
     "mm_encoder_attn_backend",
     [None] + current_platform.get_supported_vit_attn_backends(),
 )
-def test_ovis2_5(
+def test_ovis2_5_vit_attn_backend_functionality(
     image_assets,
     question: str,
-    mm_encoder_attn_backend: _MHA_Backend,
+    mm_encoder_attn_backend: _MHA_Backend | None,
 ):
     images = [asset.pil_image for asset in image_assets]
 

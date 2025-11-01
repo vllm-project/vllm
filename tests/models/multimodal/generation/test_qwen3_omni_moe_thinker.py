@@ -23,7 +23,7 @@ QUESTION = "What is the content of each image?"
     "mm_encoder_attn_backend",
     [None] + current_platform.get_supported_vit_attn_backends(),
 )
-def test_qwen3_omni_moe_thinker_image_input(
+def test_qwen3_omni_moe_thinker_vit_attn_backend_functionality(
     image_assets,
     question: str,
     mm_encoder_attn_backend: _MHA_Backend | None,

@@ -603,7 +603,8 @@ def run_reduced_model(llm: LLM, should_profile: bool = False) -> None:
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.parametrize("tp,ep", [(2, True)])
 @pytest.mark.parametrize(
-    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
+    "mm_encoder_attn_backend",
+    [None] + current_platform.get_supported_vit_attn_backends(),
 )
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_dummy_maverick(
@@ -615,7 +616,7 @@ def test_dummy_maverick(
     enforce_eager: bool,
     tp: int,
     ep: bool,
-    mm_encoder_attn_backend: _MHA_Backend,
+    mm_encoder_attn_backend: _MHA_Backend | None,
     output_dir: str = "/tmp/reduced_maverick",
     force_recreate: bool = True,
     profile: bool = False,
