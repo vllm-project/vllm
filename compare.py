@@ -2,10 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from datetime import datetime
 from itertools import product
-
-import regex as re
 import torch
 
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+import random
+import numpy as np
+random.seed(42)
+np.random.seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+
+import regex as re
+import torch 
+  
 from vllm.v1.sample.ops.topk_topp_sampler import (apply_top_k_top_p,
                                                   apply_top_k_top_p_triton,
                                                   apply_top_k_top_p_test2
@@ -51,6 +62,7 @@ def test_accuracy(logits, k, p, func_list):
 
         if not is_correct:
             print_to_log(r_str(f"Error: logits are not close on {i} - " + f"{func_name}"), log_file)
+            output_logits = apply_top_k_top_p_test2(logits, k, p, debug=True)
             error_mask = torch.abs(output_logits - original_logits) > 1e-5
             error_rows = torch.where(error_mask)[0]
             error_rows = torch.unique(error_rows)
