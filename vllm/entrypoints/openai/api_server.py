@@ -113,8 +113,15 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.llm_engine import _V1_ONLY_ERROR_MSG
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
+
+
+def _ensure_v1_or_exit():
+    if not envs.VLLM_USE_V1:
+        raise SystemExit(_V1_ONLY_ERROR_MSG)
+
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
 
@@ -211,7 +218,7 @@ async def build_async_engine_client_from_engine_args(
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
     # V1 AsyncLLM.
-    assert envs.VLLM_USE_V1
+    _ensure_v1_or_exit()
 
     if disable_frontend_multiprocessing:
         logger.warning(

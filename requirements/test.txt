@@ -1093,7 +1093,7 @@ tensorboardx==2.6.4
     # via lightning
 tensorizer==2.10.1
     # via -r requirements/test.in
-termcolor==3.1.0
+termcolor==3.2.0
     # via gpt-oss
 terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
     # via -r requirements/test.in
