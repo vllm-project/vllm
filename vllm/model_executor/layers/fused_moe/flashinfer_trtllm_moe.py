@@ -30,8 +30,8 @@ def flashinfer_fused_moe_blockscale_fp8(
     expert_offset: int,
     local_num_experts: int,
     block_shape: list[int],
-    routed_scaling: float | None = 1.0,
     routing_method_type: int = RoutingMethodType.DeepSeekV3,
+    routed_scaling: float | None = 1.0,
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
@@ -85,8 +85,8 @@ def flashinfer_fused_moe_blockscale_fp8_fake(
     expert_offset: int,
     local_num_experts: int,
     block_shape: list[int],
+    routing_method_type: int,
     routed_scaling: float = 1.0,
-    routing_method_type: int = RoutingMethodType.DeepSeekV3,
 ) -> torch.Tensor:
     return torch.empty_like(x)
 
