@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
+import anthropic
 import cloudpickle
 import httpx
 import openai
@@ -244,6 +245,23 @@ class RemoteOpenAIServer:
             api_key=self.DUMMY_API_KEY,
             max_retries=0,
             **kwargs,
+        )
+
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
 
 

@@ -29,7 +29,7 @@ def server():  # noqa: F811
 
 @pytest_asyncio.fixture
 async def client(server):
-    async with server.get_async_client() as async_client:
+    async with server.get_async_client_anthropic() as async_client:
         yield async_client
 
 
