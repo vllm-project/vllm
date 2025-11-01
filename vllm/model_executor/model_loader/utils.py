@@ -70,53 +70,15 @@ def initialize_model(
             except Exception as e:
                 logger.debug("GGUF multimodal detection failed: %s", e)
 
-        if is_multimodal_gguf:
-            # Only force multimodal for Gemma3 models
-            try:
-                architectures = getattr(model_config.hf_config, "architectures", [])
-                is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
+        # Ensure multimodal_config is set for all multimodal GGUF models
+        if is_multimodal_gguf and model_config.multimodal_config is None:
+            from vllm.config.multimodal import MultiModalConfig
 
-                if is_gemma3:
-                    import vllm.model_executor.models.gemma3_mm as gemma3_mm
+            model_config.multimodal_config = MultiModalConfig()
+            logger.debug("Initialized multimodal_config for GGUF model")
 
-                    model_class = gemma3_mm.Gemma3ForConditionalGeneration
-                    logger.info(
-                        "Loaded Gemma3ForConditionalGeneration for multimodal GGUF"
-                    )
-
-                    # Update architectures for subprocess consistency
-                    model_config.hf_config.architectures = [
-                        "Gemma3ForConditionalGeneration"
-                    ]
-
-                    # Vision config should already be set by ModelConfig.__post_init__
-                    # via extract_vision_config_from_gguf(). Verify it exists.
-                    if (
-                        not hasattr(model_config.hf_config, "vision_config")
-                        or model_config.hf_config.vision_config is None
-                    ):
-                        raise RuntimeError(
-                            "vision_config not initialized for Gemma3 GGUF "
-                            "multimodal. ModelConfig should have extracted it "
-                            "from mmproj.gguf or raised an error."
-                        )
-
-                    # Ensure multimodal_config is set
-                    if model_config.multimodal_config is None:
-                        from vllm.config.multimodal import MultiModalConfig
-
-                        model_config.multimodal_config = MultiModalConfig()
-                        logger.debug("Initialized multimodal_config for GGUF model")
-                else:
-                    # Non-Gemma3: use standard path
-                    logger.debug("Multimodal GGUF detected for non-Gemma3 model")
-                    model_class, _ = get_model_architecture(model_config)
-            except (ImportError, AttributeError) as e:
-                logger.warning("Failed to load Gemma3ForConditionalGeneration: %s", e)
-                model_class, _ = get_model_architecture(model_config)
-        else:
-            # Standard path
-            model_class, _ = get_model_architecture(model_config)
+        # Use standard architecture resolution for all models
+        model_class, _ = get_model_architecture(model_config)
 
     if vllm_config.quant_config is not None:
         configure_quant_config(vllm_config.quant_config, model_class)
@@ -377,7 +339,8 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> Optional["SiglipVisionC
         SiglipVisionConfig if extraction succeeds, None if required fields missing
 
     Raises:
-        Any exceptions from GGUF reading (file not found, corrupted, etc.)
+        Exception: Exceptions from GGUF reading (file not found, corrupted,
+            etc.) propagate directly from gguf.GGUFReader.
     """
     import gguf
     from transformers import SiglipVisionConfig
