@@ -561,27 +561,6 @@ class Gemma3ForConditionalGeneration(
             and getattr(quant_config, "quant_method", "") == "gguf"
         ) or (model_path and model_path.endswith(".gguf"))
 
-        # GGUF models: initialize vision_config if missing (text-only GGUF files)
-        if not hasattr(config, "vision_config") or config.vision_config is None:
-            from transformers import SiglipVisionConfig
-
-            config.vision_config = SiglipVisionConfig(
-                hidden_size=1152,
-                intermediate_size=4304,
-                num_hidden_layers=27,
-                num_attention_heads=16,
-                num_channels=3,
-                image_size=896,
-                patch_size=14,
-                layer_norm_eps=1e-6,
-                attention_dropout=0.0,
-                num_image_tokens=256,
-                vision_use_head=False,  # Disable pooling head for Gemma3
-            )
-            config.mm_tokens_per_image = 256
-            config.image_token_index = 262144
-            logger.info("Created default vision_config for GGUF model")
-
         # GGUF models: vision tower is always unquantized (F16 from mmproj.gguf).
         # HF models: pass through quant_config normally
         vision_quant_config = None if self._is_gguf else quant_config

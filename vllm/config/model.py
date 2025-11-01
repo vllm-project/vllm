@@ -593,26 +593,13 @@ class ModelConfig:
                                 )
                                 break
 
-                    # Fallback to hardcoded defaults if extraction fails
+                    # Fail fast if extraction fails - indicates
+                    # corrupted/incomplete GGUF
                     if vision_config is None:
-                        from transformers import SiglipVisionConfig
-
-                        logger.warning(
-                            "Using fallback vision config (metadata extraction failed)"
-                        )
-                        vision_config = SiglipVisionConfig(
-                            hidden_size=1152,
-                            intermediate_size=4304,
-                            num_hidden_layers=27,
-                            num_attention_heads=16,
-                            num_channels=3,
-                            image_size=896,
-                            patch_size=14,
-                            layer_norm_eps=1e-6,
-                            attention_dropout=0.0,
-                            num_image_tokens=256,
-                            # Disable pooling head for Gemma3
-                            vision_use_head=False,
+                        raise ValueError(
+                            "Failed to extract vision config from mmproj.gguf. "
+                            "This may indicate a corrupted or incomplete GGUF file. "
+                            "Please verify your mmproj.gguf file is valid."
                         )
 
                     self.hf_config.vision_config = vision_config
