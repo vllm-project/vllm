@@ -19,7 +19,7 @@ from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import (
@@ -40,6 +40,9 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
 logger = init_logger(__name__)
+
+COMPLETED_NONE_FUTURE: Future[ModelRunnerOutput | None] = Future()
+COMPLETED_NONE_FUTURE.set_result(None)
 
 
 @dataclass
@@ -95,6 +98,8 @@ class RayDistributedExecutor(Executor):
 
         # KV connector setup
         self.has_connector = self.vllm_config.kv_transfer_config is not None
+
+        self.scheduler_output: SchedulerOutput | None = None
 
     @property
     def max_concurrent_batches(self) -> int:
@@ -381,22 +386,46 @@ class RayDistributedExecutor(Executor):
             self.shutdown()
 
     def execute_model(  # type: ignore[override]
-        self, scheduler_output: SchedulerOutput, non_block: bool = False
+        self,
+        scheduler_output: SchedulerOutput,
+        non_block: bool = False,
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        if self.scheduler_output is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
+        self.scheduler_output = scheduler_output
+        return COMPLETED_NONE_FUTURE if non_block else None
+
+    def sample_tokens(  # type: ignore[override]
+        self,
+        grammar_output: "GrammarOutput | None",
+        non_block: bool = False,
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
         """Execute the model on the Ray workers.
 
+        The scheduler output to use should have been provided in
+        a prior call to execute_model().
+
         Args:
-            scheduler_output: The scheduler output to execute.
+            grammar_output: The structured outputs grammar bitmask, if applicable.
             non_block: If True, the method will return a Future.
 
         Returns:
             The model runner output.
         """
+        scheduler_output = self.scheduler_output
+        if scheduler_output is None:
+            return None  # noqa
+
+        self.scheduler_output = None
+
         # Build the compiled DAG for the first time.
         if self.forward_dag is None:  # type: ignore
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
-        refs = self.forward_dag.execute(scheduler_output)  # type: ignore
+        refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)

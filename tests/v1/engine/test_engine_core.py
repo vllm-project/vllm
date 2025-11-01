@@ -248,7 +248,7 @@ def test_engine_core_concurrent_batches():
             self,
             scheduler_output,
             non_block=False,
-        ) -> Future[ModelRunnerOutput]:
+        ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
 
             # DummyExecutor used only for testing async case.
@@ -256,6 +256,23 @@ def test_engine_core_concurrent_batches():
 
             def _execute():
                 output = self.collective_rpc("execute_model", args=(scheduler_output,))
+                # Make a copy because output[0] may be reused
+                # by the next batch.
+                return copy.deepcopy(output[0])
+
+            # Use the thread pool instead of creating a new thread
+            return self.thread_pool.submit(_execute)
+
+        def sample_tokens(
+            self, grammar_output, non_block=False
+        ) -> Future[ModelRunnerOutput]:
+            """Make sample_tokens non-blocking."""
+
+            # DummyExecutor used only for testing async case.
+            assert non_block
+
+            def _execute():
+                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
                 # Make a copy because output[0] may be reused
                 # by the next batch.
                 return copy.deepcopy(output[0])

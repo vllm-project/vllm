@@ -181,12 +181,17 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
-    # ids of structured outputs requests included in the bitmask, in the
-    # same order as the corresponding stacked rows of the bitmask.
-    # There may be more than one row per request in the case of speculative decoding.
-    structured_output_request_ids: list[str]
-    # the bitmask for the whole batch
-    grammar_bitmask: "npt.NDArray[np.int32] | None"
+    # Whether the scheduled requests have all the output tokens they
+    # need to perform grammar bitmask computation.
+    pending_structured_output_tokens: bool = False
 
     # KV Cache Connector metadata.
     kv_connector_metadata: KVConnectorMetadata | None = None
+
+
+@dataclass
+class GrammarOutput:
+    # ids of structured output requests.
+    structured_output_request_ids: list[str]
+    # Bitmask ordered as structured_output_request_ids.
+    grammar_bitmask: "npt.NDArray[np.int32]"

@@ -7,6 +7,7 @@ import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
+from vllm.sampling_params import StructuredOutputsParams
 
 from ...conftest import VllmRunner
 from ...models.utils import check_outputs_equal
@@ -15,9 +16,12 @@ MODEL = "Qwen/Qwen3-0.6B"
 
 
 @dynamo_config.patch(cache_size_limit=16)
-def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
+def test_preempt_and_async_scheduling_e2e(
+    sample_json_schema, monkeypatch: pytest.MonkeyPatch
+):
     """Test consistency of combos of async scheduling, preemption,
-    uni/multiproc executor, and various sampling parameters."""
+    uni/multiproc executor, and various sampling parameters
+    including structured outputs."""
 
     first_prompt = (
         "The following numbers of the sequence "
@@ -35,6 +39,12 @@ def test_preempt_and_async_scheduling_e2e(monkeypatch: pytest.MonkeyPatch):
         dict(bad_words=["the", " the"]),
         dict(logprobs=2),
         dict(logprobs=2, presence_penalty=-1.0),
+        dict(structured_outputs=StructuredOutputsParams(json=sample_json_schema)),
+        dict(
+            structured_outputs=StructuredOutputsParams(json=sample_json_schema),
+            logprobs=2,
+            presence_penalty=-1.0,
+        ),
     ]
 
     default_params = dict(

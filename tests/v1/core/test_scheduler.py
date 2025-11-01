@@ -337,8 +337,6 @@ def test_stop_via_update_from_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_output = ModelRunnerOutput(
@@ -385,8 +383,6 @@ def test_stop_via_update_from_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_output = ModelRunnerOutput(
@@ -431,8 +427,6 @@ def test_stop_via_update_from_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_output = ModelRunnerOutput(
@@ -472,8 +466,6 @@ def test_stop_via_update_from_output():
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
-        structured_output_request_ids=[],
-        grammar_bitmask=None,
     )
 
     model_output = ModelRunnerOutput(
@@ -1988,7 +1980,6 @@ def test_schedule_skip_tokenizer_init():
         scheduler.add_request(request)
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
-    assert output.grammar_bitmask is None
 
 
 def test_schedule_skip_tokenizer_init_structured_output_request():

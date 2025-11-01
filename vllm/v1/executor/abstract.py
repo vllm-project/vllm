@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -187,25 +187,41 @@ class Executor(ABC):
 
     @overload
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: Literal[False] = False,
-    ) -> ModelRunnerOutput:
+        self, scheduler_output: SchedulerOutput, non_block: Literal[False] = False
+    ) -> ModelRunnerOutput | None:
         pass
 
     @overload
     def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: Literal[True] = True,
-    ) -> Future[ModelRunnerOutput]:
+        self, scheduler_output: SchedulerOutput, non_block: Literal[True] = True
+    ) -> Future[ModelRunnerOutput | None]:
         pass
 
     def execute_model(
         self, scheduler_output: SchedulerOutput, non_block: bool = False
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(  # type: ignore[call-overload]
             "execute_model", args=(scheduler_output,), non_block=non_block
+        )
+        return output[0]
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[False] = False
+    ) -> ModelRunnerOutput:
+        pass
+
+    @overload
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: Literal[True] = True
+    ) -> Future[ModelRunnerOutput]:
+        pass
+
+    def sample_tokens(
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        output = self.collective_rpc(  # type: ignore[call-overload]
+            "sample_tokens", args=(grammar_output,), non_block=non_block
         )
         return output[0]
 
