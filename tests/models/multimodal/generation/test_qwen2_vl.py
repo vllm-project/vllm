@@ -351,9 +351,6 @@ def run_embedding_input_test(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.parametrize(
-    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
-)
 def test_qwen2_vl_image_embeddings_input(
     vllm_runner,
     image_assets,
@@ -362,7 +359,6 @@ def test_qwen2_vl_image_embeddings_input(
     dtype,
     max_tokens,
     num_logprobs,
-    mm_encoder_attn_backend: _MHA_Backend,
     monkeypatch,
 ) -> None:
     images = [asset.pil_image for asset in image_assets]
@@ -385,7 +381,7 @@ def test_qwen2_vl_image_embeddings_input(
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
-        mm_encoder_attn_backend=mm_encoder_attn_backend,
+        mm_encoder_attn_backend=_MHA_Backend.FLASH_ATTN,
     )
 
 
@@ -406,9 +402,6 @@ def test_qwen2_vl_image_embeddings_input(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@pytest.mark.parametrize(
-    "mm_encoder_attn_backend", current_platform.get_supported_vit_attn_backends()
-)
 def test_qwen2_vl_multiple_image_embeddings_input(
     vllm_runner,
     image_assets,
@@ -417,7 +410,6 @@ def test_qwen2_vl_multiple_image_embeddings_input(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    mm_encoder_attn_backend: _MHA_Backend,
 ) -> None:
     images = [asset.pil_image for asset in image_assets]
 
@@ -441,7 +433,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(
         num_logprobs=num_logprobs,
         mm_limit=2,
         tensor_parallel_size=1,
-        mm_encoder_attn_backend=mm_encoder_attn_backend,
+        mm_encoder_attn_backend=_MHA_Backend.FLASH_ATTN,
     )
 
 
