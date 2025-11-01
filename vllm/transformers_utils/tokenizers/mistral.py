@@ -190,6 +190,8 @@ class MistralTokenizer(TokenizerBase):
         }
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
+        self._special_token_ids = self._get_special_token_ids()
+        self._special_tokens = self._get_special_tokens()
 
         # Vocab sorted by token id.
         self._vocab = self.tokenizer._vocab
@@ -210,23 +212,7 @@ class MistralTokenizer(TokenizerBase):
             )
         )
 
-    # the following attributes are set to fit vLLM's design and are used
-    # by the structured output backends.
-    @property
-    def all_special_tokens_extended(self) -> list[str]:
-        return self.all_special_tokens
-
-    @property
-    def all_special_tokens(self) -> list[str]:
-        from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
-
-        return [
-            self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
-            for i in self.all_special_ids
-        ]
-
-    @property
-    def all_special_ids(self) -> list[int]:
+    def _get_special_token_ids(self) -> list[int]:
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer,
         )
@@ -243,6 +229,28 @@ class MistralTokenizer(TokenizerBase):
         else:
             raise ValueError(f"Unknown tokenizer type: {type(self.tokenizer)}")
         return sorted(special_ids)
+
+    def _get_special_tokens(self) -> list[str]:
+        from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+
+        return [
+            self.tokenizer.decode([i], special_token_policy=SpecialTokenPolicy.KEEP)
+            for i in self.all_special_ids
+        ]
+
+    # the following attributes are set to fit vLLM's design and are used
+    # by the structured output backends.
+    @property
+    def all_special_tokens_extended(self) -> list[str]:
+        return self.all_special_tokens
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        return self._special_tokens
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return self._special_token_ids
 
     @property
     def bos_token_id(self) -> int:
