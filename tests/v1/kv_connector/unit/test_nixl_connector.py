@@ -981,9 +981,7 @@ def test_scheduler_kv_connector_stats_aggregation():
         scheduled_encoder_inputs={},
         num_common_prefix_blocks=[0],
         finished_req_ids=set(),
-        free_encoder_mm_hashes=set(),
-        structured_output_request_ids={},
-        grammar_bitmask=None,
+        free_encoder_mm_hashes=[],
     )
 
     engine_core_outputs = scheduler.update_from_output(scheduler_output, model_output)

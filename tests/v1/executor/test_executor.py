@@ -31,7 +31,9 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
-        return super().collective_rpc(method, timeout, args, kwargs)
+        return super().collective_rpc(
+            method, timeout, args, kwargs, non_block, unique_reply_rank
+        )
 
 
 CustomMultiprocExecutorAsync = CustomMultiprocExecutor
