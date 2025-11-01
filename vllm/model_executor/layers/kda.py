@@ -292,7 +292,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
         output[:] = self.o_proj(core_attn_out)[0]
-        
+
     def _forward(
         self,
         q_proj_states: torch.Tensor,
