@@ -172,14 +172,14 @@ class MultiModalConfig:
             _MHA_Backend as BackendEnum,
         )
         from vllm.attention.backends.registry import (
-            backend_name_to_enum,
+            mha_backend_name_to_enum,
         )
 
         if value is None or isinstance(value, BackendEnum):
             return value
 
         if isinstance(value, str):
-            candidate = backend_name_to_enum(value.upper())
+            candidate = mha_backend_name_to_enum(value.upper())
             if candidate is not None:
                 return candidate
 
