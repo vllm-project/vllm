@@ -7,6 +7,7 @@ import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
+from vllm.sampling_params import StructuredOutputsParams
 
 from ...conftest import VllmRunner
 from ...models.utils import check_outputs_equal
@@ -25,15 +26,6 @@ class TestPreemptAndAsyncScheduling:
         f"Tell me about the number {i}: " for i in range(32)
     ]
 
-    sampling_param_tests: list[dict[str, Any]] = [
-        dict(),
-        # dict(min_tokens=20),
-        dict(presence_penalty=-1.0),
-        dict(bad_words=["the", " the"]),
-        dict(logprobs=2),
-        dict(logprobs=2, presence_penalty=-1.0),
-    ]
-
     default_params = dict(
         temperature=0.0,  # greedy
         max_tokens=20,
@@ -50,12 +42,27 @@ class TestPreemptAndAsyncScheduling:
             spec_config={"method": "mtp", "num_speculative_tokens": 1},
         )
 
-    def test_without_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
+    def test_without_spec_decoding(
+        self, sample_json_schema, monkeypatch: pytest.MonkeyPatch
+    ):
         """Test consistency of combos of async scheduling, preemption,
         uni/multiproc executor with spec decoding."""
-
+        sampling_param_tests: list[dict[str, Any]] = [
+            dict(),
+            # dict(min_tokens=20),
+            dict(presence_penalty=-1.0),
+            dict(bad_words=["the", " the"]),
+            dict(logprobs=2),
+            dict(logprobs=2, presence_penalty=-1.0),
+            dict(structured_outputs=StructuredOutputsParams(json=sample_json_schema)),
+            dict(
+                structured_outputs=StructuredOutputsParams(json=sample_json_schema),
+                logprobs=2,
+                presence_penalty=-1.0,
+            ),
+        ]
         self.preempt_and_async_scheduling_e2e(
-            monkeypatch, MODEL, self.sampling_param_tests, None
+            monkeypatch, MODEL, sampling_param_tests, None
         )
 
     @dynamo_config.patch(cache_size_limit=16)
