@@ -190,8 +190,12 @@ class MistralTokenizer(TokenizerBase):
         }
         # Sort the dict for convenience
         self._vocab_dict = dict(sorted(self._vocab_dict.items(), key=lambda x: x[1]))
+
+        # Cache special tokens for faster access.
         self._special_token_ids = self._get_special_token_ids()
+        self._special_token_ids_set = set(self._special_token_ids)
         self._special_tokens = self._get_special_tokens()
+        self._special_tokens_set = set(self._special_tokens)
 
         # Vocab sorted by token id.
         self._vocab = self.tokenizer._vocab
@@ -413,7 +417,7 @@ class MistralTokenizer(TokenizerBase):
             tokens = [
                 t
                 for t in tokens
-                if (t in to_decode_special_tokens or t not in self.all_special_tokens)
+                if (t in to_decode_special_tokens or t not in self._special_tokens_set)
             ]
 
             if any(isinstance(t, bytes) for t in tokens):
@@ -497,7 +501,7 @@ class MistralTokenizer(TokenizerBase):
             # We filtered unwanted special tokens so we can decode the rest.
             tokens = [
                 self.tokenizer.id_to_byte_piece(token_id, SpecialTokenPolicy.KEEP)
-                if token_id not in self.all_special_ids
+                if token_id not in self._special_token_ids_set
                 else self.tokenizer.decode([token_id], SpecialTokenPolicy.KEEP)
                 for token_id in ids_kept
             ]
