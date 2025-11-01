@@ -1218,7 +1218,7 @@ class FusedMoE(CustomOp):
         zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
-        routing_method_type: int = 2,
+        routing_method_type: int | None = None,
     ):
         super().__init__()
 
