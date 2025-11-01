@@ -368,15 +368,15 @@ class OpType(Enum):
             return lora_shrink
         if self == OpType.LORA_EXPAND:
             return lora_expand
-        if (
-            self == OpType.FUSED_MOE_LORA_GATE_UP_SHRINK
-            or self == OpType.FUSED_MOE_LORA_DOWN_SHRINK
-        ):
+        if self in [
+            OpType.FUSED_MOE_LORA_GATE_UP_SHRINK,
+            OpType.FUSED_MOE_LORA_DOWN_SHRINK,
+        ]:
             return fused_moe_lora_shrink
-        if (
-            self == OpType.FUSED_MOE_LORA_GATE_UP_EXPAND
-            or self == OpType.FUSED_MOE_LORA_DOWN_EXPAND
-        ):
+        if self in [
+            OpType.FUSED_MOE_LORA_GATE_UP_EXPAND,
+            OpType.FUSED_MOE_LORA_DOWN_EXPAND,
+        ]:
             return fused_moe_lora_expand
 
         raise ValueError(f"Unrecognized optype {self}")
@@ -1245,13 +1245,12 @@ def as_benchmark_contexts(
                 num_active_loras=args.num_active_loras
                 if args.num_active_loras
                 else num_loras,
-                # To be filled based on the OpType to benchmark
                 seq_length=None,
                 sort_by_lora_id=sort_by_lora_id,
                 dtype=args.dtype,
-                # To be filled based on the OpType to benchmark
                 top_k_num=top_k_num,
                 num_experts=num_experts,
+                # To be filled based on the OpType to benchmark
                 num_slices=None,
             )
         )
