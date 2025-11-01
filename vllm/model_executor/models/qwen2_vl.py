@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import AutoConfig, BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor, Qwen2VLProcessor
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig,
@@ -1651,9 +1651,7 @@ class Tarsier2Processor(Qwen2VLProcessor):
 class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self) -> Qwen2VLConfig:
         model_path = self.ctx.model_config.model
-        original_config = AutoConfig.from_pretrained(model_path)
-        config_dict = original_config.to_dict()
-        correct_config = Qwen2VLConfig.from_dict(config_dict)
+        correct_config = Qwen2VLConfig.from_pretrained(model_path)
 
         return correct_config
 
