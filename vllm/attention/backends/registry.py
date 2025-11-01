@@ -32,7 +32,7 @@ class _Backend(enum.Enum):
 
 class _MHA_Backend(enum.Enum):
     VLLM_FLASH_ATTN = enum.auto()  # CUDA-only
-    FLASH_ATTN = enum.auto()  # CUDA/ROCm
+    FLASH_ATTN = enum.auto()  # CUDA/ROCm/XPU
     XFORMERS = enum.auto()  # CUDA
     ROCM_AITER_FA = enum.auto()  # ROCM-only
     TORCH_SDPA = enum.auto()  # CUDA/ROCm/TPU/XPU/CPU
