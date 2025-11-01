@@ -433,6 +433,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
 
+                    if finish_reason == "abort":
+                        raise ValueError(output.stop_reason)
+
                     chunk = CompletionStreamResponse(
                         id=request_id,
                         created=created_time,
@@ -509,7 +512,7 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-    ) -> CompletionResponse:
+    ) -> CompletionResponse | ErrorResponse:
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
@@ -526,6 +529,8 @@ class OpenAIServingCompletion(OpenAIServing):
             out_logprobs: GenericSequence[dict[int, Logprob] | None] | None
 
             for output in final_res.outputs:
+                if output.finish_reason == "abort":
+                    return self.create_error_response(str(output.stop_reason))
                 assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
