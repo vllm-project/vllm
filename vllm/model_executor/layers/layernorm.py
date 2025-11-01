@@ -189,11 +189,15 @@ class RMSNorm(CustomOp):
         """PyTorch-native implementation equivalent to forward()."""
         x = x.to(torch.float32)
         if residual is not None:
-            # Handle sequence parallelism: narrow x to match residual's size
-            # This handles the case where residual is scattered but x is not
-            # Using narrow with symbolic length for better Dynamo support
+            # Handle sequence parallelism: ensure x and residual have compatible shapes
+            # When SP is enabled, residual is scattered. We need to make x compatible.
+            # Use select/index instead of narrow to force shape change
             seq_len = residual.size(0)
-            x = torch.narrow(x, dim=0, start=0, length=seq_len)
+            
+            # Force x to have the same sequence length as residual
+            # This creates a proper subgraph that Dynamo can't optimize away
+            indices = torch.arange(seq_len, device=x.device)
+            x = torch.index_select(x, dim=0, index=indices)
             
             # residual promoted f16->f32 automatically,
             # otherwise Inductor eliminates the casts to and from f16,
