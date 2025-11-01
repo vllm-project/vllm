@@ -135,8 +135,9 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         from vllm.utils.flashinfer import autotune
 
         with autotune(False):
-            # Skipping flashinfer auto-tune for this function as the autotuner
-            # throws a "Cannot pack tensors on meta" error.
+            # Enable autotune when,
+            # https://github.com/flashinfer-ai/flashinfer/issues/2023 is
+            # resolved.
             trtllm_fp4_block_scale_routed_moe(**kwargs)
 
         return output
