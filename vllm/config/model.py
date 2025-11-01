@@ -1483,7 +1483,6 @@ class ModelConfig:
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
-
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
