@@ -109,7 +109,7 @@ __global__ void moe_align_block_size_kernel(
 
   for (size_t i = tid; i < numel; i += stride) {
     int expert_id = topk_ids[i];
-    if (expert_id >= num_experts) {
+    if (expert_id < 0 || expert_id >= num_experts) {
       continue;
     }
     int warp_idx = expert_id / experts_per_warp;
