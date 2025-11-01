@@ -309,6 +309,12 @@ class Siglip2Attention(nn.Module):
             ).reshape(seq_length, -1)
         elif self.attn_backend == _MHA_Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
+            from vllm.platforms import current_platform
+
+            if current_platform.is_rocm():
+                queries = queries.contiguous()
+                keys = keys.contiguous()
+                values = values.contiguous()
             batch_size = cu_seqlens.shape[0] - 1
             outputs = []
             cu = cu_seqlens.tolist()
