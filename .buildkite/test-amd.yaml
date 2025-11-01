@@ -304,7 +304,7 @@ steps:
 
 - label: V1 Test e2e + engine # 30min
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -372,7 +372,7 @@ steps:
 - label: Examples Test # 30min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
+  agent_pool: mi325_2
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
