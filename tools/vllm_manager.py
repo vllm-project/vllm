@@ -1236,8 +1236,8 @@ async def root():
             }
         }
 
-        // Auto-refresh status every 5 seconds
-        setInterval(refreshStatus, 5000);
+        // Auto-refresh status every 30 seconds
+        setInterval(refreshStatus, 30000);
 
         // Initial load
         refreshStatus();
