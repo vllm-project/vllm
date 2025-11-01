@@ -320,6 +320,9 @@ def test_human_readable_model_len():
     args = parser.parse_args(["--max-model-len", "1024"])
     assert args.max_model_len == 1024
 
+    args = parser.parse_args(["--max-model-len", "-1"])
+    assert args.max_model_len == -1
+
     # Lower
     args = parser.parse_args(["--max-model-len", "1m"])
     assert args.max_model_len == 1_000_000
