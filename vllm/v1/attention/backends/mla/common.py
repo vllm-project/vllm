@@ -1970,10 +1970,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         if has_decode:
             assert attn_metadata.decode is not None
 
-            decode_q_nope, decode_q_pe = decode_q.split(
-                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-            )
-
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
