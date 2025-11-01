@@ -3,7 +3,7 @@
 
 import random
 from collections.abc import Callable
-from typing import NamedTuple, Optional, Union
+from typing import NamedTuple, TypeAlias
 
 import numpy as np
 import pytest
@@ -21,7 +21,7 @@ from tests.v1.sample.utils import (
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (
     BatchUpdate,
     BatchUpdateBuilder,
@@ -54,7 +54,7 @@ THINK_START_TOKEN_ID = 999
 THINK_END_TOKEN_ID = 998
 
 # LogitsProcessor subclass or "none"
-LogitprocType = Union[type[LogitsProcessor], str]
+LogitprocType: TypeAlias = type[LogitsProcessor] | str
 
 
 class LogitsProcsRequestParams:
@@ -591,7 +591,7 @@ class LogitsprocTestHelpers(NamedTuple):
     """Supports setting up and validating logitsprocs unit tests."""
 
     eval_fxn: Callable
-    gen_request_fxn: Optional[Callable] = None
+    gen_request_fxn: Callable | None = None
 
 
 logitsprocs_test_mapping = {
@@ -637,7 +637,7 @@ def _generate_fake_step_update(
     workload_params: list[LogitsProcsRequestParams],
     wdx: int,
     batch_update_builder: BatchUpdateBuilder,
-) -> tuple[Optional[BatchUpdate], int, int]:
+) -> tuple[BatchUpdate | None, int, int]:
     batch_size = len(persistent_batch)
     workload_size = len(workload_params)
     workload_reqs_remaining = workload_size - wdx

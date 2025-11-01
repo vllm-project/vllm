@@ -13,7 +13,7 @@ import argparse
 import json
 import random
 from statistics import mean
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd  # type: ignore
 import tqdm  # type: ignore
@@ -25,7 +25,7 @@ def has_non_english_chars(text: str) -> bool:
 
 
 def content_is_valid(
-    content: str, min_content_len: Optional[int], max_content_len: Optional[int]
+    content: str, min_content_len: int | None, max_content_len: int | None
 ) -> bool:
     if min_content_len and len(content) < min_content_len:
         return False
@@ -37,7 +37,7 @@ def content_is_valid(
 
 
 def print_stats(
-    conversations: "list[dict[Any, Any]]", tokenizer: Optional[AutoTokenizer] = None
+    conversations: "list[dict[Any, Any]]", tokenizer: AutoTokenizer | None = None
 ) -> None:
     # Collect statistics
     stats = []
@@ -109,12 +109,12 @@ def convert_sharegpt_to_openai(
     seed: int,
     input_file: str,
     output_file: str,
-    max_items: Optional[int],
-    min_content_len: Optional[int] = None,
-    max_content_len: Optional[int] = None,
-    min_turns: Optional[int] = None,
-    max_turns: Optional[int] = None,
-    model: Optional[str] = None,
+    max_items: int | None,
+    min_content_len: int | None = None,
+    max_content_len: int | None = None,
+    min_turns: int | None = None,
+    max_turns: int | None = None,
+    model: str | None = None,
 ) -> None:
     if min_turns and max_turns:
         assert min_turns <= max_turns

@@ -4,7 +4,7 @@
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
     CompilationConfig,
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     PassConfig,
 )
@@ -50,7 +50,7 @@ __all__ = [
     "CacheConfig",
     # From vllm.config.compilation
     "CompilationConfig",
-    "CompilationLevel",
+    "CompilationMode",
     "CUDAGraphMode",
     "PassConfig",
     # From vllm.config.device

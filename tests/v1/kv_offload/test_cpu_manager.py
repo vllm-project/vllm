@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -29,7 +28,7 @@ def to_hashes(int_hashes: list[int]) -> list[BlockHash]:
 
 
 def verify_store_output(
-    prepare_store_output: Optional[PrepareStoreOutput],
+    prepare_store_output: PrepareStoreOutput | None,
     expected_prepare_store_output: ExpectedPrepareStoreOutput,
 ):
     assert prepare_store_output is not None

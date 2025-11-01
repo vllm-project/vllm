@@ -5,7 +5,7 @@ import copy
 import textwrap
 import traceback
 from itertools import product
-from typing import Any, Optional
+from typing import Any
 
 import pytest
 import torch
@@ -13,8 +13,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless, has_deep_ep, has_deep_gemm, has_pplx
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from .modular_kernel_tools.common import (
     Config,
@@ -245,10 +246,10 @@ def test_modular_kernel_combinations_multigpu(
     n: int,
     e: int,
     dtype: torch.dtype,
-    quant_config: Optional[TestMoEQuantConfig],
+    quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
-    chunk_size: Optional[int],
+    chunk_size: int | None,
     world_size: int,
     pytestconfig,
 ):
@@ -287,13 +288,15 @@ def test_modular_kernel_combinations_singlegpu(
     n: int,
     e: int,
     dtype: torch.dtype,
-    quant_config: Optional[TestMoEQuantConfig],
+    quant_config: TestMoEQuantConfig | None,
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
     fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute,
-    chunk_size: Optional[int],
+    chunk_size: int | None,
     world_size: int,
     pytestconfig,
 ):
+    """Note: float8_e4m3fn is not supported on CUDA architecture < 89,
+    and those tests will be skipped on unsupported hardware."""
     config = Config(
         Ms=Ms,
         K=k,
@@ -308,6 +311,12 @@ def test_modular_kernel_combinations_singlegpu(
         world_size=world_size,
     )
 
+    if (
+        quant_config is not None and quant_config.quant_dtype == torch.float8_e4m3fn
+    ) and not current_platform.has_device_capability(89):
+        pytest.skip(
+            "Triton limitation: fp8e4nv data type is not supported on CUDA arch < 89"
+        )
     verbosity = pytestconfig.getoption("verbose")
     run(config, verbosity > 0)
 

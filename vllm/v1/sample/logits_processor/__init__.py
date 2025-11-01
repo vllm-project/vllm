@@ -6,7 +6,7 @@ import itertools
 from abc import abstractmethod
 from collections.abc import Sequence
 from functools import partial
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -83,7 +83,7 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
 
 
 def _load_logitsprocs_by_fqcns(
-    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]],
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
 ) -> list[type[LogitsProcessor]]:
     """Load logit processor types, identifying them by fully-qualified class
     names (FQCNs).
@@ -148,7 +148,7 @@ def _load_logitsprocs_by_fqcns(
 
 
 def _load_custom_logitsprocs(
-    logits_processors: Optional[Sequence[Union[str, type[LogitsProcessor]]]],
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
 ) -> list[type[LogitsProcessor]]:
     """Load all custom logits processors.
 
@@ -178,7 +178,7 @@ def build_logitsprocs(
     device: torch.device,
     is_pin_memory: bool,
     is_pooling_model: bool,
-    custom_logitsprocs: Sequence[Union[str, type[LogitsProcessor]]] = (),
+    custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (),
 ) -> LogitsProcessors:
     if is_pooling_model:
         if custom_logitsprocs:
@@ -251,7 +251,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """Consume request info; return a per-request logits processor.
 
         Return None if logits processor does not need to be applied to request
@@ -269,9 +269,9 @@ class AdapterLogitsProcessor(LogitsProcessor):
     def _new_state(
         self,
         params: SamplingParams,
-        prompt_ids: Optional[list[int]],
+        prompt_ids: list[int] | None,
         output_ids: list[int],
-    ) -> Optional[partial[torch.Tensor]]:
+    ) -> partial[torch.Tensor] | None:
         """Return state representation for new request
 
         Returns None if logits processor is not applicable to request
@@ -294,7 +294,7 @@ class AdapterLogitsProcessor(LogitsProcessor):
             return partial(req_lp, *args)
         return None
 
-    def update_state(self, batch_update: Optional[BatchUpdate]):
+    def update_state(self, batch_update: BatchUpdate | None):
         process_dict_updates(
             self.req_info,
             batch_update,

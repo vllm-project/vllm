@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Union
 
 import torch
 
@@ -40,13 +40,19 @@ class BatchDescriptor(NamedTuple):
     False can also be used for an uniform decode batch to dispatch to the 
     cudagraph supporting non-uniform batches.
     """
+    has_lora: bool = False
+    """
+    Whether this batch has active LoRA adapters.
+    """
 
     @property
     def non_uniform(self) -> "BatchDescriptor":
         """
         Return a non-uniform version of current batch descriptor.
         """
-        return BatchDescriptor(self.num_tokens, uniform_decode=False)
+        return BatchDescriptor(
+            self.num_tokens, uniform_decode=False, has_lora=self.has_lora
+        )
 
 
 def _compute_sp_num_tokens(
@@ -84,7 +90,7 @@ class DPMetadata:
     num_tokens_across_dp_cpu: torch.Tensor
 
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
-    local_sizes: Optional[list[int]] = None
+    local_sizes: list[int] | None = None
 
     @staticmethod
     def make(
@@ -158,7 +164,7 @@ class DPMetadata:
         finally:
             self.local_sizes = None
 
-    def get_chunk_sizes_across_dp_rank(self) -> Optional[list[int]]:
+    def get_chunk_sizes_across_dp_rank(self) -> list[int] | None:
         assert self.local_sizes is not None
         return self.local_sizes
 
@@ -194,13 +200,13 @@ class ForwardContext:
     # TODO: remove after making all virtual_engines share the same kv cache
     virtual_engine: int  # set dynamically for each forward pass
     # set dynamically for each forward pass
-    dp_metadata: Optional[DPMetadata] = None
+    dp_metadata: DPMetadata | None = None
     # determine the cudagraph style at runtime to be FULL, PIECEWISE, or NONE.
     # by default NONE, no cudagraph is used.
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE
-    batch_descriptor: Optional[BatchDescriptor] = None
+    batch_descriptor: BatchDescriptor | None = None
 
-    ubatch_slices: Optional[UBatchSlices] = None
+    ubatch_slices: UBatchSlices | None = None
 
     def __post_init__(self):
         assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
@@ -208,7 +214,7 @@ class ForwardContext:
         )
 
 
-_forward_context: Optional[ForwardContext] = None
+_forward_context: ForwardContext | None = None
 
 
 def get_forward_context() -> ForwardContext:
@@ -224,10 +230,10 @@ def create_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
-    dp_metadata: Optional[DPMetadata] = None,
+    dp_metadata: DPMetadata | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    batch_descriptor: Optional[BatchDescriptor] = None,
-    ubatch_slices: Optional[UBatchSlices] = None,
+    batch_descriptor: BatchDescriptor | None = None,
+    ubatch_slices: UBatchSlices | None = None,
 ):
     return ForwardContext(
         no_compile_layers=vllm_config.compilation_config.static_forward_context,
@@ -241,7 +247,7 @@ def create_forward_context(
 
 
 @contextmanager
-def override_forward_context(forward_context: Optional[ForwardContext]):
+def override_forward_context(forward_context: ForwardContext | None):
     """A context manager that overrides the current forward context.
     This is used to override the forward context for a specific
     forward pass.
@@ -260,11 +266,11 @@ def set_forward_context(
     attn_metadata: Any,
     vllm_config: VllmConfig,
     virtual_engine: int = 0,
-    num_tokens: Optional[int] = None,
-    num_tokens_across_dp: Optional[torch.Tensor] = None,
+    num_tokens: int | None = None,
+    num_tokens_across_dp: torch.Tensor | None = None,
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
-    batch_descriptor: Optional[BatchDescriptor] = None,
-    ubatch_slices: Optional[UBatchSlices] = None,
+    batch_descriptor: BatchDescriptor | None = None,
+    ubatch_slices: UBatchSlices | None = None,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -275,7 +281,7 @@ def set_forward_context(
     if need_to_track_batchsize:
         forward_start_time = time.perf_counter()
 
-    dp_metadata: Optional[DPMetadata] = None
+    dp_metadata: DPMetadata | None = None
     if vllm_config.parallel_config.data_parallel_size > 1 and (
         attn_metadata is not None or num_tokens is not None
     ):

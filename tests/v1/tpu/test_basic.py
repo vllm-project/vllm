@@ -5,8 +5,6 @@
 Run `pytest tests/v1/tpu/test_basic.py`.
 """
 
-from __future__ import annotations
-
 from typing import TYPE_CHECKING
 
 import pytest
@@ -16,6 +14,8 @@ from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
+else:
+    VllmRunner = object
 
 MODELS = [
     "Qwen/Qwen2.5-1.5B-Instruct",

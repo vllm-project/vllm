@@ -1,15 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 import numpy as np
 import torch
-from transformers import PretrainedConfig
 
 from vllm.triton_utils import tl, triton
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 from .common import apply_rotary_emb_dispatch
 from .yarn_scaling_rope import YaRNScalingRotaryEmbedding, yarn_get_mscale
 
@@ -201,7 +199,7 @@ def apply_interleaved_rope(x: torch.Tensor, mrope_section: list[int]) -> torch.T
     return x_t
 
 
-class MRotaryEmbedding(RotaryEmbedding):
+class MRotaryEmbedding(RotaryEmbeddingBase):
     """Rotary Embedding with Multimodal Sections."""
 
     def __init__(
@@ -212,11 +210,11 @@ class MRotaryEmbedding(RotaryEmbedding):
         base: float,
         is_neox_style: bool,
         dtype: torch.dtype,
-        mrope_section: Optional[list[int]] = None,
+        mrope_section: list[int] | None = None,
         mrope_interleaved: bool = False,
         # YaRN parameters.
         *,
-        scaling_factor: Optional[float] = None,
+        scaling_factor: float | None = None,
         extrapolation_factor: float = 1,
         attn_factor: float = 1,
         beta_fast: int = 32,
@@ -265,9 +263,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward().
 
         Args:
@@ -318,9 +316,9 @@ class MRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert positions.ndim == 1 or positions.ndim == 2
         assert key is not None
 
@@ -359,56 +357,14 @@ class MRotaryEmbedding(RotaryEmbedding):
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
 
-    def forward_xpu(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        return self.forward_native(positions, query, key, offsets)
-
     def forward_cpu(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)
-
-    @classmethod
-    def get_input_positions(
-        cls,
-        input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
-        video_grid_thw: Optional[Union[list[list[int]], torch.Tensor]],
-        second_per_grid_ts: Optional[list[float]],
-        context_len: int = 0,
-        seq_len: Optional[int] = None,
-        audio_feature_lengths: Optional[torch.Tensor] = None,
-        use_audio_in_video: bool = False,
-    ) -> tuple[list[list[int]], int]:
-        """Get mrope input positions and delta value."""
-
-        image_grid_thw = [] if image_grid_thw is None else image_grid_thw
-        video_grid_thw = [] if video_grid_thw is None else video_grid_thw
-        second_per_grid_ts = [] if second_per_grid_ts is None else second_per_grid_ts
-
-        llm_positions, mrope_position_delta = cls.get_input_positions_tensor(
-            input_tokens=input_tokens,
-            hf_config=hf_config,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            second_per_grid_ts=second_per_grid_ts,
-            context_len=context_len,
-            seq_len=seq_len,
-            audio_feature_lengths=audio_feature_lengths,
-            use_audio_in_video=use_audio_in_video,
-        )
-
-        return llm_positions.tolist(), mrope_position_delta
 
     @staticmethod
     def get_next_input_positions(

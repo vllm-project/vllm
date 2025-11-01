@@ -9,6 +9,7 @@ import threading
 import time
 import traceback
 import weakref
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -17,7 +18,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.synchronize import Lock as LockType
 from threading import Thread
-from typing import Any, Callable, Optional, Union, cast
+from typing import Any, cast
 
 import cloudpickle
 import torch
@@ -32,17 +33,20 @@ from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tp_group,
 )
+from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.utils import (
-    _maybe_force_spawn,
-    decorate_logs,
+from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
-    get_mp_context,
     get_open_port,
+)
+from vllm.utils.system_utils import (
+    _maybe_force_spawn,
+    decorate_logs,
+    get_mp_context,
     set_process_title,
 )
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerWrapperBase
@@ -59,8 +63,8 @@ class MultiprocExecutor(Executor):
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
         self.shutdown_event = threading.Event()
-        self.failure_callback: Optional[FailureCallback] = None
-        self.io_thread_pool: Optional[ThreadPoolExecutor] = None
+        self.failure_callback: FailureCallback | None = None
+        self.io_thread_pool: ThreadPoolExecutor | None = None
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -128,15 +132,12 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        # For pipeline parallel, we use a thread pool for asynchronous
-        # execute_model.
-        if self.max_concurrent_batches > 1:
-            # Note: must use only 1 IO thread to keep dequeue sequence
-            # from the response queue
-            # _async_aggregate_workers_output also assumes a single IO thread
-            self.io_thread_pool = ThreadPoolExecutor(
-                max_workers=1, thread_name_prefix="mp_exec_io"
-            )
+        # Note: must use only 1 IO thread to keep dequeue sequence
+        # from the response queue.
+        # _async_aggregate_workers_output also assumes a single IO thread.
+        self.io_thread_pool = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="mp_exec_io"
+        )
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
@@ -175,16 +176,28 @@ class MultiprocExecutor(Executor):
         else:
             self.failure_callback = callback
 
-    def execute_model(
-        self,
-        scheduler_output: SchedulerOutput,
-        non_block: bool = False,
-    ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
+    def execute_model(  # type: ignore[override]
+        self, scheduler_output: SchedulerOutput, non_block: bool = False
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
+        return self._execute_with_aggregation(
+            "execute_model", scheduler_output, non_block=non_block
+        )
+
+    def sample_tokens(  # type: ignore[override]
+        self, grammar_output: GrammarOutput | None, non_block: bool = False
+    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+        return self._execute_with_aggregation(  # type: ignore[return-value]
+            "sample_tokens", grammar_output, non_block=non_block
+        )
+
+    def _execute_with_aggregation(
+        self, method: str, *args, non_block: bool = False
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         if not self.has_connector:
             # get output only from a single worker (output_rank)
             (output,) = self.collective_rpc(
-                "execute_model",
-                args=(scheduler_output,),
+                method,
+                args=args,
                 unique_reply_rank=self.output_rank,
                 non_block=non_block,
                 timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
@@ -193,13 +206,14 @@ class MultiprocExecutor(Executor):
 
         # get output from all workers
         outputs = self.collective_rpc(
-            "execute_model",
-            args=(scheduler_output,),
+            method,
+            args=args,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
         )
 
         # aggregate all workers output to a single output
+        assert self.kv_output_aggregator is not None
         if non_block:
             return self.kv_output_aggregator.async_aggregate(outputs, self.output_rank)
         return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
@@ -207,7 +221,7 @@ class MultiprocExecutor(Executor):
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
-    def take_draft_token_ids(self) -> Optional[DraftTokenIds]:
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
         outputs = self.collective_rpc(
             "take_draft_token_ids", unique_reply_rank=self.output_rank
@@ -216,12 +230,12 @@ class MultiprocExecutor(Executor):
 
     def collective_rpc(
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
         non_block: bool = False,
-        unique_reply_rank: Optional[int] = None,
+        unique_reply_rank: int | None = None,
     ) -> list[Any]:
         if self.is_failed:
             raise RuntimeError("Executor failed.")
@@ -252,8 +266,8 @@ class MultiprocExecutor(Executor):
 
             def get_response(
                 w: WorkerProcHandle,
-                dequeue_timeout: Optional[float] = None,
-                cancel_event: Optional[threading.Event] = None,
+                dequeue_timeout: float | None = None,
+                cancel_event: threading.Event | None = None,
             ):
                 status, result = w.worker_response_mq.dequeue(
                     timeout=dequeue_timeout, cancel=cancel_event
@@ -370,7 +384,7 @@ class UnreadyWorkerProcHandle:
     proc: BaseProcess
     rank: int
     ready_pipe: Connection
-    death_writer: Optional[Connection] = None
+    death_writer: Connection | None = None
 
 
 @dataclass
@@ -378,7 +392,7 @@ class WorkerProcHandle:
     proc: BaseProcess
     rank: int
     worker_response_mq: MessageQueue  # The worker process writes to this MQ
-    death_writer: Optional[Connection] = None
+    death_writer: Connection | None = None
 
     @classmethod
     def from_unready_handle(
@@ -454,6 +468,10 @@ class WorkerProc:
         # Load model
         self.worker.load_model()
 
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
+
     @staticmethod
     def make_worker_process(
         vllm_config: VllmConfig,
@@ -505,7 +523,7 @@ class WorkerProc:
         )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
-        ready_proc_handles: list[Optional[WorkerProcHandle]] = [None] * len(
+        ready_proc_handles: list[WorkerProcHandle | None] = [None] * len(
             unready_proc_handles
         )
         while pipes:
@@ -674,7 +692,7 @@ class WorkerProc:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
 
-    def worker_busy_loop(self, cancel: Optional[threading.Event] = None):
+    def worker_busy_loop(self, cancel: threading.Event | None = None):
         """Main busy loop for Multiprocessing Workers"""
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(

@@ -6,7 +6,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cached_property, partial
 from itertools import islice
-from typing import Annotated, Optional, Union
+from typing import Annotated
 
 import numpy as np
 import torch
@@ -75,7 +75,6 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -97,28 +96,19 @@ class MolmoImageInputs(TensorSchema):
     """
     Dimensions:
         - bn: Batch size * number of images
-        - nc: Number of crops (dynamic)
+        - bnc: Batch size * number of images * number of crops (dynamic)
         - np: Number of patches
         - tp: Token sequence positions
         - pd: Patch dimension
     """
 
-    images: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", "nc", "np", "pd", dynamic_dims={"nc"}),
-    ]
-    # Number of crops may vary per batch and image, so pass it as a list.
+    images: Annotated[torch.Tensor, TensorShape("bnc", "np", "pd")]
 
-    image_masks: Annotated[
-        Optional[Union[torch.Tensor, list[torch.Tensor]]],
-        TensorShape("bn", "nc", "np", dynamic_dims={"nc"}),
-    ]
+    image_masks: Annotated[torch.Tensor | None, TensorShape("bnc", "np")]
 
-    image_input_idx: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
-        TensorShape("bn", "nc", "tp", dynamic_dims={"nc"}),
-    ]
-    # An index tensor that maps image features to their corresponding patch tokens.
+    image_input_idx: Annotated[torch.Tensor, TensorShape("bnc", "tp")]
+    """An index tensor that maps image features to their corresponding patch tokens."""
+
     num_crops: Annotated[torch.Tensor, TensorShape("bn")]
 
 
@@ -151,7 +141,7 @@ class ViTMLP(nn.Module):
     def __init__(
         self,
         config: VisionBackboneConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.w1 = ColumnParallelLinear(
@@ -185,7 +175,7 @@ class MultiHeadDotProductAttention(nn.Module):
         config: VisionBackboneConfig,
         use_bias: bool = True,
         nlayers: int = 1,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
 
@@ -238,7 +228,7 @@ class MultiHeadDotProductAttention(nn.Module):
         )
 
     def forward(
-        self, inputs_q: torch.Tensor, inputs_kv: Optional[torch.Tensor] = None
+        self, inputs_q: torch.Tensor, inputs_kv: torch.Tensor | None = None
     ) -> torch.Tensor:
         if inputs_kv is not None:
             inputs_k = inputs_kv
@@ -263,7 +253,7 @@ class ResidualAttentionBlock(nn.Module):
     def __init__(
         self,
         config: VisionBackboneConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.attention = MultiHeadDotProductAttention(config, quant_config=quant_config)
@@ -289,7 +279,7 @@ class BlockCollection(nn.Module):
     def __init__(
         self,
         config: VisionBackboneConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         self.resblocks = nn.ModuleList(
@@ -317,7 +307,7 @@ class VisionTransformer(nn.Module):
     def __init__(
         self,
         config: VisionBackboneConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ):
         super().__init__()
         scale = config.image_emb_dim**-0.5
@@ -367,7 +357,7 @@ class VisionTransformer(nn.Module):
         return x
 
     def forward(
-        self, x: torch.Tensor, patch_num: Optional[int] = None
+        self, x: torch.Tensor, patch_num: int | None = None
     ) -> list[torch.Tensor]:
         """
         : param x: (batch_size, num_patch, n_pixels)
@@ -396,8 +386,8 @@ class MolmoAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -432,9 +422,9 @@ class MolmoAttention(nn.Module):
             quant_config=quant_config,
         )
 
-        self.tp_rank: Optional[int] = None
-        self.k_norm: Optional[nn.Module] = None
-        self.q_norm: Optional[nn.Module] = None
+        self.tp_rank: int | None = None
+        self.k_norm: nn.Module | None = None
+        self.q_norm: nn.Module | None = None
         if config.attention_layer_norm:
             self.tp_rank = get_tensor_model_parallel_rank()
             self.k_norm = RMSNorm(
@@ -503,8 +493,8 @@ class LanguageModelMLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        input_dim: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        input_dim: int | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -542,8 +532,8 @@ class ImageProjectorMLP(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        input_dim: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        input_dim: int | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -580,8 +570,8 @@ class MolmoDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -604,8 +594,8 @@ class MolmoDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -627,8 +617,8 @@ class MolmoDecoderNormAfterLayer(MolmoDecoderLayer):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-    ) -> tuple[torch.Tensor, Optional[tuple[torch.Tensor, torch.Tensor]]]:
+        residual: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor] | None]:
         # Self Attention
         residual = hidden_states
         hidden_states = self.self_attn(
@@ -654,7 +644,7 @@ class MolmoVisionBackbone(nn.Module, SupportsQuant):
         self,
         config: PretrainedConfig,
         vision_config: VisionBackboneConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
         self.vit_layers = VIT_LAYERS
@@ -849,8 +839,8 @@ class MolmoModel(nn.Module, SupportsQuant):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -1064,7 +1054,7 @@ class MolmoProcessorWrapper:
         return image_token_length_h
 
     @property
-    def message_format(self) -> Optional[str]:
+    def message_format(self) -> str | None:
         return "role"
 
     @property
@@ -1145,9 +1135,9 @@ class MolmoProcessorWrapper:
 
     def __call__(
         self,
-        text: Optional[Union[TextInput, list[TextInput]]] = None,
-        images: Optional[Union[ImageInput, list[ImageInput]]] = None,
-        return_tensors: Optional[Union[str, TensorType]] = None,
+        text: TextInput | list[TextInput] | None = None,
+        images: ImageInput | list[ImageInput] | None = None,
+        return_tensors: str | TensorType | None = None,
         **kwargs,
     ) -> BatchFeature:
         outputs = self.processor.process(  # type: ignore
@@ -1189,7 +1179,7 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         processor = self.ctx.get_hf_processor(**kwargs)
         return MolmoProcessorWrapper(processor)
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_num_image_tokens(
@@ -1197,7 +1187,7 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Optional[MolmoProcessorWrapper],
+        processor: MolmoProcessorWrapper | None,
     ) -> int:
         if processor is None:
             processor = self.get_hf_processor()
@@ -1250,7 +1240,7 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
@@ -1274,13 +1264,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
     ) -> list[int]:
         processor = self.info.get_hf_processor()
 
-        # Apply the chat template to the tokens
+        # The chat template is already applied to the prompt tokens
+        # Use message_format="none" to avoid applying it again
+        # Prepend an empty space if `always_start_with_space` is True
         tokens = processor.processor.get_tokens_input(  # type: ignore
             self.info.get_tokenizer().decode(prompt_tokens),
-            message_format=processor.message_format,
+            message_format="none",
             always_start_with_space=processor.always_start_with_space,
         )
 
+        # Prepend a BOS token id to the tokens
         processed_data = self.info.ctx.call_hf_processor(
             processor,  # type: ignore
             dict(tokens=tokens),
@@ -1363,6 +1356,8 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
 class MolmoForCausalLM(
     nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA, SupportsQuant
 ):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={
             # vision backbone mapping
@@ -1398,7 +1393,7 @@ class MolmoForCausalLM(
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return None
 
@@ -1442,7 +1437,7 @@ class MolmoForCausalLM(
     def _parse_and_validate_image_input(
         self,
         **kwargs: object,
-    ) -> Optional[MolmoImageInputs]:
+    ) -> MolmoImageInputs | None:
         images = kwargs.pop("images", None)
         image_masks = kwargs.pop("image_masks", None)
         image_input_idx = kwargs.pop("image_input_idx", None)
@@ -1451,18 +1446,12 @@ class MolmoForCausalLM(
         if images is None:
             return None
 
-        if not isinstance(num_crops, (torch.Tensor, list)):
-            raise ValueError(
-                f"Incorrect type of num_crops. Got type: {type(num_crops)}"
-            )
-        num_crops = flatten_bn(num_crops, concat=True)
-
         img_patch_id = kwargs.pop("img_patch_id", None)
-        if not isinstance(img_patch_id, torch.Tensor):
-            raise ValueError(
-                f"Incorrect type of img_patch_id. Got type: {type(img_patch_id)}"
-            )
-        self.img_patch_id = img_patch_id.flatten().unique().item()
+        if isinstance(img_patch_id, torch.Tensor):
+            img_patch_id = img_patch_id.item()
+
+        assert isinstance(img_patch_id, int)
+        self.img_patch_id = img_patch_id
 
         return MolmoImageInputs(
             images=images,
@@ -1481,17 +1470,9 @@ class MolmoForCausalLM(
         num_crops = image_input["num_crops"]
 
         # Call the vision backbone on the whole batch at once
-        images_flat = flatten_bn(images, concat=True)
-        image_masks_flat = (
-            None if image_masks is None else flatten_bn(image_masks, concat=True)
-        )
-        image_input_idx_flat = flatten_bn(image_input_idx, concat=True)
-
-        image_features_flat = self.vision_backbone(
-            images=images_flat.unsqueeze(0),
-            image_masks=(
-                None if image_masks_flat is None else image_masks_flat.unsqueeze(0)
-            ),
+        image_features = self.vision_backbone(
+            images=images.unsqueeze(0),
+            image_masks=None if image_masks is None else image_masks.unsqueeze(0),
         ).squeeze(0)
 
         # Only the features corresponding to patch tokens are relevant
@@ -1499,8 +1480,8 @@ class MolmoForCausalLM(
         results = []
         num_crops_list = num_crops.tolist()
         for feats, img_idx in zip(
-            image_features_flat.split(num_crops_list),
-            image_input_idx_flat.split(num_crops_list),
+            image_features.split(num_crops_list),
+            image_input_idx.split(num_crops_list),
         ):
             is_valid = img_idx >= 0
             valid_img_idx = img_idx[is_valid]
@@ -1522,8 +1503,8 @@ class MolmoForCausalLM(
         self,
         input_ids: torch.LongTensor,
         positions: torch.LongTensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor:
         if intermediate_tensors is not None:

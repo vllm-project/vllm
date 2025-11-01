@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 import huggingface_hub
 import regex as re
@@ -23,6 +23,7 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithShardedLoRA,
@@ -35,7 +36,9 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
     VocabParallelEmbeddingWithLoRA,
 )
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.utils import get_moe_expert_mapping, get_packed_modules_mapping
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -58,7 +61,16 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     MergedColumnParallelLinearWithShardedLoRA,
     MergedQKVParallelLinearWithShardedLoRA,
     RowParallelLinearWithShardedLoRA,
+    FusedMoEWithLoRA,
 }
+
+
+def is_moe_model(model: nn.Module) -> bool:
+    """Checks if the model contains FusedMoE layers and warns the user."""
+    if any(isinstance(module, FusedMoE) for module in model.modules()):
+        logger.info_once("MoE model detected. Using fused MoE LoRA implementation.")
+        return True
+    return False
 
 
 def from_layer(
@@ -66,7 +78,7 @@ def from_layer(
     max_loras: int,
     lora_config: LoRAConfig,
     packed_modules_list: list,
-    model_config: Optional[PretrainedConfig] = None,
+    model_config: PretrainedConfig | None = None,
 ) -> nn.Module:
     for lora_cls in _all_lora_classes:
         # specifying kwargs so they can be easily accessed in decorator
@@ -87,7 +99,7 @@ def from_layer_logits_processor(
     lm_head: "ParallelLMHead",
     max_loras: int,
     lora_config: LoRAConfig,
-    model_config: Optional[PretrainedConfig] = None,
+    model_config: PretrainedConfig | None = None,
 ) -> LogitsProcessorWithLoRA:
     ret = LogitsProcessorWithLoRA(
         layer,
@@ -155,7 +167,7 @@ def parse_fine_tuned_lora_name(
 
 
 def is_regex_target_modules(
-    load_modules: Union[str, list[str]], expected_lora_modules: list[str]
+    load_modules: str | list[str], expected_lora_modules: list[str]
 ) -> bool:
     """
     PEFT supports passing `target_modules` in the form of regular expressions,
@@ -205,6 +217,9 @@ def get_supported_lora_modules(model: nn.Module) -> list[str]:
         if isinstance(module, (LinearBase,)):
             supported_lora_modules.add(name.split(".")[-1])
 
+        if isinstance(module, (FusedMoE,)):
+            supported_lora_modules.add(name.split(".")[-1])
+
     return list(supported_lora_modules)
 
 
@@ -252,3 +267,27 @@ def get_adapter_absolute_path(lora_path: str) -> str:
         return lora_path
 
     return local_snapshot_path
+
+
+def process_packed_modules_mapping(model: nn.Module) -> dict[str, list[str]]:
+    if is_moe_model(model):
+        if moe_packed_mapping := get_moe_expert_mapping(model):
+            # This method generates and returns a dictionary mapping packed module
+            # names to lists of their corresponding submodule names. It includes
+            # both static mappings and dynamic mappings for expert layers, where
+            # the expert indices are expanded based on the configured number
+            # of routed experts.
+            packed_modules_mapping = get_packed_modules_mapping(model)
+
+            packed_modules_mapping["experts"] = [
+                weight_name.rstrip(".") for _, weight_name, _, _ in moe_packed_mapping
+            ]
+
+            return packed_modules_mapping
+        else:
+            raise AttributeError(
+                "To support LoRA for MoE model, "
+                "'get_expert_mapping' must be implemented"
+            )
+    else:
+        return get_packed_modules_mapping(model)
