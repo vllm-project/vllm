@@ -313,7 +313,7 @@ steps:
   commands:
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
-    - pytest -v -s v1/e2e
+    - VLLM_ROCM_USE_AITER=1 pytest -v -s v1/e2e
     - pytest -v -s v1/engine
 
 - label: V1 Test entrypoints # 35min
@@ -372,7 +372,7 @@ steps:
 - label: Examples Test # 30min
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_2
+  agent_pool: mi325_1
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
