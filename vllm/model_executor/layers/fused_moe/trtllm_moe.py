@@ -132,5 +132,11 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
-        trtllm_fp4_block_scale_routed_moe(**kwargs)
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            # Skipping flashinfer auto-tune for this function as the autotuner
+            # throws a "Cannot pack tensors on meta" error.
+            trtllm_fp4_block_scale_routed_moe(**kwargs)
+
         return output
