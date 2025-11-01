@@ -3,25 +3,20 @@
 import asyncio
 import os
 from contextlib import AsyncExitStack
+from dataclasses import replace
 
 import pytest
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
 
-@pytest.fixture
-def use_vllm_v1(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
-
 @pytest.mark.asyncio
-async def test_run_eagle_dp(use_vllm_v1):
+async def test_run_eagle_dp():
     target_model = "meta-llama/Llama-3.1-8B-Instruct"
     draft_model = "yuhuili/EAGLE-LLaMA3.1-Instruct-8B"
 
@@ -35,16 +30,14 @@ async def test_run_eagle_dp(use_vllm_v1):
         trust_remote_code=True,
     )
 
-    eagle_engine_args = engine_args.replace(
+    eagle_engine_args = replace(
+        engine_args,
         speculative_config={
             "model": draft_model,
             "method": "eagle",
             "num_speculative_tokens": 3,
-        }
+        },
     )
-
-    if not current_platform.supports_v1(eagle_engine_args.create_model_config()):
-        pytest.skip(reason="Requires V1-supporting platform.", allow_module_level=True)
 
     prompt = "This is a test of data parallel with eagle"
     num_expected_tokens = 100
