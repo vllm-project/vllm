@@ -1411,3 +1411,14 @@ def flat_product(*iterables: Iterable[Any]):
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
         yield tuple(itertools.chain(*normalized))
+
+
+class TestFP8Layer(torch.nn.Module):
+    """Helper class for ScaledMMLinearKernels."""
+
+    def __init__(self, weight, weight_scale, input_scale):
+        super().__init__()
+        self.weight_scale = weight_scale
+        self.weight = weight
+        self.input_scale = input_scale
+        self.input_scale_ub = None

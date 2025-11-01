@@ -33,7 +33,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
 )
@@ -97,9 +96,6 @@ class FBGEMMFp8Config(QuantizationConfig):
 class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN
-        )
         self.out_dtype = torch.get_default_dtype()
 
         self.fp8_linear_kernel = init_fp8_linear_kernel(

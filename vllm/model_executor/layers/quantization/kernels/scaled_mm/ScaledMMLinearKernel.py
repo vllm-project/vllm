@@ -41,7 +41,7 @@ class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
 class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     weight_quant_strategy: ScaledMMLinearQuantStrategy
     activation_group_shape: GroupShape
-    out_dtype: torch.dtype
+    out_dtype: torch.dtype | None
 
 
 _FP8ParamsT = tuple[

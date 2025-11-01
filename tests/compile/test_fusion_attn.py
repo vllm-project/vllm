@@ -28,15 +28,22 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.kv_cache_interface import AttentionSpec
+
+from ..utils import TestFP8Layer
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -170,11 +177,18 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.quant_key.scale.static,
-            act_quant_group_shape=self.quant_key.scale.group_shape,
-        )
+        if self.quant_key.scale.group_shape.is_per_tensor():
+            weight_quant_strategy = ScaledMMLinearQuantStrategy.TENSOR
+        else:
+            weight_quant_strategy = ScaledMMLinearQuantStrategy.CHANNEL
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            act_q_static=self.quant_key.scale.static,
+            act_q_group_shape=self.quant_key.scale.group_shape,
+            weight_quant_strategy=weight_quant_strategy,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
+        )
         hidden_size = self.num_qo_heads * self.head_size
         self.w = kwargs.get(
             "w",
@@ -190,12 +204,8 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         """Forward pass that creates the pattern to be fused."""
         attn_output = self.attn(q, k, v)
-        return self.fp8_linear.apply(
-            input=attn_output,
-            weight=self.w["weight"],
-            weight_scale=self.w["wscale"],
-            input_scale=self.w["scale"],
-        )
+        layer = TestFP8Layer(self.w["weight"], self.w["wscale"], self.w["scale"])
+        return self.fp8_linear.apply_weights(layer, attn_output)
 
 
 class TestAttentionNvfp4QuantPatternModel(AttentionQuantPatternModel):

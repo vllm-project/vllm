@@ -64,7 +64,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     ],
 }
 
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel, covariant=True)
+_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
 
 

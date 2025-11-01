@@ -18,19 +18,24 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     cutlass_fp8_supported,
     maybe_create_device_identity,
 )
 from vllm.platforms import current_platform
 
-from ..utils import override_cutlass_fp8_supported
+from ..utils import TestFP8Layer, override_cutlass_fp8_supported
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -54,6 +59,8 @@ class TestModel(torch.nn.Module):
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
+        weight_quant_strategy = ScaledMMLinearQuantStrategy.TENSOR
+
         quant_scale = ScaleDesc(torch.float32, static, group_shape)
         self.quant_key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
         if static:
@@ -66,9 +73,12 @@ class TestModel(torch.nn.Module):
         ]
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=static,
-                act_quant_group_shape=group_shape,
+            self.fp8_linear = init_fp8_linear_kernel(
+                act_q_static=static,
+                act_q_group_shape=group_shape,
+                weight_quant_strategy=weight_quant_strategy,
+                out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
             )
 
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
@@ -79,20 +89,20 @@ class TestModel(torch.nn.Module):
         x = resid = torch.relu(x)
         y = self.norm[0](x)
 
-        x2 = self.fp8_linear.apply(
-            y, self.w[0], self.wscale[0], input_scale=self.scale[0]
-        )
+        layer1 = TestFP8Layer(self.w[0], self.wscale[0], input_scale=self.scale[0])
+        x2 = self.fp8_linear.apply_weights(layer1, y)
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear.apply(
-            y2, self.w[1], self.wscale[1], input_scale=self.scale[1]
-        )
+        layer2 = TestFP8Layer(self.w[1], self.wscale[1], input_scale=self.scale[1])
+        x3 = self.fp8_linear.apply_weights(layer2, y2)
 
         y3, resid = self.norm[2](x3, resid)  # use resid here
 
-        x4 = self.fp8_linear.apply(
-            y3, self.w[2], self.wscale[2], input_scale=self.scale[2]
+        layer3 = TestFP8Layer(self.w[2], self.wscale[2], input_scale=self.scale[2])
+        x4 = self.fp8_linear.apply_weights(
+            layer3,
+            y3,
         )
 
         y4, resid = self.norm[3](x4, resid)  # use resid here
