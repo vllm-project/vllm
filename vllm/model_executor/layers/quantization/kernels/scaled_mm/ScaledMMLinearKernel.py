@@ -44,13 +44,13 @@ class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     out_dtype: torch.dtype
 
 
-FP8ParamsT = tuple[
+_FP8ParamsT = tuple[
     torch.Tensor,  # weight
     torch.Tensor,  # weight_scale
     torch.Tensor | None,  # input_scale,
     torch.Tensor | None,  # input_scale_ub,
 ]
-Int8ParamsT = tuple[
+_Int8ParamsT = tuple[
     torch.Tensor,  # weight
     torch.Tensor,  # weight_scale
     torch.Tensor | None,  # input_scale,
@@ -58,11 +58,11 @@ Int8ParamsT = tuple[
     torch.Tensor | None,  # azp_adj
 ]
 
-ParamsT = TypeVar("ParamsT", Int8ParamsT, FP8ParamsT)
-ConfigT = TypeVar("ConfigT", bound=ScaledMMLinearLayerConfig)
+_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
+_ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
 
 
-class ScaledMMLinearKernel(Generic[ConfigT, ParamsT], ABC):
+class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
@@ -70,10 +70,10 @@ class ScaledMMLinearKernel(Generic[ConfigT, ParamsT], ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, c: ConfigT) -> tuple[bool, str | None]:
+    def can_implement(cls, c: _ConfigT) -> tuple[bool, str | None]:
         raise NotImplementedError
 
-    def __init__(self, c: ConfigT, layer_param_names: Sequence[str]) -> None:
+    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
         assert self.can_implement(c)
         self.config = c
         self.layer_param_names = layer_param_names
@@ -93,12 +93,12 @@ class ScaledMMLinearKernel(Generic[ConfigT, ParamsT], ABC):
 
     # return a covariant type in the subclass
     @abstractmethod
-    def _get_layer_params(self, layer) -> ParamsT:
+    def _get_layer_params(self, layer) -> _ParamsT:
         raise NotImplementedError
 
 
 class FP8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, FP8ParamsT], ABC
+    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, _FP8ParamsT], ABC
 ):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
@@ -122,7 +122,7 @@ class FP8ScaledMMLinearKernel(
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
-    def _get_layer_params(self, layer) -> FP8ParamsT:
+    def _get_layer_params(self, layer) -> _FP8ParamsT:
         w, w_s, x_s, x_s_ub = self.layer_param_names
         return (
             getattr(layer, w),
@@ -133,9 +133,9 @@ class FP8ScaledMMLinearKernel(
 
 
 class Int8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, Int8ParamsT], ABC
+    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
 ):
-    def _get_layer_params(self, layer) -> Int8ParamsT:
+    def _get_layer_params(self, layer) -> _Int8ParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
         return (
             getattr(layer, w_q),

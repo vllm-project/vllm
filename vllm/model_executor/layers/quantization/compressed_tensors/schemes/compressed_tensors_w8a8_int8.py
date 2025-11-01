@@ -11,11 +11,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    _POSSIBLE_INT8_KERNELS,
-    choose_scaled_mm_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    Int8ScaledMMLinearLayerConfig,
+    init_int8_linear_kernel,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -51,15 +47,10 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        scaled_mm_linear_kernel_config = Int8ScaledMMLinearLayerConfig(
+        self.kernel = init_int8_linear_kernel(
             is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
             is_static_input_scheme=self.is_static_input_scheme,
             input_symmetric=self.input_symmetric,
-        )
-
-        kernel_type = choose_scaled_mm_linear_kernel(
-            scaled_mm_linear_kernel_config,
-            _POSSIBLE_INT8_KERNELS,
             module_name=self.__class__.__name__,
         )
 
@@ -109,18 +100,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         layer.register_parameter("input_scale", input_scale)
         if not hasattr(layer, "azp_adj"):
             layer.register_parameter("azp_adj", None)
-
-        layer_param_names = [
-            "weight",
-            "weight_scale",
-            "input_scale",
-            "input_zero_point",
-            "azp_adj",
-        ]
-
-        self.kernel = kernel_type(
-            c=scaled_mm_linear_kernel_config, layer_param_names=layer_param_names
-        )
 
     # Checkpoints are serialized in compressed-tensors format, which is
     # different from the format the kernel may want. Handle repacking here.

@@ -7,11 +7,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    _POSSIBLE_INT8_KERNELS,
-    choose_scaled_mm_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    Int8ScaledMMLinearLayerConfig,
+    init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.parameter import (
@@ -51,15 +47,10 @@ class QuarkW8A8Int8(QuarkScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        scaled_mm_linear_kernel_config = Int8ScaledMMLinearLayerConfig(
+        self.kernel = init_int8_linear_kernel(
             is_channelwise=(self.qscheme == "per_channel"),
             is_static_input_scheme=(self.is_static_input_scheme is True),
             input_symmetric=(self.input_symmetric is True),
-        )
-
-        kernel_type = choose_scaled_mm_linear_kernel(
-            scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_INT8_KERNELS,
             module_name=self.__class__.__name__,
         )
 
@@ -118,18 +109,6 @@ class QuarkW8A8Int8(QuarkScheme):
         layer.register_parameter("input_zero_point", input_zero_point)
         if not hasattr(layer, "azp_adj"):
             layer.register_parameter("azp_adj", None)
-
-        layer_param_names = [
-            "weight",
-            "weight_scale",
-            "input_scale",
-            "input_zero_point",
-            "azp_adj",
-        ]
-
-        self.kernel = kernel_type(
-            c=scaled_mm_linear_kernel_config, layer_param_names=layer_param_names
-        )
 
     # Checkpoints are serialized in quark format, which is
     # different from the format the kernel may want. Handle repacking here.
