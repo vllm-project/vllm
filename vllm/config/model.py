@@ -1484,10 +1484,10 @@ class ModelConfig:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
 
-        # Since Mamba1 does not have a chunk notion,
-        # use 2048 to align with the kernel chunking.
+        # Since Mamba1 does not have a chunk notion
+        # we use a default chunk size of 1024.
         if chunk_size is None:
-            chunk_size = 2048
+            chunk_size = 1024
 
         return chunk_size
 
