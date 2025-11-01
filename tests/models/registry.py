@@ -882,27 +882,27 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersEmbeddingModel": _HfExamplesInfo(
-        "BAAI/bge-base-en-v1.5", min_transformers_version="4.57.0.dev0"
+        "BAAI/bge-base-en-v1.5", min_transformers_version="5.0.0"
     ),
     "TransformersForSequenceClassification": _HfExamplesInfo(
         "papluca/xlm-roberta-base-language-detection",
-        min_transformers_version="4.57.0.dev0",
+        min_transformers_version="5.0.0",
     ),
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
-        "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
+        "allenai/OLMoE-1B-7B-0924", min_transformers_version="5.0.0"
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="5.0.0"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
-        "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
-        "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
     ),
     "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
     "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(

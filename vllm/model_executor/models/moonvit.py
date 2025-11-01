@@ -49,7 +49,7 @@ from functools import cached_property
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.activations import ACT2FN, PytorchGELUTanh
+from transformers.activations import ACT2FN
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import is_flash_attn_2_available
 
@@ -651,7 +651,7 @@ class MoonVitPretrainedModel(PreTrainedModel):
                 "num_heads": config.num_attention_heads,
                 "hidden_dim": config.hidden_size,
                 "mlp_dim": config.intermediate_size,
-                "activation": PytorchGELUTanh(),
+                "activation": ACT2FN["gelu_pytorch_tanh"],
                 "attn_bias": True,
                 "attn_implementation": config._attn_implementation,
             },
