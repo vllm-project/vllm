@@ -350,10 +350,8 @@ class Qwen2_5_VisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
         self.attn_backend = attn_backend
-        self.attn_backend, self.flash_attn_varlen_func = (
-            maybe_get_vit_flash_attn_backend(
-                self.attn_backend,
-            )
+        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
+            self.attn_backend,
         )
 
         self.is_flash_attn_backend = self.attn_backend in {
