@@ -246,6 +246,11 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     tool_calls = chat_msg.get("tool_calls")
     if role == "assistant" and tool_calls:
         msgs: list[Message] = []
+        content = chat_msg.get("content") or ""
+        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, content)
+        analysis_msg = analysis_msg.with_channel("analysis")
+        msgs.append(analysis_msg)
+
         for call in tool_calls:
             func = call.get("function", {})
             name = func.get("name", "")
@@ -270,9 +275,13 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
                 if isinstance(item, dict) and item.get("type") == "text"
             )
 
-        msg = Message.from_author_and_content(
-            Author.new(Role.TOOL, f"functions.{name}"), content
-        ).with_channel("commentary")
+        msg = (
+            Message.from_author_and_content(
+                Author.new(Role.TOOL, f"functions.{name}"), content
+            )
+            .with_channel("commentary")
+            .with_recipient("assistant")
+        )
         return [msg]
 
     # Default: user/assistant/system messages with content
