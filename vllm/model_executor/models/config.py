@@ -300,7 +300,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
                     "Its support for Mamba2 layers is experimental. "
-                    "Please report any issues you may observe.",
+                    "Please report any issues you may observe."
                 )
             else:
                 logger.info(
