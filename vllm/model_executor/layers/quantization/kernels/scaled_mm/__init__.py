@@ -181,7 +181,8 @@ def init_int8_linear_kernel(
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
-        config, _POSSIBLE_INT8_KERNELS,
+        config,
+        _POSSIBLE_INT8_KERNELS,
     )
 
     logger.info_once(
