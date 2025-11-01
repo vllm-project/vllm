@@ -493,9 +493,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            assert self.vllm_flash_attn_version == 3, (
-                "Sinks are only supported in FlashAttention 3"
-            )
             assert self.sinks.shape[0] == num_heads, (
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
