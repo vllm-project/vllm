@@ -193,6 +193,7 @@ class SchedulerOutput:
     # togather.
     total_num_scheduled_spec_tokens: int = 0
 
+
 @dataclass
 class GrammarOutput:
     # ids of structured output requests.

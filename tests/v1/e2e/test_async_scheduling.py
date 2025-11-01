@@ -128,9 +128,7 @@ class TestPreemptAndAsyncScheduling:
                                 for (
                                     other_test_outs,
                                     other_test_logprobs,
-                                ), params in zip(
-                                    results[1:], self.sampling_param_tests[1:]
-                                ):
+                                ), params in zip(results[1:], sampling_param_tests[1:]):
                                     with pytest.raises(AssertionError):
                                         check_outputs_equal(
                                             outputs_0_lst=results[0][0],
