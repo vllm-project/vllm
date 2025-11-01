@@ -112,7 +112,7 @@ def maybe_get_vit_flash_attn_backend(
 
     if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_cuda_alike():
         from flash_attn import flash_attn_varlen_func
-    if attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_xpu():
+    elif attn_backend == _MHA_Backend.FLASH_ATTN and current_platform.is_xpu():
         from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     elif attn_backend == _MHA_Backend.VLLM_FLASH_ATTN:
         from vllm.vllm_flash_attn import flash_attn_varlen_func
