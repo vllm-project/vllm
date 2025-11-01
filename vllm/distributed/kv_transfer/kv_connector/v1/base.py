@@ -50,7 +50,12 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
-    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+    from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+        KVConnectorPromMetrics,
+        KVConnectorStats,
+        PromMetric,
+        PromMetricT,
+    )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.request import Request
@@ -70,12 +75,60 @@ CopyBlocksOp = Callable[
 logger = init_logger(__name__)
 
 
+class SupportsHMA(ABC):
+    """
+    The class that indicates the corresponding connector supports hybrid memory
+    allocator (HMA).
+    This is required to use the connector together with hybrid memory allocator.
+    """
+
+    @abstractmethod
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        Called exactly once when a request has finished for all kv cache groups,
+        before its blocks are freed for each group.
+
+        NOTE(Kuntai): This function is only supported by connectors that support HMA.
+
+        The connector may assumes responsibility for freeing the blocks
+        asynchronously by returning True.
+
+        Returns:
+            True if the request is being saved/sent asynchronously and blocks
+            should not be freed until the request_id is returned from
+            get_finished().
+            Optional KVTransferParams to be included in the request outputs
+            returned by the engine.
+        """
+        raise NotImplementedError
+
+
+def supports_hma(connector: Any) -> bool:
+    if isinstance(connector, type):
+        return issubclass(connector, SupportsHMA)
+    else:
+        return isinstance(connector, SupportsHMA)
+
+
 class KVConnectorRole(enum.Enum):
     # Connector running in the scheduler process
     SCHEDULER = 0
 
     # Connector running in the worker process
     WORKER = 1
+
+
+class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
+    """
+    Metadata used for out of band connector handshake between
+    P/D workers. This needs to serializeable.
+    """
+
+    pass
 
 
 class KVConnectorMetadata(ABC):  # noqa: B024
@@ -276,6 +329,18 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
@@ -370,7 +435,7 @@ class KVConnectorBase_V1(ABC):
         Called exactly once when a request has finished, before its blocks are
         freed.
 
-        The connector may assumes responsibility for freeing the the blocks
+        The connector may assumes responsibility for freeing the blocks
         asynchronously by returning True.
 
         Returns:
@@ -430,5 +495,31 @@ class KVConnectorBase_V1(ABC):
         KVConnectorStats resolution method. This method allows dynamically
         registered connectors to return their own KVConnectorStats object,
         which can implement custom aggregation logic on the data dict.
+        """
+        return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
+        """
+        return None
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: "VllmConfig",
+        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[str]],
+    ) -> Optional["KVConnectorPromMetrics"]:
+        """
+        Create a KVConnectorPromMetrics subclass which should register
+        per-connector Prometheus metrics and implement observe() to
+        expose connector transfer stats via Prometheus.
         """
         return None

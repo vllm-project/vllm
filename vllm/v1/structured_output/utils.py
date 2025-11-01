@@ -16,6 +16,7 @@ from diskcache import Cache
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
     import outlines_core as oc
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     import xgrammar as xgr
 
     from vllm.transformers_utils.tokenizer import AnyTokenizer
-    from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
@@ -47,6 +47,7 @@ CACHE = None
 
 def apply_grammar_bitmask(
     scheduler_output: SchedulerOutput,
+    grammar_output: GrammarOutput,
     input_batch: InputBatch,
     logits: torch.Tensor,
 ) -> None:
@@ -58,9 +59,9 @@ def apply_grammar_bitmask(
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
     """
-    grammar_bitmask = scheduler_output.grammar_bitmask
-    if grammar_bitmask is None:
-        return
+    # Serialization of np.ndarray is much more efficient than a tensor,
+    # so we receive it in that format.
+    grammar_bitmask = grammar_output.grammar_bitmask
 
     # We receive the structured output bitmask from the scheduler,
     # compacted to contain bitmasks only for structured output requests.
@@ -79,7 +80,7 @@ def apply_grammar_bitmask(
         cumulative_offset += len(
             scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
         )
-        if req_id in scheduler_output.structured_output_request_ids:
+        if req_id in grammar_output.structured_output_request_ids:
             struct_out_req_batch_indices[req_id] = logit_index
 
     out_indices = []
@@ -91,7 +92,7 @@ def apply_grammar_bitmask(
         dtype=grammar_bitmask.dtype,
     )
     cumulative_index = 0
-    for req_id in scheduler_output.structured_output_request_ids:
+    for req_id in grammar_output.structured_output_request_ids:
         num_spec_tokens = len(
             scheduler_output.scheduled_spec_decode_tokens.get(req_id, [])
         )
@@ -101,22 +102,28 @@ def apply_grammar_bitmask(
                 sorted_bitmask[logit_index + i] = grammar_bitmask[cumulative_index + i]
                 out_indices.append(logit_index + i)
         cumulative_index += 1 + num_spec_tokens
-    grammar_bitmask = sorted_bitmask
+
+    # Copy async to device as tensor.
+    grammar_bitmask = torch.from_numpy(sorted_bitmask).to(
+        logits.device, non_blocking=True
+    )
 
     # If the length of out indices and the logits have the same shape
     # we don't need to pass indices to the kernel,
     # since the bitmask is already aligned with the logits.
     skip_out_indices = len(out_indices) == logits.shape[0]
 
-    # Serialization of np.ndarray is much more efficient than a tensor,
-    # so we receive it in that format.
-    grammar_bitmask = torch.from_numpy(grammar_bitmask).contiguous()
+    index_tensor = None
+    if not skip_out_indices:
+        # xgrammar expects a python list of indices but it will actually work with
+        # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
+        # manner and there should be no cpu sync within xgrammar.
+        index_tensor = torch.tensor(
+            out_indices, dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        index_tensor = index_tensor.to(logits.device, non_blocking=True)
 
-    xgr.apply_token_bitmask_inplace(
-        logits,
-        grammar_bitmask.to(logits.device, non_blocking=True),
-        indices=out_indices if not skip_out_indices else None,
-    )
+    xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
 
 
 class OutlinesVocabulary:

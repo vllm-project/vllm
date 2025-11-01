@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Union
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
+from vllm import envs
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -107,6 +108,28 @@ class ConversationContext(ABC):
     @abstractmethod
     async def cleanup_session(self) -> None:
         raise NotImplementedError("Should not be called.")
+
+
+def _create_json_parse_error_messages(
+    last_msg: Message, e: json.JSONDecodeError
+) -> list[Message]:
+    """
+    Creates an error message when json parse failed.
+    """
+    error_msg = (
+        f"Error parsing tool arguments as JSON: {str(e)}. "
+        "Please ensure the tool call arguments are valid JSON and try again."
+    )
+    content = TextContent(text=error_msg)
+    author = Author(role=Role.TOOL, name=last_msg.recipient)
+    return [
+        Message(
+            author=author,
+            content=[content],
+            recipient=Role.ASSISTANT,
+            channel=last_msg.channel,
+        )
+    ]
 
 
 class SimpleContext(ConversationContext):
@@ -339,7 +362,13 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
-        args = json.loads(last_msg.content[0].text)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.content[0].text)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.content[0].text)
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
@@ -420,7 +449,13 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        args = json.loads(last_msg.content[0].text)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.content[0].text)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.content[0].text)
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
