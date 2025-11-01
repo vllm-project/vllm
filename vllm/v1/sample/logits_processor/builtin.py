@@ -251,7 +251,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         # Check if thinking is enabled
         self.is_enabled = (
-            reasoning_config is not None and reasoning_config.is_thinking_enabled()
+            reasoning_config is not None and reasoning_config.is_thinking_enabled
         )
 
         self.think_start_token_ids = getattr(
