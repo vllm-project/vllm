@@ -27,7 +27,7 @@ __all__ = [
 
 
 def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
+    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
     return (
         envs.VLLM_USE_FLASHINFER_MOE_FP4
         and has_flashinfer_cutlass_fused_moe()
@@ -79,6 +79,7 @@ def select_nvfp4_gemm_impl(
             ep_size=moe.moe_parallel_config.ep_size,
             tp_rank=moe.moe_parallel_config.tp_rank,
             tp_size=moe.moe_parallel_config.tp_size,
+            use_dp=moe.moe_parallel_config.dp_size > 1,
         )
 
     # native cutlass experts currently don't support DP; TP case won't call this

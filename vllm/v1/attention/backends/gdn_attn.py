@@ -115,7 +115,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         )
         self.decode_cudagraph_max_bs = min(
             self.vllm_config.scheduler_config.max_num_seqs * (self.num_spec + 1),
-            self.compilation_config.max_capture_size,
+            self.compilation_config.max_cudagraph_capture_size,
         )
 
         self._max_cached_blocks = cdiv(
