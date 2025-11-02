@@ -2,23 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.attention.layer import Attention, AttentionType
+from vllm.config import (
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder,
+    create_fast_prefill_custom_backend,
+)
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
-
-if TYPE_CHECKING:
-    from vllm.attention.layer import Attention
 
 
 class MultiModalBudget:
@@ -144,27 +149,34 @@ class AttentionGroup:
         default_factory=lambda: []
     )
 
-    def create_metadata_builders(
-        self,
-        vllm_config,
-        device,
-        kernel_block_size: int | None,
+    @staticmethod
+    def create_with_metadata_builders(
+        backend: type[AttentionBackend],
+        layer_names: list[str],
+        kv_cache_spec: KVCacheSpec,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        kv_cache_group_id: int,
+        kernel_block_size: int,
         num_metadata_builders: int = 1,
-    ):
-        kv_cache_spec_builder = (
-            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-            if kernel_block_size is not None
-            else self.kv_cache_spec
+    ) -> "AttentionGroup":
+        kv_cache_spec_kernel = kv_cache_spec.copy_with_new_block_size(
+            block_size=kernel_block_size,
         )
-        self.metadata_builders = [
-            self.backend.get_builder_cls()(
-                kv_cache_spec_builder,
-                self.layer_names,
-                vllm_config,
-                device,
+        metadata_builders = [
+            backend.get_builder_cls()(
+                kv_cache_spec_kernel, layer_names, vllm_config, device
             )
             for _ in range(num_metadata_builders)
         ]
+        return AttentionGroup(
+            backend,
+            layer_names,
+            kv_cache_spec,  # Note(Chen): this is the original kv_cache_spec without
+            # kernel_block_size change
+            kv_cache_group_id,
+            metadata_builders,
+        )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -248,7 +260,6 @@ def gather_mm_placeholders(
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    runner_only_attn_layers: set[str] | None = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -272,8 +283,22 @@ def add_kv_sharing_layers_to_kv_cache_groups(
         tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
         tgt_kv_cache_group.layer_names.append(layer_name)
 
-        if runner_only_attn_layers is not None:
+
+def get_runner_only_attn_layers(
+    vllm_config: VllmConfig,
+) -> set[str]:
+    """
+    Get the runner-only attention layers.
+    """
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    print("attn_layers", attn_layers)
+    runner_only_attn_layers: set[str] = set()
+    for layer_name, attn_module in attn_layers.items():
+        if attn_module.attn_type == AttentionType.ENCODER_ONLY:
             runner_only_attn_layers.add(layer_name)
+        if attn_module.kv_sharing_target_layer_name:
+            runner_only_attn_layers.add(layer_name)
+    return runner_only_attn_layers
 
 
 def bind_kv_cache(
@@ -364,3 +389,24 @@ def is_residual_scattered_for_sp(
         return True
 
     return num_input_tokens in vllm_config.compilation_config.compile_sizes
+
+
+def get_attn_backend_cls(
+    vllm_config: VllmConfig,
+    kv_sharing_fast_prefill_eligible_layers: set[str],
+    layer_names: list[str] | None = None,
+) -> dict[str, type[AttentionBackend]]:
+    """
+    Get the attention backend classes for the given VllmConfig.
+    """
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    attn_backend_cls_dict = {}
+    for layer_name, attn_module in attn_layers.items():
+        attn_backend = attn_module.get_attn_backend()
+        if layer_name in kv_sharing_fast_prefill_eligible_layers:
+            attn_backend = create_fast_prefill_custom_backend(
+                "FastPrefill",
+                attn_backend,
+            )
+        attn_backend_cls_dict[layer_name] = attn_backend
+    return attn_backend_cls_dict
