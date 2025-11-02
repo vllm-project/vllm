@@ -24,6 +24,7 @@ from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
+from vllm.v1.executor.multiproc_executor import ExecutorProc, MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
 from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
 
@@ -100,10 +101,6 @@ def run_headless(args: argparse.Namespace):
     if local_engine_count <= 0:
         raise ValueError("data_parallel_size_local must be > 0 in headless mode")
 
-    host = parallel_config.data_parallel_master_ip
-    port = engine_args.data_parallel_rpc_port  # add to config too
-    handshake_address = get_tcp_uri(host, port)
-
     # Catch SIGTERM and SIGINT to allow graceful shutdown.
     def signal_handler(signum, frame):
         logger.debug("Received %d signal.", signum)
@@ -111,6 +108,29 @@ def run_headless(args: argparse.Namespace):
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
+
+    if parallel_config.distributed_node_rank_within_dp > 0:
+        host = parallel_config.distributed_master_ip
+        head_node_address = f"{host}:{parallel_config.distributed_master_port}"
+        logger.info(
+            "Launching vllm multiproc executor in headless mode,"
+            "with head node address %s for torch.distributed processgroup.",
+            head_node_address,
+        )
+        # Start the proc.
+        executor_proc = ExecutorProc.create(
+            vllm_config=vllm_config, executor_class=MultiprocExecutor
+        )
+        try:
+            executor_proc.join()
+        finally:
+            logger.info("Shutting down.")
+            if executor_proc.is_alive():
+                executor_proc.terminate()
+        return
+    host = parallel_config.data_parallel_master_ip
+    port = parallel_config.data_parallel_rpc_port
+    handshake_address = get_tcp_uri(host, port)
 
     logger.info(
         "Launching %d data parallel engine(s) in headless mode, "
