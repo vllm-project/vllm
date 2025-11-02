@@ -353,6 +353,14 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        if self.scheduler_config.async_scheduling is None:
+            if (
+                self.model_config
+                and self.model_config.runner_type == "pooling"
+                and self.parallel_config.pipeline_parallel_size == 1
+            ):
+                self.scheduler_config.async_scheduling = True
+
         from vllm.platforms import current_platform
 
         if (

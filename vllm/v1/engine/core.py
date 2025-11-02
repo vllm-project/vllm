@@ -117,23 +117,12 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
-            Scheduler = resolve_obj_by_qualname(
-                vllm_config.scheduler_config.scheduler_cls
-            )
-        else:
-            Scheduler = vllm_config.scheduler_config.scheduler_cls
+        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
-        # This warning can be removed once the V1 Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
-        if Scheduler is not V1Scheduler:
-            logger.warning(
-                "Using configured V1 scheduler class %s. "
-                "This scheduler interface is not public and "
-                "compatibility may not be maintained.",
-                vllm_config.scheduler_config.scheduler_cls,
-            )
+        print("Scheduler")
+        print("=" * 80)
+        print(Scheduler)
+        print("=" * 80)
 
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Encoder models without KV cache don't support
