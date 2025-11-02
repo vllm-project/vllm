@@ -167,8 +167,9 @@ class OpenAISpeechToText(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        lora_request = self._maybe_get_adapters(request)
         try:
+            lora_request = self._maybe_get_adapters(request)
+
             prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
