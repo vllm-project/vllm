@@ -77,8 +77,8 @@ def main():
             out_str = f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}"
             print(out_str)
             print(sep_str)
-            f.write(out_str)
-            f.write(sep_str)
+            print(out_str, file=f)
+            print(sep_str, file=f)
 
 
 if __name__ == "__main__":

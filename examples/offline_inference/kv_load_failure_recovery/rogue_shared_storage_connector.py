@@ -75,7 +75,10 @@ class RogueSharedStorageConnector(SharedStorageConnector):
     def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
         if self._async_load and forward_context.attn_metadata is None:
             # Bypass  sanity check in super().start_load_kv
-            forward_context.attn_metadata = "None"
+            forward_context.attn_metadata = {}
+            super().start_load_kv(forward_context, **kwargs)
+            forward_context.attn_metadata = None
+            return
 
         super().start_load_kv(forward_context, **kwargs)
 
