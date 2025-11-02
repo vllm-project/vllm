@@ -5,6 +5,7 @@ from math import lcm
 from typing import TYPE_CHECKING
 
 import vllm.envs as envs
+from vllm.attention.backends.registry import _Backend, backend_to_class
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.utils.math_utils import cdiv, round_up
@@ -364,6 +365,11 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             ).page_size_bytes
         else:
             kernel_block_alignment_size = 16
+            if envs.VLLM_ATTENTION_BACKEND == "FLASHINFER":
+                flashinfer_backend_cls = backend_to_class(_Backend.FLASHINFER)
+                kernel_block_alignment_size = min(
+                    flashinfer_backend_cls.get_supported_kernel_block_size()
+                )
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),

@@ -113,7 +113,7 @@ class CudaPlatformBase(Platform):
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 16
+            cache_config.block_size = 32
 
         # TODO(lucas): handle this more gracefully
         # Note: model_config may be None during testing
