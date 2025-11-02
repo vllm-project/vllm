@@ -154,7 +154,9 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "throughput"
+    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency", "cutedsl"] = (
+        "throughput"
+    )
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1207,7 +1209,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "latency":
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
     "VLLM_FLASHINFER_MOE_BACKEND": env_with_choices(
-        "VLLM_FLASHINFER_MOE_BACKEND", "throughput", ["throughput", "latency"]
+        "VLLM_FLASHINFER_MOE_BACKEND",
+        "throughput",
+        ["throughput", "latency", "cutedsl"],
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
