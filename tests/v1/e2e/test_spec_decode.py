@@ -122,7 +122,6 @@ def test_ngram_correctness(
 
 
 @pytest.mark.parametrize(
-    ["model_setup", "mm_enabled"],
     "model_path",
     [
         "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
