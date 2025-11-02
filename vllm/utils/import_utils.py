@@ -403,3 +403,8 @@ def has_triton_kernels() -> bool:
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
     return _has_module("tilelang")
+
+
+def has_fbgemm_gpu_gen_ai() -> bool:
+    """Whether the optional `fbgemm-gpu-genai` package is available."""
+    return _has_module("fbgemm_gpu.experimental.gen_ai")
