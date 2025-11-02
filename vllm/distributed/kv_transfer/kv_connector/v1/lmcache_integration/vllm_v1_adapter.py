@@ -724,7 +724,7 @@ class LMCacheConnectorV1Impl:
                 "max_model_len": getattr(
                     vllm_config.model_config, "max_model_len", None
                 ),
-                "vocab_size": getattr(vllm_config.model_config, "vocab_size", None),
+                "vocab_size": vllm_config.model_config.get_vocab_size(),
                 "num_layers": getattr(
                     vllm_config.model_config, "get_num_layers", lambda _: None
                 )(vllm_config.parallel_config),
