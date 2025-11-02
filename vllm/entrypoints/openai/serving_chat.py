@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import Final
+from typing import Final, TypeVar
 
 import jinja2
 import partial_json_parser
@@ -73,6 +73,12 @@ from vllm.transformers_utils.tokenizers import (
 from vllm.utils.collection_utils import as_list
 
 logger = init_logger(__name__)
+
+ChatCompletionResponseChoiceT = TypeVar(
+    "ChatCompletionResponseChoiceT",
+    ChatCompletionResponseChoice,
+    ChatCompletionResponseStreamChoice,
+)
 
 
 class OpenAIServingChat(OpenAIServing):
@@ -510,6 +516,31 @@ class OpenAIServingChat(OpenAIServing):
                         delta_message = None
 
         return delta_message, function_name_returned
+
+    def maybe_filter_parallel_tool_calls(
+        self, choice: ChatCompletionResponseChoiceT, request: ChatCompletionRequest
+    ) -> ChatCompletionResponseChoiceT:
+        """Filter to first tool call only when parallel_tool_calls is False."""
+
+        if request.parallel_tool_calls:
+            return choice
+
+        if (
+            isinstance(choice, ChatCompletionResponseChoice)
+            and choice.message.tool_calls
+        ):
+            choice.message.tool_calls = choice.message.tool_calls[:1]
+        elif (
+            isinstance(choice, ChatCompletionResponseStreamChoice)
+            and choice.delta.tool_calls
+        ):
+            choice.delta.tool_calls = [
+                tool_call
+                for tool_call in choice.delta.tool_calls
+                if tool_call.index == 0
+            ]
+
+        return choice
 
     async def chat_completion_stream_generator(
         self,
@@ -1195,6 +1226,9 @@ class OpenAIServingChat(OpenAIServing):
 
                         finish_reason_sent[i] = True
 
+                    choice_data = self.maybe_filter_parallel_tool_calls(
+                        choice_data, request
+                    )
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -1540,6 +1574,7 @@ class OpenAIServingChat(OpenAIServing):
                     as_list(output.token_ids) if request.return_token_ids else None
                 ),
             )
+            choice_data = self.maybe_filter_parallel_tool_calls(choice_data, request)
 
             choices.append(choice_data)
 
