@@ -7,10 +7,16 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale,
 )
@@ -22,6 +28,13 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkW8A8Fp8"]
+
+logger = init_logger(__name__)
+
+QUANT_STRATEGY_MAP = {
+    "per_tensor": ScaledMMLinearQuantStrategy.TENSOR,
+    "per_channel": ScaledMMLinearQuantStrategy.CHANNEL,
+}
 
 
 class QuarkW8A8Fp8(QuarkScheme):
@@ -40,10 +53,6 @@ class QuarkW8A8Fp8(QuarkScheme):
         )
         self.act_quant_group_shape = (
             GroupShape.PER_TOKEN if per_token else GroupShape.PER_TENSOR
-        )
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=self.is_static_input_scheme,
-            act_quant_group_shape=self.act_quant_group_shape,
         )
         self.out_dtype = torch.get_default_dtype()
 
@@ -163,17 +172,21 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
+        layer.register_parameter("input_scale_ub", None)
+
+        weight_quant_strategy = QUANT_STRATEGY_MAP[self.weight_qscheme]
+        self.fp8_linear_kernel = init_fp8_linear_kernel(
+            act_q_static=self.is_static_input_scheme,
+            act_q_group_shape=self.act_quant_group_shape,
+            weight_quant_strategy=weight_quant_strategy,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear_kernel.apply_weights(layer, x, bias)

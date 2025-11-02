@@ -24,13 +24,18 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     maybe_create_device_identity,
 )
 from vllm.platforms import current_platform
@@ -50,22 +55,26 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, cuda_force_torch: bool, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
-        self.wscale = torch.rand(1, dtype=torch.float32)
-        self.scale = torch.rand(1, dtype=torch.float32)
-
-        self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
+        self.weight_scale = torch.rand(1, dtype=torch.float32)
+        self.input_scale = torch.rand(1, dtype=torch.float32)
+        self.input_scale_ub = None
+        self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=True,
-                act_quant_group_shape=GroupShape.PER_TENSOR,
+            self.fp8_linear = init_fp8_linear_kernel(
+                act_q_static=True,
+                act_q_group_shape=GroupShape.PER_TENSOR,
+                weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+                out_dtype=torch.get_default_dtype(),
+                module_name=self.__class__.__name__,
             )
+
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
         self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = self.fp8_linear.apply(y, self.w, self.wscale, input_scale=self.wscale)
+        x2 = self.fp8_linear.apply_weights(self, y)
         return x2
 
     def ops_in_model_before(self):

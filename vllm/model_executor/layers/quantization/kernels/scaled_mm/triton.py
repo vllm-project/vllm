@@ -7,7 +7,7 @@ import torch
 from vllm.platforms import current_platform
 
 from .cutlass import CutlassScaledMMLinearKernel
-from .ScaledMMLinearKernel import ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
 
 class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
@@ -16,7 +16,7 @@ class TritonScaledMMLinearKernel(CutlassScaledMMLinearKernel):
         return 75
 
     @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if current_platform.is_cpu():
             return (
                 False,

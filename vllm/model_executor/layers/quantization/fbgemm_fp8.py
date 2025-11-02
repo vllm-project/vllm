@@ -18,6 +18,12 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
@@ -27,7 +33,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
 )
@@ -91,10 +96,15 @@ class FBGEMMFp8Config(QuantizationConfig):
 class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=False, act_quant_group_shape=GroupShape.PER_TOKEN
-        )
         self.out_dtype = torch.get_default_dtype()
+
+        self.fp8_linear_kernel = init_fp8_linear_kernel(
+            act_q_static=False,
+            act_q_group_shape=GroupShape.PER_TOKEN,
+            weight_quant_strategy=ScaledMMLinearQuantStrategy.CHANNEL,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
 
     def create_weights(
         self,
@@ -184,12 +194,4 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=None,
-            input_scale_ub=layer.input_scale_ub,
-            bias=bias,
-        )
+        return self.fp8_linear_kernel.apply_weights(layer, x, bias)

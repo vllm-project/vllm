@@ -7,8 +7,15 @@ import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 from torch.nn import Parameter
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    QUANT_STRATEGY_MAP,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
@@ -24,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     cutlass_block_fp8_supported,
     maybe_create_device_identity,
 )
@@ -41,6 +47,8 @@ strategy_to_parameter_type = {
     QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
     QuantizationStrategy.TENSOR: PerTensorScaleParameter,
 }
+
+logger = init_logger(__name__)
 
 
 class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
@@ -72,9 +80,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            self.fp8_linear = Fp8LinearOp(
-                act_quant_static=self.is_static_input_scheme,
-                act_quant_group_shape=self.act_q_group_shape,
+            weight_quant_strategy = QUANT_STRATEGY_MAP[self.strategy]
+            self.fp8_linear_kernel = init_fp8_linear_kernel(
+                act_q_static=self.is_static_input_scheme,
+                act_q_group_shape=self.act_q_group_shape,
+                weight_quant_strategy=weight_quant_strategy,
+                out_dtype=self.out_dtype,
+                module_name=self.__class__.__name__,
             )
 
     @classmethod
@@ -134,6 +146,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
+        layer.register_parameter("input_scale_ub", None)
+
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
@@ -190,11 +204,4 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 bias=bias,
             )
 
-        return self.fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            input_scale=layer.input_scale,
-            bias=bias,
-        )
+        return self.fp8_linear_kernel.apply_weights(layer, x, bias)

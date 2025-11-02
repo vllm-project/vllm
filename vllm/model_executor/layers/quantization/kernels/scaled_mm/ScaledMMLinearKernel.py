@@ -2,19 +2,67 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
+from typing import Generic, TypeVar
 
 import torch
+from compressed_tensors.quantization import QuantizationStrategy
+
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+
+class ScaledMMLinearQuantStrategy(Enum):
+    TENSOR = "tensor"
+    CHANNEL = "channel"
+    BLOCK = "block"
+
+
+QUANT_STRATEGY_MAP = {
+    QuantizationStrategy.TENSOR: ScaledMMLinearQuantStrategy.TENSOR,
+    QuantizationStrategy.CHANNEL: ScaledMMLinearQuantStrategy.CHANNEL,
+}
 
 
 @dataclass
 class ScaledMMLinearLayerConfig:
-    is_channelwise: bool
     is_static_input_scheme: bool
+
+
+@dataclass
+class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+    is_channelwise: bool
     input_symmetric: bool
 
 
-class ScaledMMLinearKernel(ABC):
+@dataclass
+class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+    weight_quant_strategy: ScaledMMLinearQuantStrategy
+    activation_group_shape: GroupShape
+    out_dtype: torch.dtype | None
+
+
+_FP8ParamsT = tuple[
+    torch.Tensor,  # weight
+    torch.Tensor,  # weight_scale
+    torch.Tensor | None,  # input_scale,
+    torch.Tensor | None,  # input_scale_ub,
+]
+_Int8ParamsT = tuple[
+    torch.Tensor,  # weight
+    torch.Tensor,  # weight_scale
+    torch.Tensor | None,  # input_scale,
+    torch.Tensor | None,  # input_zp
+    torch.Tensor | None,  # azp_adj
+]
+
+_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
+_ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
+
+
+class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:
@@ -22,25 +70,13 @@ class ScaledMMLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: _ConfigT) -> tuple[bool, str | None]:
         raise NotImplementedError
 
-    def __init__(
-        self,
-        c: ScaledMMLinearLayerConfig,
-        w_q_param_name: str,
-        w_s_param_name: str,
-        i_s_param_name: str,
-        i_zp_param_name: str,
-        azp_adj_param_name: str,
-    ) -> None:
+    def __init__(self, c: _ConfigT, layer_param_names: Sequence[str]) -> None:
         assert self.can_implement(c)
         self.config = c
-        self.w_q_name = w_q_param_name
-        self.w_s_name = w_s_param_name
-        self.i_s_name = i_s_param_name
-        self.i_zp_name = i_zp_param_name
-        self.azp_adj_name = azp_adj_param_name
+        self.layer_param_names = layer_param_names
 
     @abstractmethod
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -55,19 +91,56 @@ class ScaledMMLinearKernel(ABC):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    def _get_weight_params(
-        self, layer: torch.nn.Module
-    ) -> tuple[
-        torch.Tensor,  # weight
-        torch.Tensor,  # weight_scale
-        torch.Tensor | None,  # input_scale,
-        torch.Tensor | None,  # input_zp
-        torch.Tensor | None,  # azp_adj
-    ]:
+    # return a covariant type in the subclass
+    @abstractmethod
+    def _get_layer_params(self, layer) -> _ParamsT:
+        raise NotImplementedError
+
+
+class FP8ScaledMMLinearKernel(
+    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, _FP8ParamsT], ABC
+):
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        self.quant_fp8 = QuantFP8(
+            static=c.is_static_input_scheme,
+            group_shape=c.activation_group_shape,
+            num_token_padding=self.get_ouput_padding(),
+        )
+        super().__init__(c, layer_param_names)
+
+    @abstractmethod
+    def get_ouput_padding(self) -> int | None:
+        raise NotImplementedError
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        # lovelace and up
+        return 89
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
+    def _get_layer_params(self, layer) -> _FP8ParamsT:
+        w, w_s, x_s, x_s_ub = self.layer_param_names
         return (
-            getattr(layer, self.w_q_name),
-            getattr(layer, self.w_s_name),
-            getattr(layer, self.i_s_name),
-            getattr(layer, self.i_zp_name),
-            getattr(layer, self.azp_adj_name),
+            getattr(layer, w),
+            getattr(layer, w_s),
+            getattr(layer, x_s),
+            getattr(layer, x_s_ub),
+        )
+
+
+class Int8ScaledMMLinearKernel(
+    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
+):
+    def _get_layer_params(self, layer) -> _Int8ParamsT:
+        w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
+        return (
+            getattr(layer, w_q),
+            getattr(layer, w_s),
+            getattr(layer, i_s),
+            getattr(layer, i_zp),
+            getattr(layer, azp_adj),
         )

@@ -26,14 +26,19 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    Fp8LinearOp,
     GroupShape,
 )
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
-from ..utils import has_module_attribute, multi_gpu_test
+from ..utils import TestFP8Layer, has_module_attribute, multi_gpu_test
 from .backend import TestBackend
 
 
@@ -81,19 +86,21 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         self.eps = eps
         self.norm = [RMSNorm(hidden_size, eps) for i in range(4)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
-        self.w = [
+        self.input_scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
+        self.weight = [
             torch.rand(hidden_size, hidden_size)
             .to(dtype=current_platform.fp8_dtype())
             .t()
             for _ in range(3)
         ]
 
-        self.fp8_linear = Fp8LinearOp(
-            act_quant_static=True,
-            act_quant_group_shape=GroupShape.PER_TENSOR,
+        self.fp8_linear = init_fp8_linear_kernel(
+            act_q_static=True,
+            act_q_group_shape=GroupShape.PER_TENSOR,
+            weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
         )
-
-        self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
 
     def forward(self, hidden_states):
         # avoid having graph input be an arg to a pattern directly
@@ -101,23 +108,27 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         x = resid = tensor_model_parallel_all_reduce(z)
         y = self.norm[0](x)
 
-        z2 = self.fp8_linear.apply(
-            y, self.w[0], self.wscale[0], input_scale=self.scale[0]
+        layer1 = TestFP8Layer(
+            self.weight[0], self.weight_scale[0], input_scale=self.input_scale[0]
         )
+        z2 = self.fp8_linear.apply_weights(layer1, y)
 
         x2 = tensor_model_parallel_all_reduce(z2)
         y2, resid = self.norm[1](x2, resid)
 
-        z3 = self.fp8_linear.apply(
-            y2, self.w[1], self.wscale[1], input_scale=self.scale[1]
+        layer2 = TestFP8Layer(
+            self.weight[1], self.weight_scale[1], input_scale=self.input_scale[1]
         )
+        z3 = self.fp8_linear.apply(layer2, y2)
 
         x3 = tensor_model_parallel_all_reduce(z3)
         y3, resid = self.norm[2](x3, resid)  # use resid here
 
-        z4 = self.fp8_linear.apply(
-            y3, self.w[2], self.wscale[2], input_scale=self.scale[2]
+        layer3 = TestFP8Layer(
+            self.weight[2], self.weight_scale[2], input_scale=self.input_scale[2]
         )
+        z4 = self.fp8_linear.apply(layer3, y3)
+
         x4 = tensor_model_parallel_all_reduce(z4)
         y4, resid = self.norm[3](x4, resid)  # use resid here
         return y4

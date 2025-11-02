@@ -27,11 +27,17 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import Fp8LinearOp
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    ScaledMMLinearQuantStrategy,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
-from ..utils import multi_gpu_test
+from ..utils import TestFP8Layer, multi_gpu_test
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -107,8 +113,13 @@ class TestQuantModel(torch.nn.Module):
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
-        self.fp8_linear = Fp8LinearOp(act_quant_static=True)
-
+        self.fp8_linear = init_fp8_linear_kernel(
+            act_q_static=True,
+            act_q_group_shape=GroupShape.PER_TENSOR,
+            weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+            out_dtype=torch.get_default_dtype(),
+            module_name=self.__class__.__name__,
+        )
         self.scale = torch.rand(1, dtype=torch.float32)
         # Create a weight that is compatible with torch._scaled_mm,
         # which expects a column-major layout.
@@ -138,14 +149,9 @@ class TestQuantModel(torch.nn.Module):
 
         # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
-
         # scaled_mm with static input quantization
-        fp8_linear_result = self.fp8_linear.apply(
-            norm_output,
-            self.w,
-            self.wscale,
-            input_scale=self.scale.to(norm_output.device),
-        )
+        layer = TestFP8Layer(None, None, self.scale.to(norm_output.device))
+        fp8_linear_result = self.fp8_linear.apply(layer, norm_output)
 
         return fp8_linear_result, residual_output
 
