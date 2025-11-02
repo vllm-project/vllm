@@ -76,6 +76,14 @@ class FlashMLASparseBackend(AttentionBackend):
         return FlashMLASparseImpl
 
     @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [576]
+
+    @classmethod
+    def is_mla(cls) -> bool:
+        return True
+
+    @classmethod
     def is_sparse(cls) -> bool:
         return True
 
