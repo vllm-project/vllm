@@ -375,6 +375,10 @@ def selective_scan_fn(
     cache_indices=None,
     has_initial_state=None,
     pad_slot_id=PAD_SLOT_ID,
+    block_size=1024,
+    block_idx_first_scheduled_token=None,
+    block_idx_last_scheduled_token=None,
+    initial_state_idx=None,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -397,7 +401,10 @@ def selective_scan_fn(
         x.shape=(dim,17)
     cache_indices: (batch) int32
         A tensor with each cell is a correspondent
-        input and output ssm_state index
+        input and output ssm_state indices
+      - Without APC: (batch,) - single state index per batch item
+      - With APC: (batch, max_positions) - cache block indices for read/write
+        Each non-zero value indicates a cache block to load from and/or write to.
     has_initial_state: (batch) bool
         A tensor populated with ones and zeros,
         indicate if the ssm_state at the corresponding index should be
@@ -408,6 +415,17 @@ def selective_scan_fn(
         that will not be processed,
         for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id]
         in this case, the kernel will not process entries at indices 0 and 3
+    block_size: int
+        The block size to align the cached states to
+    block_idx_first_scheduled_token: (batch,), dtype int32
+        The pointer into cache_indices, where the first
+        cache block to be filled is located.
+    block_idx_last_scheduled_token: (batch,), dtype int32
+        The pointer into cache_indices, where the last cache block
+        to be filled is located.
+    initial_state_idx: (batch,), dtype int32
+        The pointer into cache_indices, where the cache block
+        containing the initial state is located.
     returns
         output: (dim, total_length) for varlen or (batch, dim, seqlen)
                 supports inplace replacement
@@ -448,6 +466,10 @@ def selective_scan_fn(
         has_initial_state,
         ssm_states,
         pad_slot_id,
+        block_size,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
     )
 
     if z is None:
