@@ -18,7 +18,7 @@ def get_model_args(
     speculative_config = {
         "method": spec_method,
         "model": spec_model_name,
-        "num_speculative_tokens": 4,
+        "num_speculative_tokens": 1,
         "max_model_len": model_max_len,
     }
 
@@ -27,7 +27,7 @@ def get_model_args(
         "dtype": "auto",
         "add_bos_token": True,
         "tensor_parallel_size": tp_size,
-        "gpu_memory_utilization": 0.93,
+        "gpu_memory_utilization": 0.7,
         "speculative_config": speculative_config,
         "enable_expert_parallel": True,
         "num_redundant_experts": tp_size,
