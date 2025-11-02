@@ -425,6 +425,11 @@ class Scheduler(SchedulerInterface):
                             self.waiting.pop_request()
                             skipped_waiting_requests.prepend_request(request)
                             continue
+                        # Keep track of number of tokens to load from remote
+                        # for the request st we can compute actual throughput
+                        request.num_external_computed_tokens = (
+                            num_external_computed_tokens
+                        )
 
                         num_external_computed_tokens = ext_tokens
 
@@ -1025,6 +1030,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        num_external_computed_tokens=request.num_external_computed_tokens,
                     )
                 )
             else:
@@ -1481,9 +1487,12 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
-                total_affected_tokens += (
+                num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
+                total_affected_tokens += num_affected_tokens
+                # Prefill is to be recomputed locally, track its performance.
+                request.num_external_computed_tokens -= num_affected_tokens
 
             if is_affected:
                 if not marked_invalid_block:

@@ -120,7 +120,7 @@ class LoggingStatLogger(StatLoggerBase):
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
-        self.num_prompt_tokens += iteration_stats.num_prompt_tokens
+        self.num_prompt_tokens += iteration_stats.num_local_prompt_tokens
         self.num_generation_tokens += iteration_stats.num_generation_tokens
 
     def _get_throughput(self, tracked_stats: int, now: float) -> float:
