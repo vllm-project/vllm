@@ -26,7 +26,6 @@ class Mamba1AttentionBackend(AttentionBackend):
 class Mamba1AttentionMetadata:
     query_start_loc_p: torch.Tensor
     state_indices_tensor: torch.Tensor
-    seq_lens: torch.Tensor
     has_initial_states_p: torch.Tensor | None
     num_prefills: int
     num_prefill_tokens: int
@@ -60,7 +59,6 @@ class Mamba1AttentionMetadataBuilder(
         fast_build: bool = False,
     ) -> Mamba1AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        seq_lens = common_attn_metadata.seq_lens
 
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -153,7 +151,6 @@ class Mamba1AttentionMetadataBuilder(
 
         return Mamba1AttentionMetadata(
             query_start_loc_p=query_start_loc_p,
-            seq_lens=seq_lens,
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor=state_indices_tensor,
             num_prefills=num_prefills,
