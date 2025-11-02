@@ -6,15 +6,18 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
 import vllm.envs as envs
+from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
     KVConnectorBaseType,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
+from vllm.distributed.kv_transfer.kv_connector.v1 import (
+    KVConnectorRole,
+    supports_hma,
+)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.config.kv_transfer import KVTransferConfig
 
 logger = init_logger(__name__)
@@ -38,7 +41,7 @@ class KVConnectorFactory:
     @classmethod
     def create_connector(
         cls,
-        config: "VllmConfig",
+        config: VllmConfig,
         role: KVConnectorRole,
     ) -> KVConnectorBase:
         if not envs.VLLM_USE_V1:
@@ -51,6 +54,15 @@ class KVConnectorFactory:
         if kv_transfer_config is None:
             raise ValueError("kv_transfer_config must be set to create a connector")
         connector_cls = cls.get_connector_class(kv_transfer_config)
+
+        # check if the connector supports HMA
+        hma_enabled = not config.scheduler_config.disable_hybrid_kv_cache_manager
+        if hma_enabled and not supports_hma(connector_cls):
+            raise ValueError(
+                f"Connector {connector_cls.__name__} does not support HMA but "
+                f"HMA is enabled. Please set `--disable-hybrid-kv-cache-manager`."
+            )
+
         logger.info(
             "Creating v1 connector with name: %s and engine_id: %s",
             connector_cls.__name__,
@@ -65,6 +77,24 @@ class KVConnectorFactory:
         # - Should only be used inside the forward context & attention layer
         # We build separately to enforce strict separation
         return connector_cls(config, role)
+
+    @classmethod
+    def get_connector_class_by_name(
+        cls, connector_name: str
+    ) -> type[KVConnectorBaseType]:
+        """Get a registered connector class by name.
+
+        Raises ValueError if the connector is not registered.
+
+        Args:
+            connector_name: Name of the registered connector.
+
+        Returns:
+            The connector class.
+        """
+        if connector_name not in cls._registry:
+            raise ValueError(f"Connector '{connector_name}' is not registered.")
+        return cls._registry[connector_name]()
 
     @classmethod
     def get_connector_class(

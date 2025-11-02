@@ -451,10 +451,18 @@ def gptq_gemm(
     b_gptq_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_exllama: bool,
+    use_v2_format: bool,
     bit: int,
 ) -> torch.Tensor:
     return torch.ops._C.gptq_gemm(
-        a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, use_exllama, bit
+        a,
+        b_q_weight,
+        b_gptq_qzeros,
+        b_gptq_scales,
+        b_g_idx,
+        use_exllama,
+        use_v2_format,
+        bit,
     )
 
 
@@ -468,6 +476,7 @@ if hasattr(torch.ops._C, "gptq_gemm"):
         b_gptq_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_exllama: bool,
+        use_v2_format: bool,
         bit: int,
     ) -> torch.Tensor:
         return torch.empty(
@@ -1710,6 +1719,10 @@ def selective_scan_fwd(
     has_initial_state: torch.Tensor | None,
     ssm_states: torch.Tensor,
     pad_slot_id: int,
+    block_size: int = 1024,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -1726,6 +1739,10 @@ def selective_scan_fwd(
         has_initial_state,
         ssm_states,
         pad_slot_id,
+        block_size,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
     )
 
 
