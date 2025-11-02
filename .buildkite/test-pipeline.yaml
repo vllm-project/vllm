@@ -25,6 +25,7 @@
 #     and $$BUILDKITE_PARALLEL_JOB_COUNT environment variables.
 # working_dir(str): specify the place where the command should execute, default to /vllm-workspace/tests
 # source_file_dependencies(list): the list of prefixes to opt-in the test for, if empty, the test will always run.
+# ci_always_run(bool): default to false, if true, the test will always run on CI (ready label added).
 
 # When adding a test
 # - If the test belongs to an existing group, add it there
@@ -1201,6 +1202,7 @@ steps:
 - label: LM Eval Large Models (H100) # optional
   gpu: h100
   optional: true
+  ci_always_run: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
