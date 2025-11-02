@@ -31,8 +31,8 @@ from vllm.multimodal.utils import (
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 
-from ..models.registry import HF_EXAMPLE_MODELS
-from ..utils import VLLM_PATH
+from ...models.registry import HF_EXAMPLE_MODELS
+from ...utils import VLLM_PATH
 
 EXAMPLES_DIR = VLLM_PATH / "examples"
 
