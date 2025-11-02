@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import tempfile
 
@@ -11,6 +12,7 @@ from huggingface_hub.utils import LocalEntryNotFoundError
 from vllm.model_executor.model_loader.weight_utils import (
     download_weights_from_hf,
     enable_hf_transfer,
+    filter_duplicate_safetensors_files,
 )
 
 
@@ -59,6 +61,28 @@ def test_download_weights_from_hf():
             )
             is not None
         )
+
+
+def test_filter_duplicate_safetensors_files_with_subfolder(tmp_path):
+    llm_dir = tmp_path / "llm"
+    llm_dir.mkdir()
+    kept_file = llm_dir / "model-00001-of-00002.safetensors"
+    kept_file.write_bytes(b"0")
+    dropped_file = tmp_path / "other.safetensors"
+    dropped_file.write_bytes(b"0")
+
+    index_path = llm_dir / "model.safetensors.index.json"
+    index_path.write_text(
+        json.dumps({"weight_map": {"w": "model-00001-of-00002.safetensors"}})
+    )
+
+    filtered = filter_duplicate_safetensors_files(
+        [str(kept_file), str(dropped_file)],
+        str(tmp_path),
+        "llm/model.safetensors.index.json",
+    )
+
+    assert filtered == [str(kept_file)]
 
 
 if __name__ == "__main__":
