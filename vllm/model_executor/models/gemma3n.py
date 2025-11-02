@@ -367,8 +367,11 @@ class Gemma3nAttention(nn.Module):
                 if ".layers." in prefix:
                     param_name_before_layers = prefix.split(".layers.")[0]
                 else:
-                    param_name_before_layers = "model"
-                    logger.warning(f"Unexpected prefix format: '{prefix}', defaulting to 'model'")
+                    raise ValueError(
+                        f"Unexpected prefix format for Gemma3nAttention: '{prefix}'. "
+                        "The prefix is expected to contain '.layers.' to correctly "
+                        "determine the KV sharing target layer."
+                    )
                 # Only the greater layer is required to specify sharing.
                 kv_sharing_target_layer_name = f"{param_name_before_layers}.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
 
