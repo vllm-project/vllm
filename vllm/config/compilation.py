@@ -110,10 +110,41 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_size_mb: dict[int, float] = field(default_factory=dict)
+    """The thresholds of the communicated tensor sizes under which
+    vllm should use flashinfer fused allreduce. Specified as a
+    dictionary mapping each world size to the threshold in MB
+        { <world size>: <max size in mb> }
+    Unspecified world sizes will fallback to
+        _FI_ALLREDUCE_MAX_INPUT_SIZES = {
+            "9.0": {
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
+            },
+            "10.0": {
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
+            },
+        }, where key is the device capability"""
 
     # TODO(luka) better pass enabling system.
+
+    def flashinfer_max_size(self, world_size: int) -> int | None:
+        """
+        Returns the max communication size in bytes for flashinfer
+        allreduce fusion for the given world size. Returns None if world size
+        is not supported by configs as it's not supported by flashinfer.
+        """
+
+        MiB = 1024 * 1024
+        max_sizes = {
+            k: int(v * MiB) for k, v in self.fi_allreduce_fusion_max_size_mb.items()
+        }
+
+        # return None if world size is not supported by flashinfer
+        return max_sizes.get(world_size)
 
     def uuid(self):
         """
@@ -135,6 +166,35 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+            if self.enable_fi_allreduce_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Allreduce + rms norm + quant (fp8) fusion might not work"
+                )
+
+        # import here to avoid circular dependencies
+        from vllm.platforms import current_platform
+
+        # Default tuned max size of the input tensor
+        # per world size per device capability
+        # to use flashinfer fused allreduce
+        fi_allreduce_fusion_max_size_mb = {
+            "9.0": {
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
+            },
+            "10.0": {
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
+            },
+        }
+        device_capability = current_platform.get_device_capability().as_version_str()
+
+        max_sizes = fi_allreduce_fusion_max_size_mb.get(device_capability, {})
+        max_sizes.update(self.fi_allreduce_fusion_max_size_mb)
+        self.fi_allreduce_fusion_max_size_mb = max_sizes
 
 
 @config
@@ -164,6 +224,8 @@ class CompilationConfig:
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`compile_ranges_split_points`]
+            [vllm.config.CompilationConfig.compile_ranges_split_points]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -281,6 +343,16 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+    compile_ranges_split_points: list[int] | None = None
+    """Split points that represent compile ranges for inductor.
+    The compile ranges are 
+    [1, split_points[0]), 
+    [split_points[0], split_points[1]), ..., 
+    [split_points[-1], max_num_batched_tokens + 1).
+    Compile sizes are also used single element ranges:
+    [compile_sizes[i], compile_sizes[i] + 1).
+    """
+
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -867,3 +939,14 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def get_compile_ranges(self) -> list[tuple[int, int]]:
+        """Get the compile ranges for the compilation config."""
+        split_points = self.compile_ranges_split_points
+        compile_ranges = []
+        for i, s in enumerate(split_points):
+            if i == 0:
+                compile_ranges.append((1, s))
+            else:
+                compile_ranges.append((split_points[i - 1], s))
+        return compile_ranges
