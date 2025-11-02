@@ -49,8 +49,7 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 )
 from transformers.video_utils import VideoMetadata
 
-from vllm.attention.backends.registry import _Backend
-from vllm.attention.layer import check_upstream_fa_availability
+from vllm.attention.backends.registry import _MHA_Backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -198,8 +197,7 @@ class Qwen3_VisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend: _Backend = _Backend.TORCH_SDPA,
-        use_upstream_fa: bool = False,
+        attn_backend: _MHA_Backend = _MHA_Backend.TORCH_SDPA,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -214,7 +212,6 @@ class Qwen3_VisionBlock(nn.Module):
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
-            use_upstream_fa=use_upstream_fa,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -306,7 +303,7 @@ class Qwen3_VisionTransformer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
-        attn_backend_override: _Backend | None = None,
+        attn_backend_override: _MHA_Backend | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = vision_config.hidden_size
@@ -370,20 +367,13 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        use_upstream_fa = False
-        if (
-            self.attn_backend != _Backend.FLASH_ATTN
-            and self.attn_backend != _Backend.ROCM_AITER_FA
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            self.attn_backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
 
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
+            _MHA_Backend.VLLM_FLASH_ATTN,
+            _MHA_Backend.FLASH_ATTN,
+            _MHA_Backend.TORCH_SDPA,
+            _MHA_Backend.XFORMERS,
+            _MHA_Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"Qwen3-VL does not support {self.attn_backend} backend now."
@@ -400,7 +390,6 @@ class Qwen3_VisionTransformer(nn.Module):
                     prefix=f"{prefix}.blocks.{layer_idx}",
                     use_data_parallel=use_data_parallel,
                     attn_backend=self.attn_backend,
-                    use_upstream_fa=use_upstream_fa,
                 )
                 for layer_idx in range(vision_config.depth)
             ]
@@ -516,11 +505,11 @@ class Qwen3_VisionTransformer(nn.Module):
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
         seqlens = torch.zeros(1, device=cu_seqlens.device)
         if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
+            self.attn_backend == _MHA_Backend.FLASH_ATTN
+            or self.attn_backend == _MHA_Backend.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == _MHA_Backend.XFORMERS:
             seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         return max_seqlen, seqlens
 

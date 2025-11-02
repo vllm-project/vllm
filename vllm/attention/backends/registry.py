@@ -30,6 +30,15 @@ class _Backend(enum.Enum):
     ROCM_AITER_UNIFIED_ATTN = enum.auto()
 
 
+class _MHA_Backend(enum.Enum):
+    VLLM_FLASH_ATTN = enum.auto()  # CUDA-only
+    FLASH_ATTN = enum.auto()  # CUDA/ROCm/XPU
+    XFORMERS = enum.auto()  # CUDA
+    ROCM_AITER_FA = enum.auto()  # ROCM-only
+    TORCH_SDPA = enum.auto()  # CUDA/ROCm/TPU/XPU/CPU
+    PALLAS = enum.auto()  # TPU only
+
+
 BACKEND_MAP = {
     _Backend.FLASH_ATTN: "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend",  # noqa: E501
     _Backend.TRITON_ATTN: "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend",  # noqa: E501
@@ -108,3 +117,18 @@ def backend_name_to_enum(backend_name: str) -> _Backend | None:
     """
     assert backend_name is not None
     return _Backend[backend_name] if backend_name in _Backend.__members__ else None
+
+
+def mha_backend_name_to_enum(backend_name: str) -> _MHA_Backend | None:
+    """
+    Convert a string backend name to a _MHA_Backend enum value.
+
+    Returns:
+        _MHA_Backend: enum value if backend_name is a valid in-tree type
+        None: otherwise it's an invalid in-tree type or an out-of-tree platform
+              is loaded.
+    """
+    assert backend_name is not None
+    return (
+        _MHA_Backend[backend_name] if backend_name in _MHA_Backend.__members__ else None
+    )
