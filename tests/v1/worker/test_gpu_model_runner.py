@@ -187,9 +187,7 @@ def _make_mock_backend_for_kernel_block_size(
     supported_sizes: list[int | MultipleOf],
 ):
     class _MockBackend:
-        @staticmethod
-        def get_supported_kernel_block_size():
-            return supported_sizes
+        supported_kernel_block_sizes = supported_sizes
 
     return _MockBackend()
 
