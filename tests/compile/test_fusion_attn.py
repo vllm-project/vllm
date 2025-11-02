@@ -10,7 +10,7 @@ from tests.utils import flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import global_force_attn_backend_context_manager
 from vllm.compilation.fusion_attn import ATTN_OP, AttnFusionPass
 from vllm.compilation.fx_utils import find_op_nodes
@@ -104,7 +104,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         # TODO(luka) use get_kv_cache_stride_order
         # Create dummy KV cache for the selected backend
-        if backend == _Backend.ROCM_ATTN:
+        if backend == AttentionBackendEnum.ROCM_ATTN:
             # k/v as 1st dimention
             # HND: [num_blocks, num_kv_heads, block_size, head_size]
             kv_cache = torch.zeros(
@@ -116,7 +116,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        elif backend == _Backend.ROCM_AITER_UNIFIED_ATTN:
+        elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
             # k/v as 1st dimention
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
@@ -128,7 +128,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        elif backend == _Backend.TRITON_ATTN:
+        elif backend == AttentionBackendEnum.TRITON_ATTN:
             # k/v as 2nd dimention
             # NHD: [num_blocks, block_size, num_kv_heads, head_size]
             kv_cache = torch.zeros(
@@ -140,7 +140,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
                 dtype=self.kv_cache_dtype,
                 device=self.device,
             )
-        elif backend == _Backend.FLASHINFER:
+        elif backend == AttentionBackendEnum.FLASHINFER:
             kv_cache = torch.zeros(
                 num_blocks,
                 2,
@@ -244,8 +244,8 @@ MODELS_FP8: list[tuple[str, type]] = []
 MODELS_FP4: list[tuple[str, type]] = []
 HEADS: list[tuple[int, int]] = []
 SPLIT_ATTENTION: list[bool] = []
-BACKENDS_FP8: list[_Backend] = []
-BACKENDS_FP4: list[_Backend] = []
+BACKENDS_FP8: list[AttentionBackendEnum] = []
+BACKENDS_FP4: list[AttentionBackendEnum] = []
 
 if current_platform.is_cuda():
     HEADS = [(64, 8), (40, 8)]
@@ -261,8 +261,8 @@ if current_platform.is_cuda():
             TestAttentionNvfp4QuantPatternModel,
         )
     ]
-    BACKENDS_FP8 = [_Backend.TRITON_ATTN, _Backend.FLASHINFER]
-    BACKENDS_FP4 = [_Backend.FLASHINFER]
+    BACKENDS_FP8 = [AttentionBackendEnum.TRITON_ATTN, AttentionBackendEnum.FLASHINFER]
+    BACKENDS_FP4 = [AttentionBackendEnum.FLASHINFER]
 
 elif current_platform.is_rocm():
     HEADS = [(32, 8), (40, 8)]
@@ -270,9 +270,9 @@ elif current_platform.is_rocm():
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
     BACKENDS = [
-        _Backend.ROCM_AITER_UNIFIED_ATTN,
-        _Backend.ROCM_ATTN,
-        _Backend.TRITON_ATTN,
+        AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+        AttentionBackendEnum.ROCM_ATTN,
+        AttentionBackendEnum.TRITON_ATTN,
     ]
 
 
@@ -302,11 +302,11 @@ def test_attention_quant_pattern(
     custom_ops: str,
     model_name: str,
     model_class: type[AttentionQuantPatternModel],
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     dist_init,
 ):
     """Test AttentionStaticQuantPattern fusion pass"""
-    if backend == _Backend.FLASHINFER and (
+    if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
@@ -314,6 +314,7 @@ def test_attention_quant_pattern(
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     device = torch.device("cuda:0")
+    torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
     vllm_config = VllmConfig(
@@ -402,7 +403,7 @@ def test_attention_quant_pattern(
 
         result_fused_1 = model_compiled(q, k, v)
 
-        if backend == _Backend.FLASHINFER:
+        if backend == AttentionBackendEnum.FLASHINFER:
             # With the Flashinfer backend after the 1st round of the forward
             # pass, output quant scale should be loaded into the attn layer's
             # _o_scale_float, the 2nd round should reuse the loaded
