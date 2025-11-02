@@ -317,14 +317,23 @@ def make_tensor_with_pad(
     The padding is applied to the end of each inner list until it reaches
     `max_len`.
     """
-    np_dtype = TORCH_DTYPE_TO_NUMPY_DTYPE[dtype]
-    padded_x = make_ndarray_with_pad(x, pad, np_dtype, max_len=max_len)
+    if max_len is None:
+        max_len = max(len(row) for row in x) if x else 0
 
-    tensor = torch.from_numpy(padded_x).to(device)
-    if pin_memory:
-        tensor = tensor.pin_memory()
+    padded_tensor = torch.full(
+        (len(x), max_len), fill_value=pad, dtype=dtype, device=device
+    )
 
-    return tensor
+    for i, row in enumerate(x):
+        row_len = len(row)
+        if row_len > 0:
+            row_tensor = torch.as_tensor(row, dtype=dtype, device=device)
+            padded_tensor[i, :row_len] = row_tensor
+
+    if pin_memory and padded_tensor.device.type == "cpu":
+        return padded_tensor.pin_memory()
+
+    return padded_tensor
 
 
 prev_set_stream = torch.cuda.set_stream
