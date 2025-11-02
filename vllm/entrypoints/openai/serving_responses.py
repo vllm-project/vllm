@@ -50,6 +50,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -92,7 +93,10 @@ from vllm.entrypoints.openai.protocol import (
     ResponseUsage,
     StreamingResponsesResponse,
 )
-from vllm.entrypoints.openai.serving_engine import OpenAIServing
+from vllm.entrypoints.openai.serving_engine import (
+    GenerationError,
+    OpenAIServing,
+)
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -591,40 +595,57 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        input_messages = None
-        output_messages = None
-        if self.use_harmony:
-            assert isinstance(context, HarmonyContext)
-            output = self._make_response_output_items_with_harmony(context)
-            if request.enable_response_messages:
-                input_messages = context.messages[: context.num_init_messages]
-                output_messages = context.messages[context.num_init_messages :]
-            num_tool_output_tokens = context.num_tool_output_tokens
-            if len(output) > 0:
-                if context.finish_reason == "length":
+        try:
+            input_messages = None
+            output_messages = None
+            if self.use_harmony:
+                assert isinstance(context, HarmonyContext)
+                output = self._make_response_output_items_with_harmony(context)
+                if request.enable_response_messages:
+                    input_messages = context.messages[: context.num_init_messages]
+                    output_messages = context.messages[context.num_init_messages :]
+                num_tool_output_tokens = context.num_tool_output_tokens
+                if len(output) > 0:
+                    if context.finish_reason == "length":
+                        status = "incomplete"
+                    elif context.finish_reason == "abort":
+                        status = "cancelled"
+                    elif context.finish_reason == "error":
+                        logger.error(
+                            "Request %s failed with internal error during generation",
+                            request.request_id,
+                        )
+                        raise GenerationError("Internal server error")
+                else:
                     status = "incomplete"
-                elif context.finish_reason == "abort":
-                    status = "cancelled"
             else:
-                status = "incomplete"
-        else:
-            assert isinstance(context, SimpleContext)
-            final_res = context.last_output
-            assert final_res is not None
-            assert len(final_res.outputs) == 1
-            final_output = final_res.outputs[0]
+                assert isinstance(context, SimpleContext)
+                final_res = context.last_output
+                assert final_res is not None
+                assert len(final_res.outputs) == 1
+                final_output = final_res.outputs[0]
 
-            output = self._make_response_output_items(request, final_output, tokenizer)
-
-            # TODO: context for non-gptoss models doesn't use messages
-            # so we can't get them out yet
-            if request.enable_response_messages:
-                raise NotImplementedError(
-                    "enable_response_messages is currently only supported for gpt-oss"
+                # finish_reason='error' indicates retryable internal error
+                self._handle_error_finish_reason(
+                    final_output.finish_reason, request.request_id
                 )
-            # Calculate usage.
-            assert final_res.prompt_token_ids is not None
-            num_tool_output_tokens = 0
+
+                output = self._make_response_output_items(
+                    request, final_output, tokenizer
+                )
+
+                # TODO: context for non-gptoss models doesn't use messages
+                # so we can't get them out yet
+                if request.enable_response_messages:
+                    raise NotImplementedError(
+                        "enable_response_messages is currently only "
+                        "supported for gpt-oss"
+                    )
+                # Calculate usage.
+                assert final_res.prompt_token_ids is not None
+                num_tool_output_tokens = 0
+        except GenerationError as e:
+            return self._convert_generation_error_to_response(e)
 
         assert isinstance(context, (SimpleContext, HarmonyContext))
         num_prompt_tokens = context.num_prompt_tokens
@@ -1024,6 +1045,9 @@ class OpenAIServingResponses(OpenAIServing):
             async for event in generator:
                 event_deque.append(event)
                 new_event_signal.set()  # Signal new event available
+        except GenerationError as e:
+            logger.exception("Background request failed for %s", request.request_id)
+            response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
             response = self.create_error_response(str(e))
@@ -1047,6 +1071,9 @@ class OpenAIServingResponses(OpenAIServing):
     ):
         try:
             response = await self.responses_full_generator(request, *args, **kwargs)
+        except GenerationError as e:
+            logger.exception("Background request failed for %s", request.request_id)
+            response = self._convert_generation_error_to_response(e)
         except Exception as e:
             logger.exception("Background request failed for %s", request.request_id)
             response = self.create_error_response(str(e))
@@ -1185,6 +1212,10 @@ class OpenAIServingResponses(OpenAIServing):
                 continue
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
+                # finish_reason='error' indicates a retryable error
+                self._handle_error_finish_reason(
+                    output.finish_reason, request.request_id
+                )
                 if reasoning_parser:
                     delta_message = (
                         reasoning_parser.extract_reasoning_content_streaming(
@@ -1481,6 +1512,9 @@ class OpenAIServingResponses(OpenAIServing):
         is_first_function_call_delta = False
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)
+
+            # finish_reason='error' indicates a retryable error
+            self._handle_error_finish_reason(ctx.finish_reason, request.request_id)
 
             if ctx.is_expecting_start():
                 current_output_index += 1
@@ -1976,18 +2010,26 @@ class OpenAIServingResponses(OpenAIServing):
                 )
             )
 
-            async for event_data in processer(
-                request,
-                sampling_params,
-                result_generator,
-                context,
-                model_name,
-                tokenizer,
-                request_metadata,
-                created_time,
-                _increment_sequence_number_and_return,
-            ):
-                yield event_data
+            try:
+                async for event_data in processer(
+                    request,
+                    sampling_params,
+                    result_generator,
+                    context,
+                    model_name,
+                    tokenizer,
+                    request_metadata,
+                    created_time,
+                    _increment_sequence_number_and_return,
+                ):
+                    yield event_data
+            except GenerationError as e:
+                logger.exception("Error in responses stream generator.")
+                error_json = self._convert_generation_error_to_streaming_response(e)
+                yield _increment_sequence_number_and_return(
+                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                )
+                return
 
             async def empty_async_generator():
                 # A hack to trick Python to think this is a generator but
