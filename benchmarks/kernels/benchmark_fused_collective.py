@@ -17,10 +17,13 @@ import argparse
 import itertools
 import os
 import time
+from collections.abc import Callable
 
+import pandas as pd
 import torch  # type: ignore
 import torch.distributed as dist  # type: ignore
 
+from vllm.config.vllm import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_reduce,
@@ -278,225 +281,54 @@ def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
     )
 
 
-def standard_allreduce_rmsnorm(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rms_gamma: torch.Tensor,
-    rms_eps: float,
-    norm_out: torch.Tensor | None = None,
-):
-    """Standard allreduce + rmsnorm operations."""
-    # All-reduce first
-    allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-    # Then RMS norm
-    if residual is not None:
-        # Fused add + RMS norm
-        FUSED_ADD_RMS_NORM_OP(allreduce_out, residual, rms_gamma, rms_eps)
-    else:
-        # Just RMS norm
-        if norm_out is None:
-            norm_out = torch.empty_like(allreduce_out)
-        RMS_NORM_OP(norm_out, allreduce_out, rms_gamma, rms_eps)
-
-
-def standard_allreduce_rmsnorm_fp8_quant(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rms_gamma: torch.Tensor,
-    rms_eps: float,
-    scale_factor: torch.Tensor,
-    norm_out: torch.Tensor | None = None,
-    quant_out: torch.Tensor | None = None,
-):
-    """Standard allreduce + rmsnorm + FP8 quantization."""
-    if quant_out is None:
-        quant_out = torch.empty_like(input_tensor, dtype=FP8_DTYPE)
-
-    # All-reduce first
-    allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-
-    # Then fused RMS norm + FP8 quantization
-    if residual is not None:
-        FUSED_ADD_RMS_NORM_STATIC_FP8_QUANT_OP(
-            quant_out, allreduce_out, residual, rms_gamma, scale_factor, rms_eps
+class VllmFusedAllreduce:
+    def __init__(self, hidden_dim, dtype):
+        self.rms_eps = 1e-6
+        self.rms_norm = RMSNorm(hidden_dim, eps=self.rms_eps, dtype=dtype)
+        self.fp8_quant = QuantFP8(
+            static=True,
+            group_shape=GroupShape.PER_TENSOR,
         )
-        return quant_out, residual
-    else:
-        RMS_NORM_STATIC_FP8_QUANT_OP(
-            quant_out, allreduce_out, rms_gamma, scale_factor, rms_eps
-        )
-        return quant_out
 
+    def allreduce_rmsnorm(
+        self, input_tensor: torch.Tensor, residual: torch.Tensor | None
+    ):
+        allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
+        return self.rms_norm(allreduce_out, residual)
 
-def standard_allreduce_rmsnorm_fp4_quant(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rms_gamma: torch.Tensor,
-    rms_eps: float,
-    input_global_scale: torch.Tensor,
-    quant_out: torch.Tensor,
-    output_scale: torch.Tensor,
-    norm_out: torch.Tensor | None = None,
-):
-    """Standard allreduce + rmsnorm + FP4 quantization."""
+    def allreduce_rmsnorm_fp8_quant(
+        self,
+        input_tensor: torch.Tensor,
+        residual: torch.Tensor | None,
+        scale_factor: torch.Tensor,
+    ):
+        allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
+        rms_out = self.rms_norm(allreduce_out, residual)
+        if residual is None:
+            quant_out = self.fp8_quant(rms_out, scale_factor)
+            return quant_out
+        else:
+            rms_out, residual_out = rms_out
+            quant_out = self.fp8_quant(rms_out, scale_factor)
+            return quant_out, residual_out
 
-    # All-reduce first
-    allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-
-    # Then RMS norm
-    if residual is not None:
-        FUSED_ADD_RMS_NORM_OP(allreduce_out, residual, rms_gamma, rms_eps)
-        quant_input = allreduce_out
-        residual_out = residual
-    else:
-        if norm_out is None:
-            norm_out = torch.empty_like(allreduce_out)
-        RMS_NORM_OP(norm_out, allreduce_out, rms_gamma, rms_eps)
-        quant_input = norm_out
-        residual_out = allreduce_out
-
-    # Finally FP4 quantization
-    SCALED_FP4_QUANT_OP(quant_out, quant_input, output_scale, input_global_scale)
-    if residual is not None:
-        return quant_out, residual_out, output_scale
-    else:
-        return quant_out, norm_out
-
-
-def standard_allreduce_rmsnorm_native(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rmsnorm_layer: RMSNorm,
-    norm_out: torch.Tensor | None = None,
-):
-    """Standard allreduce + rmsnorm operations using native RMSNorm forward."""
-    # All-reduce first
-    allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-    # Apply native RMSNorm
-    if residual is not None:
-        result = rmsnorm_layer.forward_native(allreduce_out, residual)
-        return result  # Returns (norm_out, residual_out)
-    else:
-        result = rmsnorm_layer.forward_native(allreduce_out)
-        return result  # Returns norm_out
-
-
-def standard_allreduce_rmsnorm_fp8_quant_native(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rmsnorm_layer: RMSNorm,
-    quant_fp8_layer: QuantFP8,
-    scale_factor: torch.Tensor,
-    norm_out: torch.Tensor | None = None,
-    quant_out: torch.Tensor | None = None,
-):
-    """Standard allreduce + rmsnorm + FP8 quantization using native implementations."""
-    # All-reduce first
-    allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-
-    # Apply native RMSNorm
-    if residual is not None:
-        norm_out, residual_out = rmsnorm_layer.forward_native(allreduce_out, residual)
-    else:
-        norm_out = rmsnorm_layer.forward_native(allreduce_out)
-        residual_out = allreduce_out
-
-    # Apply native FP8 quantization
-    quant_out, _ = quant_fp8_layer.forward_native(norm_out, scale=scale_factor)
-
-    if residual is not None:
-        return quant_out, residual_out
-    else:
-        return quant_out
-
-
-def standard_allreduce_rmsnorm_fp4_quant_native(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rmsnorm_layer: RMSNorm,
-    input_global_scale: torch.Tensor,
-    quant_out: torch.Tensor,
-    output_scale: torch.Tensor,
-    norm_out: torch.Tensor | None = None,
-):
-    """Standard allreduce + rmsnorm + FP4 quantization using native RMSNorm."""
-    # All-reduce first
-    allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
-
-    # Apply native RMSNorm
-    if residual is not None:
-        norm_out, residual_out = rmsnorm_layer.forward_native(allreduce_out, residual)
-        quant_input = norm_out
-    else:
-        norm_out = rmsnorm_layer.forward_native(allreduce_out)
-        quant_input = norm_out
-        residual_out = allreduce_out
-
-    # Apply FP4 quantization (still using fused CUDA op as there's no native FP4)
-    SCALED_FP4_QUANT_OP(quant_out, quant_input, output_scale, input_global_scale)
-
-    if residual is not None:
-        return quant_out, residual_out, output_scale
-    else:
-        return quant_out, norm_out
-
-
-# Compiled versions of native functions
-@torch.compile
-def standard_allreduce_rmsnorm_native_compiled(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rmsnorm_layer: RMSNorm,
-    norm_out: torch.Tensor | None = None,
-):
-    """Compiled version of standard allreduce + rmsnorm."""
-    return standard_allreduce_rmsnorm_native(
-        input_tensor, residual, rmsnorm_layer, norm_out
-    )
-
-
-@torch.compile
-def standard_allreduce_rmsnorm_fp8_quant_native_compiled(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rmsnorm_layer: RMSNorm,
-    quant_fp8_layer: QuantFP8,
-    scale_factor: torch.Tensor,
-    norm_out: torch.Tensor | None = None,
-    quant_out: torch.Tensor | None = None,
-):
-    """Compiled version of standard allreduce + rmsnorm + FP8 quantization."""
-    return standard_allreduce_rmsnorm_fp8_quant_native(
-        input_tensor,
-        residual,
-        rmsnorm_layer,
-        quant_fp8_layer,
-        scale_factor,
-        norm_out,
-        quant_out,
-    )
-
-
-@torch.compile
-def standard_allreduce_rmsnorm_fp4_quant_native_compiled(
-    input_tensor: torch.Tensor,
-    residual: torch.Tensor | None,
-    rmsnorm_layer: RMSNorm,
-    input_global_scale: torch.Tensor,
-    quant_out: torch.Tensor,
-    output_scale: torch.Tensor,
-    norm_out: torch.Tensor | None = None,
-):
-    """Compiled version of standard allreduce + rmsnorm + FP4 quantization."""
-    return standard_allreduce_rmsnorm_fp4_quant_native(
-        input_tensor,
-        residual,
-        rmsnorm_layer,
-        input_global_scale,
-        quant_out,
-        output_scale,
-        norm_out,
-    )
+    def allreduce_rmsnorm_fp4_quant(
+        self,
+        input_tensor: torch.Tensor,
+        residual: torch.Tensor | None,
+        input_global_scale: torch.Tensor,
+        quant_out: torch.Tensor,
+        output_scale: torch.Tensor,
+    ):
+        allreduce_out = tensor_model_parallel_all_reduce(input_tensor)
+        rms_out = self.rms_norm(allreduce_out, residual)
+        if residual is None:
+            SCALED_FP4_QUANT_OP(quant_out, rms_out, output_scale, input_global_scale)
+            return quant_out, output_scale
+        else:
+            rms_out, residual_out = rms_out
+            SCALED_FP4_QUANT_OP(quant_out, rms_out, output_scale, input_global_scale)
+            return quant_out, residual_out, output_scale
 
 
 def create_test_tensors(
@@ -531,6 +363,23 @@ def create_test_tensors(
         fp4_quant_out,
         fp4_output_scale,
     )
+
+
+# From bench_per_token_quant_fp8.py
+def with_dyn_arg(fn: Callable, arg_index: int, dim_index: int):
+    def inner(*args):
+        torch._dynamo.mark_dynamic(args[arg_index], dim_index)
+        return fn(*args)
+
+    return inner
+
+
+def bench_compile(fn: Callable):
+    # recompile for different shapes
+    fwd = torch.compile(fn, fullgraph=True, dynamic=False)
+
+    # First dim is explicitly dynamic to simulate vLLM usage
+    return with_dyn_arg(fwd, 0, 0)
 
 
 def benchmark_operation(
@@ -578,8 +427,7 @@ def run_benchmarks(
     dtype: torch.dtype,
     use_residual: bool,
     allreduce_params: FlashInferFusedAllReduceParams | None,
-    quant_mode: str = "all",
-    disable_oneshot: bool = False,
+    quant_modes: set[str],
 ):
     """Run all benchmarks for given configuration.
 
@@ -600,46 +448,55 @@ def run_benchmarks(
 
     rms_eps = 1e-6
     results = {}
+    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
 
     # Create RMSNorm and QuantFP8 layers once for native benchmarks
-    rmsnorm_layer = RMSNorm(hidden_dim, eps=rms_eps, dtype=dtype)
-    rmsnorm_layer.weight.data = rms_gamma
-    quant_fp8_layer = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
 
-    if quant_mode in ["all", "none"]:
+    if "none" in quant_modes:
         # Standard AllReduce + RMSNorm
-        try:
-            time_ms = benchmark_operation(
-                standard_allreduce_rmsnorm,
-                input_tensor,
-                norm_out=norm_out,
-                residual=residual,
-                rms_gamma=rms_gamma,
-                rms_eps=rms_eps,
-            )
-            results["standard_allreduce_rmsnorm"] = time_ms
-        except Exception as e:
-            logger.error("Standard AllReduce+RMSNorm failed: %s", e)
-            results["standard_allreduce_rmsnorm"] = float("inf")
+        for custom_op in ["-rms_norm", "+rms_norm"]:
+            with set_current_vllm_config(
+                VllmConfig(compilation_config=CompilationConfig(custom_ops=[custom_op]))
+            ):
+                try:
+                    suffix = (
+                        "_custom_rms_norm" if "+" in custom_op else "_native_rms_norm"
+                    )
+                    time_ms = benchmark_operation(
+                        vllm_fused_allreduce.allreduce_rmsnorm,
+                        input_tensor,
+                        residual=residual,
+                    )
+                    results[f"standard_allreduce_{suffix}"] = time_ms
+                except Exception as e:
+                    logger.error("Standard AllReduce+RMSNorm failed: %s", e)
+                    results[f"standard_allreduce_{suffix}"] = float("inf")
 
         # Standard AllReduce + RMSNorm Native Compiled
-        try:
-            time_ms = benchmark_operation(
-                standard_allreduce_rmsnorm_native_compiled,
-                input_tensor,
-                residual=residual,
-                rmsnorm_layer=rmsnorm_layer,
-                norm_out=norm_out,
-            )
-            results["standard_allreduce_rmsnorm_native_compiled"] = time_ms
-        except Exception as e:
-            logger.error("Standard AllReduce+RMSNorm Native Compiled failed: %s", e)
-            results["standard_allreduce_rmsnorm_native_compiled"] = float("inf")
-
-        # FlashInfer Fused AllReduce + RMSNorm Oneshot
-        if flashinfer_comm is not None and allreduce_params is not None:
+        with set_current_vllm_config(
+            VllmConfig(compilation_config=CompilationConfig(custom_ops=["-rms_norm"]))
+        ):
             try:
-                if not disable_oneshot:
+                standard_allreduce_rmsnorm_native_compiled = torch.compile(
+                    vllm_fused_allreduce.allreduce_rmsnorm,
+                    fullgraph=True,
+                    dynamic=False,
+                )
+                time_ms = benchmark_operation(
+                    standard_allreduce_rmsnorm_native_compiled,
+                    input_tensor,
+                    residual=residual,
+                )
+                results["standard_allreduce_rmsnorm_native_compiled"] = time_ms
+            except Exception as e:
+                logger.error("Standard AllReduce+RMSNorm Native Compiled failed: %s", e)
+                results["standard_allreduce_rmsnorm_native_compiled"] = float("inf")
+
+        # FlashInfer Fused AllReduce + RMSNorm Oneshot/Twoshot
+        if flashinfer_comm is not None and allreduce_params is not None:
+            for use_oneshot in [True, False]:
+                suffix = "_oneshot" if use_oneshot else "_twoshot"
+                try:
                     time_ms = benchmark_operation(
                         flashinfer_fused_allreduce_rmsnorm,
                         input_tensor,
@@ -648,73 +505,82 @@ def run_benchmarks(
                         rms_gamma=rms_gamma,
                         rms_eps=rms_eps,
                         allreduce_params=allreduce_params,
-                        use_oneshot=True,
+                        use_oneshot=use_oneshot,
                     )
-                    results["flashinfer_fused_allreduce_rmsnorm_oneshot"] = time_ms
-            except Exception as e:
-                logger.error("FlashInfer Fused AllReduce+RMSNorm Oneshot failed: %s", e)
-                results["flashinfer_fused_allreduce_rmsnorm_oneshot"] = float("inf")
+                    results[f"flashinfer_fused_allreduce_rmsnorm{suffix}"] = time_ms
+                except Exception as e:
+                    logger.error("FlashInfer Fused AllReduce+RMSNorm failed: %s", e)
+                    results[f"flashinfer_fused_allreduce_rmsnorm{suffix}"] = float(
+                        "inf"
+                    )
 
-            # FlashInfer Fused AllReduce + RMSNorm Two-shot
-            try:
-                time_ms = benchmark_operation(
-                    flashinfer_fused_allreduce_rmsnorm,
-                    input_tensor,
-                    residual=residual,
-                    norm_out=norm_out,
-                    rms_gamma=rms_gamma,
-                    rms_eps=rms_eps,
-                    allreduce_params=allreduce_params,
-                    use_oneshot=False,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_twoshot"] = time_ms
-            except Exception as e:
-                logger.error(
-                    "FlashInfer Fused AllReduce+RMSNorm Two-shot failed: %s", e
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_twoshot"] = float("inf")
-
-    if quant_mode in ["all", "fp8_only"]:
+    if "fp8" in quant_modes:
         # Standard AllReduce + RMSNorm + FP8 Quant
-        try:
-            time_ms = benchmark_operation(
-                standard_allreduce_rmsnorm_fp8_quant,
-                input_tensor,
-                norm_out=norm_out,
-                residual=residual,
-                rms_gamma=rms_gamma,
-                rms_eps=rms_eps,
-                scale_factor=scale_fp8,
-                quant_out=quant_out_fp8,
+        for rms_norm_custom_op in ["-rms_norm", "+rms_norm"]:
+            suffix = (
+                "_custom_rms_norm" if "+" in rms_norm_custom_op else "_native_rms_norm"
             )
-            results["standard_allreduce_rmsnorm_fp8_quant"] = time_ms
-        except Exception as e:
-            logger.error("Standard AllReduce+RMSNorm+FP8 failed: %s", e)
-            results["standard_allreduce_rmsnorm_fp8_quant"] = float("inf")
+            for quant_fp8_custom_op in ["-quant_fp8", "+quant_fp8"]:
+                suffix += (
+                    "_custom_quant_fp8"
+                    if "+" in quant_fp8_custom_op
+                    else "_native_quant_fp8"
+                )
+                with set_current_vllm_config(
+                    VllmConfig(
+                        compilation_config=CompilationConfig(
+                            custom_ops=[rms_norm_custom_op, quant_fp8_custom_op]
+                        )
+                    )
+                ):
+                    try:
+                        time_ms = benchmark_operation(
+                            vllm_fused_allreduce.allreduce_rmsnorm_fp8_quant,
+                            input_tensor,
+                            residual=residual,
+                            scale_factor=scale_fp8,
+                        )
+                        results[f"standard_allreduce{suffix}"] = time_ms
+                    except Exception as e:
+                        logger.error("Standard AllReduce+RMSNorm+FP8 failed: %s", e)
+                        results[f"standard_allreduce{suffix}"] = float("inf")
 
         # Standard AllReduce + RMSNorm + FP8 Quant Native Compiled
-        try:
-            time_ms = benchmark_operation(
-                standard_allreduce_rmsnorm_fp8_quant_native_compiled,
-                input_tensor,
-                residual=residual,
-                rmsnorm_layer=rmsnorm_layer,
-                quant_fp8_layer=quant_fp8_layer,
-                scale_factor=scale_fp8,
-                norm_out=norm_out,
-                quant_out=quant_out_fp8,
+        with set_current_vllm_config(
+            VllmConfig(
+                compilation_config=CompilationConfig(
+                    custom_ops=["-rms_norm", "-quant_fp8"]
+                )
             )
-            results["standard_allreduce_rmsnorm_fp8_quant_native_compiled"] = time_ms
-        except Exception as e:
-            logger.error("Standard AllReduce+RMSNorm+FP8 Native Compiled failed: %s", e)
-            results["standard_allreduce_rmsnorm_fp8_quant_native_compiled"] = float(
-                "inf"
-            )
+        ):
+            try:
+                standard_allreduce_rmsnorm_fp8_quant_native_compiled = torch.compile(
+                    vllm_fused_allreduce.allreduce_rmsnorm_fp8_quant,
+                    fullgraph=True,
+                    dynamic=False,
+                )
+                time_ms = benchmark_operation(
+                    standard_allreduce_rmsnorm_fp8_quant_native_compiled,
+                    input_tensor,
+                    residual=residual,
+                    scale_factor=scale_fp8,
+                )
+                results["standard_allreduce_rmsnorm_fp8_quant_native_compiled"] = (
+                    time_ms
+                )
+            except Exception as e:
+                logger.error(
+                    "Standard AllReduce+RMSNorm+FP8 Native Compiled failed: %s", e
+                )
+                results["standard_allreduce_rmsnorm_fp8_quant_native_compiled"] = float(
+                    "inf"
+                )
 
         # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
-            try:
-                if not disable_oneshot:
+            for use_oneshot in [True, False]:
+                suffix = "_oneshot" if use_oneshot else "_twoshot"
+                try:
                     time_ms = benchmark_operation(
                         flashinfer_fused_allreduce_rmsnorm_fp8_quant,
                         input_tensor,
@@ -725,87 +591,81 @@ def run_benchmarks(
                         scale_factor=scale_fp8,
                         quant_out=quant_out_fp8,
                         allreduce_params=allreduce_params,
-                        use_oneshot=True,
+                        use_oneshot=use_oneshot,
                     )
-                    results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_oneshot"] = (
+                    results[f"flashinfer_fused_allreduce_rmsnorm_fp8_quant{suffix}"] = (
                         time_ms
                     )
-            except Exception as e:
-                logger.error(
-                    "FlashInfer Fused AllReduce+RMSNorm+FP8 Oneshot failed: %s",
-                    e,
+                except Exception as e:
+                    logger.error(
+                        "FlashInfer Fused AllReduce+RMSNorm+FP8 Oneshot failed: %s",
+                        e,
+                    )
+                    results[f"flashinfer_fused_allreduce_rmsnorm_fp8_quant{suffix}"] = (
+                        float("inf")
+                    )
+
+    if "fp4" in quant_modes and current_platform.has_device_capability(100):
+        # Standard AllReduce + RMSNorm + FP4 Quant
+        for rms_norm_custom_op in ["-rms_norm", "+rms_norm"]:
+            suffix = (
+                "_custom_rms_norm" if "+" in rms_norm_custom_op else "_native_rms_norm"
+            )
+            with set_current_vllm_config(
+                VllmConfig(
+                    compilation_config=CompilationConfig(
+                        custom_ops=[rms_norm_custom_op]
+                    )
                 )
-                results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_oneshot"] = float(
-                    "inf"
-                )
-            # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Two-shot
+            ):
+                try:
+                    time_ms = benchmark_operation(
+                        vllm_fused_allreduce.allreduce_rmsnorm_fp4_quant,
+                        input_tensor,
+                        residual=residual,
+                        input_global_scale=scale_fp4,
+                        quant_out=fp4_quant_out,
+                        output_scale=fp4_output_scale,
+                    )
+                    results[f"standard_allreduce_{suffix}_fp4_quant"] = time_ms
+                except Exception as e:
+                    logger.error("Standard AllReduce+RMSNorm+FP4 failed: %s", e)
+                    results[f"standard_allreduce_{suffix}_fp4_quant"] = float("inf")
+
+        # Standard AllReduce + RMSNorm + FP4 Quant Native Compiled
+        with set_current_vllm_config(
+            VllmConfig(compilation_config=CompilationConfig(custom_ops=["-rms_norm"]))
+        ):
             try:
-                time_ms = benchmark_operation(
-                    flashinfer_fused_allreduce_rmsnorm_fp8_quant,
-                    input_tensor,
-                    norm_out=norm_out,
-                    residual=residual,
-                    rms_gamma=rms_gamma,
-                    rms_eps=rms_eps,
-                    scale_factor=scale_fp8,
-                    quant_out=quant_out_fp8,
-                    allreduce_params=allreduce_params,
-                    use_oneshot=False,
+                standard_allreduce_rmsnorm_fp4_quant_native_compiled = torch.compile(
+                    vllm_fused_allreduce.allreduce_rmsnorm_fp4_quant,
+                    fullgraph=True,
+                    dynamic=False,
                 )
-                results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_twoshot"] = (
+                time_ms = benchmark_operation(
+                    standard_allreduce_rmsnorm_fp4_quant_native_compiled,
+                    input_tensor,
+                    residual=residual,
+                    quant_out=fp4_quant_out,
+                    input_global_scale=scale_fp4,
+                    output_scale=fp4_output_scale,
+                )
+                results["standard_allreduce_rmsnorm_fp4_quant_native_compiled"] = (
                     time_ms
                 )
             except Exception as e:
                 logger.error(
-                    "FlashInfer Fused AllReduce+RMSNorm+FP8 Two-shot failed: %s",
-                    e,
+                    "Standard AllReduce+RMSNorm+FP4 Native Compiled failed: %s", e
                 )
-                results["flashinfer_fused_allreduce_rmsnorm_fp8_quant_twoshot"] = float(
+                results["standard_allreduce_rmsnorm_fp4_quant_native_compiled"] = float(
                     "inf"
                 )
 
-    if quant_mode in ["all", "fp4_only"]:
-        # Standard AllReduce + RMSNorm + FP4 Quant
-        try:
-            time_ms = benchmark_operation(
-                standard_allreduce_rmsnorm_fp4_quant,
-                input_tensor,
-                norm_out=norm_out,
-                residual=residual,
-                rms_gamma=rms_gamma,
-                rms_eps=rms_eps,
-                input_global_scale=scale_fp4,
-                quant_out=fp4_quant_out,
-                output_scale=fp4_output_scale,
-            )
-            results["standard_allreduce_rmsnorm_fp4_quant"] = time_ms
-        except Exception as e:
-            logger.error("Standard AllReduce+RMSNorm+FP4 failed: %s", e)
-            results["standard_allreduce_rmsnorm_fp4_quant"] = float("inf")
-
-        # Standard AllReduce + RMSNorm + FP4 Quant Native Compiled
-        try:
-            time_ms = benchmark_operation(
-                standard_allreduce_rmsnorm_fp4_quant_native_compiled,
-                input_tensor,
-                residual=residual,
-                rmsnorm_layer=rmsnorm_layer,
-                input_global_scale=scale_fp4,
-                quant_out=fp4_quant_out,
-                output_scale=fp4_output_scale,
-                norm_out=norm_out,
-            )
-            results["standard_allreduce_rmsnorm_fp4_quant_native_compiled"] = time_ms
-        except Exception as e:
-            logger.error("Standard AllReduce+RMSNorm+FP4 Native Compiled failed: %s", e)
-            results["standard_allreduce_rmsnorm_fp4_quant_native_compiled"] = float(
-                "inf"
-            )
-
         # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
-            try:
-                if not disable_oneshot:
+            for use_oneshot in [True, False]:
+                suffix = "_oneshot" if use_oneshot else "_twoshot"
+                try:
                     time_ms = benchmark_operation(
                         flashinfer_fused_allreduce_rmsnorm_fp4_quant,
                         input_tensor,
@@ -817,19 +677,19 @@ def run_benchmarks(
                         allreduce_params=allreduce_params,
                         quant_out=fp4_quant_out,
                         output_scale=fp4_output_scale,
-                        use_oneshot=True,
+                        use_oneshot=use_oneshot,
                     )
-                    results["flashinfer_fused_allreduce_rmsnorm_fp4_quant_oneshot"] = (
+                    results[f"flashinfer_fused_allreduce_rmsnorm_fp4_quant{suffix}"] = (
                         time_ms
                     )
-            except Exception as e:
-                logger.error(
-                    "FlashInfer Fused AllReduce+RMSNorm+FP4 Oneshot failed: %s",
-                    e,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_fp4_quant_oneshot"] = float(
-                    "inf"
-                )
+                except Exception as e:
+                    logger.error(
+                        "FlashInfer Fused AllReduce+RMSNorm+FP4 Oneshot failed: %s",
+                        e,
+                    )
+                    results[f"flashinfer_fused_allreduce_rmsnorm_fp4_quant{suffix}"] = (
+                        float("inf")
+                    )
 
         # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant Two-shot
         if flashinfer_comm is not None and allreduce_params is not None:
@@ -962,7 +822,7 @@ def prepare_results_with_speedups(results_dict):
 
 
 def print_results(
-    results_dict, seq_len, hidden_dim, dtype, use_residual, quant_mode, input_size_mb
+    results_dict, seq_len, hidden_dim, dtype, use_residual, quant_modes, input_size_mb
 ):
     """Print benchmark results in a formatted table."""
     print(f"\n{'=' * 80}")
@@ -972,7 +832,7 @@ def print_results(
     )
     print(
         f"dtype={dtype}, residual={'yes' if use_residual else 'no'}, "
-        f"quant_mode={quant_mode}"
+        f"quant_modes={','.join(sorted(list(quant_modes)))}"
     )
     print(f"{'=' * 80}")
     print(f"{'Operation':<50} {'Time (ms)':<12} {'Speedup':<10}")
@@ -996,46 +856,51 @@ def format_results_markdown(
     all_results: list[dict], world_size: int, args: argparse.Namespace
 ) -> str:
     """Format all benchmark results as markdown."""
-    markdown = f"""# FlashInfer Fused Collective Operations Benchmark Results
+    lines: list[str] = []
+    lines.append("# FlashInfer Fused Collective Operations Benchmark Results")
+    lines.append("")
+    lines.append(f"**World Size:** {world_size}  ")
+    lines.append(f"**Hidden Dimension:** {args.hidden_dim}  ")
+    lines.append(f"**Warmup Iterations:** {args.warmup}  ")
+    lines.append(f"**Benchmark Trials:** {args.trials}  ")
+    modes = ",".join(all_results[0]["quant_modes"]) if all_results else "N/A"
+    lines.append(f"**Quantization Modes:** {modes}  ")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
 
-**World Size:** {world_size}  
-**Hidden Dimension:** {args.hidden_dim}  
-**Warmup Iterations:** {args.warmup}  
-**Benchmark Trials:** {args.trials}  
-**Quantization Mode:** {all_results[0]["quant_mode"] if all_results else "N/A"}  
-
----
-
-"""
-
-    for result in all_results:
-        seq_len = result["seq_len"]
-        dtype = result["dtype"]
-        use_residual = result["use_residual"]
-        results_dict = result["results"]
-        input_size_mb = result["input_size_mb"]
+    for entry in all_results:
+        seq_len = entry["seq_len"]
+        dtype = entry["dtype"]
+        use_residual = entry["use_residual"]
+        results_dict = entry["results"]
+        input_size_mb = entry["input_size_mb"]
         residual_str = "with residual" if use_residual else "no residual"
 
-        markdown += f"""
-## Configuration: seq_len={seq_len}, dtype={dtype}, {residual_str}
-**Input Size:** {input_size_mb:.2f} MB
+        lines.append(
+            f"## Configuration: seq_len={seq_len}, dtype={dtype}, {residual_str}"
+        )
+        lines.append(f"**Input Size:** {input_size_mb:.2f} MB")
+        lines.append("")
 
-| Operation | Time (ms) | Speedup |
-|-----------|-----------|---------|
-"""
+        prepared = prepare_results_with_speedups(results_dict)
+        # Build DataFrame for markdown export
+        rows = [
+            {
+                "Operation": r["operation"].replace("_", " ").title(),
+                "Time (ms)": r["time_str"],
+                "Speedup": r["speedup_str"],
+            }
+            for r in prepared
+        ]
+        df = pd.DataFrame(rows)
+        if df.empty:
+            lines.append("No results.")
+        else:
+            lines.append(df.to_markdown(index=False))
+        lines.append("")
 
-        # Prepare results with speedup calculations
-        prepared_results = prepare_results_with_speedups(results_dict)
-
-        for result in prepared_results:
-            # Format operation name for better readability
-            formatted_op_name = result["operation"].replace("_", " ").title()
-            markdown += f"| {formatted_op_name} | {result['time_str']} |"
-            markdown += f"{result['speedup_str']} |\n"
-
-        markdown += "\n"
-
-    return markdown
+    return "\n".join(lines)
 
 
 def save_results_to_file(
@@ -1089,28 +954,16 @@ def main():
         help="Skip residual connection tests",
     )
 
-    # Quantization mode options (mutually exclusive with --no-quant)
-    quant_group = parser.add_mutually_exclusive_group()
-    quant_group.add_argument(
-        "--no-quant", action="store_true", help="Skip all quantization tests"
-    )
-    quant_group.add_argument(
-        "--quant-fp8", action="store_true", help="Only run FP8 quantization tests"
-    )
-    quant_group.add_argument(
-        "--quant-fp4", action="store_true", help="Only run FP4 quantization tests"
-    )
-    quant_group.add_argument(
-        "--quant-all",
-        action="store_true",
-        help="Run all quantization tests (default)",
+    parser.add_argument(
+        "--quant-modes",
+        type=str,
+        default="none,fp8,fp4",
+        help=(
+            "Comma-separated quantization modes to run: none, fp8, fp4. "
+            "Default: none,fp8,fp4"
+        ),
     )
 
-    parser.add_argument(
-        "--disable-oneshot",
-        action="store_true",
-        help="Disable oneshot mode for FlashInfer operations",
-    )
     parser.add_argument(
         "--warmup", type=int, default=5, help="Number of warmup iterations"
     )
@@ -1152,24 +1005,25 @@ def main():
             f"Current world size: {world_size}. Use torchrun with --nproc_per_node > 1."
         )
 
-    # Determine quantization mode
-    if args.no_quant:
-        quant_mode = "none"
-    elif args.quant_fp8:
-        quant_mode = "fp8_only"
-    elif args.quant_fp4:
-        quant_mode = "fp4_only"
-    else:  # args.quant_all or default
-        quant_mode = "all"
+    # Parse quantization modes
+    valid_quant_modes = {"none", "fp8", "fp4"}
+    raw_modes = [
+        m.strip().lower() for m in (args.quant_modes or "").split(",") if m.strip()
+    ]
+    quant_modes = set(raw_modes) if raw_modes else {"none", "fp8", "fp4"}
+    invalid = sorted(list(quant_modes - valid_quant_modes))
+    if invalid:
+        raise ValueError(
+            f"Invalid --quant-modes entries: {','.join(invalid)}. "
+            f"Valid options are: {','.join(sorted(valid_quant_modes))}."
+        )
 
     if rank == 0:
         logger.info("Running benchmark with world_size=%s, rank=%s", world_size, rank)
-        logger.info("Quantization mode: %s", quant_mode)
+        logger.info("Quantization modes: %s", ",".join(sorted(list(quant_modes))))
         if flashinfer_comm is not None:
-            oneshot_status = "enabled" if not args.disable_oneshot else "disabled"
             logger.info(
-                "FlashInfer available - will benchmark fused operations (oneshot: %s)",
-                oneshot_status,
+                "FlashInfer available - will benchmark fused operations",
             )
         else:
             logger.info(
@@ -1186,8 +1040,6 @@ def main():
 
     # Test configurations
     residual_options = [True] if not args.no_residual else [False]
-    if not args.no_residual:
-        residual_options.append(False)
 
     configs = list(itertools.product(args.seq_lens, dtypes, residual_options))
 
@@ -1233,8 +1085,7 @@ def main():
                 dtype,
                 use_residual,
                 allreduce_params,
-                quant_mode=quant_mode,
-                disable_oneshot=args.disable_oneshot,
+                quant_modes=quant_modes,
             )
 
             # Store results for markdown export
@@ -1249,7 +1100,7 @@ def main():
                         "hidden_dim": args.hidden_dim,
                         "dtype": str(dtype).replace("torch.", ""),
                         "use_residual": use_residual,
-                        "quant_mode": quant_mode,
+                        "quant_modes": sorted(list(quant_modes)),
                         "input_size_mb": input_size_mb,
                         "results": results,
                     }
@@ -1261,7 +1112,7 @@ def main():
                     args.hidden_dim,
                     dtype,
                     use_residual,
-                    quant_mode,
+                    quant_modes,
                     input_size_mb,
                 )
 

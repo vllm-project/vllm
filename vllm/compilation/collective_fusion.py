@@ -504,9 +504,8 @@ if flashinfer_comm is not None:
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
-        max_tensor_size = max_token_num * hidden_size * element_size
 
-        if current_tensor_size <= max_tensor_size:
+        if num_tokens <= max_token_num:
             device_capability = (
                 current_platform.get_device_capability().as_version_str()
             )
