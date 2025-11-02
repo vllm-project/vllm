@@ -801,6 +801,27 @@ def load_ovis2_5(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_paddleocr_vl(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>" * len(image_urls)
+    prompt = f"<|begin_of_sentence|>User: {question}{placeholders}\nAssistant: "
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_pixtral_hf(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "mistral-community/pixtral-12b"
 
@@ -1312,6 +1333,7 @@ model_example_map = {
     "NVLM_D": load_nvlm_d,
     "ovis": load_ovis,
     "ovis2_5": load_ovis2_5,
+    "paddleocr_vl": load_paddleocr_vl,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
     "phi4_multimodal": load_phi4_multimodal,
