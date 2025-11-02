@@ -1,18 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
-from typing import Any, Optional, Union
+from collections.abc import Iterable, Sequence
+from typing import Any
 
-from vllm.distributed.kv_events import (MEDIUM_GPU, AllBlocksCleared,
-                                        BlockRemoved, BlockStored,
-                                        KVCacheEvent)
+from vllm.distributed.kv_events import (
+    MEDIUM_GPU,
+    AllBlocksCleared,
+    BlockRemoved,
+    BlockStored,
+    KVCacheEvent,
+)
 from vllm.logger import init_logger
-from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
-                                         ExternalBlockHash,
-                                         FreeKVCacheBlockQueue, KVCacheBlock,
-                                         get_block_hash,
-                                         make_block_hash_with_group_id,
-                                         maybe_convert_block_hash)
+from vllm.v1.core.kv_cache_utils import (
+    BlockHash,
+    BlockHashWithGroupId,
+    ExternalBlockHash,
+    FreeKVCacheBlockQueue,
+    KVCacheBlock,
+    get_block_hash,
+    make_block_hash_with_group_id,
+    maybe_convert_block_hash,
+)
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -20,7 +28,7 @@ logger = init_logger(__name__)
 
 class BlockHashToBlockMap:
     """
-    Cache of blocks that are used for prefix caching. It caches blocks 
+    Cache of blocks that are used for prefix caching. It caches blocks
     from hash directly to a block or multiple blocks
     (i.e. {block_hash: KVCacheBlocks})
     - Mostly block_hash maps to a single KVCacheBlock, and KVCacheBlocks
@@ -42,11 +50,11 @@ class BlockHashToBlockMap:
     """
 
     def __init__(self):
-        self._cache: dict[BlockHashWithGroupId,
-                          Union[KVCacheBlock, dict[int, KVCacheBlock]]] = {}
+        self._cache: dict[
+            BlockHashWithGroupId, KVCacheBlock | dict[int, KVCacheBlock]
+        ] = {}
 
-    def get_one_block(self,
-                      key: BlockHashWithGroupId) -> Optional[KVCacheBlock]:
+    def get_one_block(self, key: BlockHashWithGroupId) -> KVCacheBlock | None:
         """
         Gets any block with the given block hash key.
         """
@@ -77,8 +85,7 @@ class BlockHashToBlockMap:
         else:
             self._unexpected_blocks_type(blocks)
 
-    def pop(self, key: BlockHashWithGroupId,
-            block_id: int) -> Optional[KVCacheBlock]:
+    def pop(self, key: BlockHashWithGroupId, block_id: int) -> KVCacheBlock | None:
         """
         Checks if block_hash exists and pop block_id from the cache
         """
@@ -148,8 +155,7 @@ class BlockPool:
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
-        self.cached_block_hash_to_block: BlockHashToBlockMap = \
-            BlockHashToBlockMap()
+        self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -161,9 +167,9 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
     def get_cached_block(
-            self, block_hash: BlockHash,
-            kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
-        """Get the cached block by the block hash for each group in 
+        self, block_hash: BlockHash, kv_cache_group_ids: list[int]
+    ) -> list[KVCacheBlock] | None:
+        """Get the cached block by the block hash for each group in
         `kv_cache_group_ids`, or None if cache miss for any group.
         If there are duplicated blocks, we return the first block in the cache.
 
@@ -177,9 +183,11 @@ class BlockPool:
         cached_blocks = []
         for group_id in kv_cache_group_ids:
             block_hash_with_group_id = make_block_hash_with_group_id(
-                block_hash, group_id)
+                block_hash, group_id
+            )
             block = self.cached_block_hash_to_block.get_one_block(
-                block_hash_with_group_id)
+                block_hash_with_group_id
+            )
             if not block:
                 return None
             cached_blocks.append(block)
@@ -211,48 +219,50 @@ class BlockPool:
             block_size: Number of tokens in each block.
             kv_cache_group_id: The id of the KV cache group.
         """
-        if num_cached_blocks == num_full_blocks:
+        if num_cached_blocks >= num_full_blocks:
             return
         new_full_blocks = blocks[num_cached_blocks:num_full_blocks]
         assert len(request.block_hashes) >= num_full_blocks
         new_block_hashes = request.block_hashes[num_cached_blocks:]
 
-        new_hashes: Optional[list[ExternalBlockHash]] = (
-            [] if self.enable_kv_cache_events else None)
+        new_hashes: list[ExternalBlockHash] | None = (
+            [] if self.enable_kv_cache_events else None
+        )
         for i, blk in enumerate(new_full_blocks):
             assert blk.block_hash is None
             block_hash = new_block_hashes[i]
 
             # Update and added the full block to the cache.
             block_hash_with_group_id = make_block_hash_with_group_id(
-                block_hash, kv_cache_group_id)
+                block_hash, kv_cache_group_id
+            )
             blk.block_hash = block_hash_with_group_id
-            self.cached_block_hash_to_block.insert(block_hash_with_group_id,
-                                                   blk)
+            self.cached_block_hash_to_block.insert(block_hash_with_group_id, blk)
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
-                parent_block_hash: Optional[ExternalBlockHash] = None
+                parent_block_hash: ExternalBlockHash | None = None
             else:
                 parent_block = blocks[num_cached_blocks - 1]
                 assert parent_block.block_hash is not None
                 parent_block_hash = maybe_convert_block_hash(
-                    get_block_hash(parent_block.block_hash))
+                    get_block_hash(parent_block.block_hash)
+                )
 
             self.kv_event_queue.append(
                 BlockStored(
                     block_hashes=new_hashes,
                     parent_block_hash=parent_block_hash,
-                    token_ids=request.
-                    all_token_ids[num_cached_blocks *
-                                  block_size:num_full_blocks * block_size],
+                    token_ids=request.all_token_ids[
+                        num_cached_blocks * block_size : num_full_blocks * block_size
+                    ],
                     block_size=block_size,
-                    lora_id=request.lora_request.id
-                    if request.lora_request else None,
+                    lora_id=request.lora_request.id if request.lora_request else None,
                     medium=MEDIUM_GPU,
-                ))
+                )
+            )
 
     def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
@@ -266,8 +276,7 @@ class BlockPool:
             A list of new block.
         """
         if num_blocks > self.get_num_free_blocks():
-            raise ValueError(
-                f"Cannot get {num_blocks} free blocks from the pool")
+            raise ValueError(f"Cannot get {num_blocks} free blocks from the pool")
 
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
@@ -299,8 +308,7 @@ class BlockPool:
             # The block doesn't have hash, eviction is not needed
             return False
 
-        if self.cached_block_hash_to_block.pop(block_hash,
-                                               block.block_id) is None:
+        if self.cached_block_hash_to_block.pop(block_hash, block.block_id) is None:
             # block not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
@@ -313,13 +321,14 @@ class BlockPool:
             # we disable hybrid kv cache manager when kv cache event is
             # enabled, so there is only one group.
             self.kv_event_queue.append(
-                BlockRemoved(block_hashes=[
-                    maybe_convert_block_hash(get_block_hash(block_hash))
-                ],
-                             medium=MEDIUM_GPU))
+                BlockRemoved(
+                    block_hashes=[maybe_convert_block_hash(get_block_hash(block_hash))],
+                    medium=MEDIUM_GPU,
+                )
+            )
         return True
 
-    def touch(self, blocks: tuple[list[KVCacheBlock], ...]) -> None:
+    def touch(self, blocks: tuple[Sequence[KVCacheBlock], ...]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -347,10 +356,9 @@ class BlockPool:
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
             block.ref_cnt -= 1
-        self.free_block_queue.append_n([
-            block for block in blocks_list
-            if block.ref_cnt == 0 and not block.is_null
-        ])
+        self.free_block_queue.append_n(
+            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
+        )
 
     def reset_prefix_cache(self) -> bool:
         """Reset prefix cache. This function may be used in RLHF
@@ -365,7 +373,9 @@ class BlockPool:
         if num_used_blocks != 1:  # The null block is always marked as used
             logger.warning(
                 "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet", num_used_blocks - 1)
+                "blocks (%d) are not freed yet",
+                num_used_blocks - 1,
+            )
             return False
 
         # Remove all hashes so that no new blocks will hit.
@@ -405,7 +415,7 @@ class BlockPool:
 
     def take_events(self) -> list[KVCacheEvent]:
         """Atomically takes all events and clears the queue.
-        
+
         Returns:
             A list of KV cache events.
         """

@@ -37,9 +37,7 @@ class XPUModelRunner(GPUModelRunner):
 
 @contextmanager
 def _torch_cuda_wrapper():
-
     class _EventPlaceholder:
-
         def __init__(self, *args, **kwargs) -> None:
             self.record = lambda: None
             self.synchronize = lambda: None

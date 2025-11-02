@@ -44,9 +44,7 @@ def test_tokenizer():
     # Add custom test tokens
     test_tokens = ["<test:think>", "</test:think>", "<alt:start>", "<alt:end>"]
     existing_tokens = set(tokenizer.get_vocab().keys())
-    new_tokens = [
-        token for token in test_tokens if token not in existing_tokens
-    ]
+    new_tokens = [token for token in test_tokens if token not in existing_tokens]
     if new_tokens:
         tokenizer.add_tokens(new_tokens)
     return tokenizer
@@ -54,8 +52,8 @@ def test_tokenizer():
 
 class TestBaseThinkingReasoningParserInit:
     """
-        Test initialization and basic properties of
-        BaseThinkingReasoningParser.
+    Test initialization and basic properties of
+    BaseThinkingReasoningParser.
     """
 
     def test_successful_initialization(self, test_tokenizer):
@@ -76,7 +74,6 @@ class TestBaseThinkingReasoningParserInit:
 
         # Create a parser with tokens not in vocabulary
         class MissingTokenParser(BaseThinkingReasoningParser):
-
             @property
             def start_token(self) -> str:
                 return "<missing:start>"
@@ -85,15 +82,15 @@ class TestBaseThinkingReasoningParserInit:
             def end_token(self) -> str:
                 return "<missing:end>"
 
-        with pytest.raises(RuntimeError,
-                           match="could not locate think start/end tokens"):
+        with pytest.raises(
+            RuntimeError, match="could not locate think start/end tokens"
+        ):
             MissingTokenParser(test_tokenizer)
 
     def test_initialization_with_empty_tokens(self, test_tokenizer):
         """Test that initialization fails with empty token strings."""
 
         class EmptyTokenParser(BaseThinkingReasoningParser):
-
             @property
             def start_token(self) -> str:
                 return ""
@@ -102,8 +99,9 @@ class TestBaseThinkingReasoningParserInit:
             def end_token(self) -> str:
                 return ""
 
-        with pytest.raises(ValueError,
-                           match="start_token and end_token must be defined"):
+        with pytest.raises(
+            ValueError, match="start_token and end_token must be defined"
+        ):
             EmptyTokenParser(test_tokenizer)
 
 
@@ -158,10 +156,8 @@ class TestBaseThinkingReasoningParserExtraction:
         parser = TestThinkingReasoningParser(test_tokenizer)
         request = ChatCompletionRequest(messages=[], model="test-model")
 
-        model_output = ("<test:think>This is reasoning"
-                        "</test:think>This is content")
-        reasoning, content = parser.extract_reasoning_content(
-            model_output, request)
+        model_output = "<test:think>This is reasoning</test:think>This is content"
+        reasoning, content = parser.extract_reasoning_content(model_output, request)
 
         assert reasoning == "This is reasoning"
         assert content == "This is content"
@@ -171,9 +167,8 @@ class TestBaseThinkingReasoningParserExtraction:
         parser = TestThinkingReasoningParser(test_tokenizer)
         request = ChatCompletionRequest(messages=[], model="test-model")
 
-        model_output = ("This is reasoning</test:think>This is content")
-        reasoning, content = parser.extract_reasoning_content(
-            model_output, request)
+        model_output = "This is reasoning</test:think>This is content"
+        reasoning, content = parser.extract_reasoning_content(model_output, request)
 
         assert reasoning == "This is reasoning"
         assert content == "This is content"
@@ -184,8 +179,7 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is just content"
-        reasoning, content = parser.extract_reasoning_content(
-            model_output, request)
+        reasoning, content = parser.extract_reasoning_content(model_output, request)
 
         assert reasoning == "This is just content"
         assert content is None
@@ -196,8 +190,7 @@ class TestBaseThinkingReasoningParserExtraction:
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = ""
-        reasoning, content = parser.extract_reasoning_content(
-            model_output, request)
+        reasoning, content = parser.extract_reasoning_content(model_output, request)
 
         assert reasoning == ""
         assert content is None
@@ -207,9 +200,8 @@ class TestBaseThinkingReasoningParserExtraction:
         parser = TestThinkingReasoningParser(test_tokenizer)
         request = ChatCompletionRequest(messages=[], model="test-model")
 
-        model_output = ("<test:think></test:think>")
-        reasoning, content = parser.extract_reasoning_content(
-            model_output, request)
+        model_output = "<test:think></test:think>"
+        reasoning, content = parser.extract_reasoning_content(model_output, request)
 
         assert reasoning == ""
         assert content is None
@@ -221,19 +213,24 @@ class TestBaseThinkingReasoningParserStreaming:
     @pytest.mark.parametrize("streaming", [True, False])
     def test_simple_reasoning_extraction(self, test_tokenizer, streaming):
         """
-            Test basic reasoning extraction in both
-            streaming and non-streaming modes.
+        Test basic reasoning extraction in both
+        streaming and non-streaming modes.
         """
         parser = TestThinkingReasoningParser(test_tokenizer)
 
         model_output = [
-            "<test:think>", "Some ", "reasoning ", "content", "</test:think>",
-            "Final ", "answer"
+            "<test:think>",
+            "Some ",
+            "reasoning ",
+            "content",
+            "</test:think>",
+            "Final ",
+            "answer",
         ]
 
-        reasoning, content = run_reasoning_extraction(parser,
-                                                      model_output,
-                                                      streaming=streaming)
+        reasoning, content = run_reasoning_extraction(
+            parser, model_output, streaming=streaming
+        )
 
         assert reasoning == "Some reasoning content"
         assert content == "Final answer"
@@ -252,9 +249,7 @@ class TestBaseThinkingReasoningParserStreaming:
             "answer",
         ]
 
-        reasoning, content = run_reasoning_extraction(parser,
-                                                      deltas,
-                                                      streaming=True)
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
         assert reasoning == "Some reasoning content"
         assert content == "Final answer"
@@ -271,9 +266,7 @@ class TestBaseThinkingReasoningParserStreaming:
             "Answer",
         ]
 
-        reasoning, content = run_reasoning_extraction(parser,
-                                                      deltas,
-                                                      streaming=True)
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
         assert reasoning == "Some reasoning"
         assert content == "Answer"
@@ -290,9 +283,7 @@ class TestBaseThinkingReasoningParserStreaming:
             "end",
         ]
 
-        reasoning, content = run_reasoning_extraction(parser,
-                                                      deltas,
-                                                      streaming=True)
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
         assert reasoning == "Some reasoning without end"
         assert content is None
@@ -309,9 +300,7 @@ class TestBaseThinkingReasoningParserStreaming:
             "Final",
         ]
 
-        reasoning, content = run_reasoning_extraction(parser,
-                                                      deltas,
-                                                      streaming=True)
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
 
         assert reasoning == "Reasoning content"
         assert content == "Final"
@@ -319,29 +308,27 @@ class TestBaseThinkingReasoningParserStreaming:
 
 class TestBaseThinkingReasoningParserMultipleImplementations:
     """
-        Test that multiple implementations of
-        BaseThinkingReasoningParser work correctly.
+    Test that multiple implementations of
+    BaseThinkingReasoningParser work correctly.
     """
 
     def test_different_token_implementations(self, test_tokenizer):
         """
-            Test that different implementations 
-            with different tokens work independently.
+        Test that different implementations
+        with different tokens work independently.
         """
         parser1 = TestThinkingReasoningParser(test_tokenizer)
         parser2 = TestThinkingReasoningParserAlt(test_tokenizer)
 
         # Test parser1
-        model_output1 = ("Reasoning1</test:think>Content1")
-        reasoning1, content1 = run_reasoning_extraction(
-            parser1, [model_output1])
+        model_output1 = "Reasoning1</test:think>Content1"
+        reasoning1, content1 = run_reasoning_extraction(parser1, [model_output1])
         assert reasoning1 == "Reasoning1"
         assert content1 == "Content1"
 
         # Test parser2
         model_output2 = "Reasoning2<alt:end>Content2"
-        reasoning2, content2 = run_reasoning_extraction(
-            parser2, [model_output2])
+        reasoning2, content2 = run_reasoning_extraction(parser2, [model_output2])
         assert reasoning2 == "Reasoning2"
         assert content2 == "Content2"
 
@@ -359,7 +346,7 @@ class TestBaseThinkingReasoningParserEdgeCases:
         """Test behavior with multiple end tokens."""
         parser = TestThinkingReasoningParser(test_tokenizer)
 
-        model_output = ("First</test:think>Middle</test:think>Last")
+        model_output = "First</test:think>Middle</test:think>Last"
         reasoning, content = run_reasoning_extraction(parser, [model_output])
 
         # Should stop at first end token
@@ -370,8 +357,7 @@ class TestBaseThinkingReasoningParserEdgeCases:
         """Test behavior with nested-like token patterns."""
         parser = TestThinkingReasoningParser(test_tokenizer)
 
-        model_output = ("<test:think>Outer"
-                        "<test:think>Inner</test:think>Content")
+        model_output = "<test:think>Outer<test:think>Inner</test:think>Content"
         reasoning, content = run_reasoning_extraction(parser, [model_output])
 
         # Should process normally, start from first start token
@@ -382,11 +368,9 @@ class TestBaseThinkingReasoningParserEdgeCases:
         """Test behavior with malformed token-like strings."""
         parser = TestThinkingReasoningParser(test_tokenizer)
 
-        model_output = ("<test:thinking>Not a real token"
-                        "</test:thinking>Content")
+        model_output = "<test:thinking>Not a real token</test:thinking>Content"
         reasoning, content = run_reasoning_extraction(parser, [model_output])
 
         # Should treat as regular content since tokens don't match exactly
-        assert reasoning == ("<test:thinking>Not a real token"
-                             "</test:thinking>Content")
+        assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
         assert content is None

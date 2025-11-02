@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import warnings
-from typing import Optional
 
 import msgspec
 
 
 class LoRARequest(
-        msgspec.Struct,
-        omit_defaults=True,  # type: ignore[call-arg]
-        array_like=True):  # type: ignore[call-arg]
+    msgspec.Struct,
+    omit_defaults=True,  # type: ignore[call-arg]
+    array_like=True,
+):  # type: ignore[call-arg]
     """
     Request for a LoRA adapter.
 
@@ -22,13 +22,14 @@ class LoRARequest(
     lora_int_id must be globally unique for a given adapter.
     This is currently not enforced in vLLM.
     """
+
     lora_name: str
     lora_int_id: int
     lora_path: str = ""
-    lora_local_path: Optional[str] = msgspec.field(default=None)
-    long_lora_max_len: Optional[int] = None
-    base_model_name: Optional[str] = msgspec.field(default=None)
-    tensorizer_config_dict: Optional[dict] = None
+    lora_local_path: str | None = msgspec.field(default=None)
+    long_lora_max_len: int | None = None
+    base_model_name: str | None = msgspec.field(default=None)
+    tensorizer_config_dict: dict | None = None
 
     def __post_init__(self):
         if self.lora_int_id < 1:
@@ -39,7 +40,8 @@ class LoRARequest(
                 "and will be removed in a future version. "
                 "Please use 'lora_path' instead.",
                 DeprecationWarning,
-                stacklevel=2)
+                stacklevel=2,
+            )
             if not self.lora_path:
                 self.lora_path = self.lora_local_path or ""
 
@@ -65,7 +67,8 @@ class LoRARequest(
             "and will be removed in a future version. "
             "Please use 'path' instead.",
             DeprecationWarning,
-            stacklevel=2)
+            stacklevel=2,
+        )
         return self.lora_path
 
     @local_path.setter
@@ -75,7 +78,8 @@ class LoRARequest(
             "and will be removed in a future version. "
             "Please use 'path' instead.",
             DeprecationWarning,
-            stacklevel=2)
+            stacklevel=2,
+        )
         self.lora_path = value
 
     def __eq__(self, value: object) -> bool:
@@ -84,8 +88,7 @@ class LoRARequest(
         instances based on lora_name. This allows for identification
         and comparison lora adapter across engines.
         """
-        return isinstance(value,
-                          self.__class__) and self.lora_name == value.lora_name
+        return isinstance(value, self.__class__) and self.lora_name == value.lora_name
 
     def __hash__(self) -> int:
         """
