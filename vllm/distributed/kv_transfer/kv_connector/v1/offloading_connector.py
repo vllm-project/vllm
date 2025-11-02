@@ -287,9 +287,10 @@ class OffloadingConnectorScheduler:
                 )
                 continue
 
-            self._next_stored_block_idx[req_id] = num_blocks
-
             if not store_output.block_hashes_to_store:
+                # no new blocks to store, but prepare_store succeeded
+                # update the stored block index since all blocks are already cached
+                self._next_stored_block_idx[req_id] = num_blocks
                 continue
             block_hashes_to_store = set(store_output.block_hashes_to_store)
 
@@ -312,6 +313,8 @@ class OffloadingConnectorScheduler:
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
             self._reqs_being_stored[req_id] |= block_hashes_to_store
+            # update the stored block index only after successfully queuing the store
+            self._next_stored_block_idx[req_id] = num_blocks
 
             logger.debug(
                 "Request %s offloading %s blocks starting from block #%d",
