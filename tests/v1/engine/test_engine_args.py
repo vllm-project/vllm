@@ -53,8 +53,8 @@ def test_defaults_with_usage_context():
     vllm_config: VllmConfig = engine_args.create_engine_config(UsageContext.LLM_CLASS)
 
     from vllm.platforms import current_platform
+    from vllm.utils.mem_constants import GiB_bytes
 
-    GiB_bytes = 1024**3
     device_memory = current_platform.get_device_total_memory()
     device_name = current_platform.get_device_name().lower()
     if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
