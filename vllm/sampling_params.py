@@ -252,6 +252,9 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
+    thinking_token_budget: int | None = None
+    """Maximum number of tokens allowed for thinking operations."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -267,6 +270,7 @@ class SamplingParams(
         stop: str | list[str] | None = None,
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
+        thinking_token_budget: int | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -319,6 +323,7 @@ class SamplingParams(
             stop=stop,
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
+            thinking_token_budget=thinking_token_budget,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -628,6 +633,7 @@ class SamplingParams(
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
+            f"thinking_token_budget={self.thinking_token_budget}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
