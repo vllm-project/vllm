@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
 from importlib.util import find_spec
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
@@ -33,6 +34,7 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
+    uses_custom_attention_masks,
     uses_mrope,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
@@ -64,6 +66,37 @@ else:
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
+
+
+def _detect_gguf_multimodal_gemma3(model: str) -> Path | None:
+    """Check if GGUF model has multimodal projector file for Gemma3.
+
+    Args:
+        model: Model path string
+
+    Returns:
+        Path to mmproj file if found, None otherwise
+    """
+    if not model.endswith(".gguf"):
+        return None
+
+    try:
+        from pathlib import Path
+
+        model_path = Path(model)
+        if not model_path.is_file():
+            return None
+
+        model_dir = model_path.parent
+        mmproj_patterns = ["mmproj.gguf", "mmproj-*.gguf", "*mmproj*.gguf"]
+        for pattern in mmproj_patterns:
+            mmproj_files = list(model_dir.glob(pattern))
+            if mmproj_files:
+                return mmproj_files[0]
+        return None
+    except Exception:
+        return None
+
 
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
@@ -549,6 +582,47 @@ class ModelConfig:
 
         architectures = self.architectures
         registry = self.registry
+
+        # GGUF multimodal: Force Gemma3ForConditionalGeneration architecture
+        # when mmproj file is present, before model resolution
+        mmproj_path = _detect_gguf_multimodal_gemma3(self.model)
+        if mmproj_path is not None:
+            is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
+            if is_gemma3:
+                architectures = ["Gemma3ForConditionalGeneration"]
+                self.hf_config.architectures = architectures
+                logger.info(
+                    "Detected Gemma3 GGUF with mmproj.gguf, "
+                    "forcing Gemma3ForConditionalGeneration"
+                )
+
+                # Initialize vision_config if not present
+                if (
+                    not hasattr(self.hf_config, "vision_config")
+                    or self.hf_config.vision_config is None
+                ):
+                    from vllm.model_executor.model_loader.utils import (
+                        extract_vision_config_from_gguf,
+                    )
+
+                    vision_config = extract_vision_config_from_gguf(str(mmproj_path))
+
+                    # Fail fast if extraction fails - indicates
+                    # corrupted/incomplete GGUF
+                    if vision_config is None:
+                        raise ValueError(
+                            "Failed to extract vision config from mmproj.gguf. "
+                            "This may indicate a corrupted or incomplete GGUF "
+                            "file. Please verify your mmproj.gguf file is valid."
+                        )
+
+                    self.hf_config.vision_config = vision_config
+                    self.hf_config.mm_tokens_per_image = 256
+                    self.hf_config.image_token_index = 262144
+                    # DO NOT set boi_token_index - let
+                    # gemma3_mm.py fall back to 262143
+                    self.hf_config.eoi_token_index = 256000
+
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
@@ -694,8 +768,24 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
+
+        # GGUF multimodal: Set flag to initialize multimodal_config
+        # when Gemma3 mmproj file is present
+        is_gguf_multimodal = False
+        if _detect_gguf_multimodal_gemma3(self.model):
+            is_gemma3 = any(
+                "gemma3" in str(arch).lower() for arch in self.architectures
+            )
+            if is_gemma3:
+                is_gguf_multimodal = True
+                logger.info(
+                    "Detected Gemma3 GGUF multimodal model "
+                    "with mmproj.gguf, initializing "
+                    "multimodal_config"
+                )
+
         # Init multimodal config if needed
-        if self._model_info.supports_multimodal:
+        if self._model_info.supports_multimodal or is_gguf_multimodal:
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
@@ -1612,6 +1702,10 @@ class ModelConfig:
     @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
+
+    @property
+    def uses_custom_attention_masks(self) -> bool:
+        return uses_custom_attention_masks(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:

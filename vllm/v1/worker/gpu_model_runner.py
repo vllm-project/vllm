@@ -298,6 +298,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
+        self.uses_custom_attention_masks = model_config.uses_custom_attention_masks
         self.supports_mm_inputs = self.mm_registry.supports_multimodal_inputs(
             model_config
         )
@@ -454,7 +455,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE: `mrope_positions` is implemented with one additional dummy
             # position on purpose to make it non-contiguous so that it can work
             # with torch compile.
-            # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
+            # See:
+            # https://github.com/vllm-project/vllm/pull/12128
+            # #discussion_r1926431923
 
             # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
             # the modality of inputs. For text-only inputs, each dimension has
@@ -2160,7 +2163,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 is_multimodal=is_mm_embed,
             )
 
-            # TODO(woosuk): Avoid the copy. Optimize.
+            # Copy the embeddings to the input buffer.
             self.inputs_embeds.gpu[:num_scheduled_tokens].copy_(inputs_embeds_scheduled)
 
             input_ids = None
@@ -2169,6 +2172,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **self._init_model_kwargs(num_scheduled_tokens),
                 **self._extract_mm_kwargs(scheduler_output),
             }
+
+            # Generate custom attention masks for models that require them.
+            # V1 pre-generates embeddings, so forward() skips prepare_attn_masks().
+            # Check mm_features (mm_embeds is empty during decode).
+            has_mm_features = any(
+                req_state.mm_features for req_state in self.requests.values()
+            )
+            if self.uses_custom_attention_masks and has_mm_features:
+                mask_kwargs = self.model.generate_attention_masks(
+                    self.input_ids.gpu[:num_scheduled_tokens],
+                    self.positions.gpu[:num_scheduled_tokens],
+                    mask_dtype=self.model.dtype,
+                )
+                model_kwargs.update(mask_kwargs)
         elif self.enable_prompt_embeds and is_first_rank:
             # Get the input embeddings for the tokens that are not input embeds,
             # then put them into the appropriate positions.
@@ -3584,7 +3601,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logits = self.model.compute_logits(hidden_states)
         num_reqs = logits.size(0)
 
-        dummy_tensors = lambda v: torch.full((num_reqs,), v, device=self.device)
+        def dummy_tensors(v):
+            return torch.full((num_reqs,), v, device=self.device)
 
         dummy_metadata = SamplingMetadata(
             temperature=dummy_tensors(0.5),
