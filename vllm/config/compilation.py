@@ -112,6 +112,8 @@ class PassConfig:
     """Whether to enable flashinfer allreduce fusion."""
     fi_allreduce_fusion_max_token_num: int = 16384
     """Max number of tokens to used in flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = False
+    """Whether to enable the fused Q/K RMSNorm + RoPE pass."""
 
     # TODO(luka) better pass enabling system.
 
@@ -135,6 +137,12 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
+            logger.warning_once(
+                "QK Norm + RoPE fusion enabled but the current platform is not "
+                "CUDA-alike. The fusion will be disabled."
+            )
+            self.enable_qk_norm_rope_fusion = False
 
 
 @config
@@ -568,6 +576,10 @@ class CompilationConfig:
 
         if isinstance(self.pass_config, dict):
             self.pass_config = PassConfig(**self.pass_config)
+
+        if self.pass_config.enable_qk_norm_rope_fusion:
+            # TODO(zhuhaoran): support rope native forward match and remove this.
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
