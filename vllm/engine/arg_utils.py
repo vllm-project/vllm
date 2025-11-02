@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from pathlib import Path
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
@@ -413,6 +414,8 @@ class EngineArgs:
     eplb_window_size: int = EPLBConfig.window_size
     eplb_step_interval: int = EPLBConfig.step_interval
     eplb_log_balancedness: bool = EPLBConfig.log_balancedness
+    eplb_save_dir: Path | None = EPLBConfig.save_dir
+    eplb_load_path: Path | None = EPLBConfig.load_path
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )

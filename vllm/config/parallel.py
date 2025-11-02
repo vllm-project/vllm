@@ -3,6 +3,7 @@
 
 import hashlib
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
@@ -61,6 +62,17 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
+
+    save_dir: Path | None = None
+    """Directory to save expert load balance metrics."""
+    load_path: Path | None = None
+    """Path to load expert load balance metrics."""
+
+    @property
+    def record_metrics(self) -> bool:
+        return self.save_dir is not None or (
+            self.save_dir is None and self.load_path is None
+        )
 
 
 @config
