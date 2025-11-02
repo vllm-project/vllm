@@ -60,11 +60,8 @@ def test_qwen2_5_vl_evs_functionality(
     with vllm_runner(
         model,
         runner="generate",
-        max_model_len=4000,
-        max_num_seqs=1,
         dtype=dtype,
         limit_mm_per_prompt={"video": 1},
-        tensor_parallel_size=1,
         video_pruning_rate=video_pruning_rate,
     ) as vllm_model:
         # Generate output - this should not crash

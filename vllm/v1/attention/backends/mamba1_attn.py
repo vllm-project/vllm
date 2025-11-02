@@ -63,7 +63,7 @@ class Mamba1AttentionMetadataBuilder(
         elif (
             num_decodes > 0
             and num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             state_indices_for_decode = state_indices_tensor[:num_decodes]
             padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
