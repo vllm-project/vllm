@@ -431,9 +431,7 @@ class FlexAttentionMetadata:
 
         return final_mask_mod if self.causal else sliding_window_mask_mod
 
-    def get_prefix_lm_mask_mod(
-        self, mm_prefix_range: list[tuple[int, int]]
-    ) -> _mask_mod_signature:
+    def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
 
         def prefix_lm_mask_mod(
@@ -481,7 +479,7 @@ class FlexAttentionMetadata:
             mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
         if self.mm_prefix_range:
             # Add prefix LM mask for vision-language prefix LM attention
-            prefix_lm_mask_mod = self.get_prefix_lm_mask_mod(self.mm_prefix_range)
+            prefix_lm_mask_mod = self.get_prefix_lm_mask_mod()
             mask_mod = or_masks(mask_mod, prefix_lm_mask_mod)
         return mask_mod
 
