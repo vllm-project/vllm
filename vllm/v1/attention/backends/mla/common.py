@@ -1997,20 +1997,26 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
             if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                decode_ql_nope, _ = ops.scaled_fp8_quant(
-                    decode_ql_nope.reshape(
-                        [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
-                    ),
-                    layer._q_scale,
-                )
-                decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
-                q_pe_shape = decode_q_pe.shape
-                decode_q_pe, _ = ops.scaled_fp8_quant(
-                    decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
-                    layer._q_scale,
-                )
-                decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+                # NOTE: Quantization now happens in the model layer (mla.py) after RoPE
+                # This allows RoPE + Quant fusion via torch.compile pattern matching
+                # Check if q is already quantized (FP8 dtype)
+                if decode_q_pe.dtype != current_platform.fp8_dtype():
+                    # Fallback: quantize here if not already done in model layer
+                    ql_nope_shape = decode_ql_nope.shape
+                    decode_ql_nope, _ = ops.scaled_fp8_quant(
+                        decode_ql_nope.reshape(
+                            [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+                        ),
+                        layer._q_scale,
+                    )
+                    decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+                    q_pe_shape = decode_q_pe.shape
+                    decode_q_pe, _ = ops.scaled_fp8_quant(
+                        decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                        layer._q_scale,
+                    )
+                    decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+                # else: q is already quantized in model layer, skip quantization
 
             decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:
