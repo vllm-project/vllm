@@ -56,4 +56,5 @@ The `gpu_name` can be automatically detected by calling `torch.cuda.get_device_n
 
 ### Json Structure
 
-Optimal kernel configuration files are saved as JSON files with the structure `config_data[max_loras][num_slices][m][k][n][n2]`
+Optimal kernel configuration files are saved as JSON files with the structure `config_data[max_loras][num_slices][m][k][n][i]`
+where `i` is an optional dimension in the `fused_moe_lora` configuration, representing the intermediate size of the MoE layer.

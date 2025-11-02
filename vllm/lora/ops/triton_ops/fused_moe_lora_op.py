@@ -199,31 +199,31 @@ def _fused_moe_lora_shrink(
     num_tokens: int,
     num_experts: int,
     num_slices: int,
-    shrink_block_size_m: int,
-    shrink_block_size_n: int,
-    shrink_block_size_k: int,
-    shrink_group_size_m: int,
-    shrink_num_warps: int,
-    shrink_num_stages: int,
-    shrink_split_k: int,
+    block_size_m: int,
+    block_size_n: int,
+    block_size_k: int,
+    group_size_m: int,
+    num_warps: int,
+    num_stages: int,
+    split_k: int,
     mul_routed_weight: bool = False,
 ) -> None:
     w1_lora_a_stacked = lora_a_stacked[0]
 
     shrink_config = {
-        "BLOCK_SIZE_M": shrink_block_size_m,
-        "BLOCK_SIZE_N": shrink_block_size_n,
-        "BLOCK_SIZE_K": shrink_block_size_k,
-        "GROUP_SIZE_M": shrink_group_size_m,
-        "num_warps": shrink_num_warps,
-        "num_stages": shrink_num_stages,
-        "SPLIT_K": shrink_split_k,
+        "BLOCK_SIZE_M": block_size_m,
+        "BLOCK_SIZE_N": block_size_n,
+        "BLOCK_SIZE_K": block_size_k,
+        "GROUP_SIZE_M": group_size_m,
+        "num_warps": num_warps,
+        "num_stages": num_stages,
+        "SPLIT_K": split_k,
     }
 
     b_ptr = _get_ptr(lora_a_stacked, device)
 
     grid = lambda META: (
-        shrink_split_k
+        split_k
         * triton.cdiv(EM, META["BLOCK_SIZE_M"])
         * triton.cdiv(N, META["BLOCK_SIZE_N"]),
         len(lora_a_stacked),
@@ -288,13 +288,13 @@ def _fused_moe_lora_expand(
     num_slices: int,
     max_lora_rank: int,
     w1_output_dim_size: int,
-    expand_block_size_m: int,
-    expand_block_size_n: int,
-    expand_block_size_k: int,
-    expand_group_size_m: int,
-    expand_num_warps: int,
-    expand_num_stages: int,
-    expand_split_k: int,
+    block_size_m: int,
+    block_size_n: int,
+    block_size_k: int,
+    group_size_m: int,
+    num_warps: int,
+    num_stages: int,
+    split_k: int,
     mul_routed_weight: bool = False,
 ) -> None:
     b_ptr = _get_ptr(lora_b_stacked, device)
@@ -314,13 +314,13 @@ def _fused_moe_lora_expand(
     )
 
     expand_config = {
-        "BLOCK_SIZE_M": expand_block_size_m,
-        "BLOCK_SIZE_N": expand_block_size_n,
-        "BLOCK_SIZE_K": expand_block_size_k,
-        "GROUP_SIZE_M": expand_group_size_m,
-        "num_warps": expand_num_warps,
-        "num_stages": expand_num_stages,
-        "SPLIT_K": expand_split_k,  # Set split_k = 1 for expand calls
+        "BLOCK_SIZE_M": block_size_m,
+        "BLOCK_SIZE_N": block_size_n,
+        "BLOCK_SIZE_K": block_size_k,
+        "GROUP_SIZE_M": group_size_m,
+        "num_warps": num_warps,
+        "num_stages": num_stages,
+        "SPLIT_K": split_k,  # Set split_k = 1 for expand calls
     }
 
     grid = lambda META: (
@@ -538,13 +538,13 @@ def _fused_moe_lora_shrink_fake(
     num_tokens: int,
     num_experts: int,
     num_slices: int,
-    shrink_block_size_m: int,
-    shrink_block_size_n: int,
-    shrink_block_size_k: int,
-    shrink_group_size_m: int,
-    shrink_num_warps: int,
-    shrink_num_stages: int,
-    shrink_split_k: int,
+    block_size_m: int,
+    block_size_n: int,
+    block_size_k: int,
+    group_size_m: int,
+    num_warps: int,
+    num_stages: int,
+    split_k: int,
     mul_routed_weight: bool = False,
 ) -> None:
     return
@@ -569,13 +569,13 @@ def _fused_moe_lora_expand_fake(
     num_slices: int,
     max_lora_rank: int,
     w1_output_dim_size: int,
-    expand_block_size_m: int,
-    expand_block_size_n: int,
-    expand_block_size_k: int,
-    expand_group_size_m: int,
-    expand_num_warps: int,
-    expand_num_stages: int,
-    expand_split_k: int,
+    block_size_m: int,
+    block_size_n: int,
+    block_size_k: int,
+    group_size_m: int,
+    num_warps: int,
+    num_stages: int,
+    split_k: int,
     mul_routed_weight: bool = False,
 ) -> None:
     return

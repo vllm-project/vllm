@@ -186,7 +186,7 @@ def get_lora_op_configs(
     rank: int,
     num_slices: int,
     add_inputs: bool | None = None,
-    hidden_size_2: int | None = None,
+    moe_intermediate_size: int | None = None,
 ) -> dict[str, int | None]:
     # Add support for fused_moe_lora ops
     assert op_type in [
@@ -272,11 +272,11 @@ def get_lora_op_configs(
     )
 
     # slice by hidden_size_2
-    if hidden_size_2 is not None:
-        n2 = hidden_size_2
+    if moe_intermediate_size is not None:
+        i = moe_intermediate_size
         config_data = (
-            config_data.get(str(n2))
-            or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n2))]
+            config_data.get(str(i))
+            or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - i))]
         )
 
     assert config_data is not None
