@@ -453,7 +453,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             ),
             labelnames=labelnames,
         )
-        self.counter_prefix_cache_queries = make_per_engine(    
+        self.counter_prefix_cache_queries = make_per_engine(
             counter_prefix_cache_queries, engine_indexes, model_name
         )
 
@@ -493,11 +493,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_connector_prefix_cache_hits = make_per_engine(
             counter_connector_prefix_cache_hits, engine_indexes, model_name
         )
-        
+
         #
-        # Offloading connector 
+        # Offloading connector
         #
-        
+
         counter_offload_kv_connector_queries = self._counter_cls(
             name="vllm:offload_connector_queries",
             documentation=(
@@ -521,27 +521,27 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_offload_kv_connector_hits = make_per_engine(
             counter_offload_kv_connector_hits, engine_indexes, model_name
         )
-        
+
         gauge_kv_load_time_avg = self._gauge_cls(
             name="vllm:offload_connector_kv_load_time",
             documentation="Average time it takes to load a token from "
-                          "offloaded KV memory",
+            "offloaded KV memory",
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
-        
+
         self.gauge_kv_load_time_avg = make_per_engine(
             gauge_kv_load_time_avg, engine_indexes, model_name
         )
-        
+
         gauge_kv_store_time_avg = self._gauge_cls(
             name="vllm:offload_connector_kv_store_time",
             documentation="Average time it takes to store a token to "
-                          "offloaded KV memory",
+            "offloaded KV memory",
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
         )
-        
+
         self.gauge_kv_store_time_avg = make_per_engine(
             gauge_kv_store_time_avg, engine_indexes, model_name
         )
@@ -978,7 +978,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.counter_connector_prefix_cache_hits[engine_idx].inc(
                     scheduler_stats.connector_prefix_cache_stats.hits
                 )
-            
+
             if scheduler_stats.kv_connector_stats is not None:
                 self.counter_offload_kv_connector_queries[engine_idx].inc(
                     scheduler_stats.kv_connector_stats["total_queries"]
@@ -987,10 +987,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats["total_hits"]
                 )
                 self.gauge_kv_load_time_avg[engine_idx].set(
-                scheduler_stats.kv_connector_stats["avg_load_time"]
+                    scheduler_stats.kv_connector_stats["avg_load_time"]
                 )
                 self.gauge_kv_store_time_avg[engine_idx].set(
-                scheduler_stats.kv_connector_stats["avg_store_time"]
+                    scheduler_stats.kv_connector_stats["avg_store_time"]
                 )
 
             if scheduler_stats.spec_decoding_stats is not None:
