@@ -801,6 +801,7 @@ class WhisperForConditionalGeneration(
 
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
+    supports_segment_timestamp = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
