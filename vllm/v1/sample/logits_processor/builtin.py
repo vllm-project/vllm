@@ -239,13 +239,6 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     def __init__(
         self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
     ):
-        """
-        Args:
-          reasoning_config: Configuration for reasoning, which includes
-            the token IDs for thinking start and end.
-          pin_memory (bool): Whether to use pinned memory for tensors.
-          device (torch.device): Device to use for tensor operations.
-        """
         reasoning_config = vllm_config.reasoning_config
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
 
