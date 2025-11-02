@@ -92,8 +92,9 @@ class RunConfig:
     warmup_steps: int
     measure_steps: int
     spec_method: str
-    nwor_modes: List[str]
     scv_modes: List[str]
+    adaptive_draft_length: int
+    confidence_threshold: float
     enable_ncu: bool
     ncu_metrics: str
     enable_nsys: bool
@@ -251,44 +252,43 @@ def run_microbenchmark(config: RunConfig) -> tuple[list[dict[str, Any]], dict[tu
     results: list[dict[str, Any]] = []
     metrics_delta: dict[tuple[str, str], dict[str, float]] = {}
 
+    # Set NWOR environment variables from config
+    os.environ["VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH"] = str(config.adaptive_draft_length)
+    os.environ["VLLM_NWOR_CONFIDENCE_THRESHOLD"] = str(config.confidence_threshold)
+
+    # Generate descriptive label for results
+    nwor_label = f"adaptive={config.adaptive_draft_length},threshold={config.confidence_threshold}"
+
     for scv_mode in config.scv_modes:
         os.environ["VLLM_SCV_MODE"] = scv_mode or "off"
 
-        for nwor_mode in config.nwor_modes:
-            # Backward compatibility: translate nwor_mode to new env vars
-            if nwor_mode == "off":
-                os.environ["VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH"] = "0"
-                os.environ["VLLM_NWOR_CONFIDENCE_THRESHOLD"] = "0.0"
-            else:  # "on" or default
-                os.environ["VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH"] = "1"
-                os.environ["VLLM_NWOR_CONFIDENCE_THRESHOLD"] = "0.5"
-            engine = build_engine(config)
+        engine = build_engine(config)
 
-            prompt_offset = 0
-            # Warmup (not recorded)
-            for _ in range(config.warmup_steps):
-                warm_prompts = prompts[prompt_offset : prompt_offset + config.num_requests]
-                prompt_offset += config.num_requests
-                run_batch(engine, warm_prompts, config, nwor_mode, -1, scv_mode)
+        prompt_offset = 0
+        # Warmup (not recorded)
+        for _ in range(config.warmup_steps):
+            warm_prompts = prompts[prompt_offset : prompt_offset + config.num_requests]
+            prompt_offset += config.num_requests
+            run_batch(engine, warm_prompts, config, nwor_label, -1, scv_mode)
 
-            metrics_before = snapshot_metrics(engine)
+        metrics_before = snapshot_metrics(engine)
 
-            for batch_idx in range(config.batches):
-                start = prompt_offset + batch_idx * config.num_requests
-                end = start + config.num_requests
-                batch_prompts = prompts[start:end]
-                result = run_batch(
-                    engine, batch_prompts, config, nwor_mode, batch_idx, scv_mode
-                )
-                results.append(result)
+        for batch_idx in range(config.batches):
+            start = prompt_offset + batch_idx * config.num_requests
+            end = start + config.num_requests
+            batch_prompts = prompts[start:end]
+            result = run_batch(
+                engine, batch_prompts, config, nwor_label, batch_idx, scv_mode
+            )
+            results.append(result)
 
-            metrics_after = snapshot_metrics(engine)
-            delta = diff_metrics(metrics_after, metrics_before)
-            metrics_delta[(scv_mode, nwor_mode)] = delta
+        metrics_after = snapshot_metrics(engine)
+        delta = diff_metrics(metrics_after, metrics_before)
+        metrics_delta[(scv_mode, nwor_label)] = delta
 
-            # Explicitly delete engine to free GPU memory before next iteration
-            del engine
-            gc.collect()
+        # Explicitly delete engine to free GPU memory before next iteration
+        del engine
+        gc.collect()
 
     return results, metrics_delta
 
@@ -311,9 +311,21 @@ def parse_args() -> RunConfig:
     parser.add_argument("--warmup-steps", type=int, default=1)
     parser.add_argument("--measure-steps", type=int, default=1)
     parser.add_argument(
-        "--nwor-modes",
-        default="off,stage",
-        help="Comma-separated list of NWOR modes to benchmark (default: off,stage)",
+        "--adaptive-draft-length",
+        type=int,
+        choices=[0, 1],
+        default=1,
+        help="Enable/disable adaptive draft length (Multi-Graph Adaptive + Per-Request Predict). "
+             "0=disabled (fixed draft length), 1=enabled (default). "
+             "When enabled with threshold=0.0, preserves correctness while improving performance.",
+    )
+    parser.add_argument(
+        "--confidence-threshold",
+        type=float,
+        default=0.0,
+        help="Confidence threshold for Batch Early Exit (0.0-1.0, default=0.0). "
+             "Controls early stopping during draft generation. Set to 0.0 to disable (recommended "
+             "for correctness). Higher values may improve performance but can change outputs.",
     )
     parser.add_argument(
         "--scv-modes",
@@ -348,8 +360,11 @@ def parse_args() -> RunConfig:
     parser.add_argument("--output", default="nwor_microbench.json")
     args = parser.parse_args()
 
-    nwor_modes = [mode.strip() for mode in args.nwor_modes.split(",") if mode.strip()]
     scv_modes = [mode.strip() for mode in args.scv_modes.split(",") if mode.strip()]
+
+    # Validate confidence threshold
+    if args.confidence_threshold < 0.0 or args.confidence_threshold > 1.0:
+        parser.error("--confidence-threshold must be between 0.0 and 1.0")
 
     return RunConfig(
         target_model=args.target_model,
@@ -368,8 +383,9 @@ def parse_args() -> RunConfig:
         warmup_steps=args.warmup_steps,
         measure_steps=args.measure_steps,
         spec_method=args.spec_method,
-        nwor_modes=nwor_modes or ["off"],
         scv_modes=scv_modes or ["off"],
+        adaptive_draft_length=args.adaptive_draft_length,
+        confidence_threshold=args.confidence_threshold,
         enable_ncu=args.enable_ncu,
         ncu_metrics=args.ncu_metrics,
         enable_nsys=args.enable_nsys,
@@ -521,7 +537,7 @@ def config_to_args(
     *,
     output_path: str,
     profile_only: bool = False,
-    override_modes: tuple[str, str] | None = None,
+    override_scv_mode: str | None = None,
 ) -> list[str]:
     args = [
         "--target-model",
@@ -556,10 +572,12 @@ def config_to_args(
         str(config.warmup_steps),
         "--measure-steps",
         str(config.measure_steps),
-        "--nwor-modes",
-        ",".join(override_modes and [override_modes[1]] or config.nwor_modes),
+        "--adaptive-draft-length",
+        str(config.adaptive_draft_length),
+        "--confidence-threshold",
+        str(config.confidence_threshold),
         "--scv-modes",
-        ",".join(override_modes and [override_modes[0]] or config.scv_modes),
+        override_scv_mode or ",".join(config.scv_modes),
         "--output",
         output_path,
     ])
@@ -574,46 +592,48 @@ def run_ncu_profiles(config: RunConfig, output_json: Path) -> dict[tuple[str, st
     env = os.environ.copy()
     metric_names = [m.strip() for m in config.ncu_metrics.split(",") if m.strip()]
 
-    for scv_mode in config.scv_modes:
-        for nwor_mode in config.nwor_modes:
-            suffix = f".{scv_mode or 'off'}-{nwor_mode or 'off'}"
-            csv_path = output_json.with_suffix(f"{suffix}.ncu.csv")
-            rep_path = output_json.with_suffix(f"{suffix}.ncu")
-            profile_json = output_json.with_suffix(f"{suffix}.ncu.json")
-            args = config_to_args(
-                config,
-                output_path=str(profile_json),
-                profile_only=True,
-                override_modes=(scv_mode, nwor_mode),
-            )
-            # Try ncu first (modern CUDA), fallback to nv-nsight-cu-cli (older)
-            ncu_cmd = "ncu" if shutil.which("ncu") else "nv-nsight-cu-cli"
-            cmd = [
-                ncu_cmd,
-                "-f",  # Force overwrite existing report files
-                "--csv",
-                "--log-file",
-                str(csv_path),
-                "--metrics",
-                ",".join(metric_names),
-                "--target-processes",
-                "all",
-                "-o",
-                str(rep_path),
-                sys.executable,
-                str(script_path),
-            ] + args
-            try:
-                subprocess.run(cmd, check=True, env=env)
-            except FileNotFoundError as exc:
-                print(f"[WARN] {ncu_cmd} not found: {exc}. Skipping NCU collection.")
-                return {}
-            except subprocess.CalledProcessError as exc:
-                print(f"[WARN] nv-nsight-cu-cli failed for modes {scv_mode}/{nwor_mode}: {exc}")
-                continue
+    # Generate NWOR label for this configuration
+    nwor_label = f"adaptive={config.adaptive_draft_length},threshold={config.confidence_threshold}"
 
-            metrics = parse_ncu_csv(csv_path, metric_names)
-            metrics_map[(scv_mode, nwor_mode)] = metrics
+    for scv_mode in config.scv_modes:
+        suffix = f".{scv_mode or 'off'}-adaptive{config.adaptive_draft_length}-t{config.confidence_threshold}"
+        csv_path = output_json.with_suffix(f"{suffix}.ncu.csv")
+        rep_path = output_json.with_suffix(f"{suffix}.ncu")
+        profile_json = output_json.with_suffix(f"{suffix}.ncu.json")
+        args = config_to_args(
+            config,
+            output_path=str(profile_json),
+            profile_only=True,
+            override_scv_mode=scv_mode,
+        )
+        # Try ncu first (modern CUDA), fallback to nv-nsight-cu-cli (older)
+        ncu_cmd = "ncu" if shutil.which("ncu") else "nv-nsight-cu-cli"
+        cmd = [
+            ncu_cmd,
+            "-f",  # Force overwrite existing report files
+            "--csv",
+            "--log-file",
+            str(csv_path),
+            "--metrics",
+            ",".join(metric_names),
+            "--target-processes",
+            "all",
+            "-o",
+            str(rep_path),
+            sys.executable,
+            str(script_path),
+        ] + args
+        try:
+            subprocess.run(cmd, check=True, env=env)
+        except FileNotFoundError as exc:
+            print(f"[WARN] {ncu_cmd} not found: {exc}. Skipping NCU collection.")
+            return {}
+        except subprocess.CalledProcessError as exc:
+            print(f"[WARN] nv-nsight-cu-cli failed for scv_mode={scv_mode}: {exc}")
+            continue
+
+        metrics = parse_ncu_csv(csv_path, metric_names)
+        metrics_map[(scv_mode, nwor_label)] = metrics
     return metrics_map
 
 
