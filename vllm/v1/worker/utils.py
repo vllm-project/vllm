@@ -148,15 +148,17 @@ class AttentionGroup:
         self,
         vllm_config,
         device,
-        kernel_block_size: int,
+        kernel_block_size: int | None,
         num_metadata_builders: int = 1,
     ):
-        kv_cache_spec_kernel = self.kv_cache_spec.copy_with_new_block_size(
-            kernel_block_size
+        kv_cache_spec_builder = (
+            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else self.kv_cache_spec
         )
         self.metadata_builders = [
             self.backend.get_builder_cls()(
-                kv_cache_spec_kernel,
+                kv_cache_spec_builder,
                 self.layer_names,
                 vllm_config,
                 device,

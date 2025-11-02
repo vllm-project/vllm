@@ -4012,14 +4012,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Create the metadata builders for all KV cache groups and attn groups.
         """
         for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
-            if kv_cache_group_id == len(kernel_block_sizes):
-                # There may be a last group for layers without kv cache.
-                continue
             for attn_group in self.attn_groups[kv_cache_group_id]:
                 attn_group.create_metadata_builders(
                     self.vllm_config,
                     self.device,
-                    kernel_block_sizes[kv_cache_group_id],
+                    kernel_block_sizes[kv_cache_group_id]
+                    if kv_cache_group_id < len(kernel_block_sizes)
+                    else None,
                     num_metadata_builders=1
                     if not self.parallel_config.enable_dbo
                     else 2,
