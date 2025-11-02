@@ -808,7 +808,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
     ),
-
     # Enables torch profiler if set.
     # Both AsyncLLM's CPU traces as well as workers'
     # traces (CPU & GPU) will be saved under this directory.
