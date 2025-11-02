@@ -521,15 +521,15 @@ def parse_chat_output(
     is_tool_call = False  # TODO: update this when tool call is supported
     if len(output_msgs) == 0:
         # The generation has stopped during reasoning.
-        reasoning_content = parser.current_content
+        reasoning = parser.current_content
         final_content = None
     elif len(output_msgs) == 1:
         # The generation has stopped during final message.
-        reasoning_content = output_msgs[0].content[0].text
+        reasoning = output_msgs[0].content[0].text
         final_content = parser.current_content
     else:
         reasoning_msg = output_msgs[:-1]
         final_msg = output_msgs[-1]
-        reasoning_content = "\n".join([msg.content[0].text for msg in reasoning_msg])
+        reasoning = "\n".join([msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
-    return reasoning_content, final_content, is_tool_call
+    return reasoning, final_content, is_tool_call
