@@ -614,6 +614,14 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "int pad_slot_id) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
+  // Mamba causal conv1d CUDA kernels
+  ops.def(
+      "causal_conv1d_update("
+      "    Tensor! x, Tensor conv_state, Tensor weight, Tensor? bias,"
+      "    bool silu_activation, Tensor? cache_seqlens,"
+      "    Tensor? conv_state_indices, int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
+
   // Hadamard transforms
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 

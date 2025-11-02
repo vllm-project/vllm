@@ -1738,6 +1738,29 @@ def selective_scan_fwd(
     )
 
 
+def causal_conv1d_update_cuda(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    silu_activation: bool,
+    cache_seqlens: torch.Tensor | None,
+    conv_state_indices: torch.Tensor | None,
+    pad_slot_id: int,
+):
+    torch.ops._C.causal_conv1d_update(
+        x,
+        conv_state,
+        weight,
+        bias,
+        silu_activation,
+        cache_seqlens,
+        conv_state_indices,
+        pad_slot_id,
+    )
+    return x
+
+
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
