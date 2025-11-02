@@ -69,10 +69,10 @@ class XPUPlatform(Platform):
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
-            logger.info_once("Using Triton backend on V1 engine.")
+            logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend on V1 engine.")
+            logger.info_once("Using Flash Attention backend.")
             return AttentionBackendEnum.FLASH_ATTN.get_path()
         elif selected_backend:
             raise ValueError(
@@ -80,7 +80,7 @@ class XPUPlatform(Platform):
                 f"with use_v1: {use_v1} use_mla: {use_mla}"
             )
 
-        logger.info("Using Flash Attention backend on V1 engine.")
+        logger.info("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
@@ -111,6 +111,12 @@ class XPUPlatform(Platform):
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         device_props = torch.xpu.get_device_properties(device_id)
         return device_props.total_memory
+
+    @classmethod
+    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
+        from vllm.attention.backends.registry import _Backend
+
+        return _Backend.FLASH_ATTN
 
     @classmethod
     def inference_mode(cls):
