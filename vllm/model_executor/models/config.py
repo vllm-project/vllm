@@ -299,7 +299,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             if model_config.supports_mamba_prefix_caching:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba2 layers is experimental. "
+                    "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
             else:
