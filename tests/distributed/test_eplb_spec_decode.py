@@ -5,6 +5,8 @@ from __future__ import annotations
 import lm_eval
 import pytest
 
+from tests.utils import large_gpu_mark
+
 
 def get_model_args(
     model_name: str,
@@ -43,6 +45,7 @@ def get_model_args(
     [
         pytest.param(
             ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            marks=large_gpu_mark(min_gb=80),
         ),
         pytest.param(
             (

@@ -511,8 +511,6 @@ class Llama4Model(LlamaModel):
                         .flatten()
                         .to(new_loaded_weight.device)
                     )
-                    # Take redundant experts into account
-                    local_expert_indices %= new_loaded_weight.shape[0]
                     new_loaded_weight = new_loaded_weight[local_expert_indices]
                     expert_id = local_expert_indices[0].item()
             else:
@@ -521,17 +519,15 @@ class Llama4Model(LlamaModel):
 
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
-            success = weight_loader(
+            weight_loader(
                 param,
                 new_loaded_weight,
                 full_param_name,
                 shard_id=shard_id,
                 expert_id=expert_id,
-                return_success=True,
             )
-            if success:
-                loaded_params.add(full_param_name)
-                expert_param_loaded = True
+            loaded_params.add(full_param_name)
+            expert_param_loaded = True
 
         return expert_param_loaded
 
