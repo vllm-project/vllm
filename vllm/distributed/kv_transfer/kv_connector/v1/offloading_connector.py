@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any
+import time
 
 import torch
 
@@ -15,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
     KVConnectorRole,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -33,6 +35,101 @@ ReqId = str
 
 logger = init_logger(__name__)
 
+@dataclass
+class OffloadTiming:
+    data: dict[str, Any] = field(default_factory=dict)
+    num_stores: int = 0
+    num_loads: int = 0
+    def __post_init__(self):
+        if not self.data:
+            # Empty container init, no data is passed in.
+            self.reset()
+    
+    def reset(self):
+        self.data: dict[str, float] = {
+            "total_load_time": 0,
+            "total_store_time": 0   
+            }
+        self.num_stores = 0
+        self.num_loads = 0
+        
+    # Time is already normalized by the number of blocks.
+    def record_time(self, time: float, is_store: bool):
+        if is_store:
+            print(f"===Storing time: {time}===")
+            self.data["total_store_time"] += time
+            self.num_stores += 1
+        else:
+            print(f"===Loading time: {time}===")
+            self.data["total_load_time"] += time
+            self.num_loads += 1
+        
+
+
+@dataclass
+class OffloadingConnectorStats(KVConnectorStats):
+    
+    def __post_init__(self):
+        if not self.data:
+            # Empty container init, no data is passed in.
+            self.reset()
+    
+    def reset(self):
+        self.data: dict[str, float] = {
+            "total_queries" : 0,
+            "total_hits": 0,  
+            }
+
+    def aggregate(self, other: "KVConnectorStats") -> "KVConnectorStats":
+        if not other.is_empty():
+            self.data["total_queries"] += other.data["total_queries"]
+            self.data["total_hits"] += other.data["total_hits"]
+        return self
+
+        
+
+    def reduce(self) -> dict[str, int | float]:
+        """
+        Reduce the observations collected during a time interval to one or
+        more representative values (eg avg/median/sum of the series).
+        This is meant to be called by the logger to produce a summary of the
+        stats for the last time interval.
+        """
+        return {
+                "Total Queries": self.data["total_queries"],
+                "Total Hits": self.data["total_hits"],
+                "Avg Load Time": self.data["avg_load_time"],
+                "Avg Store Time": self.data["avg_store_time"],
+        }
+        
+
+    def is_empty(self) -> bool:
+        return self.data["total_queries"] == 0
+    
+    def record(self, num_queries, num_hits):
+        self.data["total_queries"] += num_queries
+        self.data["total_hits"] += num_hits
+    
+    def record_time(self, time: float, is_store: bool):
+        if is_store:
+            self.data["total_store_time"] += time
+        else:
+            self.data["total_load_time"] += time
+    
+    def aggregate_time_data(self, offload_timing: OffloadTiming):
+        # Avoid division by zero:
+        if offload_timing.num_loads == 0:
+            self.data["avg_load_time"] = 0
+        else:
+            self.data["avg_load_time"] = offload_timing.data["total_load_time"] / offload_timing.num_loads
+        if offload_timing.num_stores == 0:
+            self.data["avg_store_time"] = 0
+        else:
+            self.data["avg_store_time"] = offload_timing.data["total_store_time"] / offload_timing.num_stores
+            
+        
+
+
 
 @dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
@@ -48,6 +145,8 @@ class OffloadingConnector(KVConnectorBase_V1):
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
+        self.kv_connector_stats = OffloadingConnectorStats()
+        
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
@@ -87,9 +186,12 @@ class OffloadingConnector(KVConnectorBase_V1):
         self, request: "Request", num_computed_tokens: int
     ) -> tuple[int, bool]:
         assert self.connector_scheduler is not None
-        return self.connector_scheduler.get_num_new_matched_tokens(
+        num_new_matched_tokens, hit = self.connector_scheduler.get_num_new_matched_tokens(
             request, num_computed_tokens
         )
+        stats_num_queries = request.num_tokens - num_computed_tokens
+        self.kv_connector_stats.record(num_queries = stats_num_queries, num_hits = num_new_matched_tokens)
+        return num_new_matched_tokens, hit
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
@@ -121,6 +223,23 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.take_events()
 
+        
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+            # if self.connector_worker is None:
+            #     return None
+            if self.connector_worker:
+                self.kv_connector_stats.aggregate_time_data(self.connector_worker._timing_stats)
+            return self.kv_connector_stats
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return (
+            OffloadingConnectorStats(data=data)
+            if data is not None
+            else OffloadingConnectorStats()
+        )
 
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -401,9 +520,11 @@ class OffloadingConnectorWorker:
         self.worker = OffloadingWorker()
 
         self._job_counter = 0
+        
+        self._timing_stats = OffloadTiming()
 
-        # req_id -> (job_id, store)
-        self._jobs: dict[int, tuple[ReqId, bool]] = {}
+        # req_id -> (job_id, store, start_time, num_blocks)
+        self._jobs: dict[int, tuple[ReqId, bool, float, num_blocks]] = {}
         # req_id -> active job IDs
         self._load_job: dict[ReqId, int] = {}
         # req_id -> set(active job IDs)
@@ -423,7 +544,10 @@ class OffloadingConnectorWorker:
     def start_load_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_load.items():
             job_id = self._generate_job_id()
-            self._jobs[job_id] = (req_id, False)
+            current_time = time.perf_counter()
+            src_spec, dst_spec = transfer_spec
+            num_blocks = len(src_spec.block_ids)
+            self._jobs[job_id] = (req_id, False, current_time, num_blocks)
             assert req_id not in self._load_job
             self._load_job[req_id] = job_id
             assert self.worker.transfer_async(job_id, transfer_spec)
@@ -431,7 +555,10 @@ class OffloadingConnectorWorker:
     def start_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
-            self._jobs[job_id] = (req_id, True)
+            current_time = time.perf_counter()
+            src_spec, dst_spec = transfer_spec
+            num_blocks = len(dst_spec.block_ids)
+            self._jobs[job_id] = (req_id, True, current_time, num_blocks)
             self._store_jobs[req_id].add(job_id)
             assert self.worker.transfer_async(job_id, transfer_spec)
 
@@ -450,7 +577,8 @@ class OffloadingConnectorWorker:
         for job_id, success in self.worker.get_finished():
             # we currently do not support job failures
             assert success
-            req_id, store = self._jobs.pop(job_id)
+            req_id, store, start_time, num_blocks = self._jobs.pop(job_id)
+            self._timing_stats.record_time((time.perf_counter() - start_time) / num_blocks, store)
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
