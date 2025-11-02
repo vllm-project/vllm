@@ -25,7 +25,7 @@ from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
+from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import OffloadingWorker, TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
@@ -552,6 +552,7 @@ class OffloadingConnectorWorker:
             job_id = self._generate_job_id()
             current_time = time.perf_counter()
             src_spec, dst_spec = transfer_spec
+            assert isinstance(src_spec, BlockIDsLoadStoreSpec)
             num_blocks = len(src_spec.block_ids)
             self._jobs[job_id] = (req_id, False, current_time, num_blocks)
             assert req_id not in self._load_job
@@ -563,6 +564,7 @@ class OffloadingConnectorWorker:
             job_id = self._generate_job_id()
             current_time = time.perf_counter()
             src_spec, dst_spec = transfer_spec
+            assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
             num_blocks = len(dst_spec.block_ids)
             self._jobs[job_id] = (req_id, True, current_time, num_blocks)
             self._store_jobs[req_id].add(job_id)
