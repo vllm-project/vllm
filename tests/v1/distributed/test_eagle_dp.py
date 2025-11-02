@@ -23,7 +23,7 @@ async def test_run_eagle_dp():
     engine_args = AsyncEngineArgs(
         model=target_model,
         tokenizer_mode="auto",
-        enforce_eager=True,
+        enforce_eager=False,
         tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
         data_parallel_size=DP_SIZE,
         data_parallel_backend="mp",  # ray takes more time
