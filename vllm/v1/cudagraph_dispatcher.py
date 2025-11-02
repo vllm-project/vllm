@@ -81,11 +81,11 @@ class CudagraphDispatcher:
             lora_cases = [False]
 
         # Draft length cases for speculative decoding
-        # If draft_lengths is None or [0], use single case with draft_length=0
+        # Always include 0 for backward compatibility and warmup/dummy runs
         if draft_lengths is None or draft_lengths == [0]:
             draft_cases = [0]
         else:
-            draft_cases = draft_lengths
+            draft_cases = [0] + list(draft_lengths)  # Always include 0 first
 
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
