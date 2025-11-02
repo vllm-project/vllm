@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
+import model_hosting_container_standards.sagemaker as sagemaker_standards
 import prometheus_client
 import pydantic
 import regex as re
@@ -1239,6 +1240,8 @@ INVOCATION_VALIDATORS = [
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
+@sagemaker_standards.stateful_session_manager()
+@sagemaker_standards.inject_adapter_id(adapter_path="model")
 async def invocations(raw_request: Request):
     """For SageMaker, routes requests based on the request type."""
     try:
@@ -1298,6 +1301,12 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         "This should ONLY be used for local development!"
     )
 
+    @sagemaker_standards.register_load_adapter_handler(
+        request_shape={
+            "lora_name": "body.name",
+            "lora_path": "body.src",
+        },
+    )
     @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
     async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
         handler = models(raw_request)
@@ -1309,6 +1318,11 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
 
         return Response(status_code=200, content=response)
 
+    @sagemaker_standards.register_unload_adapter_handler(
+        request_shape={
+            "lora_name": "path_params.adapter_name",
+        }
+    )
     @router.post(
         "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
     )
@@ -1684,6 +1698,9 @@ def build_app(args: Namespace) -> FastAPI:
             raise ValueError(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
+
+    if not args.disable_sagemaker_standards:
+        app = sagemaker_standards.bootstrap(app)
 
     return app
 
