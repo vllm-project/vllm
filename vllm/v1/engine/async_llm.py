@@ -669,10 +669,14 @@ class AsyncLLM(EngineClient):
         self.processor.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self, device: Device | None = None) -> None:
+    async def reset_prefix_cache(
+        self,
+        device: Device | None = None,
+        reset_connector: bool = False,
+    ) -> None:
         if device == Device.CPU:
             raise ValueError("Not supported on CPU.")
-        await self.engine_core.reset_prefix_cache_async()
+        await self.engine_core.reset_prefix_cache_async(reset_connector)
 
     async def sleep(self, level: int = 1) -> None:
         await self.reset_prefix_cache()

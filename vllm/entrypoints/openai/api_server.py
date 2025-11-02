@@ -1061,15 +1061,33 @@ if envs.VLLM_SERVER_DEV_MODE:
     @router.post("/reset_prefix_cache")
     async def reset_prefix_cache(raw_request: Request):
         """
-        Reset the prefix cache. Note that we currently do not check if the
-        prefix cache is successfully reset in the API server.
+        Reset the local prefix cache.
+
+        Optionally, if the query parameter `reset_external=true`
+        also resets the external (connector-managed) prefix cache.
+
+        Note that we currently do not check if the prefix cache
+        is successfully reset in the API server.
+
+        Example:
+            POST /reset_prefix_cache?device=gpu&reset_external=true
         """
         device = None
         device_str = raw_request.query_params.get("device")
         if device_str is not None:
             device = Device[device_str.upper()]
-        logger.info("Resetting prefix cache with specific %s...", str(device))
-        await engine_client(raw_request).reset_prefix_cache(device)
+
+        reset_connector = (
+            raw_request.query_params.get("reset_external", "false").lower() == "true"
+        )
+
+        logger.info(
+            "Resetting prefix cache (device=%s, reset_external_cache=%s)",
+            str(device),
+            reset_connector,
+        )
+
+        await engine_client(raw_request).reset_prefix_cache(device, reset_connector)
         return Response(status_code=200)
 
     @router.post("/reset_mm_cache")

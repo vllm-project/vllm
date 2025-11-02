@@ -438,3 +438,6 @@ class MultiConnector(KVConnectorBase_V1):
             per_engine_labelvalues,
             prom_metrics,
         )
+
+    def reset_cache(self) -> bool:
+        return all(c.reset_cache() is not False for c in self._connectors)
