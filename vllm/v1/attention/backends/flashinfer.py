@@ -22,7 +22,9 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
+from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -327,9 +329,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            self.vllm_config.parallel_config
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+
+        self.num_qo_heads = (
+            self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
+            * self.dcp_world_size
         )
+
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
         FlashInferBackend.validate_head_size(self.head_dim)
@@ -486,6 +498,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         seq_lens_np = seq_lens_cpu.numpy()
         block_table_tensor = common_attn_metadata.block_table_tensor
 
+        if self.dcp_world_size > 1:
+            seq_lens_np = seq_lens_np // self.dcp_world_size + (
+                self.dcp_rank < seq_lens_np % self.dcp_world_size
+            )
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         use_cascade = common_prefix_len > 0
@@ -574,6 +590,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
+        if self.dcp_world_size > 1 and (prefill_use_trtllm or decode_use_trtllm):
+            raise NotImplementedError(
+                "Trtllm not support lse, please use flash attention "
+                "or FlashInfer backend."
+            )
 
         if not (prefill_use_trtllm and decode_use_trtllm):
             if self.has_sinks:
@@ -662,6 +683,77 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
 
+                if self.dcp_world_size > 1:
+                    # init custom mask for interleave kv cache
+                    # |-------total_lens----------|
+                    # |--context_lens--|--q_lens--|
+                    # Example: dcp_size=2, dcp_rank=0
+                    # For a SINGLE prefill seq, q_lens=3, total_lens=5
+                    # k_lens on RANK1 is (5 - 1 - 0) // 2 + 1 = 3
+                    # mask.shape = [q_lens, k_lens] = [3,3]
+                    # mask [[True, True, False],
+                    #       [True, True, False],
+                    #       [True, True, True]]
+                    dcp_rank = self.dcp_rank
+                    dcp_size = self.dcp_world_size
+
+                    q_lens = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(
+                        dtype=torch.int64, device=self.device
+                    )
+                    total_lens = seq_lens_cpu[
+                        prefill_start : prefill_start + num_prefills
+                    ].to(dtype=torch.int64, device=self.device)
+                    context_lens = total_lens - q_lens
+                    # max indices for global sequences
+                    max_indices = total_lens - 1
+                    # if max_indices are smaller than dcp_rank,
+                    # current rank has no kv cache, is invalid,
+                    # the mask is skipped
+                    valid = max_indices >= dcp_rank
+                    assert torch.any(valid), "There is no valid sequence"
+
+                    # local kv lens on current dcp_rank
+                    k_lens = (
+                        torch.div(
+                            max_indices - dcp_rank, dcp_size, rounding_mode="floor"
+                        )
+                        + 1
+                    )
+                    k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
+                    # vectorize operation
+                    # obtain the max length of all prefill reqs
+                    max_q = int(q_lens[valid].max().item())
+                    max_k = int(k_lens[valid].max().item())
+                    # generate local q and k indices
+                    q_indices = torch.arange(max_q, device=self.device)
+                    k_indices = torch.arange(max_k, device=self.device)
+                    # valid q and k indices of each reqs
+                    valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
+                    valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
+                    # where global q_indices >= global k_indices,
+                    # the mask is True
+                    # global q_indices = context_lens + local q_indices
+                    # global k_indices = local k_indcies * dcp_size + dcp_rank
+                    # ====> local k_indcies must be smaller or equal k_upper
+                    # k_upper=(context_lens + local q_indices - dcp_rank) // dcp_size
+                    k_upper = torch.div(
+                        context_lens[:, None] + q_indices - dcp_rank,
+                        dcp_size,
+                        rounding_mode="floor",
+                    )
+                    k_upper = torch.where(
+                        valid_q,
+                        torch.clamp(k_upper, min=-1),
+                        k_upper.new_full(k_upper.shape, -1),
+                    )
+                    mask = (k_indices[None, None, :] <= k_upper[:, :, None]) & (
+                        k_upper[:, :, None] >= 0
+                    )
+                    valid_positions = valid_q[:, :, None] & valid_k[:, None, :]
+                    # flashinfer backend needs flattened format
+                    custom_mask = torch.masked_select(mask, valid_positions)
+                else:
+                    custom_mask = None
                 # Recompute max_q_len for the slice of requests we are using
                 # for prefills. This can be different from max_q_len when
                 # we have a non-uniform batch with some short decodes offloaded
@@ -671,15 +763,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
                 if not attn_metadata.prefill_use_trtllm:
                     attn_metadata.prefill_wrapper.plan(
-                        qo_indptr_cpu,
-                        paged_kv_indptr_cpu,
+                        qo_indptr_cpu.to(self.device),
+                        paged_kv_indptr_cpu.to(self.device),
                         paged_kv_indices,
-                        paged_kv_last_page_len_cpu[prefill_start:],
+                        paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
                         self.num_qo_heads,
                         self.num_kv_heads,
                         self.head_dim,
                         self.page_size,
-                        causal=True,
+                        causal=custom_mask is None,
+                        custom_mask=custom_mask,
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
                         logits_soft_cap=self.logits_soft_cap,
@@ -764,6 +857,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
 
 class FlashInferImpl(AttentionImpl):
+    can_return_lse_for_decode: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -982,17 +1077,43 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
 
             if not attn_metadata.prefill_use_trtllm:
-                assert prefill_wrapper._causal
                 assert prefill_wrapper._window_left == self.window_left
                 assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert prefill_wrapper._sm_scale == self.scale
-                prefill_wrapper.run(
-                    prefill_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[num_decode_tokens:],
-                )
+
+                if self.dcp_world_size > 1:
+                    prefill_query = get_dcp_group().all_gather(
+                        prefill_query.contiguous(), dim=1
+                    )
+
+                    output_tmp = torch.empty_like(prefill_query)
+                    lse = torch.empty(
+                        (prefill_query.size(0), prefill_query.size(1)),
+                        dtype=torch.float32,
+                        device=prefill_query.device,
+                    )
+
+                    prefill_wrapper.run(
+                        prefill_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output_tmp,
+                        lse=lse,
+                        return_lse=True,
+                    )
+                    output[num_decode_tokens:] = cp_lse_ag_out_rs(
+                        output_tmp, lse, get_dcp_group()
+                    )
+                else:
+                    assert prefill_wrapper._causal
+                    prefill_wrapper.run(
+                        prefill_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[num_decode_tokens:],
+                    )
             else:
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
@@ -1068,13 +1189,37 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._window_left == self.window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
-                decode_wrapper.run(
-                    decode_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[:num_decode_tokens],
-                )
+
+                if self.dcp_world_size > 1:
+                    decode_query = get_dcp_group().all_gather(
+                        decode_query.contiguous(), dim=-2
+                    )
+                    output_tmp = torch.empty_like(decode_query)
+                    lse = torch.empty(
+                        (decode_query.size(0), decode_query.size(1)),
+                        dtype=torch.float32,
+                        device=decode_query.device,
+                    )
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output_tmp,
+                        lse=lse,
+                        return_lse=True,
+                    )
+                    output[:num_decode_tokens] = cp_lse_ag_out_rs(
+                        output_tmp, lse, get_dcp_group()
+                    )
+                else:
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[:num_decode_tokens],
+                    )
             else:
                 # decode_query may be non-contiguous
                 decode_query = decode_query.contiguous()
