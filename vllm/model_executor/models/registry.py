@@ -149,6 +149,7 @@ _TEXT_GENERATION_MODELS = {
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
     "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
+    "PanguEmbeddedForCausalLM": ("pangu", "PanguForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
