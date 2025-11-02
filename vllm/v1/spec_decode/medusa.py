@@ -42,11 +42,23 @@ class MedusaProposer:
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks)
 
-        # Get draft tokens and transpose the result
-        # TODO(woosuk): OPTIMIZATION: Return GPU tensor without GPU-CPU
-        # synchronization.
-        draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
-        return [list(row) for row in zip(*draft_tokens)]
+        # Early return for data-parallel rank > 0 where compute_logits
+        # returns empty list as a placeholder
+        if not logits:
+            return []
+
+        # OPTIMIZATION: Reduce GPU-CPU synchronization overhead.
+        # Perform argmax on each head first (low memory), then stack results.
+        # This avoids creating large 3D tensor [batch, heads, vocab] and
+        # reduces sync overhead from O(num_heads) to O(1).
+        # Memory: O(batch * heads) instead of O(batch * heads * vocab_size)
+        argmax_tokens = [
+            logit.argmax(dim=-1) for logit in logits
+        ]  # List of [batch_size] tensors
+        draft_tokens_gpu = torch.stack(argmax_tokens, dim=1)  # [batch_size, num_heads]
+        draft_tokens = draft_tokens_gpu.tolist()  # Single GPU-CPU sync
+
+        return draft_tokens
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
