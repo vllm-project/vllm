@@ -130,6 +130,11 @@ class LlamaModel(nn.Module):
                 # if PP disabled then draft will share embed with target
                 if get_pp_group().world_size == 1 and "embed_tokens." in name:
                     continue
+
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
