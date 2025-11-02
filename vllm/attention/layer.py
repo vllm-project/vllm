@@ -3,7 +3,7 @@
 """Attention layer."""
 
 from collections.abc import Callable
-from typing import cast
+from typing import cast, Optional
 
 import torch
 import torch.nn as nn
@@ -56,6 +56,10 @@ else:
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
+
+if current_platform.is_rocm():
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE = envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE
+
 
 
 def check_xformers_availability():
@@ -235,6 +239,7 @@ class Attention(nn.Module, AttentionLayerBase):
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
+        rotary_emb: Optional[nn.Module] = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -309,6 +314,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
+        self.impl.rotary_emb = rotary_emb
         self.backend = backend_name_to_enum(self.attn_backend.get_name())
         self.dtype = dtype
 
@@ -360,6 +366,7 @@ class Attention(nn.Module, AttentionLayerBase):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        positions: torch.Tensor = None,
         # For some alternate attention backends like MLA the attention output
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
@@ -391,7 +398,14 @@ class Attention(nn.Module, AttentionLayerBase):
 
         if self.use_output:
             output_shape = output_shape if output_shape is not None else query.shape
-            output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
+            if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+                output = torch.empty(output_shape,
+                                    dtype=query.dtype,
+                                    device=query.device)
+            else:
+                output = torch.zeros(output_shape,
+                                    dtype=query.dtype,
+                                    device=query.device)
             hidden_size = output_shape[-1]
             # Reshape the query, key, and value tensors.
             # NOTE(woosuk): We do this outside the custom op to minimize the
@@ -412,9 +426,12 @@ class Attention(nn.Module, AttentionLayerBase):
                     self, query, key, value, self_kv_cache, attn_metadata, output=output
                 )
             else:
-                torch.ops.vllm.unified_attention_with_output(
-                    query, key, value, output, self.layer_name
-                )
+                if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name, None, positions)
+                else:
+                    torch.ops.vllm.unified_attention_with_output(
+                        query, key, value, output, self.layer_name)
             return output.view(-1, hidden_size)
         else:
             if self.use_direct_call:
@@ -955,6 +972,7 @@ def unified_attention_with_output(
     output: torch.Tensor,
     layer_name: str,
     output_scale: torch.Tensor | None = None,
+    positions:  Optional[torch.Tensor] = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     wait_for_kv_layer_from_connector(layer_name)
@@ -964,17 +982,32 @@ def unified_attention_with_output(
         attn_metadata = attn_metadata[layer_name]
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    self.impl.forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache,
-        attn_metadata,
-        output=output,
-        output_scale=output_scale,
-        output_block_scale=output_block_scale,
-    )
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionImpl
+    from vllm.v1.attention.backends.rocm_aiter_fa import AiterFlashAttentionImpl
+    if VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE and (isinstance(self.impl, TritonAttentionImpl) or isinstance(self.impl, AiterFlashAttentionImpl)):
+        assert hasattr(self.impl, "rotary_emb") and self.impl.rotary_emb is not None, f"rotary_emb not found in {self.impl=}"
+        assert positions is not None, "Positions cannot be None"
+        # fusing RoPE with flushing kv_cache operation
+        self.impl.forward(self,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        output=output,
+                        output_scale=output_scale,
+                        positions=positions,
+                        output_block_scale=output_block_scale)
+    else:
+        self.impl.forward(self,
+                        query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        output=output,
+                        output_scale=output_scale,
+                        output_block_scale=output_block_scale)
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
@@ -986,6 +1019,7 @@ def unified_attention_with_output_fake(
     output: torch.Tensor,
     layer_name: str,
     output_scale: torch.Tensor | None = None,
+    positions:  Optional[torch.Tensor] = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     return
