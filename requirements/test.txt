@@ -17,7 +17,6 @@ aiohttp==3.13.0
     #   aiohttp-cors
     #   datasets
     #   fsspec
-    #   gpt-oss
     #   lm-eval
     #   ray
 aiohttp-cors==0.8.1
@@ -104,8 +103,6 @@ chardet==5.2.0
     # via mbstrdecoder
 charset-normalizer==3.4.0
     # via requests
-chz==0.3.0
-    # via gpt-oss
 click==8.1.7
     # via
     #   black
@@ -176,9 +173,7 @@ distlib==0.3.9
 dnspython==2.7.0
     # via email-validator
 docker==7.1.0
-    # via
-    #   gpt-oss
-    #   mlflow
+    # via mlflow
 docopt==0.6.2
     # via num2words
 docstring-parser==0.17.0
@@ -204,9 +199,7 @@ eval-type-backport==0.2.2
 evaluate==0.4.3
     # via lm-eval
 fastapi==0.116.1
-    # via
-    #   gpt-oss
-    #   mlflow-skinny
+    # via mlflow-skinny
 fastparquet==2024.11.0
     # via genai-perf
 fastrlock==0.8.2
@@ -281,8 +274,6 @@ google-resumable-media==2.7.2
     # via google-cloud-storage
 googleapis-common-protos==1.70.0
     # via google-api-core
-gpt-oss==0.0.8
-    # via -r requirements/test.in
 graphene==3.4.3
     # via mlflow
 graphql-core==3.2.6
@@ -310,8 +301,6 @@ hf-xet==1.1.7
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
-html2text==2025.4.15
-    # via gpt-oss
 httpcore==1.0.6
     # via httpx
 httpx==0.27.2
@@ -446,7 +435,6 @@ lm-eval @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b772215
 lxml==5.3.0
     # via
     #   blobfile
-    #   gpt-oss
     #   sacrebleu
 mako==1.3.10
     # via alembic
@@ -618,8 +606,6 @@ omegaconf==2.3.0
     #   lightning
 open-clip-torch==2.32.0
     # via -r requirements/test.in
-openai-harmony==0.0.4
-    # via gpt-oss
 opencensus==0.11.4
     # via ray
 opencensus-context==0.1.3
@@ -791,12 +777,10 @@ pydantic==2.12.0
     #   albumentations
     #   datamodel-code-generator
     #   fastapi
-    #   gpt-oss
     #   lightly
     #   mistral-common
     #   mlflow-skinny
     #   mteb
-    #   openai-harmony
     #   pydantic-extra-types
     #   ray
 pydantic-core==2.41.1
@@ -927,7 +911,6 @@ requests==2.32.3
     #   evaluate
     #   google-api-core
     #   google-cloud-storage
-    #   gpt-oss
     #   huggingface-hub
     #   lightly
     #   lm-eval
@@ -1018,7 +1001,6 @@ setuptools==77.0.3
     # via
     #   lightning-utilities
     #   pytablewriter
-    #   torch
 shapely==2.1.1
     # via
     #   geopandas
@@ -1070,8 +1052,6 @@ starlette-testclient==0.4.1
     # via schemathesis
 statsmodels==0.14.4
     # via genai-perf
-structlog==25.4.0
-    # via gpt-oss
 sympy==1.13.3
     # via
     #   einx
@@ -1086,15 +1066,12 @@ tcolorpy==0.1.6
     # via pytablewriter
 tenacity==9.1.2
     # via
-    #   gpt-oss
     #   lm-eval
     #   plotly
 tensorboardx==2.6.4
     # via lightning
 tensorizer==2.10.1
     # via -r requirements/test.in
-termcolor==3.1.0
-    # via gpt-oss
 terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
     # via -r requirements/test.in
 threadpoolctl==3.5.0
@@ -1105,7 +1082,6 @@ tifffile==2025.3.30
     #   terratorch
 tiktoken==0.12.0
     # via
-    #   gpt-oss
     #   lm-eval
     #   mistral-common
 timm==1.0.17
@@ -1228,7 +1204,6 @@ typing-extensions==4.15.0
     #   aiosignal
     #   albumentations
     #   alembic
-    #   chz
     #   fastapi
     #   graphene
     #   huggingface-hub
@@ -1268,9 +1243,7 @@ urllib3==2.2.3
     #   responses
     #   tritonclient
 uvicorn==0.35.0
-    # via
-    #   gpt-oss
-    #   mlflow-skinny
+    # via mlflow-skinny
 vector-quantize-pytorch==1.21.2
     # via -r requirements/test.in
 virtualenv==20.31.2
