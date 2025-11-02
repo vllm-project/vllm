@@ -213,6 +213,7 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -295,6 +296,27 @@ class EngineCore:
                 "Got kv_transfer_params, but no KVConnector found. "
                 "Disabling KVTransfer for this request."
             )
+        if (
+            (sampling_params := request.sampling_params)
+            and self.use_spec_decode
+            and self.async_scheduling
+        ):
+            no_penalties = (
+                sampling_params.frequency_penalty == 0.0
+                and sampling_params.presence_penalty == 0.0
+                and sampling_params.repetition_penalty == 1.0
+            )
+            if (
+                not no_penalties
+                or sampling_params.bad_words_token_ids
+                or self.vllm_config.model_config.logits_processors
+            ):
+                # TODO(Ronald1995): support this, since 2025-10-31.
+                raise ValueError(
+                    "async scheduling with spec decoding doesn't support "
+                    "penalties/bad words in sampling parameters "
+                    "or custom LogitsProcessors yet."
+                )
 
         self.scheduler.add_request(request)
 
@@ -348,7 +370,10 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
-        if self.use_spec_decode and model_executed:
+        # when using async scheduling we can't get draft token ids in adavance,
+        # so we update draft token ids in the worker process and don't
+        # need to update draft token ids here.
+        if self.use_spec_decode and model_executed and not self.async_scheduling:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
