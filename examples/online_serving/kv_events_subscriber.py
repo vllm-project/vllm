@@ -46,9 +46,56 @@ class KVEventBatch(EventBatch):
 
 
 def process_event(event_batch):
+    def _format_hash(bh):
+        if bh is None:
+            return None
+        if isinstance(bh, bytes):
+            return f"{bh.hex()[:16]}..."
+        if isinstance(bh, int):
+            return f"int:{bh}"
+        return str(bh)
+
     print(f"Received event batch at {event_batch.ts}:")
     for event in event_batch.events:
-        print(f"  - {event}")
+        if isinstance(event, BlockStored):
+            event_type = "BlockStored"
+            formatted_hashes = [_format_hash(bh) for bh in event.block_hashes]
+            parent_hash = _format_hash(event.parent_block_hash)
+
+            print(f"  - {event_type}:")
+            print(f"    block_hashes: {formatted_hashes}")
+            print(f"    parent_block_hash: {parent_hash}")
+            token_preview = event.token_ids[:5]
+            if len(event.token_ids) > 5:
+                token_preview = f"{token_preview}..."
+            print(f"    token_ids: {token_preview}")
+            print(f"    block_size: {event.block_size}")
+            print(f"    lora_id: {event.lora_id}")
+            print(f"    medium: {event.medium}")
+
+        elif isinstance(event, BlockRemoved):
+            event_type = "BlockRemoved"
+            formatted_hashes = [_format_hash(bh) for bh in event.block_hashes]
+
+            print(f"  - {event_type}:")
+            print(f"    block_hashes: {formatted_hashes}")
+            print(f"    medium: {event.medium}")
+
+        elif isinstance(event, AllBlocksCleared):
+            event_type = "AllBlocksCleared"
+            print(f"  - {event_type}: All KV cache blocks cleared")
+
+        else:
+            event_type = event.__class__.__name__
+            # For unknown types, try safe attribute access
+            try:
+                attrs = {}
+                for field_name in event.__struct_fields__:
+                    value = getattr(event, field_name)
+                    attrs[field_name] = value
+                print(f"  - {event_type}: {attrs}")
+            except Exception:
+                print(f"  - {event_type}: {event}")
 
 
 def main():
