@@ -9,6 +9,9 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 
 try:
@@ -52,9 +55,14 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
-        self.device_capability = (
-            current_platform.get_device_capability().as_version_str()
-        )
+        capability = current_platform.get_device_capability()
+        if capability is None:
+            logger.warning(
+                "SymmMemCommunicator: device capability is unknown, "
+                "communicator is not available."
+            )
+            return
+        self.device_capability = capability.as_version_str()
         if self.device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
             logger.warning(
                 "SymmMemCommunicator: Device capability %s not supported, "
@@ -95,6 +103,8 @@ class SymmMemCommunicator:
             return
         self.force_multimem = force_multimem
         self.disabled = False
+        if vllm_is_batch_invariant():
+            self.disabled = True
 
     def should_use_symm_mem(self, inp: torch.Tensor):
         if self.disabled:

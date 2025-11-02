@@ -6,13 +6,14 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 
@@ -22,11 +23,8 @@ FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    # enable spec-as-decode optimization
-    supports_uniform_spec_as_decode: ClassVar[bool] = True
-
-    # enable full CUDA Graph support for decode-only capture
     cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
 
 class FlashInferMLABackend(MLACommonBackend):
@@ -41,6 +39,10 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
         return FlashInferMLAMetadataBuilder
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
+        return [32, 64]
 
 
 g_fi_workspace = torch.zeros(

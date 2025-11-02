@@ -4,7 +4,9 @@
 import hashlib
 from typing import Any, Literal
 
+from pydantic import model_validator
 from pydantic.dataclasses import dataclass
+from typing_extensions import Self
 
 from vllm.config.utils import config
 
@@ -35,6 +37,8 @@ class StructuredOutputsConfig:
     reasoning_parser: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
+    enable_in_reasoning: bool = False
+    """Whether to use structured input for reasoning."""
 
     def compute_hash(self) -> str:
         """
@@ -54,7 +58,8 @@ class StructuredOutputsConfig:
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
-    def __post_init__(self):
+    @model_validator(mode="after")
+    def _validate_structured_output_config(self) -> Self:
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
@@ -65,3 +70,4 @@ class StructuredOutputsConfig:
                 "disable_additional_properties is only supported "
                 "for the guidance backend."
             )
+        return self

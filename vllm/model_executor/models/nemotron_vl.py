@@ -496,8 +496,11 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
             )
 
         image_token_id = kwargs["image_token_id"]
-        assert isinstance(image_token_id, torch.Tensor)
-        self.img_context_token_id = image_token_id.flatten().unique().item()
+        if isinstance(image_token_id, torch.Tensor):
+            image_token_id = image_token_id.flatten().unique().item()
+
+        assert isinstance(image_token_id, int)
+        self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
             return InternVLImagePixelInputs(
@@ -572,8 +575,8 @@ class LlamaNemotronVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, Suppor
         for modality in modalities:
             if modality == "images":
                 image_input = modalities["images"]
-                vision_embeddings = self._process_image_input(image_input)
-                multimodal_embeddings += vision_embeddings
+                image_embeddings = self._process_image_input(image_input)
+                multimodal_embeddings += tuple(image_embeddings)
 
         return multimodal_embeddings
 

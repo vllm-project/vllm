@@ -31,6 +31,7 @@ from vllm.config.model import (
     TokenizerMode,
 )
 from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.protocol import Device
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -66,6 +67,7 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -75,7 +77,8 @@ from vllm.transformers_utils.tokenizer import (
     get_cached_tokenizer,
 )
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, Device, as_iter, is_list_of
+from vllm.utils.collection_utils import as_iter, is_list_of
+from vllm.utils.counter import Counter
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -117,9 +120,8 @@ class LLM:
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
             we support `float32`, `float16`, and `bfloat16`. If `auto`, we use
-            the `torch_dtype` attribute specified in the model config file.
-            However, if the `torch_dtype` in the config is `float32`, we will
-            use `float16` instead.
+            the `dtype` attribute of the Transformers model's config. However,
+            if the `dtype` in the config is `float32`, we will use `float16` instead.
         quantization: The method used to quantize the model weights. Currently,
             we support "awq", "gptq", and "fp8" (experimental).
             If None, we first check the `quantization_config` attribute in the
@@ -176,7 +178,7 @@ class LLM:
             argument is deprecated and will be removed in v0.12.0 or v1.0.0,
             whichever is sooner.
         compilation_config: Either an integer or a dictionary. If it is an
-            integer, it is used as the level of compilation optimization. If it
+            integer, it is used as the mode of compilation optimization. If it
             is a dictionary, it can specify the full compilation configuration.
         **kwargs: Arguments for [`EngineArgs`][vllm.EngineArgs].
 
@@ -257,9 +259,7 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(
-                    level=compilation_config
-                )
+                compilation_config_instance = CompilationConfig(mode=compilation_config)
             elif isinstance(compilation_config, dict):
                 compilation_config_instance = CompilationConfig(
                     **{
@@ -286,6 +286,21 @@ class LLM:
                 structured_outputs_instance = structured_outputs_config
         else:
             structured_outputs_instance = StructuredOutputsConfig()
+
+        # warn about single-process data parallel usage.
+        _dp_size = int(kwargs.get("data_parallel_size", 1))
+        _distributed_executor_backend = kwargs.get("distributed_executor_backend")
+        if (
+            _dp_size > 1
+            and not _distributed_executor_backend == "external_launcher"
+            and not current_platform.is_tpu()
+        ):
+            raise ValueError(
+                f"LLM(data_parallel_size={_dp_size}) is not supported for single-"
+                "process usage and may hang. Please use "
+                "the explicit multi-process data-parallel example at "
+                "'examples/offline_inference/data_parallel.py'."
+            )
 
         engine_args = EngineArgs(
             model=model,
@@ -953,7 +968,7 @@ class LLM:
         truncate_prompt_tokens: int | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: list[LoRARequest] | LoRARequest | None = None,
-        pooling_task: PoolingTask = "encode",
+        pooling_task: PoolingTask | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[PoolingRequestOutput]:
         """Apply pooling to the hidden states corresponding to the input
@@ -988,25 +1003,24 @@ class LLM:
             instead pass them via the `inputs` parameter.
         """
 
-        if self.supported_tasks == ["encode"] and pooling_task is None:
-            pooling_task = "encode"
+        error_str = (
+            "pooling_task required for `LLM.encode`\n"
+            "Please use one of the more specific methods or set the "
+            "pooling_task when using `LLM.encode`:\n"
+            "  - For embeddings, use `LLM.embed(...)` "
+            'or `pooling_task="embed"`.\n'
+            "  - For classification logits, use `LLM.classify(...)` "
+            'or `pooling_task="classify"`.\n'
+            "  - For similarity scores, use `LLM.score(...)`.\n"
+            "  - For rewards, use `LLM.reward(...)` "
+            'or `pooling_task="token_classify"`\n'
+            "  - For token classification, "
+            'use `pooling_task="token_classify"`\n'
+            '  - For multi-vector retrieval, use `pooling_task="token_embed"`'
+        )
 
         if pooling_task is None:
-            pooling_task = "embed" if "embed" in self.supported_tasks else "encode"
-
-            logger.warning_once(
-                "`LLM.encode` is currently using `pooling_task = %s`.\n"
-                "Please use one of the more specific methods or set the "
-                "task directly when using `LLM.encode`:\n"
-                "  - For embeddings, use `LLM.embed(...)` "
-                'or `pooling_task="embed"`.\n'
-                "  - For classification logits, use `LLM.classify(...)` "
-                'or `pooling_task="classify"`.\n'
-                "  - For rewards, use `LLM.reward(...)` "
-                'or `pooling_task="reward"`\n'
-                "  - For similarity scores, use `LLM.score(...)`.",
-                pooling_task,
-            )
+            raise ValueError(error_str)
 
         model_config = self.model_config
         runner_type = model_config.runner_type
@@ -1016,19 +1030,6 @@ class LLM:
                 "Try passing `--runner pooling` to use the model as a "
                 "pooling model."
             )
-
-        if pooling_task not in self.supported_tasks:
-            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
-
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
-
-        for param in as_iter(pooling_params):
-            param.verify(pooling_task, model_config)
-            # for backwards compatibility
-            if truncate_prompt_tokens is not None:
-                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         io_processor_prompt = False
         if isinstance(prompts, dict) and "data" in prompts:
@@ -1046,6 +1047,34 @@ class LLM:
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+
+        if io_processor_prompt:
+            assert self.io_processor is not None
+            if is_list_of(pooling_params, PoolingParams):
+                validated_pooling_params: list[PoolingParams] = []
+                for param in as_iter(pooling_params):
+                    validated_pooling_params.append(
+                        self.io_processor.validate_or_generate_params(param)
+                    )
+                pooling_params = validated_pooling_params
+            else:
+                assert not isinstance(pooling_params, Sequence)
+                pooling_params = self.io_processor.validate_or_generate_params(
+                    pooling_params
+                )
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
+
+        if pooling_task not in self.supported_tasks:
+            raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+
+        for param in as_iter(pooling_params):
+            param.verify(pooling_task, model_config)
+            # for backwards compatibility
+            if truncate_prompt_tokens is not None:
+                param.truncate_prompt_tokens = truncate_prompt_tokens
 
         self._validate_and_add_requests(
             prompts=prompts,
@@ -1071,6 +1100,9 @@ class LLM:
                 PoolingRequestOutput[Any](
                     request_id="",
                     outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
                     prompt_token_ids=[],
                     finished=True,
                 )
@@ -1208,7 +1240,7 @@ class LLM:
             lora_request=lora_request,
             pooling_params=pooling_params,
             truncate_prompt_tokens=truncate_prompt_tokens,
-            pooling_task="encode",
+            pooling_task="token_classify",
         )
 
     def _embedding_score(
@@ -1464,8 +1496,8 @@ class LLM:
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
 
-    def reset_prefix_cache(self, device: Device | None = None) -> bool:
-        return self.llm_engine.reset_prefix_cache(device)
+    def reset_prefix_cache(self, device: Device | None = None) -> None:
+        self.llm_engine.reset_prefix_cache(device)
 
     def sleep(self, level: int = 1):
         """
@@ -1507,7 +1539,7 @@ class LLM:
         """Return a snapshot of aggregated metrics from Prometheus.
 
         Returns:
-            A ``MetricSnapshot`` instance capturing the current state
+            A `MetricSnapshot` instance capturing the current state
             of all aggregated metrics from Prometheus.
 
         Note:
@@ -1538,6 +1570,12 @@ class LLM:
             raise ValueError(
                 "The lengths of prompts and lora_request must be the same."
             )
+        if priority is not None and len(priority) != num_requests:
+            raise ValueError(
+                "The lengths of prompts "
+                f"({num_requests}) and priority ({len(priority)}) "
+                "must be the same."
+            )
 
         for sp in params if isinstance(params, Sequence) else (params,):
             if isinstance(sp, SamplingParams):
@@ -1550,20 +1588,27 @@ class LLM:
             tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
             it = tqdm_func(it, desc="Adding requests")
 
-        for i, prompt in enumerate(it):
-            if isinstance(prompt, dict):
-                self._validate_mm_data_and_uuids(
-                    prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
-                )
+        added_request_ids: list[str] = []
 
-            self._add_request(
-                prompt,
-                params[i] if isinstance(params, Sequence) else params,
-                lora_request=lora_request[i]
-                if isinstance(lora_request, Sequence)
-                else lora_request,
-                priority=priority[i] if priority else 0,
-            )
+        try:
+            for i, prompt in enumerate(it):
+                if isinstance(prompt, dict):
+                    self._validate_mm_data_and_uuids(
+                        prompt.get("multi_modal_data"), prompt.get("multi_modal_uuids")
+                    )
+                request_id = self._add_request(
+                    prompt,
+                    params[i] if isinstance(params, Sequence) else params,
+                    lora_request=lora_request[i]
+                    if isinstance(lora_request, Sequence)
+                    else lora_request,
+                    priority=priority[i] if priority else 0,
+                )
+                added_request_ids.append(request_id)
+        except Exception as e:
+            if added_request_ids:
+                self.llm_engine.abort_request(added_request_ids)
+            raise e
 
     def _validate_mm_data_and_uuids(
         self,
@@ -1646,7 +1691,7 @@ class LLM:
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
-    ) -> None:
+    ) -> str:
         prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
 
@@ -1667,6 +1712,7 @@ class LLM:
             priority=priority,
             prompt_text=prompt_text,
         )
+        return request_id
 
     def _run_engine(
         self, *, use_tqdm: bool | Callable[..., tqdm] = True

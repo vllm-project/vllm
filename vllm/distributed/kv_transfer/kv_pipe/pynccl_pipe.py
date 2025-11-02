@@ -53,6 +53,7 @@ class PyNcclPipe(KVPipeBase):
         self.config = config
         self.local_rank = local_rank
         self.kv_rank = self.config.kv_rank
+        assert self.kv_rank is not None
         self.kv_parallel_size = self.config.kv_parallel_size
         if device is None:
             self.device = self._select_device(self.config.kv_buffer_device)

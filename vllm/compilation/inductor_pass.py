@@ -14,7 +14,7 @@ import torch
 from torch import fx
 from torch._subclasses.fake_tensor import FakeTensorMode, unset_fake_temporarily
 
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if is_torch_equal_or_newer("2.6"):
     from torch._inductor.custom_graph_pass import CustomGraphPass
@@ -96,7 +96,7 @@ class InductorPass(CustomGraphPass):
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def is_applicable_for_shape(self, shape: int | None):
+    def is_applicable(self, shape: int | None):
         return True
 
 

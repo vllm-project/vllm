@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     count_expert_num_tokens,
     disable_inplace,
 )
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -557,6 +557,9 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             torch.ops._C.silu_and_mul(output, input)
         elif activation == "gelu":
             torch.ops._C.gelu_and_mul(output, input)
+        elif activation == "swigluoai":
+            # alpha = 1.702, limit = 7.0
+            torch.ops._C.swigluoai_and_mul(output, input)
         else:
             raise ValueError(f"Unsupported FusedMoe activation: {activation}")
 
@@ -984,7 +987,7 @@ class FusedMoEModularKernel(torch.nn.Module):
             assert num_chunks == 0
             workspace13 = None
             workspace2 = None
-            fused_out = torch.empty_like(a1q)
+            fused_out = torch.empty_like(a1q, dtype=in_dtype)
         else:
             assert num_chunks > 0
             workspace13, workspace2, fused_out = self._allocate_buffers(

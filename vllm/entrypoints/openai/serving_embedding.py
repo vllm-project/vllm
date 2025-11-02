@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-import base64
+import json
 from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, cast
 
-import numpy as np
 import torch
 from fastapi import Request
+from fastapi.responses import Response
 from typing_extensions import assert_never, override
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingRequest,
@@ -33,31 +33,23 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import (
-    EmbeddingOutput,
     EmbeddingRequestOutput,
     PoolingOutput,
     PoolingRequestOutput,
     RequestOutput,
 )
 from vllm.pooling_params import PoolingParams
-from vllm.utils import chunk_list
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import chunk_list
+from vllm.utils.serial_utils import (
+    EmbedDType,
+    EncodingFormat,
+    Endianness,
+    encode_pooling_bytes,
+    encode_pooling_output,
+)
 
 logger = init_logger(__name__)
-
-
-def _get_embedding(
-    output: EmbeddingOutput,
-    encoding_format: Literal["float", "base64"],
-) -> list[float] | str:
-    if encoding_format == "float":
-        return output.embedding
-    elif encoding_format == "base64":
-        # Force to use float32 for base64 encoding
-        # to match the OpenAI python client behavior
-        embedding_bytes = np.array(output.embedding, dtype="float32").tobytes()
-        return base64.b64encode(embedding_bytes).decode("utf-8")
-
-    assert_never(encoding_format)
 
 
 class EmbeddingMixin(OpenAIServing):
@@ -130,38 +122,70 @@ class EmbeddingMixin(OpenAIServing):
     def _build_response(
         self,
         ctx: ServeContext,
-    ) -> EmbeddingResponse | ErrorResponse:
-        items: list[EmbeddingResponseData] = []
-        num_prompt_tokens = 0
-
+    ) -> EmbeddingResponse | Response | ErrorResponse:
         final_res_batch_checked = cast(list[PoolingRequestOutput], ctx.final_res_batch)
 
-        for idx, final_res in enumerate(final_res_batch_checked):
-            embedding_res = EmbeddingRequestOutput.from_base(final_res)
+        encoding_format: EncodingFormat = ctx.request.encoding_format
+        embed_dtype: EmbedDType = ctx.request.embed_dtype
+        endianness: Endianness = ctx.request.endianness
 
-            item = EmbeddingResponseData(
-                index=idx,
-                embedding=_get_embedding(
-                    embedding_res.outputs, ctx.request.encoding_format
-                ),
+        def encode_float_base64():
+            items: list[EmbeddingResponseData] = []
+            num_prompt_tokens = 0
+
+            for idx, final_res in enumerate(final_res_batch_checked):
+                item = EmbeddingResponseData(
+                    index=idx,
+                    embedding=encode_pooling_output(
+                        final_res,
+                        encoding_format=encoding_format,
+                        embed_dtype=embed_dtype,
+                        endianness=endianness,
+                    ),
+                )
+                prompt_token_ids = final_res.prompt_token_ids
+
+                items.append(item)
+                num_prompt_tokens += len(prompt_token_ids)
+
+            usage = UsageInfo(
+                prompt_tokens=num_prompt_tokens,
+                total_tokens=num_prompt_tokens,
             )
-            prompt_token_ids = final_res.prompt_token_ids
 
-            items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
+            return EmbeddingResponse(
+                id=ctx.request_id,
+                created=ctx.created_time,
+                model=ctx.model_name,
+                data=items,
+                usage=usage,
+            )
 
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            total_tokens=num_prompt_tokens,
-        )
+        def encode_bytes():
+            body, items, usage = encode_pooling_bytes(
+                pooling_outputs=final_res_batch_checked,
+                embed_dtype=embed_dtype,
+                endianness=endianness,
+            )
 
-        return EmbeddingResponse(
-            id=ctx.request_id,
-            created=ctx.created_time,
-            model=ctx.model_name,
-            data=items,
-            usage=usage,
-        )
+            metadata = {
+                "id": ctx.request_id,
+                "created": ctx.created_time,
+                "model": ctx.model_name,
+                "data": items,
+                "usage": usage,
+            }
+            return EmbeddingBytesResponse(
+                body=body,
+                metadata=json.dumps(metadata),
+            )
+
+        if encoding_format == "float" or encoding_format == "base64":
+            return encode_float_base64()
+        elif encoding_format == "bytes":
+            return encode_bytes()
+        else:
+            assert_never(encoding_format)
 
     def _get_max_position_embeddings(self) -> int:
         """Get the model's effective maximum sequence length for chunking."""
@@ -399,8 +423,6 @@ class EmbeddingMixin(OpenAIServing):
                 )
                 generators.append(generator)
 
-            from vllm.utils import merge_async_iterators
-
             ctx.result_generator = merge_async_iterators(*generators)
 
             return None
@@ -561,6 +583,7 @@ class EmbeddingMixin(OpenAIServing):
                             request_id=aggregator["request_id"],
                             prompt_token_ids=original_token_ids,
                             outputs=pooling_output_data,
+                            num_cached_tokens=0,
                             finished=True,
                         )
 

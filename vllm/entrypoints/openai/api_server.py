@@ -40,12 +40,14 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (
-    load_chat_template,
-    resolve_hf_chat_template,
-    resolve_mistral_chat_template,
+from vllm.engine.protocol import Device, EngineClient
+from vllm.entrypoints.anthropic.protocol import (
+    AnthropicError,
+    AnthropicErrorResponse,
+    AnthropicMessagesRequest,
+    AnthropicMessagesResponse,
 )
+from vllm.entrypoints.anthropic.serving_messages import AnthropicServingMessages
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
@@ -58,12 +60,14 @@ from vllm.entrypoints.openai.protocol import (
     CompletionResponse,
     DetokenizeRequest,
     DetokenizeResponse,
+    EmbeddingBytesResponse,
     EmbeddingRequest,
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
     IOProcessorResponse,
     LoadLoRAAdapterRequest,
+    PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
     RerankRequest,
@@ -88,7 +92,6 @@ from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import (
     BaseModelPath,
-    LoRAModulePath,
     OpenAIServingModels,
 )
 from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
@@ -105,19 +108,17 @@ from vllm.entrypoints.utils import (
     cli_env_setup,
     load_aware_call,
     log_non_default_args,
+    process_chat_template,
+    process_lora_modules,
     with_cancellation,
 )
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.transformers_utils.tokenizer import MistralTokenizer
+from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (
-    Device,
-    FlexibleArgumentParser,
-    decorate_logs,
-    is_valid_ipv6_address,
-    set_ulimit,
-)
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.network_utils import is_valid_ipv6_address
+from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
@@ -239,6 +240,7 @@ async def build_async_engine_client_from_engine_args(
             vllm_config=vllm_config,
             usage_context=usage_context,
             enable_log_requests=engine_args.enable_log_requests,
+            aggregate_engine_logging=engine_args.aggregate_engine_logging,
             disable_log_stats=engine_args.disable_log_stats,
             client_addresses=client_config,
             client_count=client_count,
@@ -246,6 +248,7 @@ async def build_async_engine_client_from_engine_args(
         )
 
         # Don't keep the dummy data in memory
+        assert async_llm is not None
         await async_llm.reset_mm_cache()
 
         yield async_llm
@@ -310,6 +313,10 @@ def models(request: Request) -> OpenAIServingModels:
 
 def responses(request: Request) -> OpenAIServingResponses | None:
     return request.app.state.openai_serving_responses
+
+
+def messages(request: Request) -> AnthropicServingMessages:
+    return request.app.state.anthropic_serving_messages
 
 
 def chat(request: Request) -> OpenAIServingChat | None:
@@ -596,6 +603,63 @@ async def cancel_responses(response_id: str, raw_request: Request):
 
 
 @router.post(
+    "/v1/messages",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
+        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
+    },
+)
+@with_cancellation
+@load_aware_call
+async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
+    def translate_error_response(response: ErrorResponse) -> JSONResponse:
+        anthropic_error = AnthropicErrorResponse(
+            error=AnthropicError(
+                type=response.error.type,
+                message=response.error.message,
+            )
+        )
+        return JSONResponse(
+            status_code=response.error.code, content=anthropic_error.model_dump()
+        )
+
+    handler = messages(raw_request)
+    if handler is None:
+        error = base(raw_request).create_error_response(
+            message="The model does not support Messages API"
+        )
+        return translate_error_response(error)
+
+    try:
+        generator = await handler.create_messages(request, raw_request)
+    except Exception as e:
+        logger.exception("Error in create_messages: %s", e)
+        return JSONResponse(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            content=AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message=str(e),
+                )
+            ).model_dump(),
+        )
+
+    if isinstance(generator, ErrorResponse):
+        return translate_error_response(generator)
+
+    elif isinstance(generator, AnthropicMessagesResponse):
+        logger.debug(
+            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
+        )
+        return JSONResponse(content=generator.model_dump(exclude_none=True))
+
+    return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
     "/v1/chat/completions",
     dependencies=[Depends(validate_json_request)],
     responses={
@@ -680,7 +744,10 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 )
 @with_cancellation
 @load_aware_call
-async def create_embedding(request: EmbeddingRequest, raw_request: Request):
+async def create_embedding(
+    request: EmbeddingRequest,
+    raw_request: Request,
+):
     handler = embedding(raw_request)
     if handler is None:
         return base(raw_request).create_error_response(
@@ -700,6 +767,12 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         )
     elif isinstance(generator, EmbeddingResponse):
         return JSONResponse(content=generator.model_dump())
+    elif isinstance(generator, EmbeddingBytesResponse):
+        return StreamingResponse(
+            content=generator.body,
+            headers={"metadata": generator.metadata},
+            media_type=generator.media_type,
+        )
 
     assert_never(generator)
 
@@ -732,6 +805,12 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         )
     elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
+    elif isinstance(generator, PoolingBytesResponse):
+        return StreamingResponse(
+            content=generator.body,
+            headers={"metadata": generator.metadata},
+            media_type=generator.media_type,
+        )
 
     assert_never(generator)
 
@@ -991,6 +1070,16 @@ if envs.VLLM_SERVER_DEV_MODE:
             device = Device[device_str.upper()]
         logger.info("Resetting prefix cache with specific %s...", str(device))
         await engine_client(raw_request).reset_prefix_cache(device)
+        return Response(status_code=200)
+
+    @router.post("/reset_mm_cache")
+    async def reset_mm_cache(raw_request: Request):
+        """
+        Reset the multi-modal cache. Note that we currently do not check if the
+        multi-modal cache is successfully reset in the API server.
+        """
+        logger.info("Resetting multi-modal cache...")
+        await engine_client(raw_request).reset_mm_cache()
         return Response(status_code=200)
 
     @router.post("/sleep")
@@ -1627,32 +1716,9 @@ async def init_app_state(
     supported_tasks = await engine_client.get_supported_tasks()
     logger.info("Supported tasks: %s", supported_tasks)
 
-    resolved_chat_template = load_chat_template(args.chat_template)
-    if resolved_chat_template is not None:
-        # Get the tokenizer to check official template
-        tokenizer = await engine_client.get_tokenizer()
-
-        if isinstance(tokenizer, MistralTokenizer):
-            # The warning is logged in resolve_mistral_chat_template.
-            resolved_chat_template = resolve_mistral_chat_template(
-                chat_template=resolved_chat_template
-            )
-        else:
-            hf_chat_template = resolve_hf_chat_template(
-                tokenizer=tokenizer,
-                chat_template=None,
-                tools=None,
-                model_config=vllm_config.model_config,
-            )
-
-            if hf_chat_template != resolved_chat_template:
-                logger.warning(
-                    "Using supplied chat template: %s\n"
-                    "It is different from official chat template '%s'. "
-                    "This discrepancy may lead to performance degradation.",
-                    resolved_chat_template,
-                    args.model,
-                )
+    resolved_chat_template = await process_chat_template(
+        args.chat_template, engine_client, vllm_config.model_config
+    )
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()
@@ -1671,19 +1737,12 @@ async def init_app_state(
         else {}
     )
 
-    lora_modules = args.lora_modules
-    if default_mm_loras:
-        default_mm_lora_paths = [
-            LoRAModulePath(
-                name=modality,
-                path=lora_path,
-            )
-            for modality, lora_path in default_mm_loras.items()
-        ]
-        if args.lora_modules is None:
-            lora_modules = default_mm_lora_paths
-        else:
-            lora_modules += default_mm_lora_paths
+    default_mm_loras = (
+        vllm_config.lora_config.default_mm_loras
+        if vllm_config.lora_config is not None
+        else {}
+    )
+    lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
     state.openai_serving_models = OpenAIServingModels(
         engine_client=engine_client,
@@ -1747,16 +1806,19 @@ async def init_app_state(
         else None
     )
     state.openai_serving_pooling = (
-        OpenAIServingPooling(
-            engine_client,
-            state.openai_serving_models,
-            request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
-            log_error_stack=args.log_error_stack,
+        (
+            OpenAIServingPooling(
+                engine_client,
+                state.openai_serving_models,
+                supported_tasks=supported_tasks,
+                request_logger=request_logger,
+                chat_template=resolved_chat_template,
+                chat_template_content_format=args.chat_template_content_format,
+                trust_request_chat_template=args.trust_request_chat_template,
+                log_error_stack=args.log_error_stack,
+            )
         )
-        if "encode" in supported_tasks
+        if any(task in POOLING_TASKS for task in supported_tasks)
         else None
     )
     state.openai_serving_embedding = (
@@ -1807,6 +1869,7 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
         else None
@@ -1817,8 +1880,27 @@ async def init_app_state(
             state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
+            enable_force_include_usage=args.enable_force_include_usage,
         )
         if "transcription" in supported_tasks
+        else None
+    )
+    state.anthropic_serving_messages = (
+        AnthropicServingMessages(
+            engine_client,
+            state.openai_serving_models,
+            args.response_role,
+            request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            enable_auto_tools=args.enable_auto_tool_choice,
+            tool_parser=args.tool_call_parser,
+            reasoning_parser=args.structured_outputs_config.reasoning_parser,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_force_include_usage=args.enable_force_include_usage,
+        )
+        if "generate" in supported_tasks
         else None
     )
 

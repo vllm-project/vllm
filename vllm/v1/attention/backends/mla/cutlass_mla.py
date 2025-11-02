@@ -139,7 +139,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
         #       FORCE_NUM_KV_SPLITS=1
         force_num_kv_splits = os.environ.get("FORCE_NUM_KV_SPLITS", None)
         if force_num_kv_splits:
-            logger.warning_once("Forcing num_kv_splits to %d", int(force_num_kv_splits))
+            logger.debug_once("Forcing num_kv_splits to %d", int(force_num_kv_splits))
             self._num_kv_splits = int(force_num_kv_splits)
         else:
             self._num_kv_splits = -1  # => Auto-detect

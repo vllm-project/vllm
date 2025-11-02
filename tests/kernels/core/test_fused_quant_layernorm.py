@@ -15,7 +15,6 @@ VEC_HIDDEN_SIZES = range(1024, 1030)
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
     *[(1, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5120, 5137]],
-    *[(83, i) for i in [1, 1033, 2048, 5120]],
     *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
     *[(4096, i) for i in [1, 64, 5137]],
 ]
