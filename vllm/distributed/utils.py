@@ -389,7 +389,11 @@ class StatelessProcessGroup:
         launch_server = rank == 0
         if launch_server:
             # listen on the specified interface (instead of 0.0.0.0)
-            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            addrinfo = socket.getaddrinfo(
+                host, port, socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
+            family, socktype, proto, _, sockaddr = addrinfo[0]
+            listen_socket = socket.socket(family, socket.SOCK_STREAM)
             listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listen_socket.bind((host, port))
             listen_socket.listen()
