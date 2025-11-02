@@ -33,6 +33,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
+    transform_sf_into_required_layout,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -938,6 +939,49 @@ def requant_weight_ue8m0_inplace(
         s_old.copy_(s_requant)
 
 
+def deepgemm_transform_sf_into_required_layout(
+    xq: torch.Tensor, xs: torch.Tensor, is_weights: bool, use_e8m0: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert xq.dtype == torch.float8_e4m3fn, (
+        "Expected quantized tensor dtype "
+        f"to be torch.float8_e4m3fn, got {xq.dtype} instead."
+    )
+    assert xs.dtype == torch.float32, (
+        f"Expected tensor scales dtype to be torch.float32, got {xs.dtype} instead"
+    )
+
+    if use_e8m0:
+        requant_weight_ue8m0_inplace(xq, xs)
+
+    original_ndim = xq.ndim
+    if xq.ndim == 2:
+        assert xs.ndim == 2
+        xq = xq.unsqueeze(0)
+        xs = xs.unsqueeze(0)
+
+    # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
+    recipe = (1, 128, 128)
+
+    # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
+    # DeepGemm uses the `transform_sf_into_required_layout` function to
+    # represent scales in the correct format.
+    dg_xs = transform_sf_into_required_layout(
+        sf=xs,
+        mn=xq.size(1),
+        k=xq.size(2),
+        recipe=recipe,
+        num_groups=xq.size(0),
+        # is the scale factors for A in (Refers to the argument A in A @ B)
+        is_sfa=not is_weights,
+    )
+
+    if original_ndim == 2:
+        xq = xq.squeeze(0)
+        dg_xs = dg_xs.squeeze(0)
+
+    return xq, dg_xs
+
+
 def check_aiter_fp8_linear_support() -> bool:
     """AITER is only supported on ROCm and only for FP8_FNUZ
     and at the moment are MI300 series"""
@@ -1163,10 +1207,14 @@ def maybe_post_process_fp8_weight_block(
     should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
         layer.orig_dtype, layer.weight
     )
-    if is_deep_gemm_e8m0_used() and should_use_deepgemm:
-        block_sz = tuple(layer.weight_block_size)
-        requant_weight_ue8m0_inplace(
-            layer.weight.data, layer.weight_scale.data, block_sz
+    if should_use_deepgemm:
+        layer.weight.data, layer.weight_scale.data = (
+            deepgemm_transform_sf_into_required_layout(
+                layer.weight.data,
+                layer.weight_scale.data,
+                is_weights=True,
+                use_e8m0=is_deep_gemm_e8m0_used(),
+            )
         )
     # SM90 Block FP8 CUTLASS requires row-major weight scales
     elif (
