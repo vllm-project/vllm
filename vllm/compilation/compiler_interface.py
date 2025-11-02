@@ -15,7 +15,7 @@ import torch.fx as fx
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -163,6 +163,19 @@ def get_inductor_factors() -> list[Any]:
     return factors
 
 
+def is_compile_cache_enabled() -> bool:
+    # TODO(gmagogsfm): Replace torch._inductor.config.force_disable_caches
+    # with torch.compiler.config.force_disable_caches when minimum PyTorch
+    # version reaches 2.10
+    return (
+        not envs.VLLM_DISABLE_COMPILE_CACHE
+        and not torch._inductor.config.force_disable_caches
+        and not (
+            get_current_vllm_config().compilation_config.inductor_compile_config.force_disable_caches
+        )
+    )
+
+
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -219,7 +232,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+
+        if is_compile_cache_enabled():
             compiled_graph.save(path=path, format="unpacked")
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
@@ -469,10 +483,8 @@ class InductorAdaptor(CompilerInterface):
                 config_patches=current_config,
             )
 
-        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
-        # compilation cache. So turn off the checks if we disable the
-        # compilation cache.
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+        # Turn off the checks if we disable the compilation cache.
+        if is_compile_cache_enabled():
             if hash_str is None:
                 raise RuntimeError(
                     "vLLM failed to compile the model. The most "
