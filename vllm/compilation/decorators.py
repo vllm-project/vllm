@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import dataclasses
 import hashlib
 import inspect
 import os
 import sys
+import threading
 from collections.abc import Callable
 from typing import TypeVar, overload
 from unittest.mock import patch
@@ -36,6 +38,29 @@ logger = init_logger(__name__)
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
 
 _T = TypeVar("_T", bound=type[nn.Module])
+
+# Module-level cache for compiled code reuse
+# Key: compilation cache key (hash), Value: CompiledCodeCacheEntry
+_compiled_code_cache: dict[str, "CompiledCodeCacheEntry"] = {}
+_cache_lock = threading.Lock()
+
+
+@dataclasses.dataclass
+class CompiledCodeCacheEntry:
+    """
+    Stores compiled callable that can be reused across instances.
+
+    The cached compiled_callable retains Dynamo's guard logic, so when
+    reused by instances with different weights, guards will fail and
+    trigger recompilation with the correct weight bindings.
+    """
+
+    # Whether compilation has been completed
+    compiled: bool = False
+    # The compiled callable (includes guard logic)
+    compiled_callable: object | None = None
+    # AOT compiled function (if using AOT mode)
+    aot_compiled_fn: object | None = None
 
 
 def ignore_torch_compile(cls: _T) -> _T:
@@ -220,6 +245,59 @@ def _model_hash_key(fn) -> str:
     return sha256_hash.hexdigest()
 
 
+def _compute_compilation_cache_key(
+    module: nn.Module, forward_fn: Callable, vllm_config: VllmConfig
+) -> str:
+    """
+    Compute a unique cache key for compilation that identifies whether
+    compiled code can be reused across instances.
+
+    The key includes:
+    - Code location and version (_model_hash_key)
+    - Compilation configuration (from caching.compilation_config_hash_factors)
+    - Device/parallel configuration factors
+    - Module structure (parameter/buffer shapes and dtypes)
+    """
+    from vllm.compilation.caching import compilation_config_hash_factors
+
+    sha256_hash = hashlib.sha256()
+
+    # 1. Code identity (class, method, version)
+    code_key = _model_hash_key(forward_fn)
+    sha256_hash.update(code_key.encode())
+
+    # 2. Compilation configuration
+    config_factors = compilation_config_hash_factors(vllm_config)
+    for factor in config_factors:
+        sha256_hash.update(factor.encode())
+
+    # 3. Parallel/device configuration (for distributed setups)
+    parallel_config = vllm_config.parallel_config
+    sha256_hash.update(str(parallel_config.tensor_parallel_size).encode())
+    sha256_hash.update(str(parallel_config.pipeline_parallel_size).encode())
+
+    # 4. Compilation mode
+    sha256_hash.update(str(vllm_config.compilation_config.mode).encode())
+
+    # 5. Module structure (parameters and buffers)
+    # This ensures different shapes/dtypes get different cache keys
+    structure_info = []
+    for name, param in sorted(module.named_parameters()):
+        structure_info.append(f"{name}:{param.dtype}:{tuple(param.shape)}")
+    for name, buffer in sorted(module.named_buffers()):
+        structure_info.append(f"{name}:{buffer.dtype}:{tuple(buffer.shape)}")
+    if structure_info:
+        sha256_hash.update("|".join(structure_info).encode())
+
+    cache_key = sha256_hash.hexdigest()
+    logger.debug(
+        "Computed compilation cache key for %s: %s",
+        forward_fn.__qualname__,
+        cache_key[:16],
+    )
+    return cache_key
+
+
 def _verify_source_unchanged(source_info, vllm_config) -> None:
     from .caching import _compute_code_hash, _compute_code_hash_with_content
 
@@ -289,7 +367,52 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
-        compilation_counter.num_models_seen += 1
+        # Check if compilation cache is disabled
+        # If disabled, each instance compiles independently (original behavior)
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            logger.debug(
+                "Compilation cache disabled for %s (VLLM_DISABLE_COMPILE_CACHE=1)",
+                self.__class__.__name__,
+            )
+            compilation_counter.num_models_seen += 1
+            self._using_cached_compilation = False
+            self._cache_entry = None
+            TorchCompileWrapperWithCustomDispatcher.__init__(
+                self, compilation_mode=vllm_config.compilation_config.mode
+            )
+            return
+
+        # Compute cache key for this instance's compiled code
+        self._compilation_cache_key = _compute_compilation_cache_key(
+            self, self.__class__.forward, vllm_config
+        )
+
+        # Check if we can reuse cached compiled code
+        with _cache_lock:
+            if self._compilation_cache_key in _compiled_code_cache:
+                cache_entry = _compiled_code_cache[self._compilation_cache_key]
+                logger.debug(
+                    "Found cached compilation for %s (key: %s)",
+                    self.__class__.__name__,
+                    self._compilation_cache_key[:8],
+                )
+                # Mark this instance as using cached compilation
+                self._using_cached_compilation = True
+                self._cache_entry = cache_entry
+            else:
+                # First time seeing this code, increment counter
+                # and create cache entry
+                compilation_counter.num_models_seen += 1
+                logger.debug(
+                    "First compilation for %s (key: %s)",
+                    self.__class__.__name__,
+                    self._compilation_cache_key[:8],
+                )
+                cache_entry = CompiledCodeCacheEntry()
+                _compiled_code_cache[self._compilation_cache_key] = cache_entry
+                self._using_cached_compilation = False
+                self._cache_entry = cache_entry
+
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_mode=vllm_config.compilation_config.mode
         )
@@ -362,6 +485,27 @@ def _support_torch_compile(
                 )
                 return self.aot_compiled_fn(self, *args, **kwargs)
 
+        # Check if we can reuse cached compiled callable from another instance
+        if (
+            getattr(self, "_using_cached_compilation", False)
+            and self._cache_entry.compiled
+        ):
+            # Reuse cached compiled callable (with guards)
+            # Dynamo guards will check if weights match; if not, recompile
+            if self._cache_entry.aot_compiled_fn is not None:
+                logger.debug(
+                    "Reusing cached AOT compilation for %s", self.__class__.__name__
+                )
+                return self._cache_entry.aot_compiled_fn(self, *args, **kwargs)
+            elif self._cache_entry.compiled_callable is not None:
+                # Call cached compiled_callable with guards
+                # Guards will ensure correct weight binding
+                logger.debug(
+                    "Reusing cached compiled_callable (with guards) for %s",
+                    self.__class__.__name__,
+                )
+                return self._cache_entry.compiled_callable(*args, **kwargs)
+
         # the first compilation needs to have dynamic shapes marked
         if len(self.compiled_codes) < 1:
             sig = inspect.signature(self.__class__.forward)
@@ -404,10 +548,14 @@ def _support_torch_compile(
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
         if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
-            # it seems Dynamo reuse the compilation across instances,
-            # while we need to make sure the compiled code is not reused.
-            # we need to control all the compilation of the model.
-            torch._dynamo.eval_frame.remove_from_cache(self.original_code_object)
+            # Only remove from cache if this is the first instance
+            # (not using cached compilation).
+            # For cached instances, we preserve Dynamo's cache and let
+            # guards handle weight differences.
+            if not getattr(self, "_using_cached_compilation", False):
+                # For the first instance of each unique code object,
+                # we control the compilation by clearing Dynamo's cache
+                torch._dynamo.eval_frame.remove_from_cache(self.original_code_object)
 
             # collect all relevant files traced by Dynamo,
             # so that the compilation cache can trigger re-compilation
@@ -460,6 +608,20 @@ def _support_torch_compile(
                         self.aot_compiled_fn.save_compiled_function(
                             aot_compilation_path
                         )
+                        # Save AOT compiled function to cache for reuse
+                        # (only if cache is enabled and this is first compilation)
+                        if (
+                            not envs.VLLM_DISABLE_COMPILE_CACHE
+                            and not getattr(self, "_using_cached_compilation", False)
+                            and self._cache_entry is not None
+                        ):
+                            with _cache_lock:
+                                self._cache_entry.aot_compiled_fn = self.aot_compiled_fn
+                                self._cache_entry.compiled = True
+                                logger.debug(
+                                    "Saved AOT compilation to cache for %s",
+                                    self.__class__.__name__,
+                                )
                     except Exception as e:
                         logger.warning(
                             "Cannot save aot compilation to path %s, error: %s",
@@ -468,11 +630,30 @@ def _support_torch_compile(
                         )
                 else:
                     output = self.compiled_callable(*args, **kwargs)
+                    # Save compiled_callable to cache for reuse
+                    # (only if cache is enabled and this is first compilation)
+                    # The compiled_callable includes Dynamo guards, so it's safe
+                    # to reuse across instances with different weights
+                    if (
+                        not envs.VLLM_DISABLE_COMPILE_CACHE
+                        and not getattr(self, "_using_cached_compilation", False)
+                        and self._cache_entry is not None
+                    ):
+                        with _cache_lock:
+                            # Save the compiled_callable (with guards)
+                            self._cache_entry.compiled_callable = self.compiled_callable
+                            self._cache_entry.compiled = True
+                            logger.debug(
+                                "Saved compiled_callable to cache for %s",
+                                self.__class__.__name__,
+                            )
             return output
 
         # usually, capturing the model once is enough, and then we can
         # dispatch to the compiled code directly, without going through
         # the Dynamo guard mechanism.
+        # NOTE: Only the first instance (that triggered compilation) reaches here.
+        # Cached instances return earlier with guard checks.
         with self.dispatch_to_code(0):
             model_output = self.forward(*args, **kwargs)
             return model_output
