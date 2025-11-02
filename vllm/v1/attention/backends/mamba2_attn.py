@@ -100,7 +100,6 @@ class Mamba2AttentionMetadata:
     num_decodes: int
     num_decode_tokens: int
     query_start_loc_p: torch.Tensor
-    seq_lens: torch.Tensor
 
     prep_initial_states: bool
     chunk_size: int
@@ -155,7 +154,6 @@ class Mamba2AttentionMetadataBuilder(
         fast_build: bool = False,
     ) -> Mamba2AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        seq_lens = common_attn_metadata.seq_lens
 
         query_start_loc_p = None
         seq_idx_p = None
@@ -335,7 +333,6 @@ class Mamba2AttentionMetadataBuilder(
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             query_start_loc_p=query_start_loc_p,
-            seq_lens=seq_lens,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
             has_initial_states_p=has_initial_states_p,
