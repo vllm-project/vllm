@@ -1527,7 +1527,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=lambda: random_uuid(),
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
@@ -1622,7 +1622,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
         ),
     )
     request_id: str = Field(
-        default_factory=lambda: f"{random_uuid()}",
+        default_factory=lambda: random_uuid(),
         description=(
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "

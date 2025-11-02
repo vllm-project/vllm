@@ -4,6 +4,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
+from vllm.config import VllmConfig
+from vllm.config.vllm import KVCacheConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+from vllm.v1.structured_output import StructuredOutputManager
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -14,6 +19,19 @@ if TYPE_CHECKING:
 
 
 class SchedulerInterface(ABC):
+    @abstractmethod
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
+        structured_output_manager: StructuredOutputManager,
+        block_size: int,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        include_finished_set: bool = False,
+        log_stats: bool = False,
+    ) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def schedule(self) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
