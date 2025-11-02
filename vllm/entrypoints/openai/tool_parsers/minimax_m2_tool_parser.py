@@ -95,7 +95,7 @@ class MinimaxM2ToolParser(ToolParser):
                 "tokens in the tokenizer!"
             )
 
-        logger.info(
+        logger.debug(
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
