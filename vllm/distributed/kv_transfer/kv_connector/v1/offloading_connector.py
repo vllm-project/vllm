@@ -575,7 +575,12 @@ class OffloadingConnectorWorker:
             current_time = time.perf_counter()
             src_spec, dst_spec = transfer_spec
             assert isinstance(src_spec, BlockIDsLoadStoreSpec)
+<<<<<<< HEAD
             self._jobs[job_id] = (req_id, False, current_time, src_spec.num_blocks)
+=======
+            num_blocks = len(src_spec.block_ids)
+            self._jobs[job_id] = (req_id, False, current_time, num_blocks)
+>>>>>>> 6e27f2e46 (Another pre-commit fix.)
             assert req_id not in self._load_job
             self._load_job[req_id] = job_id
             assert self.worker.transfer_async(job_id, transfer_spec)
@@ -586,7 +591,12 @@ class OffloadingConnectorWorker:
             current_time = time.perf_counter()
             src_spec, dst_spec = transfer_spec
             assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
+<<<<<<< HEAD
             self._jobs[job_id] = (req_id, True, current_time, dst_spec.num_blocks)
+=======
+            num_blocks = len(dst_spec.block_ids)
+            self._jobs[job_id] = (req_id, True, current_time, num_blocks)
+>>>>>>> 6e27f2e46 (Another pre-commit fix.)
             self._store_jobs[req_id].add(job_id)
             assert self.worker.transfer_async(job_id, transfer_spec)
 
