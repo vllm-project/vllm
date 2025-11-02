@@ -15,14 +15,10 @@ from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
+from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
-from vllm.distributed.kv_transfer import (
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-    is_v1_kv_transfer_group,
-)
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -843,37 +839,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
 
-def wait_for_kv_layer_from_connector(layer_name: str):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
-        return
-    assert isinstance(attn_metadata, dict)
-    connector.wait_for_layer_load(layer_name)
-
-
-def maybe_save_kv_layer_to_connector(
-    layer_name: str,
-    kv_cache_layer: list[torch.Tensor],
-):
-    if not has_kv_transfer_group() or not is_v1_kv_transfer_group():
-        return
-
-    connector = get_kv_transfer_group()
-
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if attn_metadata is None:
-        return
-    assert isinstance(attn_metadata, dict)
-    connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata[layer_name])
-
-
 def maybe_calc_kv_scales(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -912,14 +877,13 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    wait_for_kv_layer_from_connector(layer_name)
-
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -928,7 +892,6 @@ def unified_attention(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(self, query, key, value, kv_cache, attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
 
 
@@ -948,6 +911,7 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -957,7 +921,6 @@ def unified_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -975,8 +938,6 @@ def unified_attention_with_output(
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
-
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
 def unified_attention_with_output_fake(
@@ -999,14 +960,13 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_mla_attention(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    wait_for_kv_layer_from_connector(layer_name)
-
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -1015,7 +975,6 @@ def unified_mla_attention(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
 
 
@@ -1037,6 +996,7 @@ direct_register_custom_op(
 )
 
 
+@maybe_transfer_kv_layer
 def unified_mla_attention_with_output(
     q: torch.Tensor,
     kv_c_normed: torch.Tensor,
@@ -1046,7 +1006,6 @@ def unified_mla_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    wait_for_kv_layer_from_connector(layer_name)
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -1064,8 +1023,6 @@ def unified_mla_attention_with_output(
         output_scale=output_scale,
         output_block_scale=output_block_scale,
     )
-
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
 
 
 def unified_mla_attention_with_output_fake(
