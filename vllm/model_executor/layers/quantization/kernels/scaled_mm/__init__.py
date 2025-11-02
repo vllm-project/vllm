@@ -27,7 +27,7 @@ from vllm.platforms import PlatformEnum, current_platform
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[ScaledMMLinearKernel]]] = {
     PlatformEnum.CPU: [CPUScaledMMLinearKernel],
-    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel],
+    PlatformEnum.CUDA: [CutlassScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.ROCM: [AiterScaledMMLinearKernel, TritonScaledMMLinearKernel],
     PlatformEnum.TPU: [XLAScaledMMLinearKernel],
 }
@@ -67,6 +67,13 @@ def choose_scaled_mm_linear_kernel(
                 f" {kernel.__name__} disabled by environment variable"
             )
             continue
+
+        # Check if kernel is supported on this platform/capability
+        if hasattr(kernel, "is_supported"):
+            supported, reason = kernel.is_supported(compute_capability)
+            if not supported:
+                failure_reasons.append(f" {kernel.__name__}: {reason}")
+                continue
 
         # If the current platform uses compute_capability,
         # make sure the kernel supports the compute cability.
