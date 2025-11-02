@@ -9,7 +9,6 @@ from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
-import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -79,10 +78,6 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
-    disable_logprobs: bool = True
-    """If set to True, token log probabilities are not returned during
-    speculative decoding. If set to False, token log probabilities are returned
-    according to the log probability settings in SamplingParams."""
 
     # Draft model configuration
     quantization: me_quant.QuantizationMethods | None = None
@@ -127,12 +122,6 @@ class SpeculativeConfig:
     """The configuration of the target model."""
     target_parallel_config: SkipValidation[ParallelConfig] = None  # type: ignore
     """The parallel configuration for the target model."""
-    enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
-    """Whether vLLM is configured to use chunked prefill or not. Used for
-    raising an error since it's not yet compatible with speculative decode."""
-    disable_log_stats: SkipValidation[bool] = None  # type: ignore
-    """Whether to disable the periodic printing of stage times in speculative
-    decoding."""
 
     # params generated in the post-init stage
     draft_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -366,12 +355,6 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3"):
-                    if self.enable_chunked_prefill and not envs.VLLM_USE_V1:
-                        raise ValueError(
-                            "Chunked prefill and EAGLE are not compatible "
-                            "when using V0."
-                        )
-
                     from vllm.transformers_utils.configs import SpeculatorsConfig
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
 

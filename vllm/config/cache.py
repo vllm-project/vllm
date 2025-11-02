@@ -25,6 +25,7 @@ CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
 PrefixCacheEvictionPolicy = Literal["lru", "frequency_cost"]
+KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
@@ -91,8 +92,10 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-    mamba_block_size: int | None = None
-    """Size of a contiguous cache block in number of tokens for mamba cache."""
+    mamba_block_size: int | None = Field(default=None, gt=0)
+    """Size of a contiguous cache block in number of tokens for mamba cache.
+    Can be set only when prefix caching is enabled.
+    Value must be a multiple of 8 to align with causal_conv1d kernel."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -126,6 +129,17 @@ class CacheConfig:
     control of how much memory gets used when compared with using
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
+
+    kv_offloading_size: float | None = None
+    """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
+    the total buffer size summed across all TP ranks. By default, this is set
+    to None, which means no KV offloading is enabled. When set with
+    kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
+
+    kv_offloading_backend: KVOffloadingBackend | None = None
+    """The backend to use for KV cache offloading. Supported backends include
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    together with kv_offloading_size."""
 
     # Eviction policy for prefix caching (experimental, opt-in)
     prefix_cache_eviction_policy: PrefixCacheEvictionPolicy = "lru"
