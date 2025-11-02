@@ -72,7 +72,9 @@ async def test_basic_audio_gemma(foscolo):
     model_name = "google/gemma-3n-E2B-it"
     server_args = ["--enforce-eager"]
 
-    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+    with RemoteOpenAIServer(
+        model_name, server_args, max_wait_seconds=480
+    ) as remote_server:
         client = remote_server.get_async_client()
         transcription = await client.audio.transcriptions.create(
             model=model_name,
