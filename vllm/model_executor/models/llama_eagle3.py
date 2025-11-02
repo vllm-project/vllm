@@ -328,6 +328,12 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
 
+            # To prevent overriding with target model's layers
+            if "lm_head" in name:
+                self.has_own_lm_head = True
+            if "embed_tokens" in name:
+                self.has_own_embed_tokens = True
+
         skip_substrs = []
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
