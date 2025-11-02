@@ -1243,6 +1243,14 @@ class ModelConfig:
             )
         return False
 
+    def is_prefix_lm(self) -> bool:
+        if not hasattr(self.hf_config, "model_type"):
+            return False
+        return self.hf_config.model_type in (
+            "paligemma",
+            "gemma3",
+        )
+
     def get_head_size(self) -> int:
         # TODO remove hard code
         if self.is_deepseek_mla:
