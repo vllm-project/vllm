@@ -4,7 +4,6 @@
 """Native OpenPangu Embedded model implementation."""
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -22,14 +21,13 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelL
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     make_empty_intermediate_tensors_factory,
     make_layers,
-    maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
 
@@ -124,9 +122,7 @@ class PanguAttention(nn.Module):
                 rope_scaling.setdefault(
                     "original_max_position_embeddings", original_max_position
                 )
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 2048
-        )
+        max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
 
         bias = getattr(config, "bias", False)
         self.q_proj = ColumnParallelLinear(
@@ -244,9 +240,7 @@ class PanguDecoderLayer(nn.Module):
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual
-        )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
@@ -280,8 +274,7 @@ class PanguModel(nn.Module):
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
         if get_pp_group().is_first_rank or (
-            getattr(config, "tie_word_embeddings", True)
-            and get_pp_group().is_last_rank
+            getattr(config, "tie_word_embeddings", True) and get_pp_group().is_last_rank
         ):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
@@ -333,7 +326,7 @@ class PanguModel(nn.Module):
 
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            if idx in self.aux_hidden_state_layers:
+            if self.start_layer + idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
 
