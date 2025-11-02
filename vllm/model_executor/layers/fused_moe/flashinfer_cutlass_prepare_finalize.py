@@ -231,12 +231,13 @@ def flashinfer_alltoall_dispatch(
     max_num_token = (
         max(global_num_tokens_cpu) if global_num_tokens_cpu is not None else x.shape[0]
     )
+    topk_weights_dtype = topk_weights.dtype
     alltoall_info, topk_ids, topk_weights, _ = (
         MnnvlMoe.mnnvl_moe_alltoallv_prepare_without_allgather(
             topk_ids,
             topk_weights,
             None,
-            all2all_manager.prepare_workspace,
+            all2all_manager.prepare_workspace_tensor,
             max_num_token,
             ep_rank,
             ep_size,
@@ -245,6 +246,9 @@ def flashinfer_alltoall_dispatch(
             top_k,
         )
     )
+    # NOTE: Restore original dtype, as FlashInfer casts topk_weights
+    #       to int32. Can be removed after the bug is fixed.
+    topk_weights = topk_weights.view(topk_weights_dtype)
 
     x, x_sf = moe_kernel_quantize_input(
         x,
