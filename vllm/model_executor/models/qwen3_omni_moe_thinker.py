@@ -99,7 +99,6 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
-    flatten_bn,
     maybe_prefix,
 )
 from .vision import (
@@ -1064,8 +1063,6 @@ class Qwen3OmniMoeConditionalGenerationMixin(Qwen2_5OmniConditionalGenerationMix
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
-
-        audio_feature_lengths = flatten_bn(audio_feature_lengths, concat=True)
 
         audio_feat_lengths, audio_output_lengths = _get_feat_extract_output_lengths(
             audio_feature_lengths
