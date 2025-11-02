@@ -2436,6 +2436,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             **model_kwargs,
         )
 
+    def _has_prefill_tokens_scheduled(
+        self,
+        num_scheduled_tokens: np.ndarray,
+        num_reqs: int,
+    ) -> bool:
+        prompt_lens = self.input_batch.num_prompt_tokens[:num_reqs]
+        num_computed = self.input_batch.num_computed_tokens_cpu[:num_reqs]
+        return np.any((num_scheduled_tokens > 0) & (num_computed < prompt_lens))
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2505,6 +2514,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
                 num_scheduled_tokens == self.input_batch.num_reqs * max_query_len
             )
+            # Disable uniform decode on steps that still process prompt tokens.
+            # This makes first-step behavior consistent regardless of prompt length.
+            if self._has_prefill_tokens_scheduled(
+                num_scheduled_tokens_np, self.input_batch.num_reqs
+            ):
+                uniform_decode = False
             batch_descriptor = BatchDescriptor(
                 num_tokens=num_input_tokens,
                 uniform_decode=uniform_decode,
