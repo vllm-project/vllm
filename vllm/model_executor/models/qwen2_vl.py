@@ -792,7 +792,7 @@ class Qwen2VisionTransformer(nn.Module):
         max_seqlen, seqlens = None, None
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == AttentionBackendEnum.XFORMERS:

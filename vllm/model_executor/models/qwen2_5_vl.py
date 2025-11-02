@@ -863,7 +863,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         seqlens = torch.zeros(1, device=cu_seqlens.device)
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.ROCM_AITER_FA
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == AttentionBackendEnum.XFORMERS:
