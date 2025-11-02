@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 )
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
 _config: dict[str, Any] | None = None
@@ -102,3 +103,10 @@ else:
 
     fused_topk = lambda *args, **kwargs: _raise_exception("fused_topk")
     fused_experts = lambda *args, **kwargs: _raise_exception("fused_experts")
+
+if current_platform.is_rocm():
+    from vllm.model_executor.layers.fused_moe.aiter_mori_experts import AiterMoriExperts
+
+    __all__ += [
+        "AiterMoriExperts",
+    ]

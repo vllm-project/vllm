@@ -56,7 +56,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
@@ -76,6 +76,8 @@ if current_platform.is_cuda_alike():
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
+    if has_mori():
+        from .mori_prepare_finalize import MoriPrepareAndFinalize
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = object  # type: ignore
@@ -99,6 +101,7 @@ if is_rocm_aiter_moe_enabled():
     )
 else:
     from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
@@ -233,6 +236,47 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 max_tokens_per_rank=moe.max_num_tokens,
                 num_dispatchers=all2all_manager.world_size,
                 use_fp8_dispatch=use_fp8_dispatch,
+            )
+        elif moe.use_mori_kernels:
+            use_fp8_dispatch = (
+                quant_config is not None
+                and quant_config.quant_dtype == current_platform.fp8_dtype()
+            )
+            scale_dim = 0
+            scale_type_size = 0
+            quant_dtype = None
+            if use_fp8_dispatch:
+                assert quant_config is not None
+                temp = quant_config.scale_shape(
+                    moe.max_num_tokens,
+                    moe.hidden_dim,
+                )
+                if temp is not None:
+                    scale_dim = temp[-1]
+                scale_type_size = (
+                    torch.float32.itemsize
+                )  # aiter quantization uses float32 scale
+                quant_dtype = quant_config.quant_dtype
+
+            all_to_all_args = dict(
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                experts_per_token=moe.experts_per_token,
+                hidden_dim=moe.hidden_dim,
+                data_type=moe.in_dtype,
+                quant_dtype=quant_dtype,
+                scale_dim=scale_dim,
+                scale_type_size=scale_type_size,
+            )
+            handle = all2all_manager.get_handle(all_to_all_args)
+
+            prepare_finalize = MoriPrepareAndFinalize(
+                handle,
+                max_num_tokens=moe.max_num_tokens,
+                num_local_experts=moe.num_local_experts,
+                num_dispatchers=all2all_manager.world_size,
+                use_fp8_dispatch=use_fp8_dispatch,
+                json_config=all2all_manager.json_config,
             )
 
         return prepare_finalize
@@ -398,6 +442,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             return BatchedTritonExperts(
                 max_num_tokens=self.moe.max_num_tokens,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                quant_config=self.moe_quant_config,
+            )
+        elif self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
+            from vllm.model_executor.layers.fused_moe import AiterMoriExperts
+
+            logger.debug("AiterMoriExperts for Mori integration %s", self.moe)
+            return AiterMoriExperts(
+                max_num_tokens=self.moe.max_num_tokens,
                 quant_config=self.moe_quant_config,
             )
         else:
@@ -1402,6 +1454,10 @@ class FusedMoE(CustomOp):
         return self.moe_parallel_config.use_deepep_ll_kernels
 
     @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
+
+    @property
     def use_flashinfer_cutlass_kernels(self):
         return (
             self.moe_quant_config is not None
@@ -1414,6 +1470,7 @@ class FusedMoE(CustomOp):
         return (
             self.moe_parallel_config.use_pplx_kernels
             or self.moe_parallel_config.use_deepep_ll_kernels
+            or self.moe_parallel_config.use_mori_kernels
             or (self.dp_size > 1 and self.use_flashinfer_cutlass_kernels)
         )
 
