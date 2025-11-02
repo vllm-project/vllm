@@ -77,6 +77,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
+    "ox744c": "AMD_7900XTX_RDNA3"
 }
 
 # Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
@@ -202,6 +203,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
+        import os
         from importlib.util import find_spec
 
         from vllm.attention.backends.registry import _Backend
@@ -212,6 +214,18 @@ class RocmPlatform(Platform):
         if on_gfx9() and find_spec("flash_attn") is not None:
             return _Backend.FLASH_ATTN
 
+        if (
+            os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") == "TRUE"
+            and os.environ.get("GPU_ARCHS") == "gfx1100"
+            and find_spec("flash_attn") is not None
+            and on_gfx1x()
+        ):
+            logger.info(
+                "Using ViT FlashAttention (upstream) on V1 engine (gfx1x / RDNA3)."
+            )
+            return _Backend.FLASH_ATTN
+
+        logger.info("Using Vit TORCH_SDPA V1 engine")
         return _Backend.TORCH_SDPA
 
     @classmethod

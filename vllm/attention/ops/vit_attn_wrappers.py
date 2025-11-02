@@ -14,8 +14,15 @@ To use these ops, you must have a recent version of PyTorch installed (>= 2.4.0)
 
 import einops
 import torch
+import vllm.envs as envs
 
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9, on_gfx1x
+else:
+    on_gfx9 = lambda *args, **kwargs: False
 
 
 def xformers_attn_seqlens_wrapper(
@@ -61,10 +68,14 @@ def flash_attn_maxseqlen_wrapper(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
-    is_rocm_aiter: bool,
     use_upstream_fa: bool,
 ) -> torch.Tensor:
-    if is_rocm_aiter:
+    if (
+        current_platform.is_rocm()
+        and on_gfx9()
+        and envs.VLLM_ROCM_USE_AITER
+        and envs.VLLM_ROCM_USE_AITER_MHA
+    ):
         from aiter import flash_attn_varlen_func
     else:
         if use_upstream_fa:
@@ -96,7 +107,6 @@ def flash_attn_maxseqlen_wrapper_fake(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
-    is_rocm_aiter: bool,
     use_upstream_fa: bool,
 ) -> torch.Tensor:
     b, s, h, d = q.shape
@@ -117,9 +127,8 @@ def vit_flash_attn_wrapper(
     cu_seqlens: torch.Tensor,
     max_seqlen: torch.Tensor,
     batch_size: int,
-    is_rocm_aiter: bool,
     use_upstream_fa: bool,
 ) -> torch.Tensor:
     return torch.ops.vllm.flash_attn_maxseqlen_wrapper(
-        q, k, v, cu_seqlens, max_seqlen, batch_size, is_rocm_aiter, use_upstream_fa
+        q, k, v, cu_seqlens, max_seqlen, batch_size, use_upstream_fa
     )
