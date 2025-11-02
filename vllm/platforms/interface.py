@@ -196,6 +196,20 @@ class Platform:
         return ""
 
     @classmethod
+    def get_mamba_attn_backend_cls(
+        cls,
+        mamba_type: str = "",
+    ) -> str:
+        """Get mamba attention backend class of a device."""
+        from vllm.model_executor.models.registry import MAMBA_BACKEND_MAP
+
+        if mamba_type not in MAMBA_BACKEND_MAP:
+            raise ValueError(
+                f"Invalid mamba type ({mamba_type}) for {cls.device_name}."
+            )
+        return MAMBA_BACKEND_MAP[mamba_type]
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
