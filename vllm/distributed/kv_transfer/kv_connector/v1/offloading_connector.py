@@ -56,11 +56,9 @@ class OffloadTiming:
     # Time is already normalized by the number of blocks.
     def record_time(self, time: float, is_store: bool):
         if is_store:
-            print(f"===Storing time: {time}===")
             self.data["total_store_time"] += time
             self.num_stores += 1
         else:
-            print(f"===Loading time: {time}===")
             self.data["total_load_time"] += time
             self.num_loads += 1
         
@@ -68,7 +66,8 @@ class OffloadTiming:
 
 @dataclass
 class OffloadingConnectorStats(KVConnectorStats):
-    
+    gpu_block_size: int = 0
+    offloaded_block_size: int = 0
     def __post_init__(self):
         if not self.data:
             # Empty container init, no data is passed in.
@@ -86,7 +85,13 @@ class OffloadingConnectorStats(KVConnectorStats):
             self.data["total_hits"] += other.data["total_hits"]
         return self
 
-        
+    def set_block_size(self, in_gpu_block_size: int, in_offloaded_block_size: int): 
+        """
+        Sets the block size in #tokens, in order to normalize store/load time
+        based on the number of tokens per block.
+        """
+        self.gpu_block_size = in_gpu_block_size
+        self.offloaded_block_size = in_offloaded_block_size
 
     def reduce(self) -> dict[str, int | float]:
         """
@@ -110,26 +115,19 @@ class OffloadingConnectorStats(KVConnectorStats):
         self.data["total_queries"] += num_queries
         self.data["total_hits"] += num_hits
     
-    def record_time(self, time: float, is_store: bool):
-        if is_store:
-            self.data["total_store_time"] += time
-        else:
-            self.data["total_load_time"] += time
-    
+
     def aggregate_time_data(self, offload_timing: OffloadTiming):
         # Avoid division by zero:
-        if offload_timing.num_loads == 0:
+        if offload_timing.num_loads == 0 or self.offloaded_block_size == 0:
             self.data["avg_load_time"] = 0
         else:
-            self.data["avg_load_time"] = offload_timing.data["total_load_time"] / offload_timing.num_loads
-        if offload_timing.num_stores == 0:
+            self.data["avg_load_time"] = offload_timing.data["total_load_time"] / (offload_timing.num_loads * self.offloaded_block_size)
+        if offload_timing.num_stores == 0 or self.gpu_block_size == 0:
             self.data["avg_store_time"] = 0
         else:
-            self.data["avg_store_time"] = offload_timing.data["total_store_time"] / offload_timing.num_stores
+            self.data["avg_store_time"] = offload_timing.data["total_store_time"] / (offload_timing.num_stores * self.gpu_block_size)
             
         
-
-
 
 @dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
@@ -145,8 +143,8 @@ class OffloadingConnector(KVConnectorBase_V1):
 
         self.connector_scheduler: OffloadingConnectorScheduler | None = None
         self.connector_worker: OffloadingConnectorWorker | None = None
-        self.kv_connector_stats = OffloadingConnectorStats()
-        
+        self.kv_connector_stats = OffloadingConnectorStats(gpu_block_size = spec.gpu_block_size, offloaded_block_size = spec.offloaded_block_size)
+        # self.kv_connector_stats.set_block_size(spec.gpu_block_size, spec.offloaded_block_size)
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:

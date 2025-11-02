@@ -524,7 +524,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         
         gauge_kv_load_time_avg = self._gauge_cls(
             name="vllm:offload_connector_kv_load_time",
-            documentation="Average time it takes to load a block from "
+            documentation="Average time it takes to load a token from "
                           "offloaded KV memory",
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
@@ -536,7 +536,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         
         gauge_kv_store_time_avg = self._gauge_cls(
             name="vllm:offload_connector_kv_store_time",
-            documentation="Average time it takes to store a block to "
+            documentation="Average time it takes to store a token to "
                           "offloaded KV memory",
             multiprocess_mode="mostrecent",
             labelnames=labelnames,
