@@ -363,7 +363,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 dtype=kv_cache_dtype,
             ).page_size_bytes
         else:
-            kernel_block_alignment_size = 16
+            if envs.VLLM_ATTENTION_BACKEND == "FLASHINFER":
+                kernel_block_alignment_size = 32
+            else:
+                kernel_block_alignment_size = 16
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -388,6 +391,17 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         #  return directly
         if mamba_page_size == 0:
             return
+
+        # Attention backend constraints:
+        # - FlashAttention (FA) requires block size to be multiple of 16
+        # - MLA (Multi-head Latent Attention) requires larger alignment:
+        #   * CUTLASS_MLA backend: 128-byte alignment
+        #   * Other MLA backends: 64-byte alignment
+        if model_config.use_mla:
+            use_cutlass_mla = envs.VLLM_ATTENTION_BACKEND == "CUTLASS_MLA"
+            kernel_block_alignment_size = 128 if use_cutlass_mla else 64
+        else:
+            kernel_block_alignment_size = 16
 
         if cache_config.enable_prefix_caching:
             # With prefix caching, select attention block size to
