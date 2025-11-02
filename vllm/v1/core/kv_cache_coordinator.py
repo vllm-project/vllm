@@ -6,7 +6,6 @@ from collections.abc import Sequence
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.core.single_type_kv_cache_manager import (
-    CrossAttentionManager,
     FullAttentionManager,
     get_manager_for_kv_cache_spec,
 )
@@ -72,7 +71,7 @@ class KVCacheCoordinator(ABC):
         """
         num_blocks_to_allocate = 0
         for i, manager in enumerate(self.single_type_managers):
-            if isinstance(manager, CrossAttentionManager):
+            if manager.is_cross_attention_manager:
                 # For cross-attention, we issue a single static allocation
                 # of blocks based on the number of encoder input tokens.
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
@@ -119,7 +118,7 @@ class KVCacheCoordinator(ABC):
             manager.allocate_new_blocks(
                 request_id,
                 num_encoder_tokens
-                if isinstance(manager, CrossAttentionManager)
+                if manager.is_cross_attention_manager
                 else num_tokens,
             )
             for manager in self.single_type_managers
