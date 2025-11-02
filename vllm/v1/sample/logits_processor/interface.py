@@ -96,3 +96,11 @@ class LogitsProcessor(ABC):
                 to the batch makeup.
         """
         raise NotImplementedError
+
+    @classmethod
+    def validate_params(cls, sampling_params: SamplingParams):
+        """Validate sampling params for this logits processor.
+
+        Raise ValueError for invalid ones.
+        """
+        return None

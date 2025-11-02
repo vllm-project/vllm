@@ -86,6 +86,14 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     def is_argmax_invariant(self) -> bool:
         return False
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token = params.extra_args and params.extra_args.get("target_token")
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"`target_token` has to be an integer, got {target_token}."
+            )
+
     def new_req_logits_processor(
         self,
         params: SamplingParams,
@@ -112,13 +120,6 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
             )
             is None
         ):
-            return None
-        if not isinstance(target_token, int):
-            logger.warning(
-                "target_token value %s is not int; not applying logits"
-                " processor to request.",
-                target_token,
-            )
             return None
         return DummyPerReqLogitsProcessor(target_token)
 

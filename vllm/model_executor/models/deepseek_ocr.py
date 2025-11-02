@@ -139,17 +139,18 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
     def is_argmax_invariant(self) -> bool:
         return True
 
-    def new_req_logits_processor(
-        self,
-        params: SamplingParams,
-    ) -> RequestLogitsProcessor | None:
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
         ngram_size = params.extra_args and params.extra_args.get("ngram_size")
         window_size = params.extra_args and params.extra_args.get("window_size", 100)
         whitelist_token_ids = params.extra_args and params.extra_args.get(
             "whitelist_token_ids", None
         )
+        # if ngram_size is not provided, skip validation because the processor
+        # will not be used.
         if ngram_size is None:
             return None
+
         if not isinstance(ngram_size, int) or ngram_size <= 0:
             raise ValueError(
                 f"`ngram_size` has to be a strictly positive integer, got {ngram_size}."
@@ -163,13 +164,23 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             whitelist_token_ids, Iterable
         ):
             raise ValueError(
-                "`whitelist_token_ids` has to be a set of integers, "
+                "`whitelist_token_ids` has to be a sequence of integers, "
                 f"got {whitelist_token_ids}."
             )
-        else:
-            whitelist_token_ids = (
-                set(whitelist_token_ids) if whitelist_token_ids else None
-            )
+
+    def new_req_logits_processor(
+        self,
+        params: SamplingParams,
+    ) -> RequestLogitsProcessor | None:
+        ngram_size = params.extra_args and params.extra_args.get("ngram_size")
+        window_size = params.extra_args and params.extra_args.get("window_size", 100)
+        whitelist_token_ids = params.extra_args and params.extra_args.get(
+            "whitelist_token_ids", None
+        )
+        if ngram_size is None:
+            return None
+
+        whitelist_token_ids = set(whitelist_token_ids) if whitelist_token_ids else None
         return NoRepeatNGramLogitsProcessor(
             ngram_size=ngram_size,
             window_size=window_size,
