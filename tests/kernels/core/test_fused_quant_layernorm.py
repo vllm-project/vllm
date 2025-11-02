@@ -65,7 +65,7 @@ def ref_dynamic_per_token_quant(
         )
     else:
         assert quant_dtype == torch.int8
-        torch_out, scales = ops.scaled_int8_quant(torch_out)
+        torch_out, scales, _ = ops.scaled_int8_quant(torch_out)
 
     return torch_out, scales, residual
 
@@ -109,7 +109,7 @@ def ops_impl(
 
 @pytest.mark.parametrize("num_tokens, hidden_size", NUM_TOKENS_HIDDEN_SIZES)
 @pytest.mark.parametrize("add_residual", ADD_RESIDUAL)
-@pytest.mark.parametrize("scale_ub", SCALE_UBS)
+@pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
@@ -119,7 +119,7 @@ def test_rms_norm(
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
-    scale_ub: bool,
+    has_scale_ub: bool,
     dtype: torch.dtype,
     quant_dtype: torch.dtype,
     seed: int,
@@ -130,7 +130,7 @@ def test_rms_norm(
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
 
-    if scale_ub is not None and quant_dtype != torch.float8_e4m3fn:
+    if has_scale_ub and quant_dtype != torch.float8_e4m3fn:
         # skip
         return
 
@@ -143,9 +143,11 @@ def test_rms_norm(
     scale = 1 / (hidden_size)
     x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
     residual = torch.randn_like(x) * scale if add_residual else None
-    if scale_ub is not None:
+    if has_scale_ub:
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device="cuda")
+    else:
+        scale_ub = None
 
     ref_out, ref_scales, ref_residual = ref_impl(
         layer, x, quant_dtype, residual, scale_ub
