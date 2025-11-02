@@ -2142,11 +2142,27 @@ class ClassificationChatRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
     # --8<-- [end:chat-classification-extra-params]
 
     def to_pooling_params(self):
         return PoolingParams(
             truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=get_use_activation(self),
         )
 
 
