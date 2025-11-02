@@ -17,7 +17,6 @@ import argparse
 import itertools
 import os
 import time
-from collections.abc import Callable
 
 import pandas as pd
 import torch  # type: ignore
@@ -363,23 +362,6 @@ def create_test_tensors(
         fp4_quant_out,
         fp4_output_scale,
     )
-
-
-# From bench_per_token_quant_fp8.py
-def with_dyn_arg(fn: Callable, arg_index: int, dim_index: int):
-    def inner(*args):
-        torch._dynamo.mark_dynamic(args[arg_index], dim_index)
-        return fn(*args)
-
-    return inner
-
-
-def bench_compile(fn: Callable):
-    # recompile for different shapes
-    fwd = torch.compile(fn, fullgraph=True, dynamic=False)
-
-    # First dim is explicitly dynamic to simulate vLLM usage
-    return with_dyn_arg(fwd, 0, 0)
 
 
 def benchmark_operation(
