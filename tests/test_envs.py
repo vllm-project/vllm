@@ -52,9 +52,18 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
         environment_variables
     )
 
+    # No-op, if we call envs cache enable again
+    enable_envs_cache()
+    assert envs.__getattr__.cache_info().hits == start_hits + 2 + len(
+        environment_variables
+    )
+
     # Reset envs.__getattr__ back to none-cached version to
     # avoid affecting other tests
     envs.__getattr__ = envs.__getattr__.__wrapped__
+    # Ensured the wrapped function is not cached
+    # (i.e. we only wrapped functools.cache it once)
+    assert not hasattr(envs.__getattr__, "cache_info")
 
 
 class TestEnvWithChoices:
