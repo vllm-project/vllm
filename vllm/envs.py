@@ -217,6 +217,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_DEBUG_WORKSPACE: bool = False
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
 
 
@@ -1438,6 +1439,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Debug workspace allocations.
+    # logging of workspace resize operations.
+    "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False

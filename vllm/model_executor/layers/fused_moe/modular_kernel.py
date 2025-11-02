@@ -10,6 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
@@ -18,12 +19,12 @@ from vllm.model_executor.layers.fused_moe.utils import (
 )
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
-    dbo_current_ubatch_id,
     dbo_enabled,
     dbo_maybe_run_recv_hook,
     dbo_register_recv_hook,
     dbo_yield,
 )
+from vllm.v1.worker.workspace import WorkspaceSpec, current_workspace_manager
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -639,25 +640,6 @@ def _slice_scales(
     return None
 
 
-class SharedResizableBuffer:
-    def __init__(self):
-        self.buffer = None
-
-    def get(
-        self, shape: tuple[int, ...], device: torch.device, dtype: torch.dtype
-    ) -> torch.Tensor:
-        assert shape != ()
-        shape_numel = prod(shape)
-        if (
-            self.buffer is None
-            or self.buffer.numel() < shape_numel
-            or self.buffer.device != device
-            or self.buffer.dtype != dtype
-        ):
-            self.buffer = torch.empty(shape_numel, device=device, dtype=dtype)
-        return self.buffer[:shape_numel].view(*shape)
-
-
 @final
 class FusedMoEModularKernel(torch.nn.Module):
     """
@@ -671,22 +653,6 @@ class FusedMoEModularKernel(torch.nn.Module):
     layer due to any layer specific state that may be used by the component
     objects.
     """
-
-    class SharedBuffers:
-        def __init__(self) -> None:
-            self.fused_out = SharedResizableBuffer()
-            self.workspace13 = SharedResizableBuffer()
-            self.workspace2 = SharedResizableBuffer()
-
-    # Persistent buffers that are shared across `FusedMoEModularKernel`
-    # instances (layers), to save memory and allocattions.
-    #
-    # We have two sets of buffers to support dual batch overlap (DBO) where each
-    # microbatch (ubatch) should use its own set of buffers to avoid
-    # cross-ubatch contimination.
-    # NOTE that memory is lazily allocated for these buffers, meaning that if
-    # DBO isn't being used, the second SharedBuffers will be empty.
-    shared_buffers: list[SharedBuffers] = [SharedBuffers(), SharedBuffers()]
 
     def __init__(
         self,
@@ -758,10 +724,6 @@ class FusedMoEModularKernel(torch.nn.Module):
         assert M_full > 0 and M_chunk > 0
 
         num_chunks, _ = self._chunk_info(M_full)
-
-        # select per-ubatch buffers to avoid cross-ubatch reuse under DBO
-        ubatch_idx = dbo_current_ubatch_id()
-        buffers = self.shared_buffers[ubatch_idx]
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Get intermediate workspace shapes based off the chunked M size.
@@ -786,13 +748,48 @@ class FusedMoEModularKernel(torch.nn.Module):
             expert_tokens_meta,
         )
 
+        # For modular kernels that use "mk.FusedMoEModularKernel.Standard" format
+        # we may not see the worst case during profiling in the DP+EP case due to
+        # random token routing. Force allocating the worst case.
+        is_profile_run = get_forward_context().attn_metadata is None
+        if is_profile_run and self.fused_experts.supports_chunking():
+            (
+                max_workspace13_shape,
+                max_workspace2_shape,
+                max_fused_out_shape,
+            ) = self.fused_experts.workspace_shapes(
+                envs.VLLM_FUSED_MOE_CHUNK_SIZE,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                None,  # Pass None to avoid using sampled token counts
+            )
+            max_workspace13_spec = WorkspaceSpec(
+                shape=max_workspace13_shape,
+                dtype=workspace_dtype,
+                name="moe.workspace13",
+            )
+            max_workspace2_spec = WorkspaceSpec(
+                shape=max_workspace2_shape,
+                dtype=workspace_dtype,
+                name="moe.workspace2",
+            )
+            max_fused_out_spec = WorkspaceSpec(
+                shape=max_fused_out_shape, dtype=out_dtype, name="moe.fused_out"
+            )
+            current_workspace_manager().reserve_simultaneous(
+                max_workspace13_spec, max_workspace2_spec, max_fused_out_spec
+            )
+
         # We can reuse the memory between cache1 and cache3 because by the
         # time we need cache3, we're done with cache1.
-        workspace13 = buffers.workspace13.get(
-            workspace13_shape, device=device, dtype=workspace_dtype
+        workspace13_spec = WorkspaceSpec(
+            shape=workspace13_shape, dtype=workspace_dtype, name="moe.workspace13"
         )
-        workspace2 = buffers.workspace2.get(
-            workspace2_shape, device=device, dtype=workspace_dtype
+        workspace2_spec = WorkspaceSpec(
+            shape=workspace2_shape, dtype=workspace_dtype, name="moe.workspace2"
         )
 
         # Construct the entire output that can then be processed in chunks.
@@ -800,10 +797,18 @@ class FusedMoEModularKernel(torch.nn.Module):
         # as it is large enough. This will not always be the case for standard
         # format experts and with experts that have empty workspaces.
         if num_chunks == 1 and prod(workspace13_shape) >= prod(fused_out_shape):
+            workspace13, workspace2 = current_workspace_manager().get_simultaneous(
+                workspace13_spec, workspace2_spec
+            )
             fused_out = _resize_cache(workspace13, fused_out_shape)
         else:
-            fused_out = buffers.fused_out.get(
-                fused_out_shape, device=device, dtype=out_dtype
+            fused_out_spec = WorkspaceSpec(
+                shape=fused_out_shape, dtype=out_dtype, name="moe.fused_out"
+            )
+            workspace13, workspace2, fused_out = (
+                current_workspace_manager().get_simultaneous(
+                    workspace13_spec, workspace2_spec, fused_out_spec
+                )
             )
 
         return workspace13, workspace2, fused_out

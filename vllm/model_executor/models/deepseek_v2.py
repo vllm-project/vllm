@@ -86,6 +86,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.worker.workspace import WorkspaceSpec, current_workspace_manager
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
@@ -518,8 +519,22 @@ def sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
+
+    k_fp8_spec = WorkspaceSpec(
+        shape=(total_seq_lens, head_dim),
+        dtype=torch.float8_e4m3fn,
+        name="sparse_attn_indexer.k_fp8",
+    )
+    k_scale_spec = WorkspaceSpec(
+        shape=(total_seq_lens, 4),
+        dtype=torch.uint8,
+        name="sparse_attn_indexer.k_scale",
+    )
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
+        current_workspace_manager().reserve_simultaneous(k_fp8_spec, k_scale_spec)
+
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -553,17 +568,16 @@ def sparse_attn_indexer(
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
         prefill_metadata = attn_metadata.prefill
+
+        # Get the full shared workspace buffers once (will allocate on first use)
+        workspace_manager = current_workspace_manager()
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+            k_fp8_spec, k_scale_spec
+        )
+
         for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=k.device,
-                dtype=torch.float8_e4m3fn,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=k.device,
-                dtype=torch.uint8,
-            )
+            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
             ops.cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,

@@ -138,6 +138,7 @@ from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
     AttentionGroup,
@@ -264,7 +265,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.kv_cache_dtype = kv_cache_dtype_str_to_dtype(
             cache_config.cache_dtype, self.model_config
         )
-
         self.is_pooling_model = model_config.runner_type == "pooling"
         self.enable_prompt_embeds = model_config.enable_prompt_embeds
         self.is_multimodal_raw_input_only_model = (
@@ -3907,6 +3907,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # we may do lazy capturing in future that still allows capturing
         # after here.
         set_cudagraph_capturing_enabled(False)
+
+        # Lock workspace to prevent resizing during execution.
+        # Max workspace sizes should have been captured during warmup/profiling.
+        lock_workspace()
 
         end_time = time.perf_counter()
         elapsed_time = end_time - start_time
