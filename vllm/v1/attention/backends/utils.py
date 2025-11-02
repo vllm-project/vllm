@@ -8,7 +8,6 @@ from dataclasses import dataclass, field, fields, make_dataclass
 from typing import (
     TYPE_CHECKING,
     Any,
-    ClassVar,
     Generic,
     Literal,
     Protocol,
@@ -244,11 +243,11 @@ class AttentionCGSupport(enum.Enum):
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    cudagraph_support: AttentionCGSupport
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
-    reorder_batch_threshold: int | None = None
+    reorder_batch_threshold: int | None
 
     @abstractmethod
     def __init__(
@@ -263,8 +262,14 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.vllm_config = vllm_config
         self.device = device
 
+        # Default settings: no reordering and no cudagraph support
+        self.reorder_batch_threshold = None
+        self.cudagraph_support = AttentionCGSupport.NEVER
+
     def _init_reorder_batch_threshold(
-        self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
+        self,
+        reorder_batch_threshold: int = 1,
+        supports_spec_as_decode: bool | None = False,
     ) -> None:
         self.reorder_batch_threshold = reorder_batch_threshold
         if self.reorder_batch_threshold is not None and supports_spec_as_decode:

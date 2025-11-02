@@ -3,7 +3,6 @@
 """Attention layer with FlashInfer."""
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import numpy as np
 import torch
@@ -272,11 +271,7 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-
-    reorder_batch_threshold: int = 1
+    reorder_batch_threshold: int
 
     def __init__(
         self,
@@ -313,6 +308,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if speculative_config is not None
             else 0
         )
+        self.has_spec_decode = num_spec_tokens > 0
         self.enable_cuda_graph = (
             self.compilation_config.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
         )
@@ -354,7 +350,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
+        # If using trtllm attention, we can support uniform_batch speculative decoding
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
+        self.must_use_trtllm_decode = can_use_trtllm and self.has_spec_decode
+        if self.must_use_trtllm_decode:
+            self.cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
+        else:
+            self.cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
@@ -551,7 +553,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_last_page_len_np,
         )
 
-        uses_spec_reorder = self.reorder_batch_threshold > 1
         prefill_use_trtllm = use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
@@ -561,9 +562,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.q_data_type,
             is_prefill=True,
             has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
+            has_spec=self.has_spec_decode,
         )
-        decode_use_trtllm = use_trtllm_attention(
+        decode_use_trtllm = self.must_use_trtllm_decode or use_trtllm_attention(
             self.num_qo_heads,
             self.num_kv_heads,
             num_decode_tokens,
@@ -572,7 +573,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.q_data_type,
             is_prefill=False,
             has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
+            has_spec=self.has_spec_decode,
         )
 
         if not (prefill_use_trtllm and decode_use_trtllm):

@@ -3,7 +3,6 @@
 """High-Performance Triton-only Attention layer."""
 
 from dataclasses import dataclass
-from typing import ClassVar
 
 import torch
 
@@ -66,8 +65,6 @@ class TritonAttentionMetadata:
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -85,6 +82,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        self.cudagraph_support = AttentionCGSupport.ALWAYS
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
