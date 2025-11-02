@@ -19,6 +19,7 @@ from PIL import Image, UnidentifiedImageError
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
+from vllm.multimodal.registry import ExtensionManager
 from vllm.utils.jsontree import json_map_leaves
 
 from .audio import AudioMediaIO
@@ -46,7 +47,10 @@ atexit.register(global_thread_pool.shutdown)
 
 _M = TypeVar("_M")
 
+MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
+
+@MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
     def __init__(
         self,
