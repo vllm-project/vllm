@@ -1643,7 +1643,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return modalities
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self, **kwargs: object
     ) -> MultiModalEmbeddings | None:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -1668,7 +1668,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1681,9 +1681,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,

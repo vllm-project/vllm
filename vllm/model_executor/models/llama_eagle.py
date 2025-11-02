@@ -84,7 +84,7 @@ class LlamaModel(nn.Module):
             self.config.hidden_size * 2, self.config.hidden_size, bias=False
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -158,8 +158,8 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

@@ -655,7 +655,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         The replacement returned is not actually used to replace the placeholder
         tokens - it's just used to make sure we allocate the correct number
         of tokens.
-        Actual replacement is done in get_multimodal_embeddings of
+        Actual replacement is done in embed_multimodal of
         NemotronH_Nano_VL_V2
         (specifically in _process_video_input -> _create_final_video_embeddings).
         There, we create the final embeddings with text embeddings for indicator tokens
@@ -1401,7 +1401,7 @@ class NemotronH_Nano_VL_V2(
 
         # Create final video embeddings, merging text embeddings for indicator
         # tokens with video embeddings
-        text_embeddings = self.get_language_model().get_input_embeddings(repl_token_ids)
+        text_embeddings = self.get_language_model().embed_input_ids(repl_token_ids)
         final_video_embeddings = _merge_multimodal_embeddings(
             inputs_embeds=text_embeddings,
             multimodal_embeddings=video_embeddings,
@@ -1465,7 +1465,7 @@ class NemotronH_Nano_VL_V2(
 
         return modalities
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Validate the multimodal input keyword arguments
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if modalities is None:
