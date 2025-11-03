@@ -59,7 +59,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 hidden_size=lora_a_stacked.shape[-1],
                 rank=lora_a_stacked.shape[-2],
                 num_slices=num_slices,
-                hidden_size_2=lora_b_stacked.shape[-2],
+                moe_intermediate_size=lora_b_stacked.shape[-2],
             )
             expand_config = get_lora_op_configs(
                 op_type=f"fused_moe_lora_{op_prefix}_expand",
@@ -68,7 +68,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 hidden_size=lora_a_stacked.shape[-1],
                 rank=lora_a_stacked.shape[-2],
                 num_slices=num_slices,
-                hidden_size_2=lora_b_stacked.shape[-2],
+                moe_intermediate_size=lora_b_stacked.shape[-2],
             )
         else:  # fall back to the default config
             get_config_func = functools.partial(

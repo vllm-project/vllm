@@ -213,10 +213,10 @@ def get_lora_op_configs(
         }
     # The default config for fused_moe_lora ops
     elif op_type in [
-        "fused_moe_lora_gate_up_shrink",
-        "fused_moe_lora_gate_up_expand",
-        "fused_moe_lora_down_shrink",
-        "fused_moe_lora_down_expand",
+        "fused_moe_lora_w13_shrink",
+        "fused_moe_lora_w13_expand",
+        "fused_moe_lora_w2_shrink",
+        "fused_moe_lora_w2_expand",
     ]:
         default = {
             "block_m": 64,
