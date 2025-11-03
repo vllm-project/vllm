@@ -1611,6 +1611,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin,
             logger.debug("Finish execute for mm hash %s", mm_hash)
             self.maybe_save_ec_to_connector(self.encoder_cache, mm_hash)
 
+        self.maybe_wait_for_ec_save()
+
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",

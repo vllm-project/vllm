@@ -87,3 +87,9 @@ ECConnectorFactory.register_connector(
     "vllm.distributed.ec_transfer.ec_connector.shared_storage_connector",
     "ECSharedStorageConnector",
 )
+
+ECConnectorFactory.register_connector(
+    "ECMooncakeStorageConnector",
+    "vllm.distributed.ec_transfer.ec_connector.mooncake_storage_connector",
+    "ECMooncakeStorageConnector",
+)
