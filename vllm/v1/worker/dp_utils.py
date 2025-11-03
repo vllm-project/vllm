@@ -49,7 +49,21 @@ def _run_ar(
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = 1 if should_dp_pad else 0
-    dist.all_reduce(tensor, group=group)
+
+    # FIXME: Use custom allreduce for ROCm DP scenario
+    # when using torch.dist.all_reduce, there is a hip graph cature
+    # issue, which needs further investigation
+    # the tracking issue link: https://github.com/ROCm/hip/issues/3876
+    dp_group = get_dp_group()
+    if (
+        current_platform.is_rocm()
+        and dp_group.device_communicator is not None
+        and device != "cpu"
+    ):
+        tensor = dp_group.device_communicator.all_reduce(tensor)
+    else:
+        dist.all_reduce(tensor, group=group)
+
     return tensor
 
 
