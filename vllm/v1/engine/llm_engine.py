@@ -213,10 +213,10 @@ class LLMEngine:
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.engine_core.get_supported_tasks()
 
-    def abort_request(self, request_ids: list[str]) -> None:
+    def abort_request(self, request_ids: list[str], internal: bool = False) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        request_ids = self.output_processor.abort_requests(request_ids)
+        request_ids = self.output_processor.abort_requests(request_ids, internal)
         self.engine_core.abort_requests(request_ids)
 
     def add_request(
@@ -238,6 +238,12 @@ class LLMEngine:
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -268,7 +274,7 @@ class LLMEngine:
             return
 
         # Fan out child requests (for n>1).
-        parent_req = ParentRequest(request_id, params)
+        parent_req = ParentRequest(request.request_id, request.external_req_id, params)
         for idx in range(n):
             request_id, child_params = parent_req.get_child_info(idx)
             child_request = request if idx == n - 1 else copy(request)

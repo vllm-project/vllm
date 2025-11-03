@@ -289,12 +289,15 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
-
         # Convert Input --> Request.
         if isinstance(prompt, EngineCoreRequest):
             request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
         else:
             assert prompt_text is None
             request = self.input_processor.process_inputs(
@@ -313,6 +316,9 @@ class AsyncLLM(EngineClient):
             elif isinstance(prompt, Mapping):
                 prompt_text = cast(str | None, prompt.get("prompt"))
 
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector(params.output_kind, request.request_id)
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -324,7 +330,9 @@ class AsyncLLM(EngineClient):
         assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request_id, parent_params)
+        parent_request = ParentRequest(
+            request.request_id, request.external_req_id, parent_params
+        )
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
@@ -395,6 +403,7 @@ class AsyncLLM(EngineClient):
                 "prompt logprobs"
             )
 
+        q: RequestOutputCollector | None = None
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
@@ -445,7 +454,8 @@ class AsyncLLM(EngineClient):
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
-            await self.abort(request_id)
+            if q:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -464,7 +474,8 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            if q:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
@@ -540,13 +551,15 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: str | Iterable[str]) -> None:
+    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids)
+        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
@@ -580,7 +593,7 @@ class AsyncLLM(EngineClient):
         if not wait_for_inflight_requests:
             request_ids = list(self.output_processor.request_states.keys())
             if request_ids:
-                await self.abort(request_ids)
+                await self.abort(request_ids, internal=True)
 
         # Wait for running requests to drain before clearing cache.
         if self.output_processor.has_unfinished_requests():
@@ -629,6 +642,7 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        q: RequestOutputCollector | None = None
         try:
             # We start the output_handler on the first call to generate() so
             # we can call __init__ before the event loop, which enables us
@@ -673,7 +687,8 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
-            await self.abort(request_id)
+            if q:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -692,7 +707,8 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            if q:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e

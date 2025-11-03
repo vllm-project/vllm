@@ -21,7 +21,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.metrics.stats import MultiModalCacheStats
 from vllm.v1.structured_output.backend_guidance import (
@@ -406,6 +406,12 @@ class InputProcessor:
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
+    def _generate_request_id(self, request_id: str):
+        """Construct an internal request ID by adding 8 random characters
+        to the supplied request ID in order to ensure uniquness.
+        """
+        return f"{request_id}-{random_uuid():.8}"
+
     def process_inputs(
         self,
         request_id: str,
@@ -432,6 +438,9 @@ class InputProcessor:
 
         if arrival_time is None:
             arrival_time = time.time()
+
+        external_req_id = request_id
+        request_id = self._generate_request_id(request_id)
 
         # Optionally generate multimodal hash overrides to avoid hashing
         # multimodal data items by their content as their identifiers.
@@ -533,6 +542,7 @@ class InputProcessor:
 
         return EngineCoreRequest(
             request_id=request_id,
+            external_req_id=external_req_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
             mm_features=mm_features,
