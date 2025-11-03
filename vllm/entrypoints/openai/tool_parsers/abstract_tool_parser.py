@@ -116,7 +116,8 @@ class ToolParserManager:
         """
         Retrieve a registered or lazily registered ToolParser class.
 
-        If the parser is lazily registered, it will be imported and cached on first access.
+        If the parser is lazily registered, 
+        it will be imported and cached on first access.
         Raises KeyError if not found.
         """
         if name in cls.tool_parsers:
