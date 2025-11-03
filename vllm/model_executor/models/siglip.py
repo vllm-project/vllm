@@ -759,10 +759,8 @@ class SiglipVisionTransformer(nn.Module):
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)
 
-        # TODO: add this back when pooled_output is used in inference.
-        # See https://github.com/vllm-project/vllm/pull/10813
-        # if self.use_head:
-        #     encoder_outputs = self.head(encoder_outputs)
+        if self.use_head:
+            encoder_outputs = self.head(encoder_outputs)
 
         # stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(

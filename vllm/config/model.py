@@ -43,7 +43,7 @@ from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
 if TYPE_CHECKING:
-    from transformers import PretrainedConfig
+    from transformers import PretrainedConfig, SiglipVisionConfig
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
@@ -96,6 +96,74 @@ def _detect_gguf_multimodal_gemma3(model: str) -> Path | None:
         return None
     except Exception:
         return None
+
+
+def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
+    """
+    Extract vision config parameters from mmproj.gguf metadata.
+
+    Reads vision encoder configuration from GGUF metadata fields instead of
+    using hardcoded values. This makes the implementation robust across
+    different Gemma3 model sizes and future variations.
+
+    Args:
+        mmproj_path: Path to mmproj.gguf file (str or Path)
+
+    Returns:
+        SiglipVisionConfig if extraction succeeds, None if required fields missing
+
+    Raises:
+        Exception: Exceptions from GGUF reading (file not found, corrupted,
+            etc.) propagate directly from gguf.GGUFReader.
+    """
+    import gguf
+    from transformers import SiglipVisionConfig
+
+    reader = gguf.GGUFReader(str(mmproj_path))
+
+    # Extract vision config parameters from GGUF metadata
+    hidden_size = reader.get_field("clip.vision.embedding_length")
+    intermediate_size = reader.get_field("clip.vision.feed_forward_length")
+    num_hidden_layers = reader.get_field("clip.vision.block_count")
+    num_attention_heads = reader.get_field("clip.vision.attention.head_count")
+    image_size = reader.get_field("clip.vision.image_size")
+    patch_size = reader.get_field("clip.vision.patch_size")
+    layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
+
+    # Validate all required fields are present
+    if any(
+        field is None
+        for field in [
+            hidden_size,
+            intermediate_size,
+            num_hidden_layers,
+            num_attention_heads,
+            image_size,
+            patch_size,
+            layer_norm_eps,
+        ]
+    ):
+        logger.warning("Missing required vision config fields in mmproj.gguf")
+        return None
+
+    # Extract scalar values from GGUF field parts
+    config = SiglipVisionConfig(
+        hidden_size=int(hidden_size.parts[-1]),
+        intermediate_size=int(intermediate_size.parts[-1]),
+        num_hidden_layers=int(num_hidden_layers.parts[-1]),
+        num_attention_heads=int(num_attention_heads.parts[-1]),
+        image_size=int(image_size.parts[-1]),
+        patch_size=int(patch_size.parts[-1]),
+        layer_norm_eps=float(layer_norm_eps.parts[-1]),
+        # Parameters not in GGUF - use safe defaults
+        num_channels=3,  # Standard RGB
+        attention_dropout=0.0,  # No dropout during inference
+        num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
+        vision_use_head=False,  # Gemma3 doesn't use pooling head
+    )
+
+    logger.info("Extracted vision config from mmproj.gguf metadata")
+    return config
 
 
 RunnerOption = Literal["auto", RunnerType]
@@ -575,10 +643,7 @@ class ModelConfig:
                     not hasattr(self.hf_config, "vision_config")
                     or self.hf_config.vision_config is None
                 ):
-                    from vllm.model_executor.model_loader.utils import (
-                        extract_vision_config_from_gguf,
-                    )
-
+                    # Use local function instead of importing from utils
                     vision_config = extract_vision_config_from_gguf(str(mmproj_path))
 
                     # Fail fast if extraction fails - indicates

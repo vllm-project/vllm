@@ -6,14 +6,14 @@ import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 from typing_extensions import assert_never
 
 if TYPE_CHECKING:
-    from transformers import SiglipVisionConfig
+    pass
 
 from vllm.attention import Attention
 from vllm.attention.layer import MLAAttention
@@ -50,25 +50,11 @@ def initialize_model(
         # Only check at top-level (prefix="") to prevent recursion
         is_multimodal_gguf = False
         if not prefix:
-            try:
-                from pathlib import Path
+            # Reuse detection logic from model_config
+            from vllm.config.model import _detect_gguf_multimodal_gemma3
 
-                model_path_str = getattr(model_config, "model", "")
-                if model_path_str and isinstance(model_path_str, (str, Path)):
-                    model_path = Path(model_path_str)
-                    if model_path.suffix.lower() == ".gguf":
-                        model_dir = model_path.parent
-                        mmproj_patterns = [
-                            "mmproj.gguf",
-                            "mmproj-*.gguf",
-                            "*mmproj*.gguf",
-                        ]
-                        for pattern in mmproj_patterns:
-                            if list(model_dir.glob(pattern)):
-                                is_multimodal_gguf = True
-                                break
-            except Exception as e:
-                logger.debug("GGUF multimodal detection failed: %s", e)
+            mmproj_path = _detect_gguf_multimodal_gemma3(model_config.model)
+            is_multimodal_gguf = mmproj_path is not None
 
         # Ensure multimodal_config is set for all multimodal GGUF models
         if is_multimodal_gguf and model_config.multimodal_config is None:
@@ -322,71 +308,3 @@ def configure_quant_config(
             quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping
-
-
-def extract_vision_config_from_gguf(mmproj_path: str) -> Optional["SiglipVisionConfig"]:
-    """
-    Extract vision config parameters from mmproj.gguf metadata.
-
-    Reads vision encoder configuration from GGUF metadata fields instead of
-    using hardcoded values. This makes the implementation robust across
-    different Gemma3 model sizes and future variations.
-
-    Args:
-        mmproj_path: Path to mmproj.gguf file (str or Path)
-
-    Returns:
-        SiglipVisionConfig if extraction succeeds, None if required fields missing
-
-    Raises:
-        Exception: Exceptions from GGUF reading (file not found, corrupted,
-            etc.) propagate directly from gguf.GGUFReader.
-    """
-    import gguf
-    from transformers import SiglipVisionConfig
-
-    reader = gguf.GGUFReader(str(mmproj_path))
-
-    # Extract vision config parameters from GGUF metadata
-    hidden_size = reader.get_field("clip.vision.embedding_length")
-    intermediate_size = reader.get_field("clip.vision.feed_forward_length")
-    num_hidden_layers = reader.get_field("clip.vision.block_count")
-    num_attention_heads = reader.get_field("clip.vision.attention.head_count")
-    image_size = reader.get_field("clip.vision.image_size")
-    patch_size = reader.get_field("clip.vision.patch_size")
-    layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
-
-    # Validate all required fields are present
-    if any(
-        field is None
-        for field in [
-            hidden_size,
-            intermediate_size,
-            num_hidden_layers,
-            num_attention_heads,
-            image_size,
-            patch_size,
-            layer_norm_eps,
-        ]
-    ):
-        logger.warning("Missing required vision config fields in mmproj.gguf")
-        return None
-
-    # Extract scalar values from GGUF field parts
-    config = SiglipVisionConfig(
-        hidden_size=int(hidden_size.parts[-1]),
-        intermediate_size=int(intermediate_size.parts[-1]),
-        num_hidden_layers=int(num_hidden_layers.parts[-1]),
-        num_attention_heads=int(num_attention_heads.parts[-1]),
-        image_size=int(image_size.parts[-1]),
-        patch_size=int(patch_size.parts[-1]),
-        layer_norm_eps=float(layer_norm_eps.parts[-1]),
-        # Parameters not in GGUF - use safe defaults
-        num_channels=3,  # Standard RGB
-        attention_dropout=0.0,  # No dropout during inference
-        num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
-        vision_use_head=False,  # Gemma3 doesn't use pooling head
-    )
-
-    logger.info("Extracted vision config from mmproj.gguf metadata")
-    return config
