@@ -104,7 +104,6 @@ Compares FlashInfer-MLA against CUTLASS MLA with optimized `num_kv_splits` value
 - Find the crossover point where prefill becomes faster
 - Analyze how this varies across batch sizes (1-256)
 
-
 ```bash
 python benchmark.py --config configs/reorder_threshold.yaml
 ```
@@ -320,7 +319,6 @@ source /path/to/vllm/.venv/bin/activate
 
 - Check hardware requirements above
 - Some backends need Hopper/Blackwell
-
 
 **OOM?**
 
