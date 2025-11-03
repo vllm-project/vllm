@@ -20,9 +20,6 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -436,10 +433,6 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
-        # Enable batch invariance settings if requested
-        if vllm_is_batch_invariant():
-            self.enforce_eager = True
-
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
@@ -1490,6 +1483,12 @@ class ModelConfig:
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
+
+        # Since Mamba1 does not have a chunk notion
+        # we use a default chunk size of 1024.
+        if chunk_size is None:
+            chunk_size = 2048
+
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:

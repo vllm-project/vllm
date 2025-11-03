@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import re
 import uuid
 from collections.abc import Sequence
 from typing import Any
+
+import regex as re
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
