@@ -232,7 +232,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
-        return self.worker_adapter.get_finished(finished_req_ids)
+        val = self.worker_adapter.get_finished(finished_req_ids)
+        # logger.error("Finished req ids: %s, %s", val[0], val[1])
+        return val
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """
@@ -320,8 +322,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if ret == 0:
             return 0, False
 
+        # logger.warning("Got %d matched tokens for request %s!",
+        #               ret, request.request_id)
         # TODO: remove this hard-coded value
-        logger.warning("Got %d matched tokens!", ret)
         assert ret % 256 == 0
 
         # Update num stored blocks for the tracker
@@ -334,6 +337,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         tracker.num_lmcache_hit_blocks = num_lmcache_blocks
 
         need_to_load = max(0, ret - num_computed_tokens)
+        logger.debug(
+            "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
+        )
         return need_to_load, need_to_load > 0
 
     def update_state_after_alloc(
@@ -357,6 +363,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # NOTE: the `blocks` are NEW BLOCKS allocated for this request.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = reformat_block_ids(blocks.get_block_ids())
+        # logger.warning("In update_state_after_alloc the block ids are: %s", block_ids)
 
         # No matter we need to retrieve or not, we need to update
         # the block ids into the tracker
@@ -375,7 +382,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # elif tracker.state == LMCacheMPRequestState.WAITING_FOR_LOAD:
         #    # Second time, the request is ready for inference
         #    tracker.state = LMCacheMPRequestState.READY
-        logger.warning("Change request tracker state to %s", tracker.state)
+        # logger.warning("Change request tracker state to %s", tracker.state)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -396,7 +403,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self._process_cached_requests(scheduler_output, metadata)
 
         if len(metadata) > 0:
-            logger.info("Final connector metadata: %s", metadata)
+            logger.debug("Final connector metadata: %s", metadata)
 
         return metadata
 

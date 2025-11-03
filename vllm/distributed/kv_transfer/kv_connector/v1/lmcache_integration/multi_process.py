@@ -76,7 +76,8 @@ class LoadStoreOp:
 
     def __post_init__(self):
         assert len(self.block_hashes) == len(self.block_ids), (
-            "The number of block hashes should be equal to the number of block ids"
+            "The number of block hashes should be equal to the number of block ids "
+            f"But got {len(self.block_hashes)} and {len(self.block_ids)}"
         )
 
 
@@ -200,7 +201,10 @@ class LMCacheMPRequestMetadata:
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
-        num_staging_blocks = len(tracker.block_hashes) - tracker.num_stored_blocks
+        min_available_blocks = min(
+            len(tracker.block_hashes), len(tracker.allocated_block_ids)
+        )
+        num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
 
         if num_chunks >= 1:
@@ -341,7 +345,6 @@ class LMCacheMPWorkerAdapter:
 
         self.finished_stores: set[str] = set()
         self.previously_finished: set[str] = set()
-        self.debug_finished_retrieves: set[str] = set()
 
         # TODO: metadata is hard-coded for now, please remove
         self.model_name = "Qwen/Qwen3-0.6B"
@@ -418,10 +421,18 @@ class LMCacheMPWorkerAdapter:
 
         # Update the internal states
         self.finished_stores.update(finished_stores)
-        self.previously_finished.update(finished_req_ids)
 
-        # Calculate the final finished stores and finished retrieves
-        return self._update_and_get_finished_store(), finished_retrieves
+        ret_stores = set()
+        for req_id in finished_req_ids:
+            if req_id in self.finished_stores or req_id in self.store_futures:
+                self.previously_finished.add(req_id)
+            else:
+                ret_stores.add(req_id)
+
+        # Calculate the final finished stores
+        ret_stores.update(self._update_and_get_finished_store())
+
+        return ret_stores, finished_retrieves
 
     def shutdown(self):
         # Unregister kv cache
@@ -442,6 +453,7 @@ class LMCacheMPWorkerAdapter:
         safe_finished_s = self.finished_stores.intersection(self.previously_finished)
         self.finished_stores.difference_update(self.previously_finished)
         self.previously_finished.difference_update(safe_finished_s)
+
         return safe_finished_s
 
     def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
