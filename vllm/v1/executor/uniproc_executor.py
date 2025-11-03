@@ -124,11 +124,10 @@ class ExecutorWithExternalLauncher(UniProcExecutor):
 
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        if envs.VLLM_USE_V1:
-            assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
-                "To get deterministic execution in V1, "
-                "please set VLLM_ENABLE_V1_MULTIPROCESSING=0"
-            )
+        assert not envs.VLLM_ENABLE_V1_MULTIPROCESSING, (
+            "To get deterministic execution, "
+            "please set VLLM_ENABLE_V1_MULTIPROCESSING=0"
+        )
         super()._init_executor()
 
     def _distributed_args(self) -> tuple[str, int, int]:
