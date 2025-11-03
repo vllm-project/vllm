@@ -1317,12 +1317,12 @@ class OpenAIServing:
         request: ResponsesRequest | ChatCompletionRequest,
         tokenizer: AnyTokenizer,
         enable_auto_tools: bool,
-        tool_parser: Callable[[AnyTokenizer], ToolParser] | None,
+        tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
 
-        if not enable_auto_tools or not tool_parser:
+        if not enable_auto_tools or not tool_parser_cls:
             # Tools are not enabled
             return None, content
         elif request.tool_choice is None:
@@ -1361,7 +1361,7 @@ class OpenAIServing:
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "auto" or request.tool_choice == "none":
             try:
-                tool_parser = self.tool_parser(tokenizer)
+                tool_parser = tool_parser_cls(tokenizer)
             except RuntimeError as e:
                 logger.exception("Error in tool parser creation.")
                 raise e
