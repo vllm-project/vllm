@@ -81,7 +81,14 @@ def guard_cuda_initialization():
     had_key = "CUDA_VISIBLE_DEVICES" in os.environ
     old_value = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    yield
+    try:
+        yield
+    except Exception as e:
+        if "No CUDA GPUs are available" in str(e):
+            err_msg = "CUDA initialization is blocked."
+        else:
+            err_msg = str(e)
+        raise RuntimeError(err_msg) from e
     if had_key:
         os.environ["CUDA_VISIBLE_DEVICES"] = old_value
     else:

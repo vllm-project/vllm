@@ -73,8 +73,10 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
                 entrypoint.name,
                 entrypoint.value,
             )
-            classes.append(entrypoint.load())
+            with guard_cuda_initialization():
+                classes.append(entrypoint.load())
         except Exception as e:
+            logger.error("Failed to load LogitsProcessor plugin %s: %s", entrypoint, e)
             raise RuntimeError(
                 f"Failed to load LogitsProcessor plugin {entrypoint}"
             ) from e
@@ -127,8 +129,15 @@ def _load_logitsprocs_by_fqcns(
 
         try:
             # Load module
-            module = importlib.import_module(module_path)
+            with guard_cuda_initialization():
+                module = importlib.import_module(module_path)
         except Exception as e:
+            logger.error(
+                "Failed to load {%s}th LogitsProcessor plugin {%s}: %s",
+                ldx,
+                logitproc,
+                e,
+            )
             raise RuntimeError(
                 f"Failed to load {ldx}th LogitsProcessor plugin {logitproc}"
             ) from e
@@ -219,9 +228,8 @@ def validate_logits_processors_parameters(
     # TODO(Isotr0py): Make the error message more informative if CUDA is
     # attempted to be initialized here. Currently, only an internal server
     # error is raised.
-    with guard_cuda_initialization():
-        for logits_procs in _load_custom_logitsprocs(logits_processors):
-            logits_procs.validate_params(sampling_params)
+    for logits_procs in _load_custom_logitsprocs(logits_processors):
+        logits_procs.validate_params(sampling_params)
 
 
 class AdapterLogitsProcessor(LogitsProcessor):
