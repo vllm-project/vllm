@@ -70,8 +70,7 @@ from vllm.entrypoints.harmony_utils import (
     get_system_message,
     get_user_message,
     has_custom_tools,
-    parse_output_message,
-    parse_remaining_state,
+    make_response_output_items_with_harmony,
     parse_response_input,
     render_for_completion,
 )
@@ -595,7 +594,7 @@ class OpenAIServingResponses(OpenAIServing):
         output_messages = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
-            output = self._make_response_output_items_with_harmony(context)
+            output = make_response_output_items_with_harmony(context)
             if request.enable_response_messages:
                 input_messages = context.messages[: context.num_init_messages]
                 output_messages = context.messages[context.num_init_messages :]
@@ -841,20 +840,6 @@ class OpenAIServingResponses(OpenAIServing):
             )
             output.append(message)
         return output
-
-    def _make_response_output_items_with_harmony(
-        self,
-        context: HarmonyContext,
-    ) -> list[ResponseOutputItem]:
-        output_items: list[ResponseOutputItem] = []
-        num_init_messages = context.num_init_messages
-        for msg in context.messages[num_init_messages:]:
-            output_items.extend(parse_output_message(msg))
-        # Handle the generation stopped in the middle (if any).
-        last_items = parse_remaining_state(context.parser)
-        if last_items:
-            output_items.extend(last_items)
-        return output_items
 
     def _construct_input_messages(
         self,
