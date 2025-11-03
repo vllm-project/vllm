@@ -24,7 +24,8 @@
 # limitations under the License.
 """Inference-only Deepseek model."""
 
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import Any
 
@@ -38,10 +39,12 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
+    tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.fused_moe import (
+    SharedFusedMoE,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -82,7 +85,11 @@ class DeepseekMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -123,19 +130,7 @@ class DeepseekMoE(nn.Module):
                 f"the number of experts {self.n_routed_experts}."
             )
 
-        self.experts = nn.ModuleList(
-            [
-                DeepseekMLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=config.moe_intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    reduce_results=False,
-                )
-                for idx in range(self.n_routed_experts)
-            ]
-        )
-        self.pack_params()
+        # self.pack_params()
 
         self.gate = ReplicatedLinear(
             config.hidden_size, self.n_routed_experts, bias=False, quant_config=None
@@ -150,6 +145,26 @@ class DeepseekMoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=False,
             )
+
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
+            gate=self.gate,
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=config.scoring_func,
+            # we do scaling outside, set factor to 1.0 to avoid double mul
+            # aiter applies routed_scaling_factor internally
+            routed_scaling_factor=1.0,
+        )
 
     def pack_params(self):
         w1 = []
@@ -173,25 +188,28 @@ class DeepseekMoE(nn.Module):
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        if self.config.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+        # if self.config.n_shared_experts is not None:
+        #     shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        topk_weights, topk_ids, _ = fused_topk(
-            hidden_states,
-            router_logits,
-            self.top_k,
-            renormalize=self.config.norm_topk_prob,
+        fused_moe_out = self.experts(
+            hidden_states=hidden_states, router_logits=router_logits
         )
+        shared_output, final_hidden_states = fused_moe_out
+        if self.shared_experts is not None:
+            assert shared_output is not None
+            final_hidden_states += shared_output
 
-        final_hidden_states = fused_experts(
-            hidden_states, self.w1, self.w2, topk_weights, topk_ids, inplace=True
-        )
-
-        if self.config.n_shared_experts is not None:
-            final_hidden_states = final_hidden_states + shared_output
-        final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+        if False:
+            final_hidden_states = tensor_model_parallel_all_gather(
+                final_hidden_states, 0
+            )
+            final_hidden_states = final_hidden_states[:num_tokens]
+        elif self.tp_size > 1:
+            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
+                final_hidden_states
+            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
@@ -354,6 +372,7 @@ class DeepseekModel(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        self.config = config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
@@ -413,6 +432,15 @@ class DeepseekModel(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+        )
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
@@ -421,17 +449,33 @@ class DeepseekModel(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                if ("mlp.experts." in name) and name not in params_dict:
+                    continue
+                name_mapped = name.replace(weight_name, param_name)
+
+                # QKV fusion is optional, fall back to normal
+                # weight loading if it's not enabled
+                # if go with fusion option, then update name
+                if (
+                    param_name == "fused_qkv_a_proj"
+                ) and name_mapped not in params_dict:
+                    continue
+                else:
+                    name = name_mapped
+
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip experts that are not assigned to this worker.
-                if (
-                    "mlp.experts." in name or "mlp.shared_experts." in name
-                ) and name not in params_dict:
-                    continue
+
                 if is_pp_missing_parameter(name, self):
                     continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -440,16 +484,76 @@ class DeepseekModel(nn.Module):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Skip experts that are not assigned to this worker.
-                if (
-                    "mlp.experts." in name or "mlp.shared_experts." in name
-                ) and name not in params_dict:
-                    continue
+                is_expert_weight = False
+                num_chunks = 1
+                for j in range(num_chunks):
+                    chunk_name = name
+                    weight_to_load = loaded_weight
+
+                    # Use expert_params_mapping to locate the destination
+                    # param and delegate to its expert-aware weight_loader
+                    # with expert_id.
+                    for mapping in expert_params_mapping:
+                        param_name, weight_name, expert_id, shard_id = mapping
+                        if weight_name not in chunk_name:
+                            continue
+
+                        # Anyway, this is an expert weight and should not be
+                        # attempted to load as other weights later
+                        is_expert_weight = True
+
+                        # Do not modify `name` since the loop may continue here
+                        # Instead, create a new variable
+                        name_mapped = chunk_name.replace(weight_name, param_name)
+
+                        if is_pp_missing_parameter(name_mapped, self):
+                            continue
+
+                        param = params_dict[name_mapped]
+                        # We should ask the weight loader to return success or
+                        # not here since otherwise we may skip experts with
+                        # other available replicas.
+                        weight_loader = typing.cast(
+                            Callable[..., bool], param.weight_loader
+                        )
+                        success = weight_loader(
+                            param,
+                            weight_to_load,
+                            name_mapped,
+                            shard_id=shard_id,
+                            expert_id=expert_id,
+                            return_success=True,
+                        )
+                        if success:
+                            name = name_mapped
+                    else:
+                        if is_expert_weight:
+                            # We've checked that this is an expert weight
+                            # However it's not mapped locally to this rank
+                            # So we simply skip it
+                            continue
+
+                        # Skip loading extra bias for GPTQ models.
+                        if name.endswith(".bias") and name not in params_dict:
+                            continue
+
+                        if name is None:
+                            continue
+
+                        if is_pp_missing_parameter(name, self):
+                            continue
+
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+
                 if is_pp_missing_parameter(name, self):
                     continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+                # param = params_dict[name]
+                # weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                # weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
@@ -496,6 +600,34 @@ class DeepseekForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return hidden_states
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for layer in self.model.layers:
+            if isinstance(layer.mlp, DeepseekMoE):
+                moe = layer.mlp
+                moe.n_local_physical_experts = num_local_physical_experts
+                moe.n_physical_experts = num_physical_experts
+                moe.n_redundant_experts = self.num_redundant_experts
+                moe.experts.update_expert_map()
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return SharedFusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts,
+            num_redundant_experts=0,
+        )
 
     def compute_logits(
         self,
