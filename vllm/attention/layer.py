@@ -756,7 +756,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # Only calculate if the layer's calculate_kv_scales flag is True
             # This flag gets set to False after the first forward pass
             if self.calculate_kv_scales:
-                self.calc_kv_scales(q, kv_c_normed, k_pe)
+                torch.ops.vllm.maybe_calc_kv_scales(
+                    q, kv_c_normed, k_pe, self.layer_name
+                )
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -789,7 +791,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Only calculate if the layer's calculate_kv_scales flag is True
                 # This flag gets set to False after the first forward pass
                 if self.calculate_kv_scales:
-                    self.calc_kv_scales(q, kv_c_normed, k_pe)
+                    torch.ops.vllm.maybe_calc_kv_scales(
+                        q, kv_c_normed, k_pe, self.layer_name
+                    )
                 return torch.ops.vllm.unified_mla_attention(
                     q,
                     kv_c_normed,
