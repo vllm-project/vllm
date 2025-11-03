@@ -140,6 +140,7 @@ class AttentionGroup:
     metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
+    kv_cache_group_id: int
 
     @staticmethod
     def create_with_metadata_builders(
@@ -148,13 +149,16 @@ class AttentionGroup:
         kv_cache_spec: KVCacheSpec,
         vllm_config: VllmConfig,
         device: torch.device,
+        kv_cache_group_id: int,
         num_metadata_builders: int = 1,
     ) -> "AttentionGroup":
         metadata_builders = [
             backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config, device)
             for _ in range(num_metadata_builders)
         ]
-        return AttentionGroup(backend, metadata_builders, layer_names, kv_cache_spec)
+        return AttentionGroup(
+            backend, metadata_builders, layer_names, kv_cache_spec, kv_cache_group_id
+        )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
