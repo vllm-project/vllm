@@ -159,7 +159,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         )
 
         print(expert_num_tokens_per_expert_list)
-        print(token_data)
 
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
