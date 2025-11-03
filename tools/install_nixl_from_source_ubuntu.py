@@ -223,7 +223,14 @@ def build_and_install_prerequisites(args):
             {os.path.basename(newly_built_wheel)}. Now installing...",
         flush=True,
     )
-    install_command = [sys.executable, "-m", "pip", "install", newly_built_wheel]
+    install_command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "install",
+        "--no-deps",
+        newly_built_wheel,
+    ]
     if args.force_reinstall:
         install_command.insert(-1, "--force-reinstall")
 
