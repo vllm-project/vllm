@@ -3,10 +3,10 @@
 # install_prerequisites.py
 import argparse
 import glob
+import json
 import os
 import subprocess
 import sys
-import json
 import urllib.request
 
 # --- Configuration ---
