@@ -136,8 +136,9 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Set of block IDs that encountered load errors.
             Empty set if no load errors occurred.
         """
-        if hasattr(self._lmcache_engine, "get_block_ids_with_load_errors"):
-            return self._lmcache_engine.get_block_ids_with_load_errors()
+        method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
+        if callable(method):
+            return method()
         else:
             # Fallback for older versions that don't support this method
             return set()
