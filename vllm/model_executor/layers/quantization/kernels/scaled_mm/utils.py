@@ -17,7 +17,7 @@ def apply_weights_fp8(
     x_s: torch.Tensor,
     bias: torch.Tensor,
     x_s_ub: torch.Tensor | None,
-    maybe_out_dtype: torch.dtype | None,
+    maybe_out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     #   ops.scaled_fp8_quant supports both dynamic and static quant.
     #   If dynamic, layer.input_scale is None and x_s computed from x.
