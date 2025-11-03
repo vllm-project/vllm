@@ -24,11 +24,11 @@ Example:
 _TOOL_PARSERS_TO_REGISTER = {
     "deepseek_v3": (
         "vllm.entrypoints.openai.tool_parsers.deepseek_v3_tool_parser",
-        "DeepseekV3ToolParser",
+        "DeepSeekV3ToolParser",
     ),
     "deepseek_v31": (
         "vllm.entrypoints.openai.tool_parsers.deepseek_v31_tool_parser",
-        "DeepseekV31ToolParser",
+        "DeepSeekV31ToolParser",
     ),
     "ernie45": (
         "vllm.entrypoints.openai.tool_parsers.ernie45_tool_parser",
@@ -96,7 +96,7 @@ _TOOL_PARSERS_TO_REGISTER = {
     ),
     "olmo3": (
         "vllm.entrypoints.openai.tool_parsers.olmo3_tool_parser",
-        "Olmo3ToolParser",
+        "Olmo3PythonicToolParser",
     ),
     "openai": (
         "vllm.entrypoints.openai.tool_parsers.openai_tool_parser",
@@ -126,9 +126,9 @@ _TOOL_PARSERS_TO_REGISTER = {
         "vllm.entrypoints.openai.tool_parsers.step3_tool_parser",
         "Step3ToolParser",
     ),
-    "xlama": (
-        "vllm.entrypoints.openai.tool_parsers.xlama_tool_parser",
-        "XlamaToolParser",
+    "xlam": (
+        "vllm.entrypoints.openai.tool_parsers.xlam_tool_parser",
+        "xLAMToolParser",
     ),
 }
 
