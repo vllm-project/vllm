@@ -33,7 +33,7 @@ MINIMAL_MODEL_ARCH_LIST = [
     "LlavaForConditionalGeneration",
     "Llama4ForConditionalGeneration",
     "BertForSequenceClassification",
-    "Gemma3nForCausalLM",
+    #"Gemma3nForCausalLM",
     "JinaVLForRanking",
     "InternVLChatModel",
     "InternLM2ForRewardModel",
