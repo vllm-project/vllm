@@ -80,6 +80,10 @@ DOCKER_BUILDKIT=1 docker build . \
     If you are using Podman instead of Docker, you might need to disable SELinux labeling by
     adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
 
+!!! note
+    The wheel build can be too large, causing a build failure. To disable the size check,
+    add `--build-arg RUN_WHEEL_CHECK=false` to your `docker build` command.
+
 ## Building for Arm64/aarch64
 
 A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper. At time of this writing, this requires the use
