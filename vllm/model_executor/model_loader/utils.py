@@ -46,23 +46,6 @@ def initialize_model(
     if model_config is None:
         model_config = vllm_config.model_config
     if model_class is None:
-        # Detect Gemma3 GGUF multimodal models by checking for mmproj.gguf
-        # Only check at top-level (prefix="") to prevent recursion
-        is_multimodal_gguf = False
-        if not prefix:
-            # Reuse detection logic from model_config
-            from vllm.config.model import _detect_gguf_multimodal_gemma3
-
-            mmproj_path = _detect_gguf_multimodal_gemma3(model_config.model)
-            is_multimodal_gguf = mmproj_path is not None
-
-        # Ensure multimodal_config is set for all multimodal GGUF models
-        if is_multimodal_gguf and model_config.multimodal_config is None:
-            from vllm.config.multimodal import MultiModalConfig
-
-            model_config.multimodal_config = MultiModalConfig()
-            logger.debug("Initialized multimodal_config for GGUF model")
-
         # Use standard architecture resolution for all models
         model_class, _ = get_model_architecture(model_config)
 

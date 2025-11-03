@@ -53,7 +53,6 @@ from .utils import (
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
-    merge_multimodal_embeddings,
 )
 
 logger = init_logger(__name__)
@@ -653,35 +652,33 @@ class Gemma3ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
-        is_multimodal: bool = False,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        # GGUF models: image_token_index (262144) exceeds vocab size (262144).
+        # HF models: image_token_index may also be out-of-vocabulary.
+        # Using handle_oov_mm_token=True avoids embedding lookup for these tokens.
+        handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        # GGUF vocab size is 262144 (indices 0-262143). Remap image_token_index
-        # from 262144 to 262143 to avoid out-of-bounds embedding lookup.
-        if self._is_gguf and self.config.image_token_index == 262144:
-            input_ids = torch.where(
-                input_ids == 262144,
-                torch.tensor(262143, dtype=input_ids.dtype, device=input_ids.device),
-                input_ids,
-            )
-            placeholder_token_id = (
-                self.config.boi_token_index
-                if hasattr(self.config, "boi_token_index")
-                else 262143
-            )
-        else:
-            placeholder_token_id = self.config.image_token_index
+        """Get input embeddings with out-of-vocabulary multimodal token handling.
 
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        For GGUF Gemma3 models, the image token ID (262144) exceeds the
+        vocabulary size (0-262143). By setting handle_oov_mm_token=True,
+        we skip embedding lookup for OOV tokens and rely on vision embeddings.
 
-        if multimodal_embeddings is not None and len(multimodal_embeddings) != 0:
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids,
-                inputs_embeds,
-                multimodal_embeddings,
-                placeholder_token_id,
-            )
+        This delegates to the SupportsMultiModal interface default implementation,
+        which filters multimodal tokens before calling the embedding layer.
+        """
+        # Early return for text-only inference (no multimodal data)
+        if multimodal_embeddings is None or is_multimodal is None:
+            return super().get_input_embeddings(input_ids)
 
-        return inputs_embeds
+        # Use interface default with OOV handling enabled
+        return super().get_input_embeddings(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
+        )
 
     def forward(
         self,
