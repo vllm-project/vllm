@@ -89,10 +89,11 @@ def guard_cuda_initialization():
         else:
             err_msg = str(e)
         raise RuntimeError(err_msg) from e
-    if had_key:
-        os.environ["CUDA_VISIBLE_DEVICES"] = old_value
-    else:
-        os.environ.pop("CUDA_VISIBLE_DEVICES")
+    finally:
+        if had_key:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES")
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
