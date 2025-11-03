@@ -1225,24 +1225,22 @@ async def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> 
 
 def broadcast_instruction(
     cmd_socket,
-    target_identities: set[bytes],
+    target_identities: set[bytes] | list[bytes],
     method_name: str,
-    timeout: int,
-    method_uuid: str = None,
+    method_uuid: str | None = None,
     **kwargs,
 ) -> str:
     """
-    Broadcast an method_name message to multiple remote endpoints.
+    Broadcast an instruction message to multiple remote endpoints.
     It serializes the specified method_name along with its parameters and
     dispatches it to all target identities via the provided ZeroMQ socket.
     """
     if method_uuid is None:
         method_uuid = str(uuid.uuid4())
-    payload = {**kwargs, "timeout": timeout}
 
     for identity in target_identities:
         serialized_instruction = serialize_method_call(
-            method_name, method_uuid, **payload
+            method_name, method_uuid, **kwargs
         )
         cmd_socket.send_multipart(
             [identity, b"", serialized_instruction.encode("utf-8")]
@@ -1253,7 +1251,7 @@ def broadcast_instruction(
 
 def wait_for_instruction_result(
     cmd_socket,
-    target_identities: set[bytes],
+    target_identities: set[bytes] | list[bytes],
     method_name: str,
     timeout: int,
     method_uuid: str,
@@ -1264,11 +1262,11 @@ def wait_for_instruction_result(
     instruction, identified by the given `method_uuid`.
 
     Args:
-        cmd_socket (zmq.Socket): The socket used to receive responses.
-        target_identities (set[bytes]): Identities that are expected to respond.
-        method_name (str): The name of the method_name (used for logging).
-        timeout (int): The maximum wait time (in seconds).
-        method_uuid (str): The unique identifier associated with the method_name.
+        cmd_socket: The socket used to receive responses.
+        target_identities: Identities that are expected to respond.
+        method_name: The name of the method_name (used for logging).
+        timeout: The maximum wait time (in seconds).
+        method_uuid: The unique identifier associated with the method_name.
 
     Notes:
         - This function does not raise exceptions for timeouts or parsing errors.
@@ -1276,6 +1274,8 @@ def wait_for_instruction_result(
     """
     start = time.monotonic()
     responses: dict[bytes, dict] = {}
+
+    target_identities = set(target_identities)
 
     while target_identities:
         remaining = timeout - (time.monotonic() - start)
@@ -1344,7 +1344,7 @@ class FaultHandler:
             identity: i for i, identity in enumerate(client_cmd_registry)
         }
 
-    async def handle_fault(self, instruction: str, timeout, **kwargs) -> bool:
+    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         if instruction == "retry" and "Dead" in self.engine_status_dict.values():
             logger.info(
                 "engine_core dead unexpectedly, retry is impossible,"
@@ -1367,11 +1367,14 @@ class FaultHandler:
         else:
             target_engines = set(self.engine_identity_to_index.keys())
 
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+
         method_uuid = broadcast_instruction(
             self.cmd_socket,
             target_engines,
             instruction,
-            timeout,
+            **kwargs,
         )
 
         engine_responses = wait_for_instruction_result(

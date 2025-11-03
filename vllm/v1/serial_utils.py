@@ -470,7 +470,9 @@ def deserialize_method_call(json_str: str) -> tuple[str, str, dict[str, Any]]:
     return method, method_uuid, params
 
 
-def serialize_method_call(method: str, method_uuid: str = None, **params: Any) -> str:
+def serialize_method_call(
+    method: str, method_uuid: str | None = None, **params: Any
+) -> str:
     """
     Serialize a method invocation into a JSON string.
     """

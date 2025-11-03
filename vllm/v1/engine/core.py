@@ -7,7 +7,6 @@ import queue
 import signal
 import threading
 import time
-import uuid
 from collections import deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -59,7 +58,9 @@ from vllm.v1.engine.exceptions import EngineLoopPausedError, FaultInfo
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
+    broadcast_instruction,
     get_device_indices,
+    wait_for_instruction_result,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -71,7 +72,6 @@ from vllm.v1.serial_utils import (
     MsgpackEncoder,
     deserialize_method_call,
     run_method,
-    serialize_method_call,
 )
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
@@ -169,26 +169,40 @@ class EngineCoreGuard(threading.Thread):  # changed
                 logger.info("[EngineCoreGuard] Received cmd: %s", cmd_str)
                 self._execute_cmd(cmd_str)
 
-    def _stop_worker_execution(self, soft_pause: bool):
+    def _stop_worker_execution(self, soft_pause: bool) -> bool:
         if soft_pause:
             pause_method = "pause_by_signal"
         else:
             pause_method = "pause_by_abort_communicators"
             self.communicator_aborted = True
 
-        self._send_cmd_to_worker(pause_method)
+        success = self._execute_worker_method(pause_method, need_response=False)
+        return success
 
-    def _send_cmd_to_worker(self, method_name, **kwargs) -> str:
-        method_uuid = str(uuid.uuid4())
+    def _execute_worker_method(
+        self, method_name, need_response=False, timeout: int = 5, **kwargs
+    ) -> bool:
+        identities = set()
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
                 identity = f"{tp_rank}_{pp_rank}".encode()
-                method_json = serialize_method_call(method_name, method_uuid, **kwargs)
-                self.worker_cmd_socket.send_multipart(
-                    [identity, b"", method_json.encode("utf-8")]
-                )
-        return method_uuid
-        # todo: need to recv results from worker after it sends back the result
+                identities.add(identity)
+
+        method_uuid = broadcast_instruction(
+            self.worker_cmd_socket, identities, method_name, **kwargs
+        )
+
+        all_success = True
+        if need_response:
+            worker_responses = wait_for_instruction_result(
+                self.worker_cmd_socket, identities, method_name, timeout, method_uuid
+            )
+            for identity in identities:
+                response = worker_responses.get(identity)
+                if response is None or not response.get("success", False):
+                    all_success = False
+
+        return all_success
 
     def _report_client_exception(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
@@ -249,16 +263,22 @@ class EngineCoreGuard(threading.Thread):  # changed
         """
         Handle the retry instruction from the ClientGuard.
         This instruction tells the EngineCore to continue its busy loop
-        after being suspended due to an exception. No additional fault
-        handling logic is required, so a simple signal is sent to the
-        fault_tolerance_queue to unblock the waiting thread.
+        after being suspended due to an exception.
         """
-        self._send_cmd_to_worker("restart_worker")
+        start_time = time.monotonic()
+
+        success = self._execute_worker_method(
+            "restart_worker", need_response=True, timeout=timeout
+        )
+        if not success:
+            return success
 
         # Nothing needs to be done for EngineCore
         self.cmd_q.put(None)
         # Ensure busy loop has been recovered.
-        success = self.busy_loop_active.wait(timeout=timeout)
+        elapsed = time.monotonic() - start_time
+        remaining_timeout = max(0, timeout - elapsed)
+        success = self.busy_loop_active.wait(timeout=remaining_timeout)
         self.engine_running = success
         return success
 
