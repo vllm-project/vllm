@@ -33,6 +33,8 @@ Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
 """
 
+from typing import Any
+
 import torch
 
 from vllm import LLM, SamplingParams
@@ -47,6 +49,16 @@ from vllm.v1.sample.logits_processor.builtin import process_dict_updates
 # Hypothetical custom logits processor
 class DummyLogitsProcessor(LogitsProcessor):
     """Fake logit processor to support unit testing and examples"""
+
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token: Any | None = params.extra_args and params.extra_args.get(
+            "target_token"
+        )
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"target_token value {target_token} {type(target_token)} is not int"
+            )
 
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
@@ -88,16 +100,6 @@ class DummyLogitsProcessor(LogitsProcessor):
         logits[rows, cols] = values_to_keep
 
         return logits
-
-    @classmethod
-    def validate_params(cls, params: SamplingParams):
-        target_token: int | None = params.extra_args and params.extra_args.get(
-            "target_token"
-        )
-        if target_token is not None and not isinstance(target_token, int):
-            raise ValueError(
-                f"target_token value {target_token} {type(target_token)} is not int"
-            )
 
 
 # Sample prompts.

@@ -76,9 +76,6 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of wrapping a fake request-level logit processor to create a
     batch-level logits processor"""
 
-    def is_argmax_invariant(self) -> bool:
-        return False
-
     @classmethod
     def validate_params(cls, params: SamplingParams):
         target_token: Any | None = params.extra_args and params.extra_args.get(
@@ -86,6 +83,9 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         )
         if target_token is not None and not isinstance(target_token, int):
             raise ValueError(f"target_token value {target_token} is not int")
+
+    def is_argmax_invariant(self) -> bool:
+        return False
 
     def new_req_logits_processor(
         self,

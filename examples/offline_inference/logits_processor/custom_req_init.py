@@ -77,6 +77,14 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
     info about the device type"""
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token = params.extra_args and params.extra_args.get("target_token")
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(
+                f"`target_token` has to be an integer, got {target_token}."
+            )
+
     def __init__(
         self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
     ):
@@ -85,14 +93,6 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
 
     def is_argmax_invariant(self) -> bool:
         return False
-
-    @classmethod
-    def validate_params(cls, params: SamplingParams):
-        target_token = params.extra_args and params.extra_args.get("target_token")
-        if target_token is not None and not isinstance(target_token, int):
-            raise ValueError(
-                f"`target_token` has to be an integer, got {target_token}."
-            )
 
     def new_req_logits_processor(
         self,

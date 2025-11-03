@@ -18,6 +18,11 @@ In vLLM, logits processors operate at batch granularity. During a given engine s
 
 Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsProcessor` and define (at minimum) the following methods:
 
+* `validate_params(cls, sampling_params: SamplingParams)`:
+    * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
+    * When request is sent to entrypoint, `validate_params()` will validate `SamplingParams` and refuse request with invalid arguments.
+    * **Note:** it's important to implement `validate_params()` to prevent invalid parameters for custom logits processor. Otherwise requests with invalid parameters can cause unexpected behaviour in custom logits processor.
+
 * `__init__(self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool)`
     * `vllm_config`: engine configuration data structure
     * `device`: hardware accelerator device info
@@ -37,11 +42,6 @@ Custom logits processors must subclass `vllm.v1.sample.logits_processor.LogitsPr
     * Consume a `BatchUpdate` data structure representing persistent batch state changes at the beginning of the current engine step
     * Use the `BatchUpdate` members to update logits processor internal state
     * **Note:** batch update data structure may be `None`, signaling no change to the batch constituents. In this case, the LogitsProcessor might still want to update its state based on the updated `output_token_ids` lists that it could have retained when they were added.
-
-* `validate_params(cls, sampling_params: SamplingParams)`:
-    * Raise `ValueError` if `SamplingParams` has invalid arguments (especially custom arguments) used by logits processor.
-    * When request is sent to entrypoint, `validate_params()` will validate `SamplingParams` and refuse request with invalid arguments.
-    * **Note:** it's important to implent `validate_params()` to prevent invalid parameters for custom logits processor. Otherwise requests with invalid parameters can cause unexpected behaviour in custom logits processor.
 
 ### How the vLLM engine builds the `BatchUpdate` data structure
 
@@ -108,6 +108,14 @@ The contrived example below implements a custom logits processor which consumes 
     class DummyLogitsProcessor(LogitsProcessor):
         """Fake logit processor to support unit testing and examples"""
 
+        @classmethod
+        def validate_params(cls, params: SamplingParams):
+            target_token: int | None = params.extra_args and params.extra_args.get(
+                "target_token"
+            )
+            if target_token is not None and not isinstance(target_token, int):
+                raise ValueError(f"target_token value {target_token} is not int")
+
         def __init__(self, vllm_config: "VllmConfig", device: torch.device,
                     is_pin_memory: bool):
             self.req_info: dict[int, int] = {}
@@ -163,14 +171,6 @@ The contrived example below implements a custom logits processor which consumes 
             logits[rows, cols] = values_to_keep
 
             return logits
-
-        @classmethod
-        def validate_params(cls, params: SamplingParams):
-            target_token: int | None = params.extra_args and params.extra_args.get(
-                "target_token"
-            )
-            if target_token is not None and not isinstance(target_token, int):
-                raise ValueError(f"target_token value {target_token} is not int")
 
     ```
 
@@ -241,9 +241,6 @@ You can wrap the request-level logits processor by subclassing `AdapterLogitsPro
         """Example of wrapping a fake request-level logit processor to create a
         batch-level logits processor"""
 
-        def is_argmax_invariant(self) -> bool:
-            return False
-
         @classmethod
         def validate_params(cls, params: SamplingParams):
             target_token: Any | None = params.extra_args and params.extra_args.get(
@@ -253,6 +250,9 @@ You can wrap the request-level logits processor by subclassing `AdapterLogitsPro
                 raise ValueError(
                     f"target_token value {target_token} is not int"
                 )
+
+        def is_argmax_invariant(self) -> bool:
+            return False
 
         def new_req_logits_processor(
             self,

@@ -131,14 +131,6 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of overriding the wrapper class `__init__()` in order to utilize
     info about the device type"""
 
-    def __init__(
-        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
-    ):
-        super().__init__(vllm_config, device, is_pin_memory)
-
-    def is_argmax_invariant(self) -> bool:
-        return True
-
     @classmethod
     def validate_params(cls, params: SamplingParams):
         ngram_size = params.extra_args and params.extra_args.get("ngram_size")
@@ -167,6 +159,14 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
                 "`whitelist_token_ids` has to be a sequence of integers, "
                 f"got {whitelist_token_ids}."
             )
+
+    def __init__(
+        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
+    ):
+        super().__init__(vllm_config, device, is_pin_memory)
+
+    def is_argmax_invariant(self) -> bool:
+        return True
 
     def new_req_logits_processor(
         self,
