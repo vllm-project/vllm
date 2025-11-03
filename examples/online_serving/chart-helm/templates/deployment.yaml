@@ -67,10 +67,15 @@ spec:
           volumeMounts:
           - name: {{ .Release.Name }}-storage
             mountPath: /data
+          {{- if .Values.pvWithModels }}
+          - name: {{ .Values.pvWithModels }}
+            mountPath: {{ .Values.modelsPath }}
+          {{- end }} 
 
         {{- with .Values.extraContainers }}
         {{ toYaml . | nindent 8 }}
         {{- end }}
+
 
       {{-   if .Values.extraInit  }}
       initContainers:
@@ -93,10 +98,21 @@ spec:
         - name: {{ .Release.Name }}-storage
           mountPath: /data
       {{- end }}
+
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 10 }}
+      {{- end }}
+
       volumes:
         - name: {{ .Release.Name }}-storage
           persistentVolumeClaim:
-            claimName: {{ .Release.Name }}-storage-claim     
+            claimName: {{ .Release.Name }}-storage-claim
+        {{- if .Values.pvWithModels }} 
+        - name: {{ .Values.pvWithModels }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.pvWithModels }}  
+        {{- end }} 
 
       {{- with .Values.nodeSelector }}
       nodeSelector:
