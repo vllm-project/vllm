@@ -252,7 +252,7 @@ def run_hf(
     disable_detokenize: bool = False,
 ) -> float:
     llm = AutoModelForCausalLM.from_pretrained(
-        model, dtype=torch.float16, trust_remote_code=trust_remote_code
+        model, dtype="float16", trust_remote_code=trust_remote_code
     )
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
