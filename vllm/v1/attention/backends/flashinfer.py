@@ -560,6 +560,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
+            head_size=self.head_dim,
+            block_size=self.page_size,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
@@ -571,6 +573,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.cache_dtype,
             self.q_data_type,
             is_prefill=False,
+            head_size=self.head_dim,
+            block_size=self.page_size,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )

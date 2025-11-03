@@ -241,6 +241,8 @@ def use_trtllm_attention(
     kv_cache_dtype: str,
     q_dtype: torch.dtype,
     is_prefill: bool,
+    head_size: int,
+    block_size: int,
     has_sinks: bool = False,
     has_spec: bool = False,
 ) -> bool:
@@ -267,6 +269,11 @@ def use_trtllm_attention(
                 "TRTLLM attention is not supported for this combination of "
                 "query and key heads, but VLLM_USE_TRTLLM_ATTENTION is set to 1"
             )
+        return False
+
+    if head_size == 256 and block_size == 16:
+        ## https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
+        # head size 256 and block size 16 is incorrect on blackwell.
         return False
 
     if has_spec and not is_prefill:
