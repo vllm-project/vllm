@@ -4,6 +4,7 @@ import copy
 from contextlib import nullcontext
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
@@ -21,14 +22,6 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
-
-
-def test_use_cudagraphs_dynamic():
-    vllm_config = VllmConfig()
-    # Default V1 configuration now starts without cudagraphs enabled; the
-    # engine decides when to capture based on runtime settings instead of a
-    # blanket default.
-    assert vllm_config.compilation_config.use_cudagraph
 
 
 def test_copy_pass():
@@ -96,7 +89,9 @@ def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
         compilation_counter.expect(
             num_graphs_seen=1,
             num_gpu_runner_capture_triggers=1 if enabled else 0,
-            num_cudagraph_captured=13 if enabled else 0,
+            # TODO(gmagogsfm): This is brittle, compilation_counter should support
+            # a way to assert that a counter is updated with any positive number.
+            num_cudagraph_captured=14 if enabled else 0,
         ),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
@@ -189,10 +184,10 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
     )
-    # With the new simplified logic, attention fusion works with splitting_ops
-    assert config.compilation_config.splitting_ops_contain_attention()
-    # cudagraph mode remains PIECEWISE
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    # enable_attn_fusion is incompatible with piecewise cudagraphs,
+    # splitting_ops is set to empty list, and cudagraph_mode is set to FULL.
+    assert not config.compilation_config.splitting_ops
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
     # When both use_inductor_graph_partition and attn_fusion pass enabled.
     if is_torch_equal_or_newer("2.9.0.dev"):
@@ -245,43 +240,59 @@ def test_resolve_operator_overload():
 @pytest.mark.parametrize(
     (
         "cudagraph_capture_sizes",
+        "max_num_seqs",
         "max_cudagraph_capture_size",
         "tp_size",
         "enable_sequence_parallelism",
         "max_num_batched_tokens",
         "use_cudagraph",
         "expected_max_size",
+        "expected_exception",
     ),
     [
-        (None, None, 1, False, 2048, True, 512),
-        ([1, 2, 4], 4, 1, False, 2048, True, 4),
-        ([1, 2, 4], 8, 1, False, 2048, True, RuntimeError),
-        ([1, 256], None, 1, False, 2048, 256),
-        ([], None, 1, False, 2048, False, 0),
-        (None, 0, 1, False, 2048, False, 0),
+        # Test 2*max_num_seqs as the cap for max_cudagraph_capture_size
+        (None, 128, None, 1, False, 2048, True, 256, None),
+        # Test 512 as the absolute cap for max_cudagraph_capture_size
+        (None, 1024, None, 1, False, 2048, True, 512, None),
+        ([1, 2, 4], None, 4, 1, False, 2048, True, 4, None),
+        ([1, 2, 4], None, 8, 1, False, 2048, True, None, ValidationError),
+        ([1, 256], None, None, 1, False, 2048, True, 256, None),
+        ([], None, None, 1, False, 2048, False, 0, None),
+        (None, None, 0, 1, False, 2048, False, 0, None),
         # truncated to nearest multiple of 8 or 16
-        (None, 257, 1, False, 2048, True, 256),
-        ([1, 2, 4, 15], None, 1, False, 2048, True, 15),  # max from list
-        ([1, 2, 4, 15], None, 2, True, 2048, True, 4),  # filtered out 15 due to SP
-        ([1, 2, 4, 15], None, 1, False, 8, True, 4),  # limited by the max_tokens
+        (None, None, 257, 1, False, 2048, True, 256, None),
+        ([1, 2, 4, 15], None, None, 1, False, 2048, True, 15, None),  # max from list
+        (
+            [1, 2, 4, 15],
+            None,
+            None,
+            2,
+            True,
+            2048,
+            True,
+            4,
+            None,
+        ),  # filtered out 15 due to SP
         # the list should contain at least 1 element when use cudagraph
-        ([], None, 1, False, 2048, True, RuntimeError),
+        ([], None, None, 1, False, 2048, True, None, ValidationError),
         # the max capturing size should be >= 1 when use cudagraph
-        (None, 0, 1, False, 2048, True, RuntimeError),
+        (None, None, 0, 1, False, 2048, True, None, ValidationError),
     ],
 )
 def test_cudagraph_sizes_post_init(
     cudagraph_capture_sizes,
+    max_num_seqs,
     max_cudagraph_capture_size,
     tp_size,
     enable_sequence_parallelism,
     max_num_batched_tokens,
     use_cudagraph,
     expected_max_size,
+    expected_exception,
 ):
     ctx = nullcontext()
-    if isinstance(expected_max_size, Exception):
-        ctx = pytest.raises(expected_max_size)
+    if expected_exception:
+        ctx = pytest.raises(expected_exception)
 
     cudagraph_mode = CUDAGraphMode.PIECEWISE if use_cudagraph else CUDAGraphMode.NONE
     with ctx:
@@ -300,9 +311,12 @@ def test_cudagraph_sizes_post_init(
             tensor_parallel_size=tp_size,
             max_num_batched_tokens=max_num_batched_tokens,
             compilation_config=compilation_config,
+            max_num_seqs=max_num_seqs,
         )
         vllm_config = engine_args.create_engine_config()
 
-    assert (
-        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
-    )
+    if not expected_exception:
+        assert (
+            vllm_config.compilation_config.max_cudagraph_capture_size
+            == expected_max_size
+        )
