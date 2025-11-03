@@ -160,11 +160,6 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
                 f"got {whitelist_token_ids}."
             )
 
-    def __init__(
-        self, vllm_config: VllmConfig, device: torch.device, is_pin_memory: bool
-    ):
-        super().__init__(vllm_config, device, is_pin_memory)
-
     def is_argmax_invariant(self) -> bool:
         return True
 
