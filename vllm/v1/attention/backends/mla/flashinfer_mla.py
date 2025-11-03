@@ -6,7 +6,7 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType
+from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -42,6 +42,10 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
         return FlashInferMLAMetadataBuilder
+
+    @classmethod
+    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
+        return [32, 64]
 
 
 g_fi_workspace = torch.zeros(
