@@ -4,7 +4,7 @@
 import time
 from collections.abc import Callable, Mapping
 from copy import copy
-from typing import Any
+from typing import Any, cast
 
 import torch.nn as nn
 from typing_extensions import TypeVar
@@ -58,18 +58,9 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "LLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github."
-            )
-
         if stat_loggers is not None:
             raise NotImplementedError(
-                "Passing StatLoggers to LLMEngine in V1 is not yet supported. "
-                "Set VLLM_USE_V1=0 and file and issue on Github."
+                "Passing StatLoggers to LLMEngine is not yet supported."
             )
 
         self.vllm_config = vllm_config
@@ -112,10 +103,9 @@ class LLMEngine:
         self.output_processor = OutputProcessor(
             self.tokenizer, log_stats=self.log_stats
         )
-        if self.observability_config.otlp_traces_endpoint is not None:
-            tracer = init_tracer(
-                "vllm.llm_engine", self.observability_config.otlp_traces_endpoint
-            )
+        endpoint = self.observability_config.otlp_traces_endpoint
+        if endpoint is not None:
+            tracer = init_tracer("vllm.llm_engine", endpoint)
             self.output_processor.tracer = tracer
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
@@ -259,7 +249,10 @@ class LLMEngine:
                 trace_headers,
                 priority,
             )
-            prompt_text = prompt if isinstance(prompt, str) else prompt.get("prompt")
+            if isinstance(prompt, str):
+                prompt_text = prompt
+            elif isinstance(prompt, Mapping):
+                prompt_text = cast(str | None, prompt.get("prompt"))
 
         n = params.n if isinstance(params, SamplingParams) else 1
 
@@ -285,7 +278,7 @@ class LLMEngine:
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
 
-    def step(self) -> list[RequestOutput] | list[PoolingRequestOutput]:
+    def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
             self.should_execute_dummy_batch = False
             self.engine_core.execute_dummy_batch()
@@ -332,8 +325,14 @@ class LLMEngine:
     def sleep(self, level: int = 1):
         self.engine_core.sleep(level)
 
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(1, level)
+
     def wake_up(self, tags: list[str] | None = None):
         self.engine_core.wake_up(tags)
+
+        if self.logger_manager is not None:
+            self.logger_manager.record_sleep_state(0, 0)
 
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
