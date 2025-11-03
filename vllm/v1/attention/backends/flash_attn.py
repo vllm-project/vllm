@@ -62,7 +62,11 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+        # NOTE(tdoublep): while in principle, FA supports
+        # MultipleOf(16), these are the block sizes that do not
+        # suffer from the NaN propagation problem described here:
+        # https://github.com/Dao-AILab/flash-attention/issues/1974
+        return [16, 32, 64]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
