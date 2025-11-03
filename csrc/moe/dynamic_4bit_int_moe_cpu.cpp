@@ -21,8 +21,6 @@ inline torch::Tensor mm(const torch::Tensor& a, const torch::Tensor& packed_w,
 #endif
 }
 
-extern void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
-
 enum ActivationKind : int64_t {
   SwiGLU_Gu = 0,  // act = SiLU(g) * u
   SwiGLUOAI = 1,  // act = SiLU(u) * g
@@ -114,19 +112,19 @@ torch::Tensor dynamic_4bit_int_moe_cpu(
       auto y13 =
           mm(x_e, w13_e, g_eff_13, /*in_features=*/H, /*out_features=*/I2);
 
+      auto g_part = y13.narrow(/*dim=*/1, /*start=*/0, /*length=*/I);
+      auto u_part = y13.narrow(/*dim=*/1, /*start=*/I, /*length=*/I);
+
       torch::Tensor act;
       if (activation_kind == ActivationKind::SwiGLUOAI) {  // SwiGLUOAI
-        auto g_part = y13.narrow(/*dim=*/1, /*start=*/0, /*length=*/I);
-        auto u_part = y13.narrow(/*dim=*/1, /*start=*/I, /*length=*/I);
-        constexpr double kAlpha = 1.702;  // GPT-OSS default
-        constexpr double kLimit = 7.0;    // GPT-OSS default
+        constexpr double kAlpha = 1.702;                   // GPT-OSS default
+        constexpr double kLimit = 7.0;                     // GPT-OSS default
         auto gate_c = at::clamp_max(g_part, kLimit);
         auto up_c = at::clamp(u_part, -kLimit, kLimit);
         auto glu = gate_c.mul(at::sigmoid(gate_c.mul(kAlpha)));
         act = up_c.add(1.0).mul(glu);
       } else {  // SiLU , SwiGLU_GU, vLLM maps silu to SiluAndMul()
-        act = at::empty({te, I}, y13.options());
-        silu_and_mul(act, y13);
+        act = at::silu(g_part).mul(u_part);
       }
 
       // W2
