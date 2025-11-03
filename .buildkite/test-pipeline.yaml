@@ -340,6 +340,16 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: V1 Test attention (B200) # 10min
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - export VLLM_DISABLE_FLASHINFER_PREFILL=1 # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention
+
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
     - vllm/
@@ -417,7 +427,7 @@ steps:
       --ignore=lora/test_llm_with_multi_loras.py \
       --ignore=lora/test_olmoe_tp.py \
       --ignore=lora/test_deepseekv2_tp.py \
-      --ignore=lora/test_gptoss.py \
+      --ignore=lora/test_gptoss_tp.py \
       --ignore=lora/test_qwen3moe_tp.py
 
   parallelism: 4
@@ -1119,6 +1129,7 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
+    - pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
@@ -1234,3 +1245,21 @@ steps:
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
+
+- label: DeepSeek V2-Lite Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep.sh 0.8 200 8020
