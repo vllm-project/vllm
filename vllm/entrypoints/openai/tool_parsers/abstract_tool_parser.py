@@ -116,7 +116,7 @@ class ToolParserManager:
         """
         Retrieve a registered or lazily registered ToolParser class.
 
-        If the parser is lazily registered, 
+        If the parser is lazily registered,
         it will be imported and cached on first access.
         Raises KeyError if not found.
         """
