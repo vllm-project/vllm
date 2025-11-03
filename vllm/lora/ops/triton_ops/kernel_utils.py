@@ -304,4 +304,4 @@ def do_shrink_kernel(
     if SPLIT_K == 1:
         tl.store(c_ptr, accumulator, mask=c_mask)
     else:
-        tl.atomic_add(c_ptr, accumulator, mask=c_mask)
+        tl.atomic_add(c_ptr, accumulator, mask=c_mask, sem="relaxed")
