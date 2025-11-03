@@ -184,7 +184,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
         if call_kwargs_annotations not in (None, inspect._empty):
             # get_type_hints will parse all type annotations at runtime,
             # and if an annotation refers to a type or
-            # name that hasn’t been imported or defined, it will raise an error.
+            # name that hasn't been imported or defined, it will raise an error.
             # So we use __annotations__ to get the raw annotations directly.
             return _collect_dynamic_keys_from_processing_kwargs(
                 get_args(call_kwargs_annotations)[0]
@@ -240,6 +240,22 @@ def cached_get_processor_without_dynamic_kwargs(
     return final_processor
 
 
+@lru_cache
+def _get_gemma3_image_processor(image_size: int):
+    """
+    Cache Gemma3ImageProcessor instances by image size.
+
+    This avoids creating new instances on every request, which would break
+    the processor cache since object instances are part of the cache key.
+
+    Args:
+        image_size: Image dimension (height=width) extracted from GGUF metadata
+    """
+    from transformers import Gemma3ImageProcessor
+
+    return Gemma3ImageProcessor(size={"height": image_size, "width": image_size})
+
+
 def cached_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
@@ -261,22 +277,23 @@ def cached_processor_from_config(
     else:
         processor_name = model_config.model
 
-    # GGUF Gemma3: pre-configure image_processor with 896x896 to match
-    # mmproj.gguf dimensions before processor creation/caching
+    # GGUF Gemma3: pre-configure image_processor with dimensions from
+    # mmproj.gguf metadata before processor creation/caching
     image_processor_override = None
     if (
         processor_name != model_config.model
         and model_config.model.endswith(".gguf")
         and "gemma-3" in processor_name.lower()
     ):
-        from transformers import Gemma3ImageProcessor
-
-        image_processor_override = Gemma3ImageProcessor(
-            size={"height": 896, "width": 896}
-        )
+        # Extract image size from already-loaded vision config (no file re-reading)
+        image_size = model_config.hf_config.vision_config.image_size
+        # Use cached instance (keyed by image_size) to avoid breaking processor cache
+        image_processor_override = _get_gemma3_image_processor(image_size)
         logger.info(
-            "GGUF Gemma3: Pre-configuring image_processor with 896x896 "
-            "(loading processor from %s)",
+            "GGUF Gemma3: Pre-configuring image_processor with %dx%d "
+            "(from mmproj.gguf metadata via %s)",
+            image_size,
+            image_size,
             processor_name,
         )
 
