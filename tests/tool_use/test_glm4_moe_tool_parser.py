@@ -484,7 +484,6 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
 <arg_key>todos</arg_key>
 <arg_value>[{"id": "1", "task": "Check for hard-coded issues in the backend code", "status": "in_progress"}, {"id": "2", "task": "Check for hard-coded issues in the frontend code", "status": "pending"}, {"id": "3", "task": "Check for code violating the Single Responsibility Principle", "status": "pending"}, {"id": "4", "task": "Generate a rectification proposal report", "status": "pending"}]</arg_value>
 </tool_call>"""
-
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
         model_output, request=None
     )  # type: ignore[arg-type]
@@ -494,7 +493,6 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
 <arg_key>todos</arg_key>
 <arg_value>[{\"id\": \"1\", \"task\": \"Check for hard-coded issues in the backend code\", \"status\": \"in_progress\"}, {\"id\": \"2\", \"task\": \"Check for hard-coded issues in the frontend code\", \"status\": \"pending\"}, {\"id\": \"3\", \"task\": \"Check for code violating the Single Responsibility Principle\", \"status\": \"pending\"}, {\"id\": \"4\", \"task\": \"Generate a rectification proposal report\", \"status\": \"pending\"}]</arg_value>
 </tool_call>"""
-
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
         model_output_escaped, request=None
     )  # type: ignore[arg-type]
@@ -515,7 +513,6 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
 <arg_key>todos</arg_key>
 <arg_value>[{"id": "1", "task": "Check file at C:\\\\Users\\\\test.txt", "status": "pending"}]</arg_value>
 </tool_call>"""
-
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
         model_output, request=None
     )  # type: ignore[arg-type]
@@ -525,7 +522,6 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
 <arg_key>todos</arg_key>
 <arg_value>[{\"id\": \"1\", \"task\": \"Check file at C:\\\\Users\\\\test.txt\", \"status\": \"pending\"}]</arg_value>
 </tool_call>"""
-
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
         model_output_escaped, request=None
     )  # type: ignore[arg-type]
@@ -536,7 +532,6 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
 <arg_key>todos</arg_key>
 <arg_value>[{"id": "1", "task": "Print \\\\n to see newline", "status": "pending"}]</arg_value>
 </tool_call>"""
-
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
         model_output, request=None
     )  # type: ignore[arg-type]
@@ -546,7 +541,6 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
 <arg_key>todos</arg_key>
 <arg_value>[{\"id\": \"1\", \"task\": \"Print \\\\n to see newline\", \"status\": \"pending\"}]</arg_value>
 </tool_call>"""
-
     extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
         model_output_escaped, request=None
     )  # type: ignore[arg-type]
