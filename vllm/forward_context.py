@@ -285,17 +285,33 @@ def set_forward_context(
     if vllm_config.parallel_config.data_parallel_size > 1 and (
         attn_metadata is not None or num_tokens is not None
     ):
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        print(
+            f"[DP{dp_rank}] set_forward_context: DP > 1, "
+            f"num_tokens={num_tokens}, "
+            f"num_tokens_across_dp={num_tokens_across_dp}"
+        )
+
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be
         # disabled.
         if num_tokens_across_dp is None:
             assert ubatch_slices is None
             assert num_tokens is not None
+            print(
+                f"[DP{dp_rank}] set_forward_context: "
+                f"CALLING coordinate_batch_across_dp with "
+                f"num_tokens={num_tokens}"
+            )
             _, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
                 allow_dp_padding=False,
+            )
+            print(
+                f"[DP{dp_rank}] set_forward_context: "
+                f"RETURNED from coordinate_batch_across_dp"
             )
             assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(

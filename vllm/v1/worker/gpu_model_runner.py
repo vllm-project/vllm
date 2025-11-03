@@ -1187,6 +1187,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # decoder.
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
+        if self.parallel_config.data_parallel_size > 1:
+            dp_rank = self.parallel_config.data_parallel_rank
+            print(
+                f"[DP{dp_rank}] BEFORE coordinate_batch_across_dp: "
+                f"num_tokens_unpadded={num_tokens_unpadded}, "
+                f"num_tokens_padded={num_tokens_padded}, "
+                f"uniform_decode={uniform_decode}"
+            )
+
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.parallel_config,
@@ -1196,6 +1205,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode=uniform_decode,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
+
+        if self.parallel_config.data_parallel_size > 1:
+            dp_rank = self.parallel_config.data_parallel_rank
+            print(f"[DP{dp_rank}] AFTER coordinate_batch_across_dp")
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -2426,72 +2439,194 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        if self.parallel_config.data_parallel_size > 1:
+            dp_rank = self.parallel_config.data_parallel_rank
+            num_tokens = scheduler_output.total_num_scheduled_tokens
+            print(f"[DP{dp_rank}] execute_model ENTRY: num_tokens={num_tokens}")
+
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                if not scheduler_output.total_num_scheduled_tokens:
+                # Flag to track if this rank has 0 tokens
+                has_zero_tokens = not scheduler_output.total_num_scheduled_tokens
+
+                if has_zero_tokens and self.parallel_config.data_parallel_size > 1:
+                    # With spec decode + DP, participate in DP coordination
+                    # before continuing to the should_run_drafter sync.
+                    import torch.distributed as dist
+
+                    from vllm.distributed.parallel_state import get_dp_group
+                    from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+
+                    dp_rank = self.parallel_config.data_parallel_rank
+                    print(f"[DP{dp_rank}] 0 tokens, participating in DP coordination")
+
+                    # Participate in the coordinate call that other ranks
+                    # make in _prepare_inputs
+                    _, num_tokens_across_dp = coordinate_batch_across_dp(
+                        num_tokens_unpadded=0,
+                        parallel_config=self.parallel_config,
+                        allow_microbatching=False,
+                        allow_dp_padding=False,
+                    )
+                    print(
+                        f"[DP{dp_rank}] Finished _prepare_inputs coordinate, "
+                        f"num_tokens_across_dp={num_tokens_across_dp}"
+                    )
+
+                    # Set empty metadata for 0-token case
+                    spec_decode_common_attn_metadata = None
+                elif has_zero_tokens:
+                    # Single DP rank with 0 tokens - return immediately
                     if not has_kv_transfer_group():
-                        # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(
                         scheduler_output, self.vllm_config
                     )
-                if self.cache_config.kv_sharing_fast_prefill:
-                    assert not self.input_batch.num_prompt_logprobs, (
-                        "--kv-sharing-fast-prefill produces incorrect "
-                        "logprobs for prompt tokens, tokens, please disable "
-                        "it when the requests need prompt logprobs"
+
+                if not has_zero_tokens:
+                    if self.cache_config.kv_sharing_fast_prefill:
+                        assert not self.input_batch.num_prompt_logprobs, (
+                            "--kv-sharing-fast-prefill produces incorrect "
+                            "logprobs for prompt tokens, tokens, please disable "
+                            "it when the requests need prompt logprobs"
+                        )
+
+                    # Prepare the decoder inputs.
+                    (
+                        attn_metadata,
+                        logits_indices,
+                        spec_decode_metadata,
+                        num_scheduled_tokens_np,
+                        spec_decode_common_attn_metadata,
+                        max_query_len,
+                        ubatch_slices,
+                        num_tokens_across_dp,
+                        use_cascade_attn,
+                    ) = self._prepare_inputs(scheduler_output)
+
+                    dp_rank = self.parallel_config.data_parallel_rank
+                    if ubatch_slices:
+                        assert num_tokens_across_dp is not None
+                        num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                        self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+                    elif num_tokens_across_dp is not None:
+                        num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                    else:
+                        num_input_tokens = self._get_num_input_tokens(
+                            scheduler_output.total_num_scheduled_tokens
+                        )
+
+                    (
+                        num_scheduled_tokens,
+                        input_ids,
+                        inputs_embeds,
+                        positions,
+                        intermediate_tensors,
+                        model_kwargs,
+                    ) = self._preprocess(
+                        scheduler_output, num_input_tokens, intermediate_tensors
                     )
 
-                # Prepare the decoder inputs.
-                (
-                    attn_metadata,
-                    logits_indices,
-                    spec_decode_metadata,
-                    num_scheduled_tokens_np,
-                    spec_decode_common_attn_metadata,
-                    max_query_len,
-                    ubatch_slices,
-                    num_tokens_across_dp,
-                    use_cascade_attn,
-                ) = self._prepare_inputs(scheduler_output)
+                    uniform_decode = (
+                        max_query_len == self.uniform_decode_query_len
+                    ) and (
+                        num_scheduled_tokens
+                        == self.input_batch.num_reqs * max_query_len
+                    )
+                    batch_descriptor = BatchDescriptor(
+                        num_tokens=num_input_tokens,
+                        uniform_decode=uniform_decode,
+                        has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                    )
+                    cudagraph_runtime_mode, batch_descriptor = (
+                        self.cudagraph_dispatcher.dispatch(
+                            batch_descriptor, use_cascade_attn
+                        )
+                    )
+                else:
+                    # Set dummy values for 0-token case
+                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+                    batch_descriptor = None
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            if ubatch_slices:
-                assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            else:
-                num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens
+            # Synchronize should_run_drafter across all DP ranks AFTER preprocessing
+            # but BEFORE any drafter execution. This ensures all ranks sync at the
+            # same execution point.
+            should_run_drafter = False
+            if (
+                self.speculative_config is not None
+                and self.parallel_config.data_parallel_size > 1
+            ):
+                import torch.distributed as dist
+
+                from vllm.distributed.parallel_state import get_dp_group
+
+                dp_rank = self.parallel_config.data_parallel_rank
+
+                # Compute local should_run_drafter value
+                if has_zero_tokens:
+                    # 0-token rank cannot run drafter
+                    local_should_run_drafter = False
+                else:
+                    # Compute whether this rank wants to run the drafter
+                    use_padded_batch_for_eagle = (
+                        self.speculative_config.use_eagle()
+                        and not self.speculative_config.disable_padded_drafter_batch
+                    )
+                    effective_drafter_max_model_len = self.max_model_len
+                    if effective_drafter_max_model_len is None:
+                        effective_drafter_max_model_len = (
+                            self.model_config.max_model_len
+                        )
+                    if self.speculative_config.draft_model_config is not None and (
+                        self.speculative_config.draft_model_config.max_model_len
+                        is not None
+                    ):
+                        effective_drafter_max_model_len = (
+                            self.speculative_config.draft_model_config.max_model_len
+                        )
+                    input_fits_in_drafter = spec_decode_common_attn_metadata and (
+                        spec_decode_common_attn_metadata.max_seq_len
+                        + self.speculative_config.num_speculative_tokens
+                        <= effective_drafter_max_model_len
+                    )
+                    local_should_run_drafter = (
+                        use_padded_batch_for_eagle and input_fits_in_drafter
+                    )
+
+                # Synchronize across all DP ranks - all must agree
+                device = get_dp_group().device
+                group = get_dp_group().device_group
+                if self.parallel_config.disable_nccl_for_dp_synchronization:
+                    device = "cpu"
+                    group = get_dp_group().cpu_group
+
+                drafter_flag = torch.tensor(
+                    [1 if local_should_run_drafter else 0],
+                    device=device,
+                    dtype=torch.int32,
+                )
+                print(
+                    f"[DP{dp_rank}] ENTERING should_run_drafter sync, "
+                    f"local={local_should_run_drafter}"
+                )
+                dist.all_reduce(drafter_flag, op=dist.ReduceOp.MIN, group=group)
+                should_run_drafter = bool(drafter_flag.item())
+                print(
+                    f"[DP{dp_rank}] EXITED should_run_drafter sync, "
+                    f"result={should_run_drafter}"
                 )
 
-            (
-                num_scheduled_tokens,
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-            ) = self._preprocess(
-                scheduler_output, num_input_tokens, intermediate_tensors
-            )
+            # Store the synchronized should_run_drafter value for later use
+            self._should_run_drafter_for_current_batch = should_run_drafter
 
-            uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
-                num_scheduled_tokens == self.input_batch.num_reqs * max_query_len
-            )
-            batch_descriptor = BatchDescriptor(
-                num_tokens=num_input_tokens,
-                uniform_decode=uniform_decode,
-                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-            )
-            cudagraph_runtime_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(batch_descriptor, use_cascade_attn)
-            )
+            # 0-token rank can now return after participating in sync
+            if has_zero_tokens:
+                if not has_kv_transfer_group():
+                    return EMPTY_MODEL_RUNNER_OUTPUT
+                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         if attn_metadata is not None:
@@ -2606,31 +2741,56 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                 )
 
-        use_padded_batch_for_eagle = (
-            self.speculative_config
-            and self.speculative_config.use_eagle()
-            and not self.speculative_config.disable_padded_drafter_batch
+        # Use the synchronized should_run_drafter value from preprocessing
+        # When DP > 1, this was already synchronized across all ranks
+        should_run_drafter = getattr(
+            self, "_should_run_drafter_for_current_batch", False
         )
-        effective_drafter_max_model_len = self.max_model_len
-        if effective_drafter_max_model_len is None:
-            effective_drafter_max_model_len = self.model_config.max_model_len
-        if (
-            self.speculative_config
-            and self.speculative_config.draft_model_config is not None
-            and self.speculative_config.draft_model_config.max_model_len is not None
-        ):
-            effective_drafter_max_model_len = (
-                self.speculative_config.draft_model_config.max_model_len
+
+        # For single DP rank, compute it locally
+        if self.parallel_config.data_parallel_size == 1:
+            use_padded_batch_for_eagle = (
+                self.speculative_config
+                and self.speculative_config.use_eagle()
+                and not self.speculative_config.disable_padded_drafter_batch
             )
-        input_fits_in_drafter = spec_decode_common_attn_metadata and (
-            spec_decode_common_attn_metadata.max_seq_len
-            + self.speculative_config.num_speculative_tokens
-            <= effective_drafter_max_model_len
-        )
-        if use_padded_batch_for_eagle and input_fits_in_drafter:
+            effective_drafter_max_model_len = self.max_model_len
+            if effective_drafter_max_model_len is None:
+                effective_drafter_max_model_len = self.model_config.max_model_len
+            if (
+                self.speculative_config
+                and self.speculative_config.draft_model_config is not None
+                and (
+                    self.speculative_config.draft_model_config.max_model_len is not None
+                )
+            ):
+                effective_drafter_max_model_len = (
+                    self.speculative_config.draft_model_config.max_model_len
+                )
+            input_fits_in_drafter = spec_decode_common_attn_metadata and (
+                spec_decode_common_attn_metadata.max_seq_len
+                + self.speculative_config.num_speculative_tokens
+                <= effective_drafter_max_model_len
+            )
+            should_run_drafter = use_padded_batch_for_eagle and input_fits_in_drafter
+
+        if self.parallel_config.data_parallel_size > 1:
+            dp_rank = self.parallel_config.data_parallel_rank
+            print(
+                f"[DP{dp_rank}] Using synchronized should_run_drafter="
+                f"{should_run_drafter}"
+            )
+
+        if should_run_drafter:
+            if self.parallel_config.data_parallel_size > 1:
+                dp_rank = self.parallel_config.data_parallel_rank
+                print(f"[DP{dp_rank}] CALLING propose_draft_token_ids...")
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
+            if self.parallel_config.data_parallel_size > 1:
+                dp_rank = self.parallel_config.data_parallel_rank
+                print(f"[DP{dp_rank}] RETURNED from propose_draft_token_ids")
 
         with record_function_or_nullcontext("Bookkeep"):
             (

@@ -215,6 +215,13 @@ class EagleProposer:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
 
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            print(
+                f"[DP{dp_rank}] EagleProposer.propose ENTRY: "
+                f"num_tokens={num_tokens}, batch_size={batch_size}"
+            )
+
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
@@ -286,12 +293,27 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            print(
+                f"[DP{dp_rank}] EagleProposer.propose: "
+                f"ENTERING set_forward_context with "
+                f"num_tokens={num_input_tokens}"
+            )
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
             num_tokens=num_input_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
+            if self.vllm_config.parallel_config.data_parallel_size > 1:
+                dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+                print(
+                    f"[DP{dp_rank}] EagleProposer.propose: "
+                    f"INSIDE set_forward_context, calling model..."
+                )
+
             ret_hidden_states = self.model(
                 input_ids=input_ids,
                 positions=self._get_positions(num_input_tokens),
