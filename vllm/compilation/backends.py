@@ -51,7 +51,9 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             and hasattr(torch._inductor, "standalone_compile")
         ):
             logger.debug("Using InductorStandaloneAdaptor")
-            return InductorStandaloneAdaptor()
+            return InductorStandaloneAdaptor(
+                compilation_config.compile_cache_save_format
+            )
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
