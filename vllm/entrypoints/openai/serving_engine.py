@@ -1321,11 +1321,7 @@ class OpenAIServing:
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
-
-        if not enable_auto_tools or not tool_parser_cls:
-            # Tools are not enabled
-            return None, content
-        elif request.tool_choice is None:
+        if request.tool_choice is None:
             # No tool calls.
             return None, content
         elif request.tool_choice and isinstance(
