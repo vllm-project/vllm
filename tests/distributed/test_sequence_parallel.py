@@ -326,7 +326,7 @@ def test_tp_sp_generation(
 
     # Skip FP8 SP-only test on sm89 (compute capability 8.9)
     if (
-        model_id == "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"
+        "fp8" in model_id.lower()
         and current_platform.get_device_capability() < (9, 0)
         and (not enable_async_tp)
     ):
