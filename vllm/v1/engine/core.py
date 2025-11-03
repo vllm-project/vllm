@@ -1146,7 +1146,10 @@ class DPEngineCoreProc(EngineCoreProc):
         self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
-        self.eep_scaling_state = None
+
+        from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
+
+        self.eep_scaling_state: ElasticEPScalingState | None = None
 
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
@@ -1324,16 +1327,14 @@ class DPEngineCoreProc(EngineCoreProc):
             reconfig_request.new_data_parallel_rank
             == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
         )
-        worker_type = "removing" if is_shutdown else "existing"
-        scale_type = "scale_down" if is_scale_down else "scale_up"
 
         self.eep_scaling_state = ElasticEPScalingState(
             model_executor=self.model_executor,
             engine_core=self,
             vllm_config=self.vllm_config,
             new_parallel_config=new_parallel_config,
-            worker_type=worker_type,
-            scale_type=scale_type,
+            worker_type="removing" if is_shutdown else "existing",
+            scale_type="scale_down" if is_scale_down else "scale_up",
             reconfig_request=reconfig_request,
         )
         self.process_input_queue_block = False
