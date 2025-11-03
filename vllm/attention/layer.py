@@ -125,7 +125,7 @@ def maybe_get_vit_flash_attn_backend(
             attn_backend = AttentionBackendEnum.FLASH_ATTN
             use_upstream_fa = True
     elif current_platform.is_xpu():
-        assert attn_backend == _Backend.FLASH_ATTN, (
+        assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
             "XPU platform only supports FLASH_ATTN as vision attention backend."
         )
         use_upstream_fa = False

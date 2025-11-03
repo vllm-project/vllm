@@ -783,7 +783,7 @@ def test_backend_correctness(dist_init, batch_spec_name: str, model: str):
         # Create a summary for the single-line failure message
         backend_names = []
         for f in failures:
-            if "[_Backend." in f:
+            if "[AttentionBackendEnum." in f:
                 backend_name = f.split("[")[1].split("]")[0]
                 backend_names.append(backend_name)
 
