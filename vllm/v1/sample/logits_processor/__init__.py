@@ -133,7 +133,7 @@ def _load_logitsprocs_by_fqcns(
                 module = importlib.import_module(module_path)
         except Exception as e:
             logger.error(
-                "Failed to load {%s}th LogitsProcessor plugin {%s}: %s",
+                "Failed to load %sth LogitsProcessor plugin %s: %s",
                 ldx,
                 logitproc,
                 e,
