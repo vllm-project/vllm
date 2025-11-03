@@ -213,13 +213,37 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        compiled_graph = standalone_compile(
-            graph,
-            example_inputs,
-            dynamic_shapes=dynamic_shapes,
-            options={"config_patches": current_config},
-        )
-
+        if dynamic_shapes == "from_graph":
+            # We need to pass fake example_inputs, otherwise torch.compile
+            # will fakify the example_inputs potentially causing some non dynamic
+            # dimension to be be duck shaped to other existing shapes that have hints
+            # matching their values.
+            # This is problem because it can lead to unintended specializations!
+            # if the new wrongly dynamic dim is specialized
+            # it will force specializing the whole shape
+            # standalone_compile probably should not accept
+            # non fake tensors as example inputs!
+            fake_example_inputs = []
+            for node in graph.graph.nodes:
+                # All place holders come first
+                if node.op == "placeholder":
+                    fake_example_inputs.append(node.meta["example_value"])
+                else:
+                    break
+            assert len(fake_example_inputs) == len(example_inputs)
+            compiled_graph = standalone_compile(
+                graph,
+                fake_example_inputs,
+                dynamic_shapes=dynamic_shapes,
+                options={"config_patches": current_config},
+            )
+        else:
+            compiled_graph = standalone_compile(
+                graph,
+                example_inputs,
+                dynamic_shapes=dynamic_shapes,
+                options={"config_patches": current_config},
+            )
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
