@@ -5,7 +5,6 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import Union
 
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
