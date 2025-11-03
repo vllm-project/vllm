@@ -107,10 +107,10 @@ class WorkerGuard:
                 break
             if has_msg:
                 assert cmd_str is not None
-                method, method_params = deserialize_method_call(cmd_str)
+                method, method_uuid, params = deserialize_method_call(cmd_str)
                 self.logger("Executing command: %s", method)
                 try:
-                    run_method(self, method, args=(), kwargs=method_params)
+                    run_method(self, method, args=(), kwargs=params)
 
                     # todo: need to send results back to engine core guard.
 

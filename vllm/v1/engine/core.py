@@ -7,6 +7,7 @@ import queue
 import signal
 import threading
 import time
+import uuid
 from collections import deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -176,14 +177,16 @@ class EngineCoreGuard(threading.Thread):  # changed
 
         self._send_cmd_to_worker(pause_method)
 
-    def _send_cmd_to_worker(self, method_name, **kwargs):
+    def _send_cmd_to_worker(self, method_name, **kwargs) -> str:
+        method_uuid = str(uuid.uuid4())
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
                 identity = f"{tp_rank}_{pp_rank}".encode()
-                method_json = serialize_method_call(method_name, **kwargs)
+                method_json = serialize_method_call(method_name, method_uuid, **kwargs)
                 self.worker_cmd_socket.send_multipart(
                     [identity, b"", method_json.encode("utf-8")]
                 )
+        return method_uuid
         # todo: need to recv results from worker after it sends back the result
 
     def _report_client_exception(self, exception: Exception) -> None:
@@ -195,7 +198,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         """
         Execute a command received from ClientGuard.
         """
-        method, method_params = deserialize_method_call(cmd_str)
+        method, method_uuid, method_params = deserialize_method_call(cmd_str)
         logger.info("[EngineCoreGuard] Executing command: %s", method)
         try:
             success = run_method(self, method, args=(), kwargs=method_params)
@@ -209,7 +212,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             )
             success = False
 
-        self._send_execution_result(success)
+        self._send_execution_result(success, method_uuid)
 
     def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
         """
@@ -258,8 +261,12 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.engine_running = success
         return success
 
-    def _send_execution_result(self, success: bool):
-        msg = {"engine_index": self.engine_index, "success": success}
+    def _send_execution_result(self, success: bool, method_uuid: str):
+        msg = {
+            "engine_index": self.engine_index,
+            "success": success,
+            "method_uuid": method_uuid,
+        }
         msg_bytes = json.dumps(msg).encode("utf-8")
         self.client_cmd_socket.send_multipart([b"", msg_bytes])
 
@@ -309,7 +316,7 @@ def busy_loop_wrapper(busy_loop_func):
                         cmd_str = self.cmd_q.get(timeout=self.engine_recovery_timeout)
                         logger.debug("Received fault tolerance command: %s", cmd_str)
                         if cmd_str is not None:
-                            method, params = deserialize_method_call(cmd_str)
+                            method, _, params = deserialize_method_call(cmd_str)
                             run_method(self, method, args=(), kwargs=params)
                         # recovery succeeded; restart the busy loop
                         continue

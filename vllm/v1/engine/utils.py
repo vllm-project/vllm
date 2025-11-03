@@ -1262,12 +1262,12 @@ class FaultHandler:
                 if index in fault_engine_indices
             }
 
-        self.send_fault_tolerance_instruction(
+        method_uuid = self.send_fault_tolerance_instruction(
             excluded_engines, instruction, timeout, **kwargs
         )
 
         execution_result = self.process_instruction_result(
-            excluded_engines, instruction, timeout
+            excluded_engines, instruction, method_uuid, timeout
         )
 
         if instruction == "retry" and execution_result:
@@ -1278,25 +1278,30 @@ class FaultHandler:
 
     def send_fault_tolerance_instruction(
         self, excluded_engines: set[bytes], instruction: str, timeout: int, **kwargs
-    ):
+    ) -> str:
+        method_uuid = str(uuid.uuid4())
         payload = {**kwargs, "timeout": timeout}
 
         for identity, index in self.engine_identity_to_index.items():
             if identity in excluded_engines:
                 continue
 
-            serialized_instruction = serialize_method_call(instruction, **payload)
+            serialized_instruction = serialize_method_call(
+                instruction, method_uuid, **payload
+            )
             self.cmd_socket.send_multipart(
                 [identity, b"", serialized_instruction.encode("utf-8")]
             )
+        return method_uuid
 
     def process_instruction_result(
-        self, excluded_engines: set[bytes], instruction: str, timeout: int
+        self,
+        excluded_engines: set[bytes],
+        instruction: str,
+        method_uuid: str,
+        timeout: int,
     ):
         """Wait for all targeted engines to return acknowledgment."""
-
-        # todo: need to add an unique id for each instruction, incase
-        #  sometimes the other end responds after the timeout.
 
         expected_engines = {
             identity
@@ -1326,9 +1331,19 @@ class FaultHandler:
                     if isinstance(identity, str):
                         identity = identity.encode("utf-8")
 
-                    expected_engines.discard(identity)
-
                     response_dict = json.loads(response)
+                    recv_uuid = response_dict.get("method_uuid")
+                    if recv_uuid != method_uuid:
+                        logger.debug(
+                            "Discarding outdated response from "
+                            "EngineCoreGuard[%s]: expected method_uuid=%s, "
+                            "got %s",
+                            self.engine_identity_to_index.get(identity, "?"),
+                            method_uuid,
+                            recv_uuid,
+                        )
+                        continue
+
                     engine_id = response_dict.get("engine_index")
                     success = response_dict.get("success", False)
 
@@ -1341,6 +1356,9 @@ class FaultHandler:
                             response_dict.get("reason", "unknown"),
                         )
                         return False
+
+                    expected_engines.discard(identity)
+
             except Exception as e:
                 logger.error("Error processing engine response: %s", e)
                 return False
