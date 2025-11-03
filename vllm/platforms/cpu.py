@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -150,7 +151,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import vllm.envs as envs
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
@@ -287,7 +287,7 @@ class CpuPlatform(Platform):
 
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        if os.getenv("VLLM_CPU_OMP_THREADS_BIND", "NA") != "nobind":
+        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
             # Note: to avoid the error 'nthreads cannot be larger than environment
             # variable "NUMEXPR_MAX_THREADS" (64)'.
             os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
