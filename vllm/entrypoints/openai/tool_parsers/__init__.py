@@ -23,11 +23,11 @@ Example:
 
 _TOOL_PARSERS_TO_REGISTER = {
     "deepseek_v3": (
-        "vllm.entrypoints.openai.tool_parsers.deepseek_v3_tool_parser",
+        "vllm.entrypoints.openai.tool_parsers.deepseekv3_tool_parser",
         "DeepSeekV3ToolParser",
     ),
     "deepseek_v31": (
-        "vllm.entrypoints.openai.tool_parsers.deepseek_v31_tool_parser",
+        "vllm.entrypoints.openai.tool_parsers.deepseekv31_tool_parser",
         "DeepSeekV31ToolParser",
     ),
     "ernie45": (
@@ -63,7 +63,7 @@ _TOOL_PARSERS_TO_REGISTER = {
         "JambaToolParser",
     ),
     "kimi_k2": (
-        "vllm.entrypoints.openai.tool_parsers.kimi_k2_parser",
+        "vllm.entrypoints.openai.tool_parsers.kimi_k2_tool_parser",
         "KimiK2ToolParser",
     ),
     "llama3_json": (
@@ -111,11 +111,11 @@ _TOOL_PARSERS_TO_REGISTER = {
         "PythonicToolParser",
     ),
     "qwen3_coder": (
-        "vllm.entrypoints.openai.tool_parsers.qwen3_coder_tool_parser",
+        "vllm.entrypoints.openai.tool_parsers.qwen3coder_tool_parser",
         "Qwen3CoderToolParser",
     ),
     "qwen3_xml": (
-        "vllm.entrypoints.openai.tool_parsers.qwen3_xml_tool_parser",
+        "vllm.entrypoints.openai.tool_parsers.qwen3xml_tool_parser",
         "Qwen3XmlToolParser",
     ),
     "seed_oss": (
