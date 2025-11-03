@@ -818,6 +818,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        needs_rebuild_block_mask = False
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
@@ -829,12 +830,13 @@ class FlexAttentionImpl(AttentionImpl):
                 )
                 # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
-                attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
-            else:
-                attn_metadata.block_mask = attn_metadata.build_block_mask()
+            needs_rebuild_block_mask = True
 
         if attn_metadata.mm_prefix_range:
             attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+            needs_rebuild_block_mask = True
+
+        if needs_rebuild_block_mask:
             attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
 
         if not attn_metadata.causal:

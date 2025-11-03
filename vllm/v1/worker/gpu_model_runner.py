@@ -1825,12 +1825,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         if self.is_prefix_lm:
+            image_doc_ranges = []
+            for _, pos_info in mm_hashes_pos:
+                img_doc_range = pos_info.extract_embeds_range()
+                image_doc_ranges.extend(img_doc_range)
+
             attn_metadata_group = get_forward_context().attn_metadata
             for attn_metadata in attn_metadata_group.values():
-                attn_metadata.mm_prefix_range = [
-                    (pos_info.offset, pos_info.offset + pos_info.length)
-                    for _, pos_info in mm_hashes_pos
-                ]
+                attn_metadata.mm_prefix_range = image_doc_ranges
 
     def _gather_mm_embeddings(
         self,
