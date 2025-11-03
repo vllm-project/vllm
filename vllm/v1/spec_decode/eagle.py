@@ -291,7 +291,6 @@ class EagleProposer:
             self.vllm_config,
             num_tokens=num_input_tokens,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
-            skip_dp_coordination=True,
         ):
             ret_hidden_states = self.model(
                 input_ids=input_ids,
@@ -454,7 +453,6 @@ class EagleProposer:
                 self.vllm_config,
                 num_tokens=input_batch_size,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                skip_dp_coordination=True,
             ):
                 ret_hidden_states = self.model(
                     input_ids=input_ids,
@@ -771,7 +769,6 @@ class EagleProposer:
                 self.vllm_config,
                 num_tokens=num_input_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
-                skip_dp_coordination=True,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -1063,7 +1060,6 @@ class EagleProposer:
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
             if use_cudagraphs
             else CUDAGraphMode.NONE,
-            skip_dp_coordination=True,
         ):
             if self.supports_mm_inputs:
                 input_ids = None

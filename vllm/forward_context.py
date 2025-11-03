@@ -271,7 +271,6 @@ def set_forward_context(
     cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     batch_descriptor: BatchDescriptor | None = None,
     ubatch_slices: UBatchSlices | None = None,
-    skip_dp_coordination: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -283,10 +282,8 @@ def set_forward_context(
         forward_start_time = time.perf_counter()
 
     dp_metadata: DPMetadata | None = None
-    if (
-        not skip_dp_coordination
-        and vllm_config.parallel_config.data_parallel_size > 1
-        and (attn_metadata is not None or num_tokens is not None)
+    if vllm_config.parallel_config.data_parallel_size > 1 and (
+        attn_metadata is not None or num_tokens is not None
     ):
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be
