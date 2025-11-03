@@ -577,22 +577,12 @@ class NemotronHModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        # residual = None
-        # for layer in islice(self.layers, self.start_layer, self.end_layer):
-        for i, layer in enumerate(
-            islice(self.layers, self.start_layer, self.end_layer)
-        ):
-            # for i, layer in enumerate(self.layers):
-            # print(f"##################### {get_pp_group().rank=}, layer_idx={i} #####################", flush=True)   # noqa: E501
-            # print(f"hidden_states before: {hidden_states[-1,...]}", flush=True)
-            # print(f"layer state dict: {layer.state_dict()}", flush=True)
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
             )
-            # print(f"hidden_states after: {hidden_states[-1,...]}", flush=True)
-            # print("--------------------------------\n\n", flush=True)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
