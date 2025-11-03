@@ -60,7 +60,7 @@ NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 0.5; else echo 0.2; fi)}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 0.7; else echo 0.2; fi)}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 2048; fi)}  # limit sequence length for fault injection tests
 
 # Find the git repository root directory
