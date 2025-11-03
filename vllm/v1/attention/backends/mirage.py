@@ -255,9 +255,9 @@ class MirageAttentionMetadataBuilder(AttentionMetadataBuilder[MirageAttentionMet
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             qo_indptr_gpu=common_attn_metadata.query_start_loc,
-            paged_kv_indptr_gpu=self.paged_kv_indptr,
-            paged_kv_indices_gpu=self.paged_kv_indices,
-            paged_kv_last_page_len_gpu=self.paged_kv_last_page_len,
+            paged_kv_indptr_gpu=paged_kv_indptr,
+            paged_kv_indices_gpu=paged_kv_indices,
+            paged_kv_last_page_len_gpu=paged_kv_last_page_len,
         )
 
         return attn_metadata

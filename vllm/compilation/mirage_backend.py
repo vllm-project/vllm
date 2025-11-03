@@ -11,8 +11,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# TODO(Jianan Ji): Is this name mapping common for all models?
 def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
-    """Transfer FX placeholder debug names to model-like dotted names.
+    """Transfer FX placeholder debug names to model-like dotted names. Return a list of transferred names and input id.
 
     Example:
         l_self_modules_layers_modules_17_modules_mlp_modules_gate_up_proj_parameters_weight_
@@ -24,13 +25,15 @@ def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
       Instead, we annotate via node.meta['logical_name'] and return the list.
     """
     converted_names = []
-    s_pattern = re.compile(r"^s\d+$")
+    s_pattern = re.compile(r"^s\d+$") # s72 / s80
+    input_id = 0
 
-    for node in placeholders:
+    for i, node in enumerate(placeholders):
         name = node.name
         if name == 'l_input_ids_':
             final_name = 'input_ids'
             converted_names.append(final_name)
+            input_id = i
         elif name == 'l_positions_':
             final_name = 'positions'
             converted_names.append(final_name)
@@ -49,7 +52,7 @@ def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
 
             converted_names.append(final_name)
 
-    return converted_names
+    return converted_names, input_id
 
 def build_model_config(
     model_config: ModelConfig,
@@ -67,7 +70,6 @@ def build_model_config(
     sin_tensor = torch.cat([sin_tensor_, sin_tensor_], dim=-1)
     
     position_embeddings = (cos_tensor, sin_tensor)
-    logger.info(f"[Mirage] position_embeddings: {position_embeddings[0].shape}, {position_embeddings[1].shape}")
     mirage_model_config = MirageModelConfig(
         # model architecture
         hidden_size=model_config.get_hidden_size(),
@@ -129,6 +131,43 @@ def build_mpk_metadata(
             positions_tensor = arg
         elif "cos_sin_cache" in name:
             position_embeddings = arg
+        elif "qkv" in name: 
+            # Split qkv since we need to shuffle them on mirage side later
+            # (6144, 4096) -> (4096, 4096), (1024, 4096), (1024, 4096)
+            qkv_tensor = arg
+
+            total_dim = qkv_tensor.shape[0]
+            n_q_heads = model_config.get_num_attention_heads(parallel_config) # 32
+            n_kv_heads = model_config.get_num_kv_heads(parallel_config) # 8
+            n_heads = n_q_heads + n_kv_heads * 2
+            
+            q_range = (total_dim * n_q_heads) // n_heads # 6144 * 32 / 48 = 4096
+            k_range = (total_dim * (n_q_heads + n_kv_heads)) // n_heads # 6144 * 40 / 48 = 5120
+
+            q_tensor = qkv_tensor[:q_range, :]
+            k_tensor = qkv_tensor[q_range:k_range, :]
+            v_tensor = qkv_tensor[k_range:, :]
+            
+            # substitute qkv to q/k/v views
+            state_dict[name.replace("qkv", "q")] = q_tensor
+            state_dict[name.replace("qkv", "k")] = k_tensor
+            state_dict[name.replace("qkv", "v")] = v_tensor
+            
+            state_dict[name] = qkv_tensor
+        elif "gate_up" in name:
+            # Split gate_up to gate and up
+            gate_up_tensor = arg
+            total_dim = gate_up_tensor.shape[0]
+            single_dim = total_dim // 2
+            
+            gate_tensor = gate_up_tensor[:single_dim, :]
+            up_tensor = gate_up_tensor[single_dim:, :]
+            
+            # substitude gate_up to gate and up
+            state_dict[name.replace("gate_up", "gate")] = gate_tensor
+            state_dict[name.replace("gate_up", "up")] = up_tensor
+            
+            state_dict[name] = gate_up_tensor
         else:
             state_dict[name] = arg
     
@@ -141,7 +180,7 @@ def build_mpk_metadata(
         parallel_config,
     )
     mpk_metadata = MPKMetadata(
-        mode = "online",
+        mode = "online_notoken",
         # total_num_requests
         # num_remote_schedulers: int = 0
         max_seq_length = model_config.max_model_len,
@@ -257,7 +296,9 @@ class MirageBackend:
         placeholders = [node for node in graph.graph.nodes if node.op == 'placeholder']
         assert len(placeholders) == len(example_inputs)
         
-        transfered_tensor_names = transfer_tensor_names(placeholders)
+        transfered_tensor_names, input_id = transfer_tensor_names(placeholders)
+
+        max_input_tokens = example_inputs[input_id].shape[0]
         
         
         self._called = True
@@ -269,7 +310,8 @@ class MirageBackend:
                 model_config = self.vllm_config.model_config
                 dtype = model_config.dtype
                 hidden_size = model_config.get_hidden_size()
-                output_tensor = torch.zeros(1, hidden_size, device='cuda', dtype=dtype)
+                # TODO(Jianan Ji): We'll want to run in eager instead of doing nothing
+                output_tensor = torch.zeros(max_input_tokens, hidden_size, device='cuda', dtype=dtype)
                 logger.info(f"[Mirage] Calling dumb_run_called, returning dummy output tensor with shape [{output_tensor.shape}]......!")
 
                 return (output_tensor,)
@@ -290,7 +332,9 @@ class MirageBackend:
                 self.compiled = True
                 
             logger.info(f"[Mirage] Calling the compiled result...")
-            return self.mpk()
+            result_hidden_states = self.mpk()
+            
+            return (result_hidden_states,)
         
         # return VllmSerializableFunction(
         #     graph, example_inputs, self.prefix, compile_or_call
