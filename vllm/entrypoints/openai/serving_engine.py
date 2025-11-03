@@ -1356,6 +1356,8 @@ class OpenAIServing:
             )
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "auto" or request.tool_choice == "none":
+            assert tool_parser_cls is not None
+            # Automatic Tool Call Parsing
             try:
                 tool_parser = tool_parser_cls(tokenizer)
             except RuntimeError as e:
