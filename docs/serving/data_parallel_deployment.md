@@ -88,7 +88,6 @@ Enable this mode with `--data-parallel-hybrid-lb` while still launching every no
 
 - You must provide `--data-parallel-size-local` and `--data-parallel-start-rank` so each node knows which ranks it owns.
 - Not compatible with `--headless` since every node exposes an API endpoint.
-- Keep `--data-parallel-address`/`--data-parallel-rpc-port` pointing at the coordinator node (rank 0) so collective operations continue to work.
 - Scale `--api-server-count` per node based on the number of local ranks
 
 In this configuration, each node keeps scheduling decisions local, which reduces cross-node traffic and avoids single node bottlenecks at larger DP sizes.
