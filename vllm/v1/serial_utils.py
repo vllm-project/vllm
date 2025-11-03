@@ -5,6 +5,7 @@ import dataclasses
 import importlib
 import json
 import pickle
+import uuid
 from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
@@ -433,7 +434,7 @@ class MsgpackDecoder:
         raise NotImplementedError(f"Extension type code {code} is not supported")
 
 
-def deserialize_method_call(json_str: str) -> tuple[str, dict[str, Any]]:
+def deserialize_method_call(json_str: str) -> tuple[str, str, dict[str, Any]]:
     """
     Deserialize an encoded method call.
 
@@ -443,34 +444,41 @@ def deserialize_method_call(json_str: str) -> tuple[str, dict[str, Any]]:
     Returns:
         tuple[str, dict[str, Any]]:
             - method (str): The method name.
-            - params (dict): A dictionary of method parameters.
-
-    Raises:
-        ValueError: If the JSON is invalid or does not contain a 'method' field.
+            - method_uuid (str): The UUID identifying the method call.
+            - params (dict[str, Any]): Additional method parameters.
     """
     try:
         payload = json.loads(json_str)
-    except json.JSONDecodeError as e:
-        logger.error("Failed to parse method JSON: %s", json_str)
+        if not isinstance(payload, dict):
+            raise ValueError("Top-level JSON must be an object")
+    except Exception as e:
+        logger.error("Invalid JSON input: %s", e)
         raise ValueError(f"Invalid JSON: {e}") from e
 
-    method = payload.get("method")
-    if not method:
-        logger.error("Missing 'method' field in JSON: %s", json_str)
-        raise ValueError("JSON must include a 'method' field")
+    try:
+        method = payload.pop("method")
+        method_uuid = payload.pop("method_uuid")
+    except KeyError as e:
+        logger.error(
+            "Missing required field: %s (payload=%s)", e.args[0], json_str[:200]
+        )
+        raise ValueError(f"Missing required field: {e.args[0]}") from e
 
-    params = {k: v for k, v in payload.items() if k != "method"}
-    return method, params
+    # Remaining fields are treated as parameters
+    params = payload
+
+    return method, method_uuid, params
 
 
-def serialize_method_call(method: str, **params: Any) -> str:
+def serialize_method_call(
+    method: str, method_uuid: str | None = None, **params: Any
+) -> str:
     """
     Serialize a method invocation into a JSON string.
-    Examples:
-        >>> serialize_method_call("retry")
-        '{"method": "resume"}'
     """
-    payload = {"method": method, **params}
+    if method_uuid is None:
+        method_uuid = str(uuid.uuid4())
+    payload = {"method": method, "method_uuid": method_uuid, **params}
     return json.dumps(payload)
 
 

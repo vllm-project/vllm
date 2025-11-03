@@ -4,6 +4,7 @@
 
 import copy
 import gc
+import json
 import os
 import threading
 import time
@@ -107,13 +108,10 @@ class WorkerGuard:
                 break
             if has_msg:
                 assert cmd_str is not None
-                method, method_params = deserialize_method_call(cmd_str)
+                method, method_uuid, params = deserialize_method_call(cmd_str)
                 self.logger("Executing command: %s", method)
                 try:
-                    run_method(self, method, args=(), kwargs=method_params)
-
-                    # todo: need to send results back to engine core guard.
-
+                    success = run_method(self, method, args=(), kwargs=params)
                 except Exception as e:
                     self.logger(
                         " Error executing method %s: %s",
@@ -121,6 +119,9 @@ class WorkerGuard:
                         e,
                         level="error",
                     )
+                    success = False
+                if method == "restart_worker":
+                    self._send_execution_result(success, method_uuid)
 
     def pause_by_signal(self):
         self.pause_event.set()
@@ -191,14 +192,23 @@ class WorkerGuard:
             self.logger("Communicators are aborted.")
         else:
             self.logger("Communicators did not abort in time.", level="warning")
+        return success
 
     def restart_worker(self):
         if self.communicator_aborted:
             raise NotImplementedError(
-                "Retry with recreation of communicators, currently un implemented"
+                "Retry with recreation of communicators, currently unimplemented"
             )
         self.pause_event.clear()
         return True
+
+    def _send_execution_result(self, success: bool, method_uuid: str):
+        msg = {
+            "success": success,
+            "method_uuid": method_uuid,
+        }
+        msg_bytes = json.dumps(msg).encode("utf-8")
+        self.cmd_socket.send_multipart([b"", msg_bytes])
 
     def shutdown(self):
         self.worker_guard_dead = True
