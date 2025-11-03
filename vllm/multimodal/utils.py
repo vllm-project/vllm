@@ -19,8 +19,8 @@ from PIL import Image, UnidentifiedImageError
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
-from vllm.multimodal.registry import ExtensionManager
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioMediaIO
 from .base import MediaIO

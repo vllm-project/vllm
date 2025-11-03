@@ -14,7 +14,7 @@ from PIL import Image
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.multimodal.registry import ExtensionManager
+from vllm.utils.registry import ExtensionManager
 
 from .base import MediaIO
 from .image import ImageMediaIO
