@@ -6,6 +6,7 @@ import os
 import platform
 import random
 import sys
+from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -178,6 +179,19 @@ class Platform:
         from vllm.attention.backends.registry import _Backend
 
         return _Backend.TORCH_SDPA
+
+    @classmethod
+    def maybe_get_vit_flash_attn_backend(
+        attn_backend: _Backend,
+        use_upstream_fa: bool,
+        attn_backend_override: _Backend | None = None,
+    ) -> tuple[_Backend, bool, Callable | None, bool]:
+        from vllm.attention.backends.registry import _Backend
+
+        attn_backend = _Backend.TORCH_SDPA
+        flash_attn_varlen_func = None
+        is_return = True
+        return attn_backend, use_upstream_fa, flash_attn_varlen_func, is_return
 
     @classmethod
     def get_attn_backend_cls(

@@ -246,6 +246,26 @@ class CudaPlatformBase(Platform):
             return _Backend.XFORMERS
 
     @classmethod
+    def maybe_get_vit_flash_attn_backend(
+        attn_backend: _Backend,
+        use_upstream_fa: bool,
+        attn_backend_override: _Backend | None = None,
+    ) -> tuple[_Backend, bool, Callable | None, bool]:
+        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.layer import check_upstream_fa_availability
+
+        flash_attn_varlen_func = None
+        is_return = False
+
+        if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
+            torch.get_default_dtype()
+        ):
+            attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+
+        return attn_backend, use_upstream_fa, flash_attn_varlen_func, is_return
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend,

@@ -47,12 +47,6 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
 )
 
-if current_platform.is_rocm():
-    from vllm.platforms.rocm import on_gfx9
-else:
-    on_gfx9 = lambda *args, **kwargs: False
-
-
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -103,44 +97,22 @@ def maybe_get_vit_flash_attn_backend(
     use_upstream_fa: bool,
     attn_backend_override: _Backend | None = None,
 ) -> tuple[_Backend, Callable | None]:
-    if current_platform.is_rocm():
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            attn_backend = _Backend.ROCM_AITER_FA
+    from vllm.platforms import current_platform
 
-        elif (
-            check_upstream_fa_availability(torch.get_default_dtype())
-            and on_gfx9()
-            and attn_backend_override is None
-        ):
-            attn_backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
-        else:
-            return _Backend.TORCH_SDPA, None
-
-    elif current_platform.is_cuda():
-        if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
-        ):
-            attn_backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
-    elif current_platform.is_xpu():
-        assert attn_backend == _Backend.FLASH_ATTN, (
-            "XPU platform only supports FLASH_ATTN as vision attention backend."
+    attn_backend, use_upstream_fa, flash_attn_varlen_func, is_return = (
+        current_platform.maybe_get_vit_flash_attn_backend(
+            attn_backend, use_upstream_fa, attn_backend_override
         )
-        use_upstream_fa = False
-    else:
-        return _Backend.TORCH_SDPA, None
+    )
+    if is_return:
+        return attn_backend, flash_attn_varlen_func
 
-    if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
-        if attn_backend == _Backend.ROCM_AITER_FA:
-            from aiter import flash_attn_varlen_func
+    if attn_backend == _Backend.FLASH_ATTN:
+        if use_upstream_fa:
+            from flash_attn import flash_attn_varlen_func as func
         else:
-            if use_upstream_fa:
-                from flash_attn import flash_attn_varlen_func
-            else:
-                from vllm.attention.utils.fa_utils import flash_attn_varlen_func
-    else:
-        flash_attn_varlen_func = None
+            from vllm.attention.utils.fa_utils import flash_attn_varlen_func as func
+        flash_attn_varlen_func = func
 
     return attn_backend, flash_attn_varlen_func
 

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections.abc import Callable
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
 
@@ -213,6 +214,36 @@ class RocmPlatform(Platform):
             return _Backend.FLASH_ATTN
 
         return _Backend.TORCH_SDPA
+
+    @classmethod
+    def maybe_get_vit_flash_attn_backend(
+        attn_backend: _Backend,
+        use_upstream_fa: bool,
+        attn_backend_override: _Backend | None = None,
+    ) -> tuple[_Backend, bool, Callable | None, bool]:
+        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.layer import check_upstream_fa_availability
+
+        is_return = False
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
+            attn_backend = _Backend.ROCM_AITER_FA
+        elif (
+            check_upstream_fa_availability(torch.get_default_dtype())
+            and on_gfx9()
+            and attn_backend_override is None
+        ):
+            attn_backend = _Backend.FLASH_ATTN
+            use_upstream_fa = True
+        else:
+            attn_backend = _Backend.TORCH_SDPA
+            is_return = True
+
+        if attn_backend == _Backend.ROCM_AITER_FA:
+            from aiter import flash_attn_varlen_func
+        else:
+            flash_attn_varlen_func = None
+
+        return attn_backend, use_upstream_fa, flash_attn_varlen_func, is_return
 
     @classmethod
     def get_attn_backend_cls(

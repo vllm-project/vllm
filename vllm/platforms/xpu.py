@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import torch
@@ -117,6 +118,22 @@ class XPUPlatform(Platform):
         from vllm.attention.backends.registry import _Backend
 
         return _Backend.FLASH_ATTN
+
+    @classmethod
+    def maybe_get_vit_flash_attn_backend(
+        attn_backend: _Backend,
+        use_upstream_fa: bool,
+        attn_backend_override: _Backend | None = None,
+    ) -> tuple[_Backend, bool, Callable | None, bool]:
+        from vllm.attention.backends.registry import _Backend
+
+        flash_attn_varlen_func = None
+        is_return = False
+        assert attn_backend == _Backend.FLASH_ATTN, (
+            "XPU platform only supports FLASH_ATTN as vision attention backend."
+        )
+        use_upstream_fa = False
+        return attn_backend, use_upstream_fa, flash_attn_varlen_func, is_return
 
     @classmethod
     def inference_mode(cls):
