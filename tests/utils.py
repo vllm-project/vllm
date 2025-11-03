@@ -6,6 +6,7 @@ import contextlib
 import copy
 import functools
 import importlib
+import itertools
 import json
 import os
 import random
@@ -15,13 +16,14 @@ import sys
 import tempfile
 import time
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager, suppress
 from multiprocessing import Process
 from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
+import anthropic
 import cloudpickle
 import httpx
 import openai
@@ -43,12 +45,10 @@ from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import (
-    FlexibleArgumentParser,
-    GB_bytes,
-    cuda_device_count_stateless,
-    get_open_port,
-)
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import GB_bytes
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -245,6 +245,23 @@ class RemoteOpenAIServer:
             api_key=self.DUMMY_API_KEY,
             max_retries=0,
             **kwargs,
+        )
+
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
 
 
@@ -984,6 +1001,11 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
             # `cloudpickle` allows pickling complex functions directly
             input_bytes = cloudpickle.dumps((f, output_filepath))
 
+            repo_root = str(VLLM_PATH.resolve())
+
+            env = dict(env or os.environ)
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+
             cmd = [sys.executable, "-m", f"{module_name}"]
 
             returned = subprocess.run(
@@ -1261,3 +1283,23 @@ def check_answers(
     frac_ok = numok / len(answer)
     print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
     assert frac_ok >= accept_rate
+
+
+def flat_product(*iterables: Iterable[Any]):
+    """
+    Flatten lists of tuples of the cartesian product.
+    Useful when we want to avoid nested tuples to allow
+    test params to be unpacked directly from the decorator.
+
+    Example:
+    flat_product([(1, 2), (3, 4)], ["a", "b"]) ->
+    [
+      (1, 2, "a"),
+      (1, 2, "b"),
+      (3, 4, "a"),
+      (3, 4, "b"),
+    ]
+    """
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else (e,) for e in element)
+        yield tuple(itertools.chain(*normalized))

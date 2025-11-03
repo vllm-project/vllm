@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
-from vllm.utils.collections import is_list_of
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler
@@ -506,6 +506,11 @@ class MultiModalDataParser:
         for data_item in data_items:
             video, metadata = self._get_video_with_metadata(data_item)
             if self.video_needs_metadata:
+                if metadata is None:
+                    raise ValueError(
+                        "Video metadata is required but not found in mm input. "
+                        "Please check your video input in `multi_modal_data`"
+                    )
                 new_videos.append((video, metadata))
                 metadata_lst.append(metadata)
             else:

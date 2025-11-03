@@ -17,7 +17,7 @@ from vllm.inputs.data import TextPrompt as EngineTextPrompt
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.inputs.parse import get_prompt_components, parse_raw_prompts
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils.asyncio import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
 
 @dataclass(frozen=True)
@@ -156,14 +156,17 @@ class BaseRenderer(ABC):
         """
         raise NotImplementedError
 
-    @classmethod
     def load_prompt_embeds(
-        cls,
+        self,
         prompt_embeds: bytes | list[bytes],
         truncate_prompt_tokens: Annotated[int, Field(ge=0)] | None = None,
         cache_salt: str | None = None,
     ) -> list[EngineEmbedsPrompt]:
         """Load and validate base64-encoded embeddings into prompt objects."""
+        if not self.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            )
 
         def _load_and_validate_embed(embed: bytes) -> EngineEmbedsPrompt:
             tensor = torch.load(
