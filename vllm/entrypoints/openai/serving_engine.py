@@ -1312,8 +1312,8 @@ class OpenAIServing:
         except ValueError:
             return None
 
+    @staticmethod
     def _parse_tool_calls_from_content(
-        self,
         request: ResponsesRequest | ChatCompletionRequest,
         tokenizer: AnyTokenizer,
         enable_auto_tools: bool,
