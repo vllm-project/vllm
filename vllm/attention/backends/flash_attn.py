@@ -877,6 +877,7 @@ class FlashAttentionImpl(AttentionImpl):
                 assert decode_meta.query_start_loc is not None
                 descale_shape = (decode_meta.query_start_loc.shape[0] - 1,
                                  key.shape[1])
+                print(f"Using flash_attn_varlen_func for decoding")
                 flash_attn_varlen_func(
                     q=decode_query,
                     k=key_cache,
@@ -905,6 +906,7 @@ class FlashAttentionImpl(AttentionImpl):
                     block_tables_arg,
                 ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
                 descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
+                print(f"Using flash_attn_with_kvcache for decoding")
                 flash_attn_with_kvcache(
                     q=decode_query.unsqueeze(1),
                     k_cache=key_cache,

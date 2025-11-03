@@ -891,6 +891,8 @@ def get_tknp_group() -> GroupCoordinator:
 
 def get_tknp_rank() -> int:
     """Get rank in token parallel group."""
+    if not is_tknp_initialized():
+        return 0
     return get_tknp_group().rank_in_group
 
 def get_tknp_world_size() -> int:

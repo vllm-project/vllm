@@ -40,50 +40,69 @@ logger = init_logger(__name__)
 
 
 # TKNP-BEGIN: token parallel scheduling helper
-class _TokenParallelSchedulerHelper:
+# class _TokenParallelSchedulerHelper:
 
-    def __init__(self, parallel_config: ParallelConfig):
-        self.enabled = parallel_config.enable_token_parallel
-        self.world_size = (parallel_config.token_parallel_size
-                           if self.enabled else 1)
-        self._req_to_rank: dict[str, int] = {}
-        self._next_rank = 0
+#     def __init__(self, parallel_config: ParallelConfig):
+#         self.enabled = parallel_config.enable_token_parallel
+#         self.world_size = (parallel_config.token_parallel_size
+#                            if self.enabled else 1)
+#         self._req_to_rank: dict[str, int] = {}
+#         self._next_rank = 0
+#         self._total_scheduled_requests = 0
+#         self.reqs_per_rank = 0
+        
+#     def _init_scheduler(self, total_scheduled_requests: int) -> None:
+#         self._total_scheduled_requests = total_scheduled_requests
+#         self.reqs_per_rank = (self._total_scheduled_requests + self.world_size - 1) // self.world_size
 
-    def register_request(self, request: Request) -> None:
-        if not self.enabled:
-            return
-        req_id = request.request_id
-        if req_id in self._req_to_rank:
-            return
-        rank = self._next_rank
-        self._req_to_rank[req_id] = rank
-        self._next_rank = (self._next_rank + 1) % self.world_size
+#     def register_request(self, request: Request) -> None:
+#         if not self.enabled:
+#             return
+#         req_id = request.request_id
+#         if req_id in self._req_to_rank:
+#             return
+        
+#         # assert self._total_scheduled_requests is not 0
+#         # print(f"[TokenParallelSchedulerHelper] Registering request {req_id} for token-parallel scheduling. Total scheduled requests: {self._total_scheduled_requests}, reqs_per_rank: {self.reqs_per_rank}")
+        
+#         # Block assignment: assign requests in blocks to each rank
+#         # Round-robin (original): rank = self._next_rank
+#         if self._total_scheduled_requests > 0:
+#             # Calculate requests per rank (with ceiling division for remainder)
+#             rank = min(self._scheduled_count // self.reqs_per_rank, self.world_size - 1)
+#             self._scheduled_count += 1
+#         else:
+#             # Fallback to round-robin if total_scheduled_requests not set
+#             rank = self._next_rank
+#             self._next_rank = (self._next_rank + 1) % self.world_size
+        
+#         self._req_to_rank[req_id] = rank
 
-    def on_request_scheduled(self, request: Request) -> None:
-        if not self.enabled:
-            return
-        if request.request_id not in self._req_to_rank:
-            self.register_request(request)
+#     def on_request_scheduled(self, request: Request) -> None:
+#         if not self.enabled:
+#             return
+#         if request.request_id not in self._req_to_rank:
+#             self.register_request(request)
 
-    def mark_finished(self, request_ids: Iterable[str]) -> None:
-        if not self.enabled or not request_ids:
-            return
-        for req_id in request_ids:
-            self._req_to_rank.pop(req_id, None)
+#     def mark_finished(self, request_ids: Iterable[str]) -> None:
+#         if not self.enabled or not request_ids:
+#             return
+#         for req_id in request_ids:
+#             self._req_to_rank.pop(req_id, None)
 
-    def build_step_allocations(
-        self, num_scheduled_tokens: dict[str, int]
-    ) -> Optional[list[TokenParallelAllocation]]:
-        if not self.enabled or not num_scheduled_tokens:
-            return None
-        allocations: list[TokenParallelAllocation] = []
-        for req_id, count in num_scheduled_tokens.items():
-            rank = self._req_to_rank.get(req_id, 0)
-            allocations.append(
-                TokenParallelAllocation(req_id=req_id,
-                                        token_parallel_rank=rank,
-                                        num_scheduled_tokens=count))
-        return allocations
+#     def build_step_allocations(
+#         self, num_scheduled_tokens: dict[str, int]
+#     ) -> Optional[list[TokenParallelAllocation]]:
+#         if not self.enabled or not num_scheduled_tokens:
+#             return None
+#         allocations: list[TokenParallelAllocation] = []
+#         for req_id, count in num_scheduled_tokens.items():
+#             rank = self._req_to_rank.get(req_id, 0)
+#             allocations.append(
+#                 TokenParallelAllocation(req_id=req_id,
+#                                         token_parallel_rank=rank,
+#                                         num_scheduled_tokens=count))
+#         return allocations
 
 
 # TKNP-END
@@ -213,8 +232,8 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         # TKNP-BEGIN: initialize token-parallel coordinator
-        self._token_parallel = _TokenParallelSchedulerHelper(
-            self.parallel_config)
+        # self._token_parallel = _TokenParallelSchedulerHelper(
+        #     self.parallel_config)
         # TKNP-END
 
     def schedule(self) -> SchedulerOutput:
@@ -337,7 +356,7 @@ class Scheduler(SchedulerInterface):
             # Schedule the request.
             scheduled_running_reqs.append(request)
             # TKNP-BEGIN: record token-parallel scheduling event
-            self._token_parallel.on_request_scheduled(request)
+            # self._token_parallel.on_request_scheduled(request)
             # TKNP-END
             if request.use_structured_output:
                 # PERF: in case of chunked prefill,
@@ -370,6 +389,14 @@ class Scheduler(SchedulerInterface):
                 for i in encoder_inputs_to_schedule:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
+
+        total_scheduled_requests = len(scheduled_running_reqs)
+        
+        # TKNP 
+        # logger.info(f"Token Parallel Scheduler: total_scheduled_requests = {total_scheduled_requests}")
+        # self._token_parallel._init_scheduler(total_scheduled_requests)
+        # for req in scheduled_running_reqs:
+        #     self._token_parallel.on_request_scheduled(req)
 
         # Record the LoRAs in scheduled_running_reqs
         scheduled_loras: set[int] = set()
@@ -531,7 +558,7 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 self.running.append(request)
                 # TKNP-BEGIN: record token-parallel scheduling event
-                self._token_parallel.on_request_scheduled(request)
+                # self._token_parallel.on_request_scheduled(request)
                 # TKNP-END
                 if self.log_stats:
                     request.record_event(EngineCoreEventType.SCHEDULED,
@@ -608,9 +635,9 @@ class Scheduler(SchedulerInterface):
             req_to_new_block_ids,
         )
         # TKNP-BEGIN: gather token-parallel metadata for this step
-        self._token_parallel.mark_finished(self.finished_req_ids)
-        token_parallel_allocations = self._token_parallel.build_step_allocations(
-            num_scheduled_tokens)
+        # self._token_parallel.mark_finished(self.finished_req_ids)
+        # token_parallel_allocations = self._token_parallel.build_step_allocations(
+        #     num_scheduled_tokens)
         # TKNP-END
 
         scheduler_output = SchedulerOutput(
@@ -629,7 +656,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
-            token_parallel_allocations=token_parallel_allocations,
+            # token_parallel_allocations=token_parallel_allocations,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -995,7 +1022,7 @@ class Scheduler(SchedulerInterface):
 
     def add_request(self, request: Request) -> None:
         # TKNP-BEGIN: pre-assign token parallel rank for new request
-        self._token_parallel.register_request(request)
+        # self._token_parallel.register_request(request)
         # TKNP-END
         self.waiting.add_request(request)
         self.requests[request.request_id] = request
@@ -1056,7 +1083,7 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
         # TKNP-BEGIN: clear token-parallel assignment immediately on finish
-        self._token_parallel.mark_finished((request_id, ))
+        # self._token_parallel.mark_finished((request_id, ))
         # TKNP-END
 
         if not delay_free_blocks:

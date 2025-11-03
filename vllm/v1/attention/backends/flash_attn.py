@@ -544,6 +544,9 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
+            # print(f"q shape: {query[:num_actual_tokens].shape}, k shape: {key_cache.shape}, v shape: {value_cache.shape}, num_actual_tokens: {num_actual_tokens}")
+            # print(f"block_table: {block_table}")
+
             flash_attn_varlen_func(
                 q=query[:num_actual_tokens],
                 k=key_cache,
@@ -566,6 +569,8 @@ class FlashAttentionImpl(AttentionImpl):
                 v_descale=layer._v_scale.expand(descale_shape),
                 num_splits=attn_metadata.max_num_splits,
             )
+
+            # print(f"flash_attn_varlen_func output: {output}")
             return output
 
         assert not use_local_attn, (

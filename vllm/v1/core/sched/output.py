@@ -165,5 +165,5 @@ class SchedulerOutput:
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
     # TKNP-BEGIN: token parallel metadata emitted by scheduler
-    token_parallel_allocations: Optional[list[TokenParallelAllocation]] = None
+    # token_parallel_allocations: Optional[list[TokenParallelAllocation]] = None
     # TKNP-END

@@ -409,7 +409,6 @@ def create_token_parallel_qkv_linear(
         **kwargs
     )
 
-
 def create_token_parallel_row_linear(
     input_size: int,
     output_size: int,

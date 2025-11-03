@@ -78,7 +78,8 @@ from vllm.distributed.parallel_state import (
     get_tknp_rank, 
     get_tknp_world_size, 
     get_tknp_group, 
-    is_tknp_initialized
+    is_tknp_initialized,
+    is_root_rank,
 )
 
 RMSNorm = init_tknp_layer(RMSNorm)
@@ -227,16 +228,24 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if is_tknp_initialized() and self.layer_idx == 0 and self.tp_rank == 0:
-            # print("hidden_states shape:", hidden_states.shape)
-            logger.info("TKNP RANK %d, layer: %d hidden_states shape: %s", get_tknp_rank(), self.layer_idx, hidden_states.shape)
+        # if is_root_rank():
+        #     # print("hidden_states shape:", hidden_states.shape)
+        #     logger.info("TKNP RANK [%d], layer: %d hidden_states shape: %s", get_tknp_rank(), self.layer_idx, hidden_states.shape)
+        #     print(f"TKNP RANK {get_tknp_rank()}: layer {self.layer_idx} LlamaAttention forward input hidden_states: {hidden_states}")
 
-        qkv, _ = self.qkv_proj(hidden_states)
+        qkv, _ = self.qkv_proj(hidden_states)        
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        logger.info(f"TKNP RANK {get_tknp_rank()}: layer {self.layer_idx} LlamaAttention forward q shape: {q.shape}, k shape: {k.shape}, v shape: {v.shape}, positions shape: {positions.shape}")
         q, k = self.rotary_emb(positions, q, k)
+
         attn_output = self.attn(q, k, v)
+
+        # if is_root_rank():
+        #     # print("attn_output shape:", attn_output.shape)
+        #     logger.info("TKNP RANK [%d], layer: %d attn_output shape: %s", get_tknp_rank(), self.layer_idx, attn_output.shape)
+        #     print(f"TKNP RANK {get_tknp_rank()}: layer {self.layer_idx} LlamaAttention forward attn_output: {attn_output}")
+            
         output, _ = self.o_proj(attn_output)
+
         return output
 
     def _init_rotary_emb(self, config: LlamaConfig,
@@ -256,6 +265,7 @@ class LlamaAttention(nn.Module):
             is_neox_style=is_neox_style,
             partial_rotary_factor=self.partial_rotary_factor,
         )
+
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -285,6 +295,8 @@ class LlamaDecoderLayer(nn.Module):
         # support internlm/internlm3-8b with qkv_bias
         if hasattr(config, 'qkv_bias'):
             attention_bias = config.qkv_bias
+            
+        self.prefix = prefix
 
         # By default, Llama uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
@@ -344,8 +356,15 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-        return hidden_states, residual
 
+        # if is_tknp_initialized() and hidden_states is not None:
+        #     if hidden_states is not None:
+        #         logger.info(f"[TKNP RANK] {get_tknp_rank()} [llama.py] {self.prefix} After mlp hidden_states.shape: {hidden_states.shape}")
+        #         print(f"[TKNP RANK] {get_tknp_rank()} [llama.py] {self.prefix} After mlp hidden_states: {hidden_states}")
+        #     else:
+        #         logger.info(f"[TKNP RANK] {get_tknp_rank()} [llama.py] {self.prefix} After mlp hidden_states is None")
+
+        return hidden_states, residual
 
 @support_torch_compile
 class LlamaModel(nn.Module):
@@ -571,7 +590,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                       prefix=maybe_prefix(prefix, "model"),
                                       layer_type=layer_type)
         # print(self.model)
-        print(f"vllm/model_executor/models/llama.py: model : {self.model}")
+        # print(f"vllm/model_executor/models/llama.py: model : {self.model}")
         # logger.info("Llama model initialized.", self.model)
 
         if get_pp_group().is_last_rank:

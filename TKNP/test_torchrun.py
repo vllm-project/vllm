@@ -54,10 +54,10 @@ def main():
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is very",
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is very",
+        "Hello, my name is Jobs",
+        "The president of the United States is very",
+        "The capital of France is also",
+        "The future of AI is very interesting",
     ]
 
     # Create sampling parameters, the same across all ranks
