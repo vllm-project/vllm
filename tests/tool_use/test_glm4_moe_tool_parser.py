@@ -449,105 +449,107 @@ def test_extract_tool_calls_incomplete_tool_call(glm4_moe_tool_parser):
     assert extracted_tool_calls.content == model_output
 
 
-def test_array_argument_with_escaped_json(self):
+def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
     """Test that array arguments with escaped JSON are properly handled without double-escaping."""
-    # Add a tool with array parameter
-    tools_with_array = [
-        ToolCall(
-            type="function",
-            function=FunctionCall(
-                name="todo_write",
-                description="Write todos",
-                parameters={
-                    "type": "object",
-                    "properties": {
-                        "todos": {
-                            "type": "array",
-                            "description": "The updated todo list",
-                        }
-                    },
-                    "required": ["todos"],
-                },
-            ),
-        ),
-    ]
 
-    def check_params(result):
-        self.assertEqual(1, len(result.calls))
-        self.assertEqual("todo_write", result.calls[0].name)
-        params = json.loads(result.calls[0].parameters)
-        self.assertIsInstance(params["todos"], list)
-        self.assertEqual(4, len(params["todos"]))
-        self.assertEqual("1", params["todos"][0]["id"])
-        self.assertEqual(
-            "Check for hard-coded issues in the backend code",
-            params["todos"][0]["task"],
+    def check_params(extracted_tool_calls):
+        assert len(extracted_tool_calls.tool_calls) == 1
+        assert extracted_tool_calls.tool_calls[0].function.name == "todo_write"
+        params = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+        assert isinstance(params["todos"], list)
+        assert len(params["todos"]) == 4
+        assert params["todos"][0]["id"] == "1"
+        assert (
+            params["todos"][0]["task"]
+            == "Check for hard-coded issues in the backend code"
         )
-        self.assertEqual("in_progress", params["todos"][0]["status"])
-        self.assertEqual("2", params["todos"][1]["id"])
-        self.assertEqual(
-            "Check for hard-coded issues in the frontend code",
-            params["todos"][1]["task"],
+        assert params["todos"][0]["status"] == "in_progress"
+        assert params["todos"][1]["id"] == "2"
+        assert (
+            params["todos"][1]["task"]
+            == "Check for hard-coded issues in the frontend code"
         )
-        self.assertEqual("pending", params["todos"][1]["status"])
-        self.assertEqual("3", params["todos"][2]["id"])
-        self.assertEqual(
-            "Check for code violating the Single Responsibility Principle",
-            params["todos"][2]["task"],
+        assert params["todos"][1]["status"] == "pending"
+        assert params["todos"][2]["id"] == "3"
+        assert (
+            params["todos"][2]["task"]
+            == "Check for code violating the Single Responsibility Principle"
         )
-        self.assertEqual("pending", params["todos"][2]["status"])
-        self.assertEqual("4", params["todos"][3]["id"])
-        self.assertEqual(
-            "Generate a rectification proposal report", params["todos"][3]["task"]
+        assert params["todos"][2]["status"] == "pending"
+        assert params["todos"][3]["id"] == "4"
+        assert (
+            params["todos"][3]["task"] == "Generate a rectification proposal report"
         )
-        self.assertEqual("pending", params["todos"][3]["status"])
+        assert params["todos"][3]["status"] == "pending"
 
-    # Simulate the raw response from GLM-4.6 model with normal and escaped JSON in XML
-    result = self.detector.detect_and_parse(
-        """<tool_call>todo_write\n<arg_key>todos</arg_key>\n<arg_value>[{\"id\": \"1\", \"task\": \"Check for hard-coded issues in the backend code\", \"status\": \"in_progress\"}, {\"id\": \"2\", \"task\": \"Check for hard-coded issues in the frontend code\", \"status\": \"pending\"}, {\"id\": \"3\", \"task\": \"Check for code violating the Single Responsibility Principle\", \"status\": \"pending\"}, {\"id\": \"4\", \"task\": \"Generate a rectification proposal report\", \"status\": \"pending\"}]</arg_value>
-</tool_call>""",
-        tools_with_array,
-    )
-    check_params(result)
-    result = self.detector.detect_and_parse(
-        r"""<tool_call>todo_write\n<arg_key>todos</arg_key>\n<arg_value>[{\"id\": \"1\", \"task\": \"Check for hard-coded issues in the backend code\", \"status\": \"in_progress\"}, {\"id\": \"2\", \"task\": \"Check for hard-coded issues in the frontend code\", \"status\": \"pending\"}, {\"id\": \"3\", \"task\": \"Check for code violating the Single Responsibility Principle\", \"status\": \"pending\"}, {\"id\": \"4\", \"task\": \"Generate a rectification proposal report\", \"status\": \"pending\"}]</arg_value>
-</tool_call>""",
-        tools_with_array,
-    )
-    check_params(result)
+    model_output = """<tool_call>todo_write
+<arg_key>todos</arg_key>
+<arg_value>[{"id": "1", "task": "Check for hard-coded issues in the backend code", "status": "in_progress"}, {"id": "2", "task": "Check for hard-coded issues in the frontend code", "status": "pending"}, {"id": "3", "task": "Check for code violating the Single Responsibility Principle", "status": "pending"}, {"id": "4", "task": "Generate a rectification proposal report", "status": "pending"}]</arg_value>
+</tool_call>"""
 
-    def check_single_todos(tool_result, expected):
-        self.assertEqual(1, len(tool_result.calls))
-        self.assertEqual("todo_write", tool_result.calls[0].name)
-        params = json.loads(tool_result.calls[0].parameters)
-        self.assertIsInstance(params["todos"], list)
-        self.assertEqual(1, len(params["todos"]))
-        self.assertEqual("1", params["todos"][0]["id"])
-        self.assertEqual(expected, params["todos"][0]["task"])
-        self.assertEqual("pending", params["todos"][0]["status"])
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+    check_params(extracted_tool_calls)
 
-    # Test with escaped JSON containing backslashes in content (e.g., Windows paths)
+    model_output_escaped = r"""<tool_call>todo_write
+<arg_key>todos</arg_key>
+<arg_value>[{\"id\": \"1\", \"task\": \"Check for hard-coded issues in the backend code\", \"status\": \"in_progress\"}, {\"id\": \"2\", \"task\": \"Check for hard-coded issues in the frontend code\", \"status\": \"pending\"}, {\"id\": \"3\", \"task\": \"Check for code violating the Single Responsibility Principle\", \"status\": \"pending\"}, {\"id\": \"4\", \"task\": \"Generate a rectification proposal report\", \"status\": \"pending\"}]</arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output_escaped, request=None
+    )  # type: ignore[arg-type]
+    check_params(extracted_tool_calls)
+
+    def check_single_todos(extracted_tool_calls, expected):
+        assert len(extracted_tool_calls.tool_calls) == 1
+        assert extracted_tool_calls.tool_calls[0].function.name == "todo_write"
+        params = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+        assert isinstance(params["todos"], list)
+        assert len(params["todos"]) == 1
+        assert params["todos"][0]["id"] == "1"
+        assert params["todos"][0]["task"] == expected
+        assert params["todos"][0]["status"] == "pending"
+
     expected_path = r"Check file at C:\Users\test.txt"
-    result = self.detector.detect_and_parse(
-        """<tool_call>todo_write\n<arg_key>todos</arg_key>\n<arg_value>[{\"id\": \"1\", \"task\": \"Check file at C:\\\\Users\\\\test.txt\", \"status\": \"pending\"}]</arg_value></tool_call>""",
-        tools_with_array,
-    )
-    check_single_todos(result, expected_path)
-    result = self.detector.detect_and_parse(
-        r"""<tool_call>todo_write\n<arg_key>todos</arg_key>\n<arg_value>[{\"id\": \"1\", \"task\": \"Check file at C:\\\\Users\\\\test.txt\", \"status\": \"pending\"}]</arg_value></tool_call>""",
-        tools_with_array,
-    )
-    check_single_todos(result, expected_path)
+    model_output = """<tool_call>todo_write
+<arg_key>todos</arg_key>
+<arg_value>[{"id": "1", "task": "Check file at C:\\\\Users\\\\test.txt", "status": "pending"}]</arg_value>
+</tool_call>"""
 
-    # Should contain literal \n, not actual newline
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+    check_single_todos(extracted_tool_calls, expected_path)
+
+    model_output_escaped = r"""<tool_call>todo_write
+<arg_key>todos</arg_key>
+<arg_value>[{\"id\": \"1\", \"task\": \"Check file at C:\\\\Users\\\\test.txt\", \"status\": \"pending\"}]</arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output_escaped, request=None
+    )  # type: ignore[arg-type]
+    check_single_todos(extracted_tool_calls, expected_path)
+
     expected_output = r"Print \n to see newline"
-    result = self.detector.detect_and_parse(
-        """<tool_call>todo_write\n<arg_key>todos</arg_key>\n<arg_value>[{\"id\": \"1\", \"task\": \"Print \\\\n to see newline\",\"status\": \"pending\"}]</arg_value></tool_call>""",
-        tools_with_array,
-    )
-    check_single_todos(result, expected_output)
-    result = self.detector.detect_and_parse(
-        r"""<tool_call>todo_write\n<arg_key>todos</arg_key>\n<arg_value>[{\"id\": \"1\", \"task\": \"Print \\\\n to see newline\",\"status\": \"pending\"}]</arg_value></tool_call>""",
-        tools_with_array,
-    )
-    check_single_todos(result, expected_output)
+    model_output = """<tool_call>todo_write
+<arg_key>todos</arg_key>
+<arg_value>[{"id": "1", "task": "Print \\\\n to see newline", "status": "pending"}]</arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output, request=None
+    )  # type: ignore[arg-type]
+    check_single_todos(extracted_tool_calls, expected_output)
+
+    model_output_escaped = r"""<tool_call>todo_write
+<arg_key>todos</arg_key>
+<arg_value>[{\"id\": \"1\", \"task\": \"Print \\\\n to see newline\", \"status\": \"pending\"}]</arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = glm4_moe_tool_parser.extract_tool_calls(
+        model_output_escaped, request=None
+    )  # type: ignore[arg-type]
+    check_single_todos(extracted_tool_calls, expected_output)
