@@ -47,7 +47,7 @@ class Glm4MoeModelToolParser(ToolParser):
         )
         self.func_arg_regex = re.compile(
             r"<arg_key>(.*?)</arg_key>(?:\\n|\s)*<arg_value>(.*?)</arg_value>",
-            re.DOTALL
+            re.DOTALL,
         )
         if not self.model_tokenizer:
             raise ValueError(
