@@ -136,7 +136,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 M = min(num_tokens, CHUNK_SIZE)
 
                 shrink_config, expand_config = self._get_lora_moe_configs(
-                    op_prefix="gate_up",
+                    op_prefix="w13",
                     lora_a_stacked=self.w1_lora_a_stacked,
                     lora_b_stacked=self.w1_lora_b_stacked,
                     num_slices=2,
@@ -216,7 +216,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 M = min(num_tokens, CHUNK_SIZE)
 
                 shrink_config, expand_config = self._get_lora_moe_configs(
-                    op_prefix="down",
+                    op_prefix="w2",
                     lora_a_stacked=self.w2_lora_a_stacked,
                     lora_b_stacked=self.w2_lora_b_stacked,
                     num_slices=1,
