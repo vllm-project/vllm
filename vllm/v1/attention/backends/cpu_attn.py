@@ -73,6 +73,7 @@ class CPUAttentionBackend(AttentionBackend):
 
 @dataclass
 class CPUAttentionMetadata:
+    isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int
     query_start_loc: torch.Tensor
@@ -177,6 +178,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             )
 
         attn_metadata = CPUAttentionMetadata(
+            isa=self.isa,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -316,7 +318,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 key_cache,
                 value_cache,
                 attn_metadata.slot_mapping,
-                attn_metadata.scheduler_metadata,
+                attn_metadata.isa,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -331,22 +333,23 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
             num_actual_tokens = num_decode_tokens
 
-        ops.cpu_attention_with_kv_cache(
-            query=query[:num_actual_tokens],
-            key_cache=key_cache,
-            value_cache=value_cache,
-            output=output[:num_actual_tokens],  # type: ignore
-            query_start_loc=attn_metadata.query_start_loc,
-            seq_lens=attn_metadata.seq_lens,
-            scale=self.scale,
-            causal=attn_metadata.causal,
-            alibi_slopes=self.alibi_slopes,  # type: ignore
-            sliding_window=self.sliding_window,
-            block_table=attn_metadata.block_table,
-            softcap=self.logits_soft_cap,
-            scheduler_metadata=attn_metadata.scheduler_metadata,
-            s_aux=self.sinks,
-        )
+        if num_actual_tokens > 0:
+            ops.cpu_attention_with_kv_cache(
+                query=query[:num_actual_tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                output=output[:num_actual_tokens],  # type: ignore
+                query_start_loc=attn_metadata.query_start_loc,
+                seq_lens=attn_metadata.seq_lens,
+                scale=self.scale,
+                causal=attn_metadata.causal,
+                alibi_slopes=self.alibi_slopes,  # type: ignore
+                sliding_window=self.sliding_window,
+                block_table=attn_metadata.block_table,
+                softcap=self.logits_soft_cap,
+                scheduler_metadata=attn_metadata.scheduler_metadata,
+                s_aux=self.sinks,
+            )
 
         return output
 

@@ -121,8 +121,7 @@ void cpu_attn_reshape_and_cache(
         key_cache,  // [num_blocks, num_kv_heads, block_size, head_size]
     torch::Tensor&
         value_cache,  // [num_blocks, num_kv_heads, block_size, head_size]
-    const torch::Tensor& slot_mapping,
-    const torch::Tensor& scheduler_metadata) {
+    const torch::Tensor& slot_mapping, const std::string& isa) {
   TORCH_CHECK_EQ(key.dim(), 3);
   TORCH_CHECK_EQ(value.dim(), 3);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
@@ -143,14 +142,20 @@ void cpu_attn_reshape_and_cache(
   const int64_t block_size_stride = key_cache.stride(2);
   const int64_t head_dim = key.size(-1);
 
-  cpu_attention::AttentionMetadata* data =
-      reinterpret_cast<cpu_attention::AttentionMetadata*>(
-          scheduler_metadata.data_ptr());
+  cpu_attention::ISA isa_tag = [&]() {
+    if (isa == "amx") {
+      return cpu_attention::ISA::AMX;
+    } else if (isa == "vec") {
+      return cpu_attention::ISA::VEC;
+    } else {
+      TORCH_CHECK(false, "Invalid ISA type: " + isa);
+    }
+  }();
 
   VLLM_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
         CPU_ATTN_DISPATCH_CASE_HEADDIM(head_dim, [&] {
-          CPU_ATTN_DISPATCH_IMPL(data->isa, [&]() {
+          CPU_ATTN_DISPATCH_IMPL(isa_tag, [&]() {
             attn_impl::reshape_and_cache(
                 key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
                 key_cache.data_ptr<scalar_t>(),

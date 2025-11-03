@@ -87,7 +87,7 @@ void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 torch::Tensor& key_cache,
                                 torch::Tensor& value_cache,
                                 const torch::Tensor& slot_mapping,
-                                const torch::Tensor& scheduler_metadata);
+                                const std::string& isa);
 
 void cpu_attention_with_kv_cache(
     const torch::Tensor& query, const torch::Tensor& key_cache,
@@ -265,8 +265,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
-      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, Tensor "
-      "scheduler_metadata) -> ()",
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
+      "isa) -> ()",
       &cpu_attn_reshape_and_cache);
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "

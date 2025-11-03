@@ -2589,7 +2589,7 @@ def cpu_attn_reshape_and_cache(
     key_cache: torch.Tensor,
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
-    scheduler_metadata: torch.Tensor,
+    isa: str,
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
@@ -2597,7 +2597,7 @@ def cpu_attn_reshape_and_cache(
         key_cache,
         value_cache,
         slot_mapping,
-        scheduler_metadata,
+        isa,
     )
 
 
