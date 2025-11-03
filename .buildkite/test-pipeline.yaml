@@ -347,8 +347,7 @@ steps:
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - export VLLM_DISABLE_FLASHINFER_PREFILL=1 # TODO: FI prefill is bugged and causes incorrectness, fix this
-    - pytest -v -s v1/attention
+    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
 
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
