@@ -31,7 +31,13 @@
 
 namespace vllm {
 
-#define round_up(x, y) ((x + y - 1) / y * y)
+template<typename Int>
+__host__ __device__ inline Int round_up(Int x, Int y)
+{
+    static_assert(std::is_integral_v<Int>, "round_up argument must be integral type");
+    return (x + y - 1) / y * y;
+}
+
 // Use UE4M3 by default.
 template <class Type, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
@@ -43,14 +49,14 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
-  int sf_m = round_up(numRows, 128);
+  int sf_m = round_up<int>(numRows, 128);
   int sf_n_unpadded = numCols / CVT_FP4_SF_VEC_SIZE;
-  int sf_n_uint32 = round_up(sf_n_unpadded, 4) / 4;
+  int sf_n_int = round_up<int>(sf_n_unpadded, 4) / 4;
   for (int row = numRows + blockIdx.x; row < sf_m; row += gridDim.x) {
     // Each thread writes 4 uint32_t elements.
-    for (int col = sf_n_unpadded + threadIdx.x * 4; col < sf_n_uint32;
+    for (int col = sf_n_unpadded + threadIdx.x * 4; col < sf_n_int;
          col += blockDim.x * 4) {
-      SFout[row * sf_n_uint32 + col] = 0x00000000;
+      SFout[row * sf_n_int + col] = 0x00;
     }
   }
 
