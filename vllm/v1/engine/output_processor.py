@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -28,6 +29,8 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
 
 
 class RequestOutputCollector:
@@ -237,7 +240,12 @@ class RequestState:
             ]
             self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
         else:
-            # Send tokens immediately
+            if self.stream_interval > 1:
+                logger.warning_once(
+                    "stream_interval > 1 is only supported for DELTA mode. "
+                    "Ignoring the stream_interval setting."
+                )
+            # Send all the new tokens
             tokens_to_send = new_token_ids
 
         request_id = self.request_id
