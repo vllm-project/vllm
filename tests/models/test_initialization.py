@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import suppress
 from functools import partial
 from unittest.mock import patch
 
@@ -104,6 +105,22 @@ def can_initialize(
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        if model_arch == "DeepseekV32ForCausalLM":
+            # FLASHMLA_SPARSE backend requires Hopper (9.0+) or Blackwell (10.0+)
+            # Mock device capability to Hopper for initialization testing on L40 for CI
+            from vllm import platforms
+            from vllm.platforms.interface import DeviceCapability
+
+            def mock_get_device_capability(device_id: int = 0):  # noqa: ARG001
+                return DeviceCapability(major=9, minor=0)
+
+            with suppress(AttributeError):
+                platforms.current_platform.get_device_capability.cache_clear()  # type: ignore
+            m.setattr(
+                platforms.current_platform,
+                "get_device_capability",
+                mock_get_device_capability,
+            )
 
         LLM(
             model_info.default,
