@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator
-from typing import Optional
 
 import torch
 
@@ -29,10 +28,10 @@ class CPUOffloadingSpec(OffloadingSpec):
         self.num_cpu_blocks: int = num_cpu_blocks
 
         # scheduler-side
-        self._manager: Optional[OffloadingManager] = None
+        self._manager: OffloadingManager | None = None
 
         # worker-side
-        self._handler: Optional[OffloadingHandler] = None
+        self._handler: OffloadingHandler | None = None
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -52,9 +51,9 @@ class CPUOffloadingSpec(OffloadingSpec):
         self, kv_caches: dict[str, torch.Tensor]
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handler:
-            if not current_platform.is_cuda():
+            if not current_platform.is_cuda_alike():
                 raise Exception(
-                    "CPU Offloading is currently only supported on CUDA GPUs"
+                    "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
 
             layer_names = list(kv_caches.keys())

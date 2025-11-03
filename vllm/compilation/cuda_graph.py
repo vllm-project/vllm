@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any, Callable, Optional
+from typing import Any
 from unittest.mock import patch
 
 import torch
@@ -16,7 +17,7 @@ from vllm.distributed.device_communicators.pynccl_allocator import set_graph_poo
 from vllm.forward_context import BatchDescriptor, get_forward_context
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import weak_ref_tensors
+from vllm.utils.torch_utils import weak_ref_tensors
 
 logger = init_logger(__name__)
 
@@ -24,12 +25,12 @@ logger = init_logger(__name__)
 @dataclasses.dataclass
 class CUDAGraphEntry:
     batch_descriptor: BatchDescriptor
-    cudagraph: Optional[torch.cuda.CUDAGraph] = None
-    output: Optional[Any] = None
+    cudagraph: torch.cuda.CUDAGraph | None = None
+    output: Any | None = None
 
     # for cudagraph debugging, track the input addresses
     # during capture, and check if they are the same during replay
-    input_addresses: Optional[list[int]] = None
+    input_addresses: list[int] | None = None
 
 
 @dataclasses.dataclass
@@ -69,7 +70,7 @@ class CUDAGraphWrapper:
         runnable: Callable,
         vllm_config: VllmConfig,
         runtime_mode: CUDAGraphMode,
-        cudagraph_options: Optional[CUDAGraphOptions] = None,
+        cudagraph_options: CUDAGraphOptions | None = None,
     ):
         self.runnable = runnable
         self.vllm_config = vllm_config

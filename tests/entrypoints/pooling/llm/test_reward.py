@@ -36,22 +36,25 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-@pytest.mark.skip_global_cleanup
 def test_pooling_params(llm: LLM):
-    def get_outputs(softmax):
+    def get_outputs(use_activation):
         outputs = llm.reward(
-            prompts, pooling_params=PoolingParams(softmax=softmax), use_tqdm=False
+            prompts,
+            pooling_params=PoolingParams(use_activation=use_activation),
+            use_tqdm=False,
         )
         return torch.cat([x.outputs.data for x in outputs])
 
-    default = get_outputs(softmax=None)
-    w_softmax = get_outputs(softmax=True)
-    wo_softmax = get_outputs(softmax=False)
+    default = get_outputs(use_activation=None)
+    w_activation = get_outputs(use_activation=True)
+    wo_activation = get_outputs(use_activation=False)
 
-    assert torch.allclose(default, w_softmax, atol=1e-2), "Default should use softmax."
-    assert not torch.allclose(w_softmax, wo_softmax, atol=1e-2), (
-        "wo_softmax should not use softmax."
+    assert torch.allclose(default, w_activation, atol=1e-2), (
+        "Default should use activation."
     )
-    assert torch.allclose(softmax(wo_softmax), w_softmax, atol=1e-2), (
-        "w_softmax should be close to softmax(wo_softmax)."
+    assert not torch.allclose(w_activation, wo_activation, atol=1e-2), (
+        "wo_activation should not use activation."
+    )
+    assert torch.allclose(softmax(wo_activation), w_activation, atol=1e-2), (
+        "w_activation should be close to activation(wo_activation)."
     )

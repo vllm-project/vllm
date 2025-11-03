@@ -10,7 +10,7 @@ like uniform random routing.
 """
 
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -24,7 +24,7 @@ class RoutingStrategy(ABC):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        indices_type: Optional[torch.dtype] = None,
+        indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route tokens to experts.
@@ -89,7 +89,7 @@ class DistributionBasedRouting(RoutingStrategy):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         top_k: int,
-        indices_type: Optional[torch.dtype] = None,
+        indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Randomly select experts for each token using the specified distribution.
@@ -269,7 +269,7 @@ class RoutingSimulator:
         router_logits: torch.Tensor,
         strategy_name: str,
         top_k: int,
-        indices_type: Optional[torch.dtype] = None,
+        indices_type: torch.dtype | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Simulate token-to-expert routing using the specified strategy.

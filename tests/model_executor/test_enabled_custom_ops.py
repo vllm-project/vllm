@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 import torch
@@ -37,7 +36,7 @@ class Relu3(ReLUSquaredActivation):
 
 
 @pytest.mark.parametrize(
-    "env, torch_level, backend, ops_enabled, default_on",
+    "env, compilation_mode, backend, ops_enabled, default_on",
     [
         # Default values based on compile level
         # - All by default (no Inductor compilation)
@@ -77,8 +76,8 @@ class Relu3(ReLUSquaredActivation):
     ],
 )
 def test_enabled_ops(
-    env: Optional[str],
-    torch_level: int,
+    env: str | None,
+    compilation_mode: int,
     backend: str,
     ops_enabled: list[int],
     default_on: bool,
@@ -86,10 +85,9 @@ def test_enabled_ops(
     custom_ops = env.split(",") if env else []
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
-            backend=backend, level=torch_level, custom_ops=custom_ops
+            backend=backend, mode=compilation_mode, custom_ops=custom_ops
         )
     )
-    # breakpoint()
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 
