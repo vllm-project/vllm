@@ -40,6 +40,8 @@ anyio==4.6.2.post1
     # via
     #   httpx
     #   starlette
+arctic-inference==0.1.0
+    # via -r requirements/test.in
 argcomplete==3.5.1
     # via datamodel-code-generator
 arrow==1.3.0
