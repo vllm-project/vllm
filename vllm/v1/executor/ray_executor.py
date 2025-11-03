@@ -441,20 +441,19 @@ class RayDistributedExecutor(Executor):
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            outputs = [ref.get() for ref in refs]
-            return self.kv_output_aggregator.aggregate(outputs)
+            return self.kv_output_aggregator.aggregate(ray.get(refs))
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)
 
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
         non_block: bool = False,
-    ) -> list[Any]:
+    ) -> list[Any] | Future[list[Any]]:
         """Runs the given method on all workers."""
         sent_method = method if isinstance(method, str) else cloudpickle.dumps(method)
         del method
@@ -470,7 +469,7 @@ class RayDistributedExecutor(Executor):
 
         # Get the results of the ray workers.
         if non_block:
-            return [FutureWrapper((output,)) for output in ray_worker_outputs]
+            return FutureWrapper(ray_worker_outputs)
 
         return ray.get(ray_worker_outputs, timeout=timeout)
 
