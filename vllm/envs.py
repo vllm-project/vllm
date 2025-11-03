@@ -218,6 +218,8 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_USE_META_SHUFFLING_MOE: bool = False
+    VLLM_META_SHUFFLING_GEMM_BACKEND: Literal["cutlass", "triton"] = "cutlass"
 
 
 def get_default_cache_root():
@@ -1442,6 +1444,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
     ),
+    "VLLM_USE_META_SHUFFLING_MOE": lambda: bool(
+        int(os.getenv("VLLM_USE_META_SHUFFLING_MOE", "0"))
+    ),
+    "VLLM_META_SHUFFLING_GEMM_BACKEND": env_with_choices(
+        "VLLM_META_SHUFFLING_GEMM_BACKEND", "cutlass", ["cutlass", "triton"]
+    ),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1567,6 +1575,7 @@ def compute_hash() -> str:
         "VLLM_USE_FBGEMM",
         "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE",
         "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL",
+        "VLLM_META_SHUFFLING_GEMM_BACKEND",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
