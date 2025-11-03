@@ -530,8 +530,13 @@ class GptOssModel(nn.Module):
             ):
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight = weight if weight.dim() == 0 else weight[0]
-                weight_loader(param, weight)
+                if weight.numel() != 1:
+                    raise ValueError(
+                        f"KV cache scale '{scale_name}' is expected to be a scalar, "
+                        f"but got a tensor of shape {weight.shape}."
+                    )
+                # Ensure weight is a scalar tensor before passing to loader.
+                weight_loader(param, weight.flatten()[0])
                 loaded_params.add(scale_name)
                 continue
 
