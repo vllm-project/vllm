@@ -10,9 +10,8 @@ from vllm import envs
 
 
 def silu_and_mul(x: torch.Tensor) -> torch.Tensor:
-    output = torch.empty_like(x[..., : x.shape[-1] // 2])
-    torch.ops._C.silu_and_mul(output, x)
-    return output
+    d = x.shape[-1] // 2
+    return F.silu(x[..., :d]) * x[..., d:]
 
 
 def swigluoai_and_mul(
