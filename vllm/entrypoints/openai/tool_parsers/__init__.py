@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from .abstract_tool_parser import ToolParser, ToolParserManager
+from .command_tool_parser import CommandToolParser
 from .deepseekv3_tool_parser import DeepSeekV3ToolParser
 from .deepseekv31_tool_parser import DeepSeekV31ToolParser
 from .ernie45_tool_parser import Ernie45ToolParser
@@ -50,6 +51,7 @@ __all__ = [
     "Olmo3PythonicToolParser",
     "MinimaxToolParser",
     "KimiK2ToolParser",
+    "CommandToolParser",
     "HunyuanA13BToolParser",
     "Glm4MoeModelToolParser",
     "Qwen3CoderToolParser",
