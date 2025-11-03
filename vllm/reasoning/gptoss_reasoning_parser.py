@@ -74,6 +74,7 @@ class GptOssReasoningParser(ReasoningParser):
             "<|start|>assistant<|channel|>final"
         )
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
+        self.reasoning_max_num_between_tokens = 20
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         end_token_ids_prefix = self.reasoning_end_token_ids_prefix
@@ -89,6 +90,8 @@ class GptOssReasoningParser(ReasoningParser):
                 for j in range(
                     suffix_start, len(input_ids) - len(end_token_ids_suffix) + 1
                 ):
+                    if j - suffix_start >= self.reasoning_max_num_between_tokens:
+                        break
                     if (
                         input_ids[j : j + len(end_token_ids_suffix)]
                         == end_token_ids_suffix
