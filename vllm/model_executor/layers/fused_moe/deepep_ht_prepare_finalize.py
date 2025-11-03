@@ -158,8 +158,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             allocate_on_comm_stream=False,
         )
 
-        print(expert_num_tokens_per_expert_list)
-
         # record the handle for this ubatch
         a2a_idx = dbo_current_ubatch_id()
         self.handles[a2a_idx] = handle
