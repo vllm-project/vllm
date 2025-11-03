@@ -192,10 +192,10 @@ def get_lora_op_configs(
     assert op_type in [
         "shrink",
         "expand",
-        "fused_moe_lora_gate_up_shrink",
-        "fused_moe_lora_gate_up_expand",
-        "fused_moe_lora_down_shrink",
-        "fused_moe_lora_down_expand",
+        "fused_moe_lora_w13_shrink",
+        "fused_moe_lora_w13_expand",
+        "fused_moe_lora_w2_shrink",
+        "fused_moe_lora_w2_expand",
     ]
 
     # default config
@@ -219,13 +219,13 @@ def get_lora_op_configs(
         "fused_moe_lora_down_expand",
     ]:
         default = {
-            "BLOCK_SIZE_M": 64,
-            "BLOCK_SIZE_N": 64,
-            "BLOCK_SIZE_K": 32,
-            "NUM_WARPS": 4,
-            "NUM_STAGES": 3,
-            "GROUP_SIZE_M": 8,
-            "SPLIT_K": 1,
+            "block_m": 64,
+            "block_n": 64,
+            "block_k": 32,
+            "num_warps": 4,
+            "num_stages": 3,
+            "group_size_m": 8,
+            "split_k": 1,
         }
     else:
         default = {
@@ -271,7 +271,7 @@ def get_lora_op_configs(
         or config_data[min(config_data.keys(), key=lambda x: abs(int(x) - n))]
     )
 
-    # slice by hidden_size_2
+    # slice by moe-intermediate-size if applicable
     if moe_intermediate_size is not None:
         i = moe_intermediate_size
         config_data = (

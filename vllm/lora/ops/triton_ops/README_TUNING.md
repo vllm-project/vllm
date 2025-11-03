@@ -44,13 +44,13 @@ For `shrink`, the config file is named as `{gpu_name}_SHRINK.json`, e.g. `NVIDIA
 
 For `expand`, the config fileis named as `{gpu_name}_EXPAND_{add_input}.json`, e.g. `NVIDIA_H200_EXPAND_TRUE.json`.
 
-For `fused_moe_lora_gate_up_shrink`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_GATE_UP_SHRINK.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_GATE_UP_SHRINK.json`.
+For `fused_moe_lora_w13_shrink`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_W13_SHRINK.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_W13_SHRINK.json`.
 
-For `fused_moe_lora_gate_up_expand`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_GATE_UP_EXPAND.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_GATE_UP_EXPAND.json`.
+For `fused_moe_lora_w13_expand`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_W13_EXPAND.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_W13_EXPAND.json`.
 
-For `fused_moe_lora_down_shrink`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_DOWN_SHRINK.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_DOWN_SHRINK.json`.
+For `fused_moe_lora_w2_shrink`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_W2_SHRINK.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_W2_SHRINK.json`.
 
-For `fused_moe_lora_down_expand`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_DOWN_EXPAND.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_DOWN_EXPAND.json`.
+For `fused_moe_lora_w2_expand`, the config file is named as `{gpu_name}_FUSED_MOE_LORA_W2_EXPAND.json`, e.g. `NVIDIA_H200_FUSED_MOE_LORA_W2_EXPAND.json`.
 
 The `gpu_name` can be automatically detected by calling `torch.cuda.get_device_name()`
 

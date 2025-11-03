@@ -148,7 +148,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 # get the block size of m from customized config or default config
                 max_loras = self.w1_lora_a_stacked.shape[0]
-                block_size = shrink_config.get("BLOCK_SIZE_M", 64)
+                block_size = shrink_config.get("BLOCK_SIZE_M") or shrink_config.get(
+                    "block_m", 64
+                )
                 (
                     sorted_token_ids_lora,
                     expert_ids_lora,
