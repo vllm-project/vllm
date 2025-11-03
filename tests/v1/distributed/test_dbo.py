@@ -31,35 +31,42 @@ DEEPEP_BACKENDS = [
     "deepep_high_throughput",
 ]
 
+
 @pytest.mark.parametrize("all2all_backend", DEEPEP_BACKENDS)
 def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
     """
     Test DBO with DP+EP using GSM8K evaluation.
     """
     required_gpus = DP_SIZE
-    
+
     if num_gpus_available < required_gpus:
         pytest.skip(f"Need at least {required_gpus} GPUs (DP={DP_SIZE})")
 
     # Server arguments for DBO + DP + EP
     server_args = [
-        "--max-model-len", "4096",
-        "--max-num-seqs", str(MAX_NUM_SEQS),  # Use larger batch to trigger decode DBO
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        str(MAX_NUM_SEQS),  # Use larger batch to trigger decode DBO
         "--trust-remote-code",
         # Note: Not using --enforce-eager to test DBO's alternate CUDA graph dispatching
-        "--data-parallel-size", str(DP_SIZE),
+        "--data-parallel-size",
+        str(DP_SIZE),
         "--enable-expert-parallel",
         "--enable-dbo",
-         # Fix threshold so we know we trigger DBO
-        "--dbo-decode-token-threshold", "16",  
-        "--dbo-prefill-token-threshold", "256",
-        "--all2all-backend", all2all_backend,
+        # Fix threshold so we know we trigger DBO
+        "--dbo-decode-token-threshold",
+        "16",
+        "--dbo-prefill-token-threshold",
+        "256",
+        "--all2all-backend",
+        all2all_backend,
     ]
 
     with RemoteOpenAIServer(
-        MODEL_NAME, 
-        server_args, 
-        max_wait_seconds=600  # Allow time for model loading with DP+EP
+        MODEL_NAME,
+        server_args,
+        max_wait_seconds=600,  # Allow time for model loading with DP+EP
     ) as remote_server:
         # Use host and port directly from RemoteOpenAIServer
         host = f"http://{remote_server.host}"
@@ -80,6 +87,3 @@ def test_dbo_dp_ep_gsm8k(all2all_backend: str, num_gpus_available):
             f"{accuracy:.3f} < {MIN_ACCURACY:.3f} "
             f"(correct: {results['num_correct']}/{results['num_questions']})"
         )
-
-
-
