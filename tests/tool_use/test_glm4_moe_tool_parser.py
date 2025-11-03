@@ -477,9 +477,7 @@ def test_array_argument_with_escaped_json(glm4_moe_tool_parser):
         )
         assert params["todos"][2]["status"] == "pending"
         assert params["todos"][3]["id"] == "4"
-        assert (
-            params["todos"][3]["task"] == "Generate a rectification proposal report"
-        )
+        assert params["todos"][3]["task"] == "Generate a rectification proposal report"
         assert params["todos"][3]["status"] == "pending"
 
     model_output = """<tool_call>todo_write
