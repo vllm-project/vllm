@@ -91,6 +91,7 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
+    VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS: bool = False
     VLLM_TORCH_PROFILER_WITH_STACK: bool = True
     VLLM_TORCH_PROFILER_WITH_FLOPS: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
@@ -251,6 +252,12 @@ def use_aot_compile() -> bool:
 
     default_value = "1" if is_torch_equal_or_newer("2.10.0.dev") else "0"
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+
+
+def use_backend_with_cache() -> bool:
+    return (
+        os.environ.get("VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS", "0") == "1"
+    )
 
 
 def env_with_choices(
@@ -520,6 +527,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # to load will result in a hard error when this is enabled.
     # Will be ignored when VLLM_USE_AOT_COMPILE is disabled.
     "VLLM_FORCE_AOT_LOAD": lambda: os.environ.get("VLLM_FORCE_AOT_LOAD", "0") == "1",
+    # Enable the new VllmBackendWithCache backend that reconstructs
+    # compiled models directly from cached inductor artifacts without
+    # re-splitting graph modules. This reduces overhead during model loading.
+    "VLLM_USE_BACKEND_WITH_INDUCTOR_COMPILED_ARTIFACTS": use_backend_with_cache,
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
