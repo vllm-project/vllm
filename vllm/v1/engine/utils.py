@@ -1223,6 +1223,110 @@ async def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> 
     return items
 
 
+def broadcast_instruction(
+    cmd_socket,
+    target_identities: set[bytes],
+    method_name: str,
+    timeout: int,
+    method_uuid: str = None,
+    **kwargs,
+) -> str:
+    """
+    Broadcast an method_name message to multiple remote endpoints.
+    It serializes the specified method_name along with its parameters and
+    dispatches it to all target identities via the provided ZeroMQ socket.
+    """
+    if method_uuid is None:
+        method_uuid = str(uuid.uuid4())
+    payload = {**kwargs, "timeout": timeout}
+
+    for identity in target_identities:
+        serialized_instruction = serialize_method_call(
+            method_name, method_uuid, **payload
+        )
+        cmd_socket.send_multipart(
+            [identity, b"", serialized_instruction.encode("utf-8")]
+        )
+
+    return method_uuid
+
+
+def wait_for_instruction_result(
+    cmd_socket,
+    target_identities: set[bytes],
+    method_name: str,
+    timeout: int,
+    method_uuid: str,
+) -> dict[bytes, dict]:
+    """
+    Wait for acknowledgment or result messages from multiple endpoints.
+    This function listens for responses corresponding to a previously broadcasted
+    instruction, identified by the given `method_uuid`.
+
+    Args:
+        cmd_socket (zmq.Socket): The socket used to receive responses.
+        target_identities (set[bytes]): Identities that are expected to respond.
+        method_name (str): The name of the method_name (used for logging).
+        timeout (int): The maximum wait time (in seconds).
+        method_uuid (str): The unique identifier associated with the method_name.
+
+    Notes:
+        - This function does not raise exceptions for timeouts or parsing errors.
+          Instead, it logs the issue and returns whatever responses have been collected.
+    """
+    start = time.monotonic()
+    responses: dict[bytes, dict] = {}
+
+    while target_identities:
+        remaining = timeout - (time.monotonic() - start)
+        if remaining <= 0:
+            logger.debug(
+                'Timeout while waiting for responses of command "%s" '
+                "from identities: %s",
+                method_name,
+                target_identities,
+            )
+            # Return partial results collected so far
+            return responses
+
+        try:
+            has_msg, identity, response = recv_router_dealer_message(
+                cmd_socket,
+                use_poller=True,
+                poll_timeout=int(remaining * 1000),
+            )
+
+            # Skip if no message was received during this polling period
+            if not has_msg:
+                continue
+
+            if isinstance(identity, str):
+                identity = identity.encode("utf-8")
+
+            response_dict = json.loads(response)
+            recv_uuid = response_dict.get("method_uuid")
+
+            # Ignore outdated or unrelated messages
+            if recv_uuid != method_uuid:
+                logger.debug(
+                    "Discarding outdated response: expected method_uuid=%s, got %s",
+                    method_uuid,
+                    recv_uuid,
+                )
+                continue
+
+            # Record this engine's response
+            responses[identity] = response_dict
+            target_identities.discard(identity)
+
+        except Exception as e:
+            logger.error("Error while processing engine response: %s", e)
+            # Return partial results even on exception to avoid data loss
+            return responses
+
+    return responses
+
+
 class FaultHandler:
     def __init__(
         self,
@@ -1233,7 +1337,6 @@ class FaultHandler:
         engine_status_dict: ThreadSafeDict[int, str],
     ) -> None:
         self.cmd_socket = cmd_socket
-        # self.client_cmd_registry = client_cmd_registry
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
         self.engine_status_dict = engine_status_dict
@@ -1249,118 +1352,57 @@ class FaultHandler:
             )
             return False
 
-        excluded_engines = set()
         if instruction == "pause":
             fault_engine_indices = {
                 index
                 for index, status in self.engine_status_dict.items()
                 if status != "Healthy"
             }
-            excluded_engines = {
+
+            target_engines = {
                 identity
                 for identity, index in self.engine_identity_to_index.items()
-                if index in fault_engine_indices
+                if index not in fault_engine_indices
             }
+        else:
+            target_engines = set(self.engine_identity_to_index.keys())
 
-        method_uuid = self.send_fault_tolerance_instruction(
-            excluded_engines, instruction, timeout, **kwargs
+        method_uuid = broadcast_instruction(
+            self.cmd_socket,
+            target_engines,
+            instruction,
+            timeout,
         )
 
-        execution_result = self.process_instruction_result(
-            excluded_engines, instruction, method_uuid, timeout
+        engine_responses = wait_for_instruction_result(
+            self.cmd_socket, target_engines, instruction, timeout, method_uuid
         )
 
-        if instruction == "retry" and execution_result:
+        # check the execution results
+        all_success = True
+        for engine_id in target_engines:
+            engine_index = self.engine_identity_to_index.get(engine_id, "?")
+            response = engine_responses.get(engine_id)
+
+            if response is None:
+                logger.error(
+                    "EngineCoreGuard[%s] did not respond"
+                    ' to command "%s" within timeout.',
+                    engine_index,
+                    instruction,
+                )
+                all_success = False
+            elif not response.get("success", False):
+                logger.error(
+                    'EngineCoreGuard[%s] failed to execute command "%s" (reason: %s)',
+                    engine_index,
+                    instruction,
+                    response.get("reason", "unknown"),
+                )
+                all_success = False
+
+        if instruction == "retry" and all_success:
             for engine_id, _ in self.engine_status_dict.items():
                 self.engine_status_dict[engine_id] = "Healthy"
             # todo: should we also clear the engine_exception_q here?
-        return execution_result
-
-    def send_fault_tolerance_instruction(
-        self, excluded_engines: set[bytes], instruction: str, timeout: int, **kwargs
-    ) -> str:
-        method_uuid = str(uuid.uuid4())
-        payload = {**kwargs, "timeout": timeout}
-
-        for identity, index in self.engine_identity_to_index.items():
-            if identity in excluded_engines:
-                continue
-
-            serialized_instruction = serialize_method_call(
-                instruction, method_uuid, **payload
-            )
-            self.cmd_socket.send_multipart(
-                [identity, b"", serialized_instruction.encode("utf-8")]
-            )
-        return method_uuid
-
-    def process_instruction_result(
-        self,
-        excluded_engines: set[bytes],
-        instruction: str,
-        method_uuid: str,
-        timeout: int,
-    ):
-        """Wait for all targeted engines to return acknowledgment."""
-
-        expected_engines = {
-            identity
-            for identity in self.engine_identity_to_index
-            if identity not in excluded_engines
-        }
-
-        start = time.monotonic()
-        while expected_engines:
-            remaining = timeout - (time.monotonic() - start)
-            if remaining <= 0:
-                logger.error(
-                    'Timeout waiting for responses of command "%s" from '
-                    "EngineCoreGuard(s): %s",
-                    instruction,
-                    [self.engine_identity_to_index[e] for e in expected_engines],
-                )
-                return False
-
-            try:
-                has_msg, identity, response = recv_router_dealer_message(
-                    self.cmd_socket,
-                    use_poller=True,
-                    poll_timeout=int(remaining) * 1000,
-                )
-                if has_msg:
-                    if isinstance(identity, str):
-                        identity = identity.encode("utf-8")
-
-                    response_dict = json.loads(response)
-                    recv_uuid = response_dict.get("method_uuid")
-                    if recv_uuid != method_uuid:
-                        logger.debug(
-                            "Discarding outdated response from "
-                            "EngineCoreGuard[%s]: expected method_uuid=%s, "
-                            "got %s",
-                            self.engine_identity_to_index.get(identity, "?"),
-                            method_uuid,
-                            recv_uuid,
-                        )
-                        continue
-
-                    engine_id = response_dict.get("engine_index")
-                    success = response_dict.get("success", False)
-
-                    if not success:
-                        logger.error(
-                            'EngineCoreGuard[%s] fail to execute command "%s" '
-                            "with reason: %s",
-                            engine_id,
-                            instruction,
-                            response_dict.get("reason", "unknown"),
-                        )
-                        return False
-
-                    expected_engines.discard(identity)
-
-            except Exception as e:
-                logger.error("Error processing engine response: %s", e)
-                return False
-
-        return True
+        return all_success

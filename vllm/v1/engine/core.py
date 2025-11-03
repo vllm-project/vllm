@@ -153,7 +153,8 @@ class EngineCoreGuard(threading.Thread):  # changed
                     )
                 else:
                     logger.error(
-                        "[EngineCoreGuard] Detected exception %s",
+                        "[EngineCoreGuard] Detected exception %s: %s",
+                        type(engine_exception).__name__,
                         engine_exception,
                     )
                     self.engine_running = False
