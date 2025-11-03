@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import torch.fx as fx
 
@@ -23,15 +24,19 @@ class ConcreteSizeEntry:
 
 
 class PiecewiseBackend:
-
-    def __init__(self, graph: fx.GraphModule, vllm_config: VllmConfig,
-                 piecewise_compile_index: int, total_piecewise_compiles: int,
-                 sym_shape_indices: list[int],
-                 compiled_graph_for_general_shape: Callable,
-                 vllm_backend: VllmBackend):
+    def __init__(
+        self,
+        graph: fx.GraphModule,
+        vllm_config: VllmConfig,
+        piecewise_compile_index: int,
+        total_piecewise_compiles: int,
+        sym_shape_indices: list[int],
+        compiled_graph_for_general_shape: Callable,
+        vllm_backend: VllmBackend,
+    ):
         """
         The backend for piecewise compilation.
-        It mainly handles the compilation of static shapes and 
+        It mainly handles the compilation of static shapes and
         dispatching based on runtime shape.
 
         We will compile `self.graph` once for the general shape,
@@ -46,13 +51,11 @@ class PiecewiseBackend:
         self.vllm_backend = vllm_backend
 
         self.is_first_graph = piecewise_compile_index == 0
-        self.is_last_graph = (
-            piecewise_compile_index == total_piecewise_compiles - 1)
+        self.is_last_graph = piecewise_compile_index == total_piecewise_compiles - 1
 
         self.is_full_graph = total_piecewise_compiles == 1
 
-        self.compile_sizes: set[int] = set(
-            self.compilation_config.compile_sizes)
+        self.compile_sizes: set[int] = set(self.compilation_config.compile_sizes)
 
         self.first_run_finished = False
 
@@ -108,7 +111,8 @@ class PiecewiseBackend:
                 self.compilation_config,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
-                runtime_shape=runtime_shape)
+                runtime_shape=runtime_shape,
+            )
 
             # finished compilations for all required shapes
             if self.is_last_graph and not self.to_be_compiled_sizes:

@@ -8,9 +8,12 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from vllm.multimodal.audio import (AudioMediaIO, AudioResampler,
-                                   resample_audio_librosa,
-                                   resample_audio_scipy)
+from vllm.multimodal.audio import (
+    AudioMediaIO,
+    AudioResampler,
+    resample_audio_librosa,
+    resample_audio_scipy,
+)
 
 
 @pytest.fixture
@@ -21,12 +24,10 @@ def dummy_audio():
 def test_resample_audio_librosa(dummy_audio):
     with patch("vllm.multimodal.audio.librosa.resample") as mock_resample:
         mock_resample.return_value = dummy_audio * 2
-        out = resample_audio_librosa(dummy_audio,
-                                     orig_sr=44100,
-                                     target_sr=22050)
-        mock_resample.assert_called_once_with(dummy_audio,
-                                              orig_sr=44100,
-                                              target_sr=22050)
+        out = resample_audio_librosa(dummy_audio, orig_sr=44100, target_sr=22050)
+        mock_resample.assert_called_once_with(
+            dummy_audio, orig_sr=44100, target_sr=22050
+        )
         assert np.all(out == dummy_audio * 2)
 
 
@@ -40,8 +41,7 @@ def test_resample_audio_scipy(dummy_audio):
     assert np.all(out_same == dummy_audio)
 
 
-@pytest.mark.xfail(
-    reason="resample_audio_scipy is buggy for non-integer ratios")
+@pytest.mark.xfail(reason="resample_audio_scipy is buggy for non-integer ratios")
 def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     out = resample_audio_scipy(dummy_audio, orig_sr=5, target_sr=3)
 
@@ -54,13 +54,12 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
 
 def test_audio_resampler_librosa_calls_resample(dummy_audio):
     resampler = AudioResampler(target_sr=22050, method="librosa")
-    with patch(
-            "vllm.multimodal.audio.resample_audio_librosa") as mock_resample:
+    with patch("vllm.multimodal.audio.resample_audio_librosa") as mock_resample:
         mock_resample.return_value = dummy_audio
         out = resampler.resample(dummy_audio, orig_sr=44100)
-        mock_resample.assert_called_once_with(dummy_audio,
-                                              orig_sr=44100,
-                                              target_sr=22050)
+        mock_resample.assert_called_once_with(
+            dummy_audio, orig_sr=44100, target_sr=22050
+        )
         assert np.all(out == dummy_audio)
 
 
@@ -69,9 +68,9 @@ def test_audio_resampler_scipy_calls_resample(dummy_audio):
     with patch("vllm.multimodal.audio.resample_audio_scipy") as mock_resample:
         mock_resample.return_value = dummy_audio
         out = resampler.resample(dummy_audio, orig_sr=44100)
-        mock_resample.assert_called_once_with(dummy_audio,
-                                              orig_sr=44100,
-                                              target_sr=22050)
+        mock_resample.assert_called_once_with(
+            dummy_audio, orig_sr=44100, target_sr=22050
+        )
         assert np.all(out == dummy_audio)
 
 

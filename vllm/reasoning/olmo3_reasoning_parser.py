@@ -4,15 +4,18 @@
 import dataclasses as dt
 import enum
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import regex as re
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
-                                              DeltaMessage, ResponsesRequest)
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    DeltaMessage,
+    ResponsesRequest,
+)
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -33,8 +36,7 @@ class Indices:
         return self.end - self.start
 
 
-def string_overlap(a: str,
-                   b: str) -> tuple[Optional[Indices], Optional[Indices]]:
+def string_overlap(a: str, b: str) -> tuple[Indices | None, Indices | None]:
     """
     Find the longest overlap where the end of string a matches the start
     of string b.
@@ -88,14 +90,14 @@ class Olmo3ReasoningBuffer:
     # is when we switch to content state.
     state: Olmo3ReasoningState = Olmo3ReasoningState.REASONING
 
-    def process_buffer(self) -> Optional[DeltaMessage]:
+    def process_buffer(self) -> DeltaMessage | None:
         start_think_idx = self.buffer.find(self.think_start)
 
         if start_think_idx >= 0:
             self.state = Olmo3ReasoningState.REASONING
             pretext, self.buffer = (
                 self.buffer[:start_think_idx],
-                self.buffer[start_think_idx + len(self.think_start):],
+                self.buffer[start_think_idx + len(self.think_start) :],
             )
             if start_think_idx > 0:
                 # this covers the case there's content before
@@ -108,7 +110,7 @@ class Olmo3ReasoningBuffer:
             self.state = Olmo3ReasoningState.CONTENT
             pretext, self.buffer = (
                 self.buffer[:end_think_idx],
-                self.buffer[end_think_idx + len(self.think_end):],
+                self.buffer[end_think_idx + len(self.think_end) :],
             )
             if end_think_idx > 0:
                 # this covers the case there's content before
@@ -140,12 +142,12 @@ class Olmo3ReasoningBuffer:
         # is the length of the text buffer
         return len(self.buffer)
 
-    def add_text(self, delta_text: str) -> Optional[DeltaMessage]:
+    def add_text(self, delta_text: str) -> DeltaMessage | None:
         # we start by adding the delta text to the buffer
         self.buffer += delta_text
 
         # setting this to empty before starting
-        delta_message: Optional[DeltaMessage] = None
+        delta_message: DeltaMessage | None = None
 
         # we start by computing the overlap between the delta_text
         # and start/end of think tokens.
@@ -153,12 +155,17 @@ class Olmo3ReasoningBuffer:
         _, overlap_think_end = string_overlap(delta_text, self.think_end)
 
         partial_overlap_start = overlap_think_start is not None and len(
-            overlap_think_start) < len(self.think_start)
+            overlap_think_start
+        ) < len(self.think_start)
         partial_overlap_end = overlap_think_end is not None and len(
-            overlap_think_end) < len(self.think_end)
+            overlap_think_end
+        ) < len(self.think_end)
 
-        if (partial_overlap_start and self.think_start in self.buffer
-                and not partial_overlap_end):
+        if (
+            partial_overlap_start
+            and self.think_start in self.buffer
+            and not partial_overlap_end
+        ):
             # we can only process the buffer if partial overlap
             # is the last part of think token (thus causing
             # text_buffer to contain the start of think token)
@@ -223,12 +230,15 @@ class Olmo3ReasoningParser(ReasoningParser):
         # notice that the first think is optional; this allows template to
         # work in cases when we hardcode a <think> at the beginning of the
         # reasoning template.
-        reasoning_expr = (rf"^(?:{self.think_start})?(?P<reasoning>.*?)" +
-                          rf"{self.think_end}(?P<content>.*)$")
+        reasoning_expr = (
+            rf"^(?:{self.think_start})?(?P<reasoning>.*?)"
+            + rf"{self.think_end}(?P<content>.*)$"
+        )
         self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
 
-        self.buffer = Olmo3ReasoningBuffer(think_start=self.think_start,
-                                           think_end=self.think_end)
+        self.buffer = Olmo3ReasoningBuffer(
+            think_start=self.think_start, think_end=self.think_end
+        )
 
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         text = self.model_tokenizer.decode(input_ids)
@@ -244,8 +254,8 @@ class Olmo3ReasoningParser(ReasoningParser):
     def extract_reasoning_content(
         self,
         model_output: str,
-        request: Union[ChatCompletionRequest, ResponsesRequest],
-    ) -> tuple[Optional[str], Optional[str]]:
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -277,12 +287,11 @@ class Olmo3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """Extract content using token ID sequence state machine"""
 
         delta_message = self.buffer.add_text(delta_text)
-        if (delta_message is None
-                and self.buffer.think_end in self.buffer.buffer):
+        if delta_message is None and self.buffer.think_end in self.buffer.buffer:
             # this is a bit hacky, but, because of how the buffer is
             # constructed, if the last delta_text contains characters that
             # marks the end of thinking tokens, then messages in the buffer

@@ -25,8 +25,8 @@
 
 import collections
 import collections.abc
-from collections.abc import Iterable, Mapping, Sequence
-from typing import Any, Callable, Optional, TypedDict, Union, cast
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import Annotated, Any, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -39,31 +39,42 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItems)
+from vllm.multimodal.inputs import (
+    MultiModalDataDict,
+    MultiModalFieldConfig,
+    MultiModalKwargsItems,
+)
 from vllm.multimodal.parse import MultiModalDataItems, MultiModalDataParser
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        BaseProcessingInfo, PromptReplacement,
-                                        PromptUpdate, PromptUpdateDetails)
+from vllm.multimodal.processing import (
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.midashenglm import DashengConfig
+from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
-_Tuple2 = Union[int, tuple[int, int], Sequence[int]]
+_Tuple2: TypeAlias = int | tuple[int, int] | Sequence[int]
 
 
 def _resolve_tuple2(x: _Tuple2) -> tuple[int, int]:
     if isinstance(x, collections.abc.Sequence):
         assert len(x) == 2, (
-            f"Expected a sequence of length 2, got {x} with length {len(x)}")
+            f"Expected a sequence of length 2, got {x} with length {len(x)}"
+        )
         return cast(tuple[int, int], tuple(x))
     return (x, x)
 
@@ -80,12 +91,14 @@ def calculate_mel_frames_dasheng(
     if center:
         audio_length_samples = audio_length_samples + n_fft
 
-    return (int(1 + ((audio_length_samples - n_fft) / hop_size)) //
-            dasheng_subsampling // model_subsampling)
+    return (
+        int(1 + ((audio_length_samples - n_fft) / hop_size))
+        // dasheng_subsampling
+        // model_subsampling
+    )
 
 
 class AudioPatchEmbed(nn.Module):
-
     def __init__(
         self,
         input_size: _Tuple2 = 64,
@@ -93,7 +106,7 @@ class AudioPatchEmbed(nn.Module):
         patch_stride: _Tuple2 = 16,
         in_chans: int = 1,
         embed_dim: int = 768,
-        norm_layer: Optional[Callable] = None,
+        norm_layer: Callable | None = None,
         flatten: bool = False,
     ):
         super().__init__()
@@ -118,14 +131,14 @@ class AudioPatchEmbed(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
         if self.flatten:
-            x = torch.permute(torch.flatten(
-                x, 2, 3), (0, 2, 1))  # rearrange(x, "b c f t -> b (f t) c")
+            x = torch.permute(
+                torch.flatten(x, 2, 3), (0, 2, 1)
+            )  # rearrange(x, "b c f t -> b (f t) c")
         x = self.norm(x)
         return x
 
 
 class LayerScale(nn.Module):
-
     def __init__(self, dim, init_values=1e-5, inplace=False):
         super().__init__()
         self.inplace = inplace
@@ -136,13 +149,12 @@ class LayerScale(nn.Module):
 
 
 class DashengMlp(nn.Module):
-
     def __init__(
         self,
         in_features: int,
-        hidden_features: Optional[int] = None,
-        out_features: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -170,13 +182,12 @@ class DashengMlp(nn.Module):
 
 
 class DashengAttention(nn.Module):
-
     def __init__(
         self,
         dim: int,
         num_heads: int = 8,
         qkv_bias: bool = False,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -216,7 +227,7 @@ class DashengAttention(nn.Module):
             prefix=f"{prefix}.proj",
         )
 
-    def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
         B, N, C = x.shape
 
         qkv, _ = self.qkv(x)
@@ -237,15 +248,14 @@ class DashengAttention(nn.Module):
 
 
 class DashengBlock(nn.Module):
-
     def __init__(
         self,
         dim: int,
         num_heads: int,
         mlp_ratio: float = 4.0,
         qkv_bias: bool = False,
-        init_values: Optional[float] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        init_values: float | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -257,8 +267,9 @@ class DashengBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
-        self.ls1 = (LayerScale(dim, init_values=init_values)
-                    if init_values else nn.Identity())
+        self.ls1 = (
+            LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        )
 
         self.norm2 = nn.LayerNorm(dim, eps=1e-6)
         self.mlp = DashengMlp(
@@ -267,14 +278,15 @@ class DashengBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        self.ls2 = (LayerScale(dim, init_values=init_values)
-                    if init_values else nn.Identity())
+        self.ls2 = (
+            LayerScale(dim, init_values=init_values) if init_values else nn.Identity()
+        )
 
     # Kwargs usually has a mask parameter that is passed to Attention
     def forward(
         self,
         x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.ls1(self.attn(self.norm1(x), mask))
         x = x + self.ls2(self.mlp(self.norm2(x)))
@@ -282,7 +294,6 @@ class DashengBlock(nn.Module):
 
 
 class DashengFrontend(nn.Module):
-
     def __init__(self, config: DashengConfig):
         super().__init__()
         self.config = config
@@ -302,9 +313,7 @@ class DashengFrontend(nn.Module):
             n_mels=self.config.n_mels,
             sample_rate=self.config.sample_rate,
         )
-        self.register_buffer("melscale_fbanks",
-                             melscale_fbanks,
-                             persistent=False)
+        self.register_buffer("melscale_fbanks", melscale_fbanks, persistent=False)
         self.melscale_fbanks: torch.Tensor
 
     def forward(self, waveform: torch.Tensor) -> torch.Tensor:
@@ -319,8 +328,7 @@ class DashengFrontend(nn.Module):
             normalized=False,
             center=self.config.center,
         )
-        mel_spectrogram = (
-            spectrogram.mT @ self.melscale_fbanks.to(torch.float32)).mT
+        mel_spectrogram = (spectrogram.mT @ self.melscale_fbanks.to(torch.float32)).mT
         # x has shape [batch, freq, time].
         # F.amplitude_to_DB accepts inputs shaped as:
         #   - [freq, time]
@@ -339,11 +347,10 @@ class DashengFrontend(nn.Module):
 
 
 class DashengAudioTransformer(nn.Module):
-
     def __init__(
         self,
         config: DashengConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -365,9 +372,11 @@ class DashengAudioTransformer(nn.Module):
         )
 
         self.time_pos_embed = nn.Parameter(
-            torch.empty(1, config.embed_dim, 1, self.patch_embed.grid_size[1]))
+            torch.empty(1, config.embed_dim, 1, self.patch_embed.grid_size[1])
+        )
         self.freq_pos_embed = nn.Parameter(
-            torch.empty(1, config.embed_dim, self.patch_embed.grid_size[0], 1))
+            torch.empty(1, config.embed_dim, self.patch_embed.grid_size[0], 1)
+        )
         self.blocks = nn.ModuleList(
             DashengBlock(
                 dim=config.embed_dim,
@@ -377,20 +386,24 @@ class DashengAudioTransformer(nn.Module):
                 init_values=config.init_values,
                 quant_config=quant_config,
                 prefix=f"{prefix}.blocks.{i}",
-            ) for i in range(config.depth))
+            )
+            for i in range(config.depth)
+        )
         self.norm = nn.LayerNorm(config.embed_dim, eps=1e-6)
 
     def forward_features(
         self,
         x: torch.Tensor,
-        mask: Optional[torch.Tensor] = None,
+        mask: torch.Tensor | None = None,
     ) -> torch.Tensor:
         t = x.shape[-1]
         x = x + self.time_pos_embed[:, :, :, :t]
-        x = (x + self.freq_pos_embed[:, :, :, :]
-             )  # Just to support __getitem__ in posembed
-        x = torch.permute(torch.flatten(x, 2, 3),
-                          (0, 2, 1))  # rearrange(x, "b c f t -> b (f t) c")
+        x = (
+            x + self.freq_pos_embed[:, :, :, :]
+        )  # Just to support __getitem__ in posembed
+        x = torch.permute(
+            torch.flatten(x, 2, 3), (0, 2, 1)
+        )  # rearrange(x, "b c f t -> b (f t) c")
         for block in self.blocks:
             x = block(x, mask)
         x = self.norm(x)
@@ -406,8 +419,8 @@ class DashengAudioTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        x_length: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        x_length: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         x = self.front_end(x)
         x = x.to(self.time_pos_embed.dtype)
         target_length_in_patches = self.target_length // 4
@@ -423,7 +436,8 @@ class DashengAudioTransformer(nn.Module):
 
         if x_length is not None:
             assert len(x_length) == len(x), (
-                "batchsizes of input x and x_length need to be same")
+                "batchsizes of input x and x_length need to be same"
+            )
             assert x_length.ndim == 1, "Lengths are of size (B,)"
             scaled_lengths = (x_length / (self.hop_length * 4)).long()
             mask = self._to_mask(max_length=t, lengths=scaled_lengths)
@@ -444,14 +458,13 @@ class DashengAudioTransformer(nn.Module):
 
 
 class AudioProjectorSubsample(nn.Module):
-
     def __init__(
         self,
         in_dim: int,
         out_dim: int,
         downsample_rate=5,
-        dtype: Optional[torch.dtype] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        dtype: torch.dtype | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -483,27 +496,32 @@ class AudioProjectorSubsample(nn.Module):
                 mask = mask[:, :-num_frames_to_discard]
         if mask is None:
             mask = torch.ones(x.shape[:-1], dtype=torch.long, device=x.device)
-        x = x.reshape(batch_size, -1, self.k *
-                      dim)  # rearrange(x, "b (s k) d -> b s (k d)", k=self.k)
+        x = x.reshape(
+            batch_size, -1, self.k * dim
+        )  # rearrange(x, "b (s k) d -> b s (k d)", k=self.k)
         for layer in self.net:
             x = layer(x)
         mask = mask.reshape(
-            batch_size, -1,
-            self.k)  # rearrange(mask, "b (s k) -> b s k", k=self.k)
+            batch_size, -1, self.k
+        )  # rearrange(mask, "b (s k) -> b s k", k=self.k)
         mask = mask.any(dim=-1).long()
         return x, mask
 
 
 # === Audio Inputs === #
-class MiDashengLMAudioInputs(TypedDict):
-    input_values: torch.Tensor
-    """Shape: `(num_audios, num_sampling_points)`"""
-    audio_length: torch.Tensor
-    """Shape: `(num_audios, 1)`"""
+class MiDashengLMAudioInputs(TensorSchema):
+    """
+
+    Dimensions:
+        - bn: Batch size * number of audios
+        - p: Number of sampling points
+    """
+
+    input_values: Annotated[torch.Tensor, TensorShape("n", "p")]
+    audio_length: Annotated[torch.Tensor, TensorShape("n")]
 
 
 class MiDashengLMProcessingInfo(BaseProcessingInfo):
-
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
@@ -512,7 +530,7 @@ class MiDashengLMProcessingInfo(BaseProcessingInfo):
         feature_extractor = hf_processor.feature_extractor
         return feature_extractor
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
     def get_min_audio_len(self):
@@ -522,9 +540,7 @@ class MiDashengLMProcessingInfo(BaseProcessingInfo):
         return 160000
 
 
-class MiDashengLMDummyInputsBuilder(
-        BaseDummyInputsBuilder[MiDashengLMProcessingInfo]):
-
+class MiDashengLMDummyInputsBuilder(BaseDummyInputsBuilder[MiDashengLMProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_audios = mm_counts.get("audio", 0)
 
@@ -540,23 +556,24 @@ class MiDashengLMDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
         audio_overrides = mm_options.get("audio") if mm_options else None
 
         return {
-            "audio":
-            self._get_dummy_audios(length=self.info.get_max_audio_len(),
-                                   num_audios=num_audios,
-                                   overrides=audio_overrides)
+            "audio": self._get_dummy_audios(
+                length=self.info.get_max_audio_len(),
+                num_audios=num_audios,
+                overrides=audio_overrides,
+            )
         }
 
 
 class MiDashengLMMultiModalProcessor(
-        BaseMultiModalProcessor[MiDashengLMProcessingInfo]):
-
+    BaseMultiModalProcessor[MiDashengLMProcessingInfo]
+):
     def _get_data_parser(self) -> MultiModalDataParser:
         feature_extractor = self.info.get_feature_extractor()
         return MultiModalDataParser(target_sr=feature_extractor.sampling_rate)
@@ -578,8 +595,10 @@ class MiDashengLMMultiModalProcessor(
                 (0, min_audio_len - audio.shape[-1]),
                 mode="constant",
                 constant_values=0,
-            ) if isinstance(audio, np.ndarray)
-            and audio.shape[-1] < min_audio_len else audio for audio in audios
+            )
+            if isinstance(audio, np.ndarray) and audio.shape[-1] < min_audio_len
+            else audio
+            for audio in audios
         ]
 
         if processed_audios:
@@ -590,7 +609,9 @@ class MiDashengLMMultiModalProcessor(
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
-        mm_kwargs = dict(**mm_kwargs, )
+        mm_kwargs = dict(
+            **mm_kwargs,
+        )
 
         return super()._call_hf_processor(
             prompt=prompt,
@@ -627,11 +648,13 @@ class MiDashengLMMultiModalProcessor(
         if audio_length is None:
             audio_output_lengths = []
         else:
-            audio_length_np = (audio_length.cpu().numpy() if isinstance(
-                audio_length, torch.Tensor) else audio_length)
+            audio_length_np = (
+                audio_length.cpu().numpy()
+                if isinstance(audio_length, torch.Tensor)
+                else audio_length
+            )
             audio_output_lengths = [
-                max(1, calculate_mel_frames_dasheng(
-                    int(length)))  # at least one frame
+                max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
                 for length in audio_length_np
             ]
 
@@ -659,6 +682,8 @@ class MiDashengLMMultiModalProcessor(
     dummy_inputs=MiDashengLMDummyInputsBuilder,
 )
 class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -672,7 +697,7 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
     }
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
             return "<|audio_bos|><|AUDIO|><|audio_eos|>"
 
@@ -708,42 +733,23 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.quant_config = quant_config
         self.make_empty_intermediate_tensors = (
-            self.decoder.make_empty_intermediate_tensors)
-
-    def _validate_and_reshape_mm_tensor(self, mm_input: object,
-                                        name: str) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(
-                f"Incorrect type of {name}. Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            return mm_input.reshape(-1, *mm_input.shape[2:])
-
-        if name == "input_values":
-            max_length = max(tensor.shape[1] for tensor in mm_input)
-            padded_mm_input = [
-                torch.nn.functional.pad(tensor,
-                                        (0, max_length - tensor.shape[1]))
-                if tensor.shape[1] < max_length else tensor
-                for tensor in mm_input
-            ]
-            return torch.concat(padded_mm_input)
-
-        return torch.concat(mm_input)
+            self.decoder.make_empty_intermediate_tensors
+        )
 
     def _parse_and_validate_audio_input(
-            self, **kwargs: object) -> Optional[MiDashengLMAudioInputs]:
+        self, **kwargs: object
+    ) -> MiDashengLMAudioInputs | None:
         input_values = kwargs.pop("input_values", None)
         audio_length = kwargs.pop("audio_length", None)
 
         if input_values is None:
             return None
-        input_values = self._validate_and_reshape_mm_tensor(
-            input_values, "input_values")
-        audio_length = self._validate_and_reshape_mm_tensor(
-            audio_length, "audio_length")
-        if not isinstance(input_values, (torch.Tensor, list)):
-            raise ValueError("Incorrect type of audio input features. "
-                             f"Got type: {type(input_values)}")
+
+        if isinstance(input_values, list):
+            input_values = torch.nn.utils.rnn.pad_sequence(
+                input_values,
+                batch_first=True,
+            )
 
         return MiDashengLMAudioInputs(
             input_values=input_values,
@@ -751,45 +757,41 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
     def _process_audio_input(
-            self, audio_input: MiDashengLMAudioInputs) -> torch.Tensor:
+        self,
+        audio_input: MiDashengLMAudioInputs,
+    ) -> tuple[torch.Tensor, ...]:
         # Process audio through encoder and projector
         input_values = audio_input["input_values"]
         audio_length = audio_input["audio_length"]
 
-        encoder_out, encoder_atts = self.audio_encoder(input_values,
-                                                       audio_length)
+        encoder_out, encoder_atts = self.audio_encoder(input_values, audio_length)
         audio_embeddings, _ = self.audio_projector(encoder_out, encoder_atts)
-        audio_embeddings = audio_embeddings.to(
-            audio_input["input_values"].dtype)
+        audio_embeddings = audio_embeddings.to(audio_input["input_values"].dtype)
         batch_size, max_audio_tokens, embed_dim = audio_embeddings.shape
 
-        audio_length_np = (audio_length.cpu().numpy() if isinstance(
-            audio_length, torch.Tensor) else audio_length)
         audio_output_lengths = [
-            max(1, calculate_mel_frames_dasheng(
-                int(length)))  # at least one frame
-            for length in audio_length_np
+            max(1, calculate_mel_frames_dasheng(int(length)))  # at least one frame
+            for length in audio_length.tolist()
         ]
-        audio_output_lengths = torch.tensor(audio_output_lengths).to(
-            audio_embeddings.device)
+        audio_output_lengths = torch.tensor(
+            audio_output_lengths,
+            device=audio_embeddings.device,
+        )
 
         audio_feature_mask = torch.arange(
-            max_audio_tokens,
-            device=audio_embeddings.device).unsqueeze(0).expand(
-                batch_size,
-                max_audio_tokens) < audio_output_lengths.unsqueeze(1)
+            max_audio_tokens, device=audio_embeddings.device
+        ).unsqueeze(0).expand(
+            batch_size, max_audio_tokens
+        ) < audio_output_lengths.unsqueeze(1)
 
-        masked_audio_features = audio_embeddings[audio_feature_mask].view(
-            -1, embed_dim)
+        masked_audio_features = audio_embeddings[audio_feature_mask].view(-1, embed_dim)
 
-        return torch.split(masked_audio_features,
-                           audio_output_lengths.tolist())
+        return torch.split(masked_audio_features, audio_output_lengths.tolist())
 
     def get_language_model(self) -> torch.nn.Module:
         return self.decoder
 
-    def get_multimodal_embeddings(self,
-                                  **kwargs: object) -> MultiModalEmbeddings:
+    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
 
         if audio_input is None:
@@ -800,20 +802,12 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
-        elif inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
-                input_ids,
-                multimodal_embeddings,
-                is_multimodal=input_ids == self.config.audio_token_id,
-            )
-            input_ids = None
 
         return self.decoder.model(
             input_ids,
@@ -825,10 +819,9 @@ class MiDashengLMModel(nn.Module, SupportsMultiModal, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.decoder.compute_logits(hidden_states)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)

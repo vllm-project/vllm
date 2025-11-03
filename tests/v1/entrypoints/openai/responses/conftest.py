@@ -6,7 +6,7 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 
 # Use a small reasoning model to test the responses API.
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen3-1.7B"
 
 
 @pytest.fixture(scope="module")
@@ -23,9 +23,9 @@ def default_server_args():
 @pytest.fixture(scope="module")
 def server_with_store(default_server_args):
     with RemoteOpenAIServer(
-            MODEL_NAME,
-            default_server_args,
-            env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1"},
+        MODEL_NAME,
+        default_server_args,
+        env_dict={"VLLM_ENABLE_RESPONSES_API_STORE": "1"},
     ) as remote_server:
         yield remote_server
 

@@ -98,7 +98,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: avg(vllm:gpu_cache_usage_perc{namespace="$NS",service="$SVC"}) or vector(0)
+                  query: avg(vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) or vector(0)
                   minStep: "15s"
 
     core_running_ts:
@@ -168,7 +168,7 @@ spec:
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
                   # multiply by 100 to present percentage; omit format.unit to avoid schema conflicts
-                  query: (avg(vllm:gpu_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  query: (avg(vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
                   minStep: "15s"
 
     core_kv_usage_pct_ts:
@@ -187,7 +187,7 @@ spec:
                 kind: PrometheusTimeSeriesQuery
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
-                  query: (avg by (service) (vllm:gpu_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  query: (avg by (service) (vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
                   minStep: "15s"
 
     # --- Per-Pod breakdowns (works on Simulator & Real) ---
@@ -246,7 +246,7 @@ spec:
                 spec:
                   datasource: { kind: PrometheusDatasource, name: accelerators-thanos-querier-datasource }
                   # if your exporter labels kv metric with pod (the sim does), this works; otherwise it will just return empty
-                  query: (avg by (pod) (vllm:gpu_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
+                  query: (avg by (pod) (vllm:kv_cache_usage_perc{namespace="$NS",service="$SVC"}) * 100) or vector(0)
                   minStep: "15s"
 
     # --- Real vLLM only (zeros on simulator) ---

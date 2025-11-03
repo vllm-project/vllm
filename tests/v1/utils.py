@@ -9,10 +9,9 @@ from tests.utils import RemoteOpenAIServer
 # Prometheus metrics utilities for testing
 
 
-def get_prometheus_metrics(
-        server: RemoteOpenAIServer) -> dict[str, dict[str, float]]:
+def get_prometheus_metrics(server: RemoteOpenAIServer) -> dict[str, dict[str, float]]:
     """Fetch and parse Prometheus metrics from the /metrics endpoint.
-    
+
     Returns:
         Dict mapping metric names to their values grouped by labels.
         For example: {"vllm:request_success": {
@@ -27,14 +26,14 @@ def get_prometheus_metrics(
 
         # Regex patterns for Prometheus metrics
         metric_with_labels = re.compile(
-            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([\d\.\-\+e]+)$')
-        metric_simple = re.compile(
-            r'^([a-zA-Z_:][a-zA-Z0-9_:]*)\s+([\d\.\-\+e]+)$')
+            r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\{([^}]*)\}\s+([\d\.\-\+e]+)$"
+        )
+        metric_simple = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)\s+([\d\.\-\+e]+)$")
 
-        for line in response.text.split('\n'):
+        for line in response.text.split("\n"):
             line = line.strip()
             # Skip comments and empty lines
-            if not line or line.startswith('#'):
+            if not line or line.startswith("#"):
                 continue
 
             # Try to match metric with labels first
@@ -45,7 +44,7 @@ def get_prometheus_metrics(
                     value = float(value_str)
                     if metric_name not in metrics:
                         metrics[metric_name] = {}
-                    metrics[metric_name][f'{{{labels_part}}}'] = value
+                    metrics[metric_name][f"{{{labels_part}}}"] = value
                 except ValueError:
                     continue
             else:
@@ -57,7 +56,7 @@ def get_prometheus_metrics(
                         value = float(value_str)
                         if metric_name not in metrics:
                             metrics[metric_name] = {}
-                        metrics[metric_name][''] = value
+                        metrics[metric_name][""] = value
                     except ValueError:
                         continue
 
@@ -67,10 +66,9 @@ def get_prometheus_metrics(
         return {}
 
 
-def get_engine_request_counts(
-        metrics: dict[str, dict[str, float]]) -> dict[str, float]:
+def get_engine_request_counts(metrics: dict[str, dict[str, float]]) -> dict[str, float]:
     """Extract request counts per engine from Prometheus metrics.
-    
+
     Returns:
         Dict mapping engine indices to request counts.
         For example: {"0": 15.0, "1": 12.0}
@@ -95,7 +93,7 @@ def get_engine_request_counts(
 
 def check_request_balancing(server: RemoteOpenAIServer, dp_size: int):
     """Check request balancing via Prometheus metrics if dp_size > 1.
-    
+
     Args:
         server: The RemoteOpenAIServer instance
         dp_size: Number of data parallel ranks
@@ -114,7 +112,8 @@ def check_request_balancing(server: RemoteOpenAIServer, dp_size: int):
     assert len(engines_with_requests) == dp_size, (
         f"Expected requests to be distributed across multiple engines,"
         f" but only engine(s) {engines_with_requests} received "
-        f"requests. Engine counts: {engine_counts}")
+        f"requests. Engine counts: {engine_counts}"
+    )
 
     # Verify that the load is reasonably balanced
     # (no engine should handle all requests)
@@ -122,4 +121,5 @@ def check_request_balancing(server: RemoteOpenAIServer, dp_size: int):
 
     for count in engine_counts.values():
         assert count > total_requests // (dp_size + 1), (
-            f"requests are imbalanced: {engine_counts}")
+            f"requests are imbalanced: {engine_counts}"
+        )

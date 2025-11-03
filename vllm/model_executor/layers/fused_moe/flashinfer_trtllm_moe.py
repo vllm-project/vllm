@@ -1,37 +1,38 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import List  # noqa: UP035
-from typing import Optional
 
 import torch
 
-from vllm.model_executor.layers.fused_moe.utils import (
-    moe_kernel_quantize_input)
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    calculate_tile_tokens_dim)
+    calculate_tile_tokens_dim,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    per_token_group_quant_fp8)
-from vllm.utils import direct_register_custom_op
+    per_token_group_quant_fp8,
+)
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def flashinfer_fused_moe_blockscale_fp8(
-        routing_logits: torch.Tensor,
-        routing_bias: torch.Tensor,
-        x: torch.Tensor,
-        w13_weight: torch.Tensor,
-        w13_weight_scale_inv: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w2_weight_scale_inv: torch.Tensor,
-        global_num_experts: int,
-        top_k: int,
-        num_expert_group: int,
-        topk_group: int,
-        intermediate_size: int,
-        expert_offset: int,
-        local_num_experts: int,
-        block_shape: List[int],  #noqa: UP006
-        routed_scaling: float = 1.0) -> torch.Tensor:
+    routing_logits: torch.Tensor,
+    routing_bias: torch.Tensor,
+    x: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w13_weight_scale_inv: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_weight_scale_inv: torch.Tensor,
+    global_num_experts: int,
+    top_k: int,
+    num_expert_group: int,
+    topk_group: int,
+    intermediate_size: int,
+    expert_offset: int,
+    local_num_experts: int,
+    block_shape: list[int],
+    routed_scaling: float = 1.0,
+) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
+
     assert top_k <= global_num_experts
     assert top_k <= 8
     assert topk_group <= 4
@@ -63,30 +64,32 @@ def flashinfer_fused_moe_blockscale_fp8(
         local_expert_offset=expert_offset,
         local_num_experts=local_num_experts,
         routed_scaling_factor=routed_scaling,
-        tile_tokens_dim=calculate_tile_tokens_dim(x.shape[0], top_k,
-                                                  global_num_experts),
+        tile_tokens_dim=calculate_tile_tokens_dim(
+            x.shape[0], top_k, global_num_experts
+        ),
         routing_method_type=2,  # DeepSeek-styled routing method
         use_shuffled_weight=False,
     )
 
 
 def flashinfer_fused_moe_blockscale_fp8_fake(
-        routing_logits: torch.Tensor,
-        routing_bias: torch.Tensor,
-        x: torch.Tensor,
-        w13_weight: torch.Tensor,
-        w13_weight_scale_inv: torch.Tensor,
-        w2_weight: torch.Tensor,
-        w2_weight_scale_inv: torch.Tensor,
-        global_num_experts: int,
-        top_k: int,
-        num_expert_group: int,
-        topk_group: int,
-        intermediate_size: int,
-        expert_offset: int,
-        local_num_experts: int,
-        block_shape: list[int],
-        routed_scaling: float = 1.0) -> torch.Tensor:
+    routing_logits: torch.Tensor,
+    routing_bias: torch.Tensor,
+    x: torch.Tensor,
+    w13_weight: torch.Tensor,
+    w13_weight_scale_inv: torch.Tensor,
+    w2_weight: torch.Tensor,
+    w2_weight_scale_inv: torch.Tensor,
+    global_num_experts: int,
+    top_k: int,
+    num_expert_group: int,
+    topk_group: int,
+    intermediate_size: int,
+    expert_offset: int,
+    local_num_experts: int,
+    block_shape: list[int],
+    routed_scaling: float = 1.0,
+) -> torch.Tensor:
     return torch.empty_like(x)
 
 
@@ -95,30 +98,31 @@ direct_register_custom_op(
     op_name="flashinfer_fused_moe_blockscale_fp8",
     op_func=flashinfer_fused_moe_blockscale_fp8,
     fake_impl=flashinfer_fused_moe_blockscale_fp8_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
+    tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
 
 def flashinfer_fused_moe_per_tensor_scale_fp8(
-        routing_logits: torch.Tensor,
-        routing_bias: Optional[torch.Tensor],
-        hidden_states: torch.Tensor,
-        input_scale: torch.Tensor,
-        gemm1_weights: torch.Tensor,
-        gemm2_weights: torch.Tensor,
-        output1_scales_scalar: torch.Tensor,
-        output1_scales_gate_scalar: torch.Tensor,
-        output2_scales_scalar: torch.Tensor,
-        num_experts: int,
-        top_k: int,
-        num_expert_group: Optional[int],
-        topk_group: Optional[int],
-        intermediate_size: int,
-        local_expert_offset: int,
-        local_num_experts: int,
-        use_routing_scales_on_input: bool,
-        routing_method_type: int,
-        routed_scaling_factor: float = 1.0) -> torch.Tensor:
+    routing_logits: torch.Tensor,
+    routing_bias: torch.Tensor | None,
+    hidden_states: torch.Tensor,
+    input_scale: torch.Tensor,
+    gemm1_weights: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    output1_scales_scalar: torch.Tensor,
+    output1_scales_gate_scalar: torch.Tensor,
+    output2_scales_scalar: torch.Tensor,
+    num_experts: int,
+    top_k: int,
+    num_expert_group: int | None,
+    topk_group: int | None,
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    use_routing_scales_on_input: bool,
+    routing_method_type: int,
+    routed_scaling_factor: float = 1.0,
+) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
 
@@ -126,10 +130,11 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
         hidden_states,
         input_scale,
         quant_dtype=torch.float8_e4m3fn,
-        per_act_token_quant=False)
+        per_act_token_quant=False,
+    )
 
-    from vllm.utils.flashinfer import (
-        flashinfer_trtllm_fp8_per_tensor_scale_moe)
+    from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
+
     return flashinfer_trtllm_fp8_per_tensor_scale_moe(
         routing_logits=routing_logits,
         routing_bias=routing_bias,
@@ -148,31 +153,34 @@ def flashinfer_fused_moe_per_tensor_scale_fp8(
         local_num_experts=local_num_experts,
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
-        tile_tokens_dim=calculate_tile_tokens_dim(hidden_states.shape[0],
-                                                  top_k, num_experts),
-        routing_method_type=routing_method_type)
+        tile_tokens_dim=calculate_tile_tokens_dim(
+            hidden_states.shape[0], top_k, num_experts
+        ),
+        routing_method_type=routing_method_type,
+    )
 
 
 def flashinfer_fused_moe_per_tensor_scale_fp8_fake(
-        routing_logits: torch.Tensor,
-        routing_bias: Optional[torch.Tensor],
-        hidden_states: torch.Tensor,
-        input_scale: torch.Tensor,
-        gemm1_weights: torch.Tensor,
-        gemm2_weights: torch.Tensor,
-        output1_scales_scalar: torch.Tensor,
-        output1_scales_gate_scalar: torch.Tensor,
-        output2_scales_scalar: torch.Tensor,
-        num_experts: int,
-        top_k: int,
-        num_expert_group: Optional[int],
-        topk_group: Optional[int],
-        intermediate_size: int,
-        local_expert_offset: int,
-        local_num_experts: int,
-        use_routing_scales_on_input: bool,
-        routing_method_type: int,
-        routed_scaling_factor: float = 1.0) -> torch.Tensor:
+    routing_logits: torch.Tensor,
+    routing_bias: torch.Tensor | None,
+    hidden_states: torch.Tensor,
+    input_scale: torch.Tensor,
+    gemm1_weights: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    output1_scales_scalar: torch.Tensor,
+    output1_scales_gate_scalar: torch.Tensor,
+    output2_scales_scalar: torch.Tensor,
+    num_experts: int,
+    top_k: int,
+    num_expert_group: int | None,
+    topk_group: int | None,
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    use_routing_scales_on_input: bool,
+    routing_method_type: int,
+    routed_scaling_factor: float = 1.0,
+) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
 
@@ -182,5 +190,5 @@ direct_register_custom_op(
     op_func=flashinfer_fused_moe_per_tensor_scale_fp8,
     mutates_args=["hidden_states"],
     fake_impl=flashinfer_fused_moe_per_tensor_scale_fp8_fake,
-    tags=(torch.Tag.needs_fixed_stride_order, ),
+    tags=(torch.Tag.needs_fixed_stride_order,),
 )

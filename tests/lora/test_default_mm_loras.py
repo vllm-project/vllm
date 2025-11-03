@@ -30,17 +30,15 @@ VLLM_RUNNER_BASE_KWARGS = {
     "enable_lora": "True",
     "max_num_seqs": 2,
     "max_lora_rank": 320,
-    "max_model_len": 12800,
+    # Keep these LoRA tests on short-RoPE for determinism post-LongRoPE change.
+    "max_model_len": 4096,
     "gpu_memory_utilization": 0.8,
-    "limit_mm_per_prompt": {
-        "audio": 1
-    },
+    "limit_mm_per_prompt": {"audio": 1},
     "enforce_eager": True,
 }
 
 
-def run_test(vllm_runner, audio_assets, lora_request, expected_suffix,
-             **kwargs):
+def run_test(vllm_runner, audio_assets, lora_request, expected_suffix, **kwargs):
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
 
     # Apply any additional kwargs as overrides to the base kwargs
@@ -53,11 +51,11 @@ def run_test(vllm_runner, audio_assets, lora_request, expected_suffix,
                 max_tokens=128,
                 audios=audios,
                 lora_request=lora_request,
-            ) for prompts, audios in inputs
+            )
+            for prompts, audios in inputs
         ]
 
-        assert vllm_outputs_with_default_lora[-1][-1][-1].endswith(
-            expected_suffix)
+        assert vllm_outputs_with_default_lora[-1][-1][-1].endswith(expected_suffix)
 
 
 def test_active_default_mm_lora(

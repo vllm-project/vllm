@@ -16,8 +16,7 @@
 # limitations under the License.
 """Qwen3-Next model configuration"""
 
-from transformers.configuration_utils import (PretrainedConfig,
-                                              layer_type_validation)
+from transformers.configuration_utils import PretrainedConfig, layer_type_validation
 from transformers.modeling_rope_utils import rope_config_validation
 from transformers.utils import logging
 

@@ -13,34 +13,29 @@ FLASHINFER_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 if not current_platform.has_device_capability(100):
     pytest.skip(
         reason="FlashInfer MLA Requires compute capability of 10 or above.",
-        allow_module_level=True)
+        allow_module_level=True,
+    )
 
 
 def ref_mla(
-        out: Tensor,  # (bs, num_heads, v_head_dim)
-        query: Tensor,  # (bs, num_heads, head_dim)
-        kv_cache: Tensor,  # (num_blocks, block_size, head_dim)
-        scale: float,
-        block_tables: Tensor,  # (bs, max_num_blocks)
-        seq_lens: Tensor,  # (bs,)
+    out: Tensor,  # (bs, num_heads, v_head_dim)
+    query: Tensor,  # (bs, num_heads, head_dim)
+    kv_cache: Tensor,  # (num_blocks, block_size, head_dim)
+    scale: float,
+    block_tables: Tensor,  # (bs, max_num_blocks)
+    seq_lens: Tensor,  # (bs,)
 ):
     bs, num_heads, v_head_dim = out.shape
     head_dim = query.shape[2]
 
     for i in range(bs):
         # gather and flatten KV-cache
-        kv = kv_cache[
-            block_tables[i]]  # (max_num_blocks, block_size, head_dim)
-        kv = kv.view(1, -1,
-                     head_dim)[:, :seq_lens[i]]  # (1, seq_len, head_dim)
+        kv = kv_cache[block_tables[i]]  # (max_num_blocks, block_size, head_dim)
+        kv = kv.view(1, -1, head_dim)[:, : seq_lens[i]]  # (1, seq_len, head_dim)
         v = kv[:, :, :v_head_dim]
 
         q = query[i].view(num_heads, 1, head_dim)
-        o = F.scaled_dot_product_attention(q,
-                                           kv,
-                                           v,
-                                           scale=scale,
-                                           enable_gqa=True)
+        o = F.scaled_dot_product_attention(q, kv, v, scale=scale, enable_gqa=True)
         out[i] = o.view(num_heads, v_head_dim)
 
     return out
@@ -50,7 +45,7 @@ def ref_mla(
 @pytest.mark.parametrize("bs", [1, 2, 4, 16])
 @pytest.mark.parametrize("block_size", [32, 64])
 def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
-    torch.set_default_device('cuda')
+    torch.set_default_device("cuda")
     torch.manual_seed(42)
 
     # Deepseek R1 config
@@ -59,11 +54,11 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     qk_nope_head_dim = 128
     qk_rope_head_dim = 64
     qk_head_dim = kv_lora_rank + qk_rope_head_dim
-    scale = (qk_nope_head_dim + qk_rope_head_dim)**-0.5
+    scale = (qk_nope_head_dim + qk_rope_head_dim) ** -0.5
 
     MAX_SEQ_LEN = 1024
 
-    seq_lens = [torch.randint(2, MAX_SEQ_LEN, (1, )).item() for _ in range(bs)]
+    seq_lens = [torch.randint(2, MAX_SEQ_LEN, (1,)).item() for _ in range(bs)]
     seq_lens[-1] = MAX_SEQ_LEN
     max_seq_len = max(seq_lens)
     seq_lens_tensor = torch.tensor(seq_lens, dtype=torch.int32)
@@ -86,12 +81,12 @@ def test_flashinfer_mla_decode(dtype: torch.dtype, bs: int, block_size: int):
     block_id = 0
     for i in range(bs):
         num_blocks_needed = blocks_per_seq[i]
-        block_tables[i, :num_blocks_needed] = all_block_ids[block_id:block_id +
-                                                            num_blocks_needed]
+        block_tables[i, :num_blocks_needed] = all_block_ids[
+            block_id : block_id + num_blocks_needed
+        ]
         block_id += num_blocks_needed
 
-    kv_cache = torch.randn(block_tables.numel(), block_size,
-                           qk_head_dim).to(dtype)
+    kv_cache = torch.randn(block_tables.numel(), block_size, qk_head_dim).to(dtype)
     q = torch.randn(bs, num_heads, qk_head_dim).to(dtype)
 
     out_ref = q.new_zeros(bs, num_heads, kv_lora_rank)

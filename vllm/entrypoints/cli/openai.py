@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import argparse
 import os
 import signal
@@ -15,11 +13,12 @@ from openai.types.chat import ChatCompletionMessageParam
 from vllm.entrypoints.cli.types import CLISubcommand
 
 if TYPE_CHECKING:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = argparse.ArgumentParser
 
 
 def _register_signal_handlers():
-
     def signal_handler(sig, frame):
         sys.exit(0)
 
@@ -80,26 +79,29 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
             break
         conversation.append({"role": "user", "content": input_message})
 
-        stream = client.chat.completions.create(model=model_name,
-                                                messages=conversation,
-                                                stream=True)
+        stream = client.chat.completions.create(
+            model=model_name, messages=conversation, stream=True
+        )
         output = _print_chat_stream(stream)
         conversation.append({"role": "assistant", "content": output})
 
 
-def _add_query_options(
-        parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+def _add_query_options(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument(
         "--url",
         type=str,
         default="http://localhost:8000/v1",
-        help="url of the running OpenAI-Compatible RESTful API server")
+        help="url of the running OpenAI-Compatible RESTful API server",
+    )
     parser.add_argument(
         "--model-name",
         type=str,
         default=None,
-        help=("The model name used in prompt completion, default to "
-              "the first model in list models API call."))
+        help=(
+            "The model name used in prompt completion, default to "
+            "the first model in list models API call."
+        ),
+    )
     parser.add_argument(
         "--api-key",
         type=str,
@@ -107,12 +109,14 @@ def _add_query_options(
         help=(
             "API key for OpenAI services. If provided, this api key "
             "will overwrite the api key obtained through environment variables."
-        ))
+        ),
+    )
     return parser
 
 
 class ChatCommand(CLISubcommand):
-    """The `chat` subcommand for the vLLM CLI. """
+    """The `chat` subcommand for the vLLM CLI."""
+
     name = "chat"
 
     @staticmethod
@@ -127,9 +131,9 @@ class ChatCommand(CLISubcommand):
         if args.quick:
             conversation.append({"role": "user", "content": args.quick})
 
-            stream = client.chat.completions.create(model=model_name,
-                                                    messages=conversation,
-                                                    stream=True)
+            stream = client.chat.completions.create(
+                model=model_name, messages=conversation, stream=True
+            )
             output = _print_chat_stream(stream)
             conversation.append({"role": "assistant", "content": output})
             return
@@ -142,9 +146,9 @@ class ChatCommand(CLISubcommand):
                 break
             conversation.append({"role": "user", "content": input_message})
 
-            stream = client.chat.completions.create(model=model_name,
-                                                    messages=conversation,
-                                                    stream=True)
+            stream = client.chat.completions.create(
+                model=model_name, messages=conversation, stream=True
+            )
             output = _print_chat_stream(stream)
             conversation.append({"role": "assistant", "content": output})
 
@@ -156,39 +160,45 @@ class ChatCommand(CLISubcommand):
             "--system-prompt",
             type=str,
             default=None,
-            help=("The system prompt to be added to the chat template, "
-                  "used for models that support system prompts."))
-        parser.add_argument("-q",
-                            "--quick",
-                            type=str,
-                            metavar="MESSAGE",
-                            help=("Send a single prompt as MESSAGE "
-                                  "and print the response, then exit."))
+            help=(
+                "The system prompt to be added to the chat template, "
+                "used for models that support system prompts."
+            ),
+        )
+        parser.add_argument(
+            "-q",
+            "--quick",
+            type=str,
+            metavar="MESSAGE",
+            help=("Send a single prompt as MESSAGE and print the response, then exit."),
+        )
         return parser
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         parser = subparsers.add_parser(
             "chat",
             help="Generate chat completions via the running API server.",
             description="Generate chat completions via the running API server.",
-            usage="vllm chat [options]")
+            usage="vllm chat [options]",
+        )
         return ChatCommand.add_cli_args(parser)
 
 
 class CompleteCommand(CLISubcommand):
-    """The `complete` subcommand for the vLLM CLI. """
-    name = 'complete'
+    """The `complete` subcommand for the vLLM CLI."""
+
+    name = "complete"
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
 
         if args.quick:
-            stream = client.completions.create(model=model_name,
-                                               prompt=args.quick,
-                                               stream=True)
+            stream = client.completions.create(
+                model=model_name, prompt=args.quick, stream=True
+            )
             _print_completion_stream(stream)
             return
 
@@ -198,9 +208,9 @@ class CompleteCommand(CLISubcommand):
                 input_prompt = input("> ")
             except EOFError:
                 break
-            stream = client.completions.create(model=model_name,
-                                               prompt=input_prompt,
-                                               stream=True)
+            stream = client.completions.create(
+                model=model_name, prompt=input_prompt, stream=True
+            )
             _print_completion_stream(stream)
 
     @staticmethod
@@ -212,20 +222,25 @@ class CompleteCommand(CLISubcommand):
             "--quick",
             type=str,
             metavar="PROMPT",
-            help=
-            "Send a single prompt and print the completion output, then exit.")
+            help="Send a single prompt and print the completion output, then exit.",
+        )
         return parser
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         parser = subparsers.add_parser(
             "complete",
-            help=("Generate text completions based on the given prompt "
-                  "via the running API server."),
-            description=("Generate text completions based on the given prompt "
-                         "via the running API server."),
-            usage="vllm complete [options]")
+            help=(
+                "Generate text completions based on the given prompt "
+                "via the running API server."
+            ),
+            description=(
+                "Generate text completions based on the given prompt "
+                "via the running API server."
+            ),
+            usage="vllm complete [options]",
+        )
         return CompleteCommand.add_cli_args(parser)
 
 

@@ -93,7 +93,6 @@ The contrived example below implements a custom logits processor which consumes 
 ??? code "Example custom logits processor definition"
 
     ``` python
-    from typing import Optional
     import torch
     from vllm.config import VllmConfig
     from vllm.sampling_params import SamplingParams
@@ -112,7 +111,7 @@ The contrived example below implements a custom logits processor which consumes 
             """Never impacts greedy sampling"""
             return False
 
-        def update_state(self, batch_update: Optional[BatchUpdate]):
+        def update_state(self, batch_update: BatchUpdate | None):
             if not batch_update:
                 return
 
