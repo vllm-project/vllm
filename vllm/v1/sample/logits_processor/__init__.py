@@ -220,14 +220,6 @@ def validate_logits_processors_parameters(
     logits_processors: Sequence[str | type[LogitsProcessor]] | None,
     sampling_params: SamplingParams,
 ):
-    if logits_processors is None:
-        return None
-
-    # we don't expect any CUDA initialization when loading custom logitsprocs,
-    # hide all visible GPUs here to guarantee process.
-    # TODO(Isotr0py): Make the error message more informative if CUDA is
-    # attempted to be initialized here. Currently, only an internal server
-    # error is raised.
     for logits_procs in _load_custom_logitsprocs(logits_processors):
         logits_procs.validate_params(sampling_params)
 
