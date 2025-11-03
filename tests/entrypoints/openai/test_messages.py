@@ -5,7 +5,7 @@ import anthropic
 import pytest
 import pytest_asyncio
 
-from ...utils import RemoteAnthropicServer
+from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
@@ -23,13 +23,13 @@ def server():  # noqa: F811
         "claude-3-7-sonnet-latest",
     ]
 
-    with RemoteAnthropicServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
 @pytest_asyncio.fixture
 async def client(server):
-    async with server.get_async_client() as async_client:
+    async with server.get_async_client_anthropic() as async_client:
         yield async_client
 
 
@@ -105,37 +105,37 @@ async def test_anthropic_tool_call(client: anthropic.AsyncAnthropic):
 
     print(f"Anthropic response: {resp.model_dump_json()}")
 
-    @pytest.mark.asyncio
-    async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
-        resp = await client.messages.create(
-            model="claude-3-7-sonnet-latest",
-            max_tokens=1024,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "What's the weather like in New York today?",
-                }
-            ],
-            tools=[
-                {
-                    "name": "get_current_weather",
-                    "description": "Useful for querying the weather "
-                    "in a specified city.",
-                    "input_schema": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "City or region, for example: "
-                                "New York, London, Tokyo, etc.",
-                            }
-                        },
-                        "required": ["location"],
-                    },
-                }
-            ],
-            stream=True,
-        )
 
-        async for chunk in resp:
-            print(chunk.model_dump_json())
+@pytest.mark.asyncio
+async def test_anthropic_tool_call_streaming(client: anthropic.AsyncAnthropic):
+    resp = await client.messages.create(
+        model="claude-3-7-sonnet-latest",
+        max_tokens=1024,
+        messages=[
+            {
+                "role": "user",
+                "content": "What's the weather like in New York today?",
+            }
+        ],
+        tools=[
+            {
+                "name": "get_current_weather",
+                "description": "Useful for querying the weather in a specified city.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "City or region, for example: "
+                            "New York, London, Tokyo, etc.",
+                        }
+                    },
+                    "required": ["location"],
+                },
+            }
+        ],
+        stream=True,
+    )
+
+    async for chunk in resp:
+        print(chunk.model_dump_json())
