@@ -22,6 +22,7 @@ def flashinfer_w8a8_scaled_mm(
     As: torch.Tensor,
     Bs: torch.Tensor,
     bias: torch.Tensor,
+    output_shape: list,
 ) -> torch.Tensor:
     return flashinfer_scaled_fp8_mm(
         A, B, out_dtype=out_dtype, scale_a=As, scale_b=Bs, bias=bias
