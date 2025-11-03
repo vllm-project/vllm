@@ -41,9 +41,6 @@ def test_basic_completion_with_fault_injection():
     """
     basic test to verify that completions work with fault injection enabled
 
-    this test runs with fault injection actively injecting faults on decode instances
-    using the pattern "OOOOOOOOOOOOOOOX" (fault every 16th operation)
-
     the test verifies that vLLM can handle these faults gracefully using the
     default retry policy (recomputation on failure)
     """
@@ -56,7 +53,6 @@ def test_basic_completion_with_fault_injection():
     assert len(completion.choices[0].text) > 0
 
     print("✅ Basic completion test passed with active fault injection!")
-    print("   Pattern: OOOOOOOOOOOOOOOX (fault every 16th operation)")
 
 
 # TODO: add more sophisticated tests that:
