@@ -31,11 +31,11 @@
 
 namespace vllm {
 
-template<typename Int>
-__host__ __device__ inline Int round_up(Int x, Int y)
-{
-    static_assert(std::is_integral_v<Int>, "round_up argument must be integral type");
-    return (x + y - 1) / y * y;
+template <typename Int>
+__host__ __device__ inline Int round_up(Int x, Int y) {
+  static_assert(std::is_integral_v<Int>,
+                "round_up argument must be integral type");
+  return (x + y - 1) / y * y;
 }
 
 // Use UE4M3 by default.
