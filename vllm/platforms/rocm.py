@@ -217,6 +217,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def maybe_get_vit_flash_attn_backend(
+        cls,
         attn_backend: _Backend,
         use_upstream_fa: bool,
         attn_backend_override: _Backend | None = None,
