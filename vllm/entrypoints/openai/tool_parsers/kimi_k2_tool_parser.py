@@ -96,8 +96,8 @@ class KimiK2ToolParser(ToolParser):
                 tool_calls = []
                 for match in function_call_tuples:
                     function_id, function_args = match
-                    # function_id: functions.get_weather:0
-                    function_name = function_id.split(".")[1].split(":")[0]
+                    # function_id: functions.get_weather:0 or get_weather:0
+                    function_name = function_id.split(":")[0].split(".")[-1]
                     tool_calls.append(
                         ToolCall(
                             id=function_id,
@@ -254,7 +254,7 @@ class KimiK2ToolParser(ToolParser):
                 )
                 if current_tool_call_matches:
                     tool_id, tool_args = current_tool_call_matches.groups()
-                    tool_name = tool_id.split(".")[1].split(":")[0]
+                    tool_name = tool_id.split(":")[0].split(".")[-1]
                     current_tool_call["id"] = tool_id
                     current_tool_call["name"] = tool_name
                     current_tool_call["arguments"] = tool_args
@@ -264,7 +264,7 @@ class KimiK2ToolParser(ToolParser):
                     )
                     if current_tool_call_name_matches:
                         (tool_id_str,) = current_tool_call_name_matches.groups()
-                        tool_name = tool_id_str.split(".")[1].split(":")[0]
+                        tool_name = tool_id_str.split(":")[0].split(".")[-1]
                         current_tool_call["id"] = tool_id_str
                         current_tool_call["name"] = tool_name
                         current_tool_call["arguments"] = ""

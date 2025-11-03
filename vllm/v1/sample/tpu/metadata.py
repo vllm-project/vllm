@@ -30,6 +30,7 @@ class TPUSupportedSamplingMetadata:
     top_p: torch.Tensor = None
 
     all_greedy: bool = True
+    all_random: bool = False
 
     # Whether logprobs are to be gathered in this batch of request. To balance
     # out compile time and runtime, a fixed `max_number_logprobs` value is used
@@ -110,6 +111,7 @@ class TPUSupportedSamplingMetadata:
                 xla_device
             ),
             all_greedy=input_batch.all_greedy,
+            all_random=input_batch.all_random,
             # TODO enable more and avoid returning None values
             top_p=input_batch.top_p_cpu_tensor[:padded_num_reqs].to(xla_device),
             top_k=input_batch.top_k_cpu_tensor[:padded_num_reqs].to(xla_device),
