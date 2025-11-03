@@ -29,7 +29,10 @@ def get_latest_nixl_version():
             return data.get("tag_name", "0.7.0")
     except Exception:
         return "0.7.0"
+
+
 NIXL_VERSION = os.environ.get("NIXL_VERSION", get_latest_nixl_version())
+
 
 def run_command(command, cwd=".", env=None):
     """Helper function to run a shell command and check for errors."""
