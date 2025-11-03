@@ -54,6 +54,8 @@ def _fused_moe_lora_kernel(
     EM,
     num_valid_tokens,
     num_experts,
+    lora_ids,
+    adapter_enabled,
     # The stride variables represent how much to increase the ptr by when
     # moving by 1 element in a particular dimension. E.g. `stride_am` is
     # how much to increase `a_ptr` by to get the element one row down
@@ -84,25 +86,33 @@ def _fused_moe_lora_kernel(
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)
     lora_idx = tl.program_id(axis=2)
+    lora_id = tl.load(lora_ids + lora_idx)
+    moe_enabled = tl.load(adapter_enabled + lora_id)
+    if lora_id == -1 or moe_enabled == 0:
+        # Early exit for the no-lora case.
+        return
     max_loras = tl.num_programs(axis=2)
     grid_k = tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)
 
     # calculate pid_m,pid_n
+    pid_sk = pid % SPLIT_K
+    pid_m_n = pid // SPLIT_K
     num_pid_m = tl.cdiv(EM, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
+    group_id = pid_m_n // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m = first_pid_m + ((pid_m_n % num_pid_in_group) % group_size_m)
+    pid_n = (pid_m_n % num_pid_in_group) // group_size_m
 
-    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_idx)
+    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr + lora_id)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
 
     # get the expert_id to process curr shard
-    ind = lora_idx * stride_el + pid_m
+    ind = lora_id * stride_el + pid_m
     expert_id = tl.load(expert_ids_ptr + ind, ind < max_loras * stride_el, -1)
     if expert_id == -1:
         return
@@ -113,10 +123,10 @@ def _fused_moe_lora_kernel(
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
+    offs_k = pid_sk * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)
 
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    token_ind = stride_tl * lora_idx + offs_token_id
+    token_ind = stride_tl * lora_id + offs_token_id
     offs_token = tl.load(
         sorted_token_ids_ptr + token_ind, token_ind < max_loras * stride_tl, 0
     )
@@ -129,9 +139,10 @@ def _fused_moe_lora_kernel(
 
     b_ptrs = (
         cur_b_ptr
-        + lora_idx * stride_bl
+        + lora_id * stride_bl
         + expert_id * stride_be
-        + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+        + offs_k[:, None] * stride_bk
+        + offs_bn[None, :] * stride_bn
     )
 
     # accumulator
@@ -180,6 +191,8 @@ def _fused_moe_lora(
     num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     max_lora_rank: int,
     top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
     block_size_m: int,
     block_size_n: int,
     block_size_k: int,
@@ -230,7 +243,7 @@ def _fused_moe_lora(
     num_tokens = M * top_k_num
     w1_output_dim_size = w1_lora_b_stacked.shape[2]
 
-    lora_intermediate_cache1 = torch.empty(
+    lora_intermediate_cache1 = torch.zeros(
         (num_slices * M * top_k_num * (max_lora_rank + w1_output_dim_size)),
         dtype=output.dtype,
         device=device,
@@ -268,6 +281,8 @@ def _fused_moe_lora(
         EM,
         num_tokens,
         num_experts,
+        lora_ids,
+        adapter_enabled,
         qcurr_hidden_states.stride(0),
         qcurr_hidden_states.stride(1),
         w1_lora_a_stacked.stride(0),
@@ -315,6 +330,8 @@ def _fused_moe_lora(
         EM,
         num_tokens,
         num_experts,
+        lora_ids,
+        adapter_enabled,
         a_intermediate_cache1.stride(0),
         a_intermediate_cache1.stride(1),
         w1_lora_b_stacked.stride(0),
@@ -348,6 +365,8 @@ def _fused_moe_lora_fake(
     num_tokens_post_padded: torch.Tensor,
     max_lora_rank: int,
     top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
     block_size_m: int,
     block_size_n: int,
     block_size_k: int,
