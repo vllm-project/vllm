@@ -364,7 +364,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Olmo3ForCausalLM": _HfExamplesInfo("shanearora/2025-sep-a-base-model"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OpenPanguMTPModel": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-Ultra-MoE-718B", trust_remote_code=True
+        "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "OPTForCausalLM": _HfExamplesInfo(
         "facebook/opt-125m", {"1b": "facebook/opt-iml-max-1.3b"}
@@ -374,10 +376,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "OuroForCausalLM": _HfExamplesInfo("ByteDance/Ouro-1.4B", trust_remote_code=True),
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-Embedded-7B", trust_remote_code=True
+        "FreedomIntelligence/openPangu-Embedded-7B-V1.1", trust_remote_code=True
     ),
     "PanguUltraMoEForCausalLM": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-Ultra-MoE-718B", trust_remote_code=True
+        "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
+        trust_remote_code=True,
+        is_available_online=False,
     ),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
