@@ -97,8 +97,6 @@ def maybe_get_vit_flash_attn_backend(
     use_upstream_fa: bool,
     attn_backend_override: _Backend | None = None,
 ) -> tuple[_Backend, Callable | None]:
-    from vllm.platforms import current_platform
-
     attn_backend, use_upstream_fa, flash_attn_varlen_func, is_return = (
         current_platform.maybe_get_vit_flash_attn_backend(
             attn_backend, use_upstream_fa, attn_backend_override
