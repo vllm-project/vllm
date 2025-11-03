@@ -277,6 +277,8 @@ def _fused_moe_lora_expand(
     expert_ids: torch.Tensor,  # (max_loras, _ ,)
     num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
     ## adding for kernel
     device: torch.device,
     N: int,
@@ -381,6 +383,8 @@ def _fused_moe_lora(
     num_tokens_post_padded: torch.Tensor,  # (max_loras, )
     max_lora_rank: int,
     top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
     shrink_block_size_m: int,
     shrink_block_size_n: int,
     shrink_block_size_k: int,
@@ -439,6 +443,8 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         top_k_num,
+        lora_ids,
+        adapter_enabled,
         ## adding for kernel
         device,
         N,
@@ -467,6 +473,8 @@ def _fused_moe_lora(
         expert_ids,
         num_tokens_post_padded,
         top_k_num,
+        lora_ids,
+        adapter_enabled,
         ## adding for kernel
         device,
         N,
@@ -530,6 +538,8 @@ def _fused_moe_lora_shrink_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
     device: torch.device,
     N: int,
     M: int,
@@ -559,6 +569,8 @@ def _fused_moe_lora_expand_fake(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     top_k_num: int,
+    lora_ids: torch.Tensor,
+    adapter_enabled: torch.Tensor,
     device: torch.device,
     N: int,
     M: int,
