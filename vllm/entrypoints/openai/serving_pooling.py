@@ -85,7 +85,7 @@ class OpenAIServingPooling(OpenAIServing):
 
         model_name = self.models.model_name()
 
-        request_id = f"pool-{self._base_request_id(raw_request)}"
+        request_id = self._internal_request_id(raw_request, "pool")
         created_time = int(time.time())
 
         is_io_processor_request = isinstance(request, IOProcessorRequest)
