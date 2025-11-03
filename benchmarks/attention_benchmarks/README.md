@@ -39,7 +39,7 @@ Express workloads concisely using query length and sequence length:
 
 ### Grammar Rule
 
-```
+```text
 Format: (<count>?) q<q_len>(k?) (s<seq_len>(k?))?
 
 - count:   Number of identical requests (optional, default=1)
@@ -99,15 +99,18 @@ Compares FlashInfer-MLA against CUTLASS MLA with optimized `num_kv_splits` value
 **Question:** At what query length does the prefill pipeline become faster than the decode pipeline?
 
 **Methodology:** Reproduces the original `benchmark_mla_threshold.py` study using the new interface:
+
 - For each query length (1-2048), test BOTH decode and prefill pipelines
 - Find the crossover point where prefill becomes faster
 - Analyze how this varies across batch sizes (1-256)
+
 
 ```bash
 python benchmark.py --config configs/reorder_threshold.yaml
 ```
 
 Tests query lengths from 1-2048 (fine-grained steps at low values, coarser at high values) across 9 batch sizes. For each query length, compares:
+
 - **Decode pipeline**: `threshold >= query_length`
 - **Prefill pipeline**: `threshold < query_length`
 
@@ -169,7 +172,7 @@ python benchmark.py \
 
 ### All Command-Line Options
 
-```
+```text
 --backends BACKEND [BACKEND ...]    # flash, triton, flashinfer, cutlass_mla,
                                     # flashinfer_mla, flashattn_mla, flashmla
 --backend BACKEND                   # Single backend (alternative to --backends)
@@ -272,7 +275,7 @@ formatter.save_json(results, "output.json")
 
 ## File Structure
 
-```
+```text
 attention_benchmarks/
 ├── README.md                      # This file
 │
@@ -308,15 +311,19 @@ attention_benchmarks/
 ## Troubleshooting
 
 **Import errors?**
+
 ```bash
 source /path/to/vllm/.venv/bin/activate
 ```
 
 **Backend not supported?**
+
 - Check hardware requirements above
 - Some backends need Hopper/Blackwell
 
+
 **OOM?**
+
 - Reduce batch size: `"32q1s1k"` → `"16q1s1k"`
 - Reduce sequence length: `"64q1s16k"` → `"64q1s4k"`
 
