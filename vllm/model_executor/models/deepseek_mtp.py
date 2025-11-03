@@ -10,7 +10,6 @@ from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     is_rocm_aiter_fusion_shared_expert_enabled,
 )
@@ -32,7 +31,6 @@ from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
     get_spec_layer_idx_from_weight_name,
 )
-
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
 

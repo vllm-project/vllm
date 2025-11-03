@@ -1,0 +1,98 @@
+{
+  "deepseekr1": {
+    "repo": "deepseek-ai/DeepSeek-R1",
+    "path": "/models/deepseek-ai/DeepSeek-R1",
+    "baseline": [
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "flexible-extract",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.9492,
+        "stderr": 0.0060
+      },
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "strict-match",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.9484,
+        "stderr": 0.0061
+      }
+    ]
+  },
+  "deepseekr1_ptpc_fp8": {
+    "repo": "EmbeddedLLM/deepseek-r1-FP8-Dynamic",
+    "path": "/models/EmbeddedLLM/deepseek-r1-FP8-Dynamic",
+    "baseline": [
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "flexible-extract",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.9477,
+        "stderr": 0.0061
+      },
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "strict-match",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.9469,
+        "stderr": 0.0062
+      }
+    ]
+  },
+  "qwen3coder_ptpc_fp8": {
+    "repo": "EmbeddedLLM/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic",
+    "path": "/models/EmbeddedLLM/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic",
+    "baseline": [
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "flexible-extract",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.8848,
+        "stderr": 0.0088
+      },
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "strict-match",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.8590,
+        "stderr": 0.0096
+      }
+    ]
+  },
+  "qwen3next": {
+    "repo": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "path": "/models/Qwen/Qwen3-Next-80B-A3B-Instruct",
+    "baseline": [
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "flexible-extract",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.8537,
+        "stderr": 0.0097
+      },
+      {
+        "task": "gsm8k",
+        "version": 3,
+        "filter": "strict-match",
+        "n_shot": 5,
+        "metric": "exact_match",
+        "value": 0.8135,
+        "stderr": 0.0107
+      }
+    ]
+  }
+}

@@ -1,0 +1,165 @@
+name: vLLM Benchmark Workflow
+
+on:
+  pull_request:
+    branches:
+      - dev/perf
+  workflow_dispatch:
+    inputs:
+      vllm_repo:
+        description: 'vLLM repo (default: https://github.com/ROCm/vllm.git)'
+        required: false
+        default: 'https://github.com/ROCm/vllm.git'
+      aiter_repo:
+        description: 'Aiter repo (default: https://github.com/ROCm/aiter.git)'
+        required: false
+        default: 'https://github.com/ROCm/aiter.git'
+      vllm_branch:
+        description: 'vLLM branch or commit (default: latest dev/perf)'
+        required: false
+        default: 'dev/perf'
+      aiter_branch:
+        description: 'Aiter branch or commit (default: latest dev/perf)'
+        required: false
+        default: 'dev/perf'
+      model_name:
+        description: 'Model name (default: deepseekr1_ptpc_fp8, options: deepseekr1_ptpc_fp8, deepseek-r1, qwen3coder_ptpc_fp8, qwen3next)'
+        required: false
+        default: 'deepseekr1_ptpc_fp8'
+
+env:
+  BASE_IMAGE: "rocm/vllm-dev:nightly"
+  AITER_REPO: ${{ github.event.inputs.aiter_repo || 'https://github.com/ROCm/aiter.git' }}
+  AITER_BRANCH: ${{ github.event.inputs.aiter_branch || 'dev/perf' }}
+  vLLM_REPO: ${{ github.event.inputs.vllm_repo || 'https://github.com/ROCm/vllm.git' }}
+  vLLM_BRANCH: ${{ github.event.inputs.vllm_branch || 'dev/perf' }}
+  MODEL_NAME: ${{ github.event.inputs.model_name || 'deepseekr1_ptpc_fp8' }}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: vllm-mi308-8gpu
+    steps:
+      - name: Checkout vLLM repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.vllm_branch }}
+          fetch-depth: 0  # ensure getting the latest full code history
+
+      - name: Show disk usage
+        run: |
+          df -h
+      
+      - name: Show models directory
+        run: |
+          ls -all /models/
+
+      - name: Docker login
+        run: docker login -u rocmshared -p ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Download the vLLM base image
+        run: |
+          docker pull ${{ env.BASE_IMAGE }}
+      
+      - name: Generate Dockerfile
+        run: |
+          cat <<EOF > Dockerfile.mod
+          FROM ${{ env.BASE_IMAGE }}
+
+          RUN echo "=== Aiter version BEFORE uninstall ===" && pip show aiter || true
+          RUN pip uninstall -y aiter
+          RUN pip install --upgrade "pybind11>=3.0.1"
+          RUN pip show pybind11
+
+          RUN git clone ${{ env.AITER_REPO }} /aiter && \\
+              cd /aiter && \\
+              git checkout ${{ env.AITER_BRANCH }} && \\
+              git submodule sync && git submodule update --init --recursive && \\
+              python3 setup.py develop
+
+          RUN echo "=== Aiter version AFTER installation ===" && pip show aiter || true
+
+          RUN echo "=== vLLM version BEFORE uninstall ===" && pip show vllm || true
+          RUN pip uninstall -y vllm
+
+          RUN git clone ${{ env.vLLM_REPO }} /vllm && \\
+              cd /vllm && \\
+              git checkout ${{ env.vLLM_BRANCH }} && \\
+              pip install -U -r requirements/rocm.txt && \\
+              python3 setup.py develop
+
+          RUN echo "=== vLLM version AFTER installation ===" && pip show vllm || true
+          EOF
+
+      - name: Show Dockerfile
+        run: cat Dockerfile.mod
+
+      - name: Build Docker image
+        run: |
+          TAG=$(echo "${{ env.vLLM_BRANCH }}-${{ env.AITER_BRANCH }}" | tr '/' '-')
+          IMAGE_TAG="rocm/vllm-aiter-ci:$TAG"
+          docker build --no-cache -t "$IMAGE_TAG" -f Dockerfile.mod .
+          echo "IMAGE_TAG=$IMAGE_TAG" >> "$GITHUB_ENV"
+      
+      - name: Clean up Rocm processes
+        run: |
+          ./.github/scripts/clean_up_rocm.sh
+
+      - name: Run the container
+        run: |
+          set -ex
+          echo "Starting container: vllm_test"
+          docker run -dt \
+          --device=/dev/dri \
+          --device=/dev/kfd \
+          --device /dev/fuse \
+          --cap-add SYS_ADMIN \
+          --privileged \
+          --shm-size=128G \
+          --user root \
+          --group-add "$(getent group render | cut -d: -f3)" \
+          --group-add "$(getent group video | cut -d: -f3)" \
+          -v "${{ github.workspace }}:/workspace" \
+          -v /models:/models \
+          -w /workspace \
+          --name vllm_test \
+          "${{ env.IMAGE_TAG }}"
+      
+      - name: Install Denpendencies
+        run: |
+          docker exec vllm_test git config --global --add safe.directory /workspace
+          docker exec vllm_test pip install lm_eval tenacity
+          docker exec vllm_test apt update
+          docker exec vllm_test apt install -y jq
+          
+      - name: Run performance tests
+        run: |
+          docker exec vllm_test ./.github/scripts/benchmark.sh ${{ env.MODEL_NAME }} benchmark_results.json
+      
+      - name: Upload benchmark results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: benchmark_results-${{ env.MODEL_NAME }}-${{ github.run_id }}
+          path: models_performance_test/*.json
+      
+      - name: Upload comparison log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: comparison_log-${{ env.MODEL_NAME }}-${{ github.run_id }}
+          path: comparison.log
+
+      - name: Clean up Rocm processes
+        if: ${{ always() }}
+        run: |
+          ./.github/scripts/clean_up_rocm.sh
+      
+      - name: Remove Docker container
+        if: ${{ always() }}
+        run: |
+          docker rm -f vllm_test || true

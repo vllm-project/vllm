@@ -5,6 +5,7 @@
 ### DeepSeek-R1 Block-Scale FP8
 
 deepseek-ai/DeepSeek-R1
+
 ```shell
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
@@ -15,6 +16,7 @@ deepseek-ai/DeepSeek-R1
 ### DeepSeek-R1 PTPC FP8
 
 EmbeddedLLM/deepseek-r1-FP8-Dynamic
+
 ```shell
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
@@ -25,6 +27,7 @@ EmbeddedLLM/deepseek-r1-FP8-Dynamic
 ### Qwen3-Coder PTPC Quark FP8
 
 EmbeddedLLM/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic
+
 ```shell
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
@@ -35,18 +38,20 @@ EmbeddedLLM/Qwen3-Coder-480B-A35B-Instruct-FP8-Dynamic
 ### Qwen3-Next
 
 Qwen/Qwen3-Next-80B-A3B-Instruct
+
 ```shell
 |Tasks|Version|     Filter     |n-shot|  Metric   |   |Value |   |Stderr|
 |-----|------:|----------------|-----:|-----------|---|-----:|---|-----:|
 |gsm8k|      3|flexible-extract|     5|exact_match|_  |0.8537|_  |0.0097|
 |     |       |strict-match    |     5|exact_match|_  |0.8135|_  |0.0107|
-
 ```
 
 ## VLMs and Omni Models (mistral-eval on chartqa)
 
 ### Qwen2.5-VL-72B
+
 Qwen/Qwen2.5-VL-72B-Instruct
+
 ```shell
 Metrics:
 {
@@ -56,7 +61,9 @@ Metrics:
 ```
 
 ### Qwen2.5-VL-72B PTPC FP8
+
 RedHatAI/Qwen2.5-VL-72B-Instruct-FP8-dynamic
+
 ```shell
 Metrics:
 {
@@ -66,7 +73,9 @@ Metrics:
 ```
 
 ### Qwen3-VL-235B
+
 Qwen/Qwen3-VL-235B-A22B-Instruct
+
 ```shell
 Metrics:
 {
@@ -76,7 +85,9 @@ Metrics:
 ```
 
 ### Qwen3-VL-235B PTPC FP8
+
 RedHatAI/Qwen3-VL-235B-A22B-Instruct-FP8-dynamic
+
 ```shell
 Metrics:
 {
@@ -86,7 +97,9 @@ Metrics:
 ```
 
 ### Qwen3-Omni
+
 Qwen/Qwen3-Omni-30B-A3B-Instruct
+
 ```shell
 Metrics:
 {
