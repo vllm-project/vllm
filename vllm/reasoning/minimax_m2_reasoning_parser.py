@@ -3,6 +3,8 @@
 
 from collections.abc import Sequence
 
+import regex as re
+
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
@@ -66,4 +68,11 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
-        return None, "<think>" + model_output
+        match = re.search(r"</think>\s*", model_output, re.DOTALL)
+        if not match:
+            return model_output, ""
+
+        end_idx = match.end()
+        before = model_output[:end_idx]
+        after = model_output[end_idx:]
+        return before.strip(), after.strip()
