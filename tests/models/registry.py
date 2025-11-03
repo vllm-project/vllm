@@ -371,7 +371,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "OuroForCausalLM": _HfExamplesInfo("ByteDance/Ouro-1.4B", trust_remote_code=True),
     "PanguEmbeddedForCausalLM": _HfExamplesInfo(
-        "FreedomIntelligence/openPangu-Embedded-7B, trust_remote_code=True"
+        "FreedomIntelligence/openPangu-Embedded-7B", trust_remote_code=True
     ),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),

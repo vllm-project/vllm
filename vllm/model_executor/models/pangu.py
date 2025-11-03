@@ -326,7 +326,9 @@ class PanguModel(nn.Module):
 
         aux_hidden_states: list[torch.Tensor] = []
         for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
-            if self.start_layer + idx in self.aux_hidden_state_layers:
+            if residual is None:
+                aux_hidden_states.append(hidden_states)
+            else:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
 
