@@ -171,6 +171,12 @@ def test_rms_norm(
             # fallback: compare dequantized values with relaxed tolerance
             a_deq = a * ref_scales.view(-1, 1)
             b_deq = b * ops_scales.view(-1, 1)
+            # NOTE: It is possible that some future test cases trigger this
+            # max diff due to precision issues. If such an error is
+            # encountered, it's recommended to inspect the differences between
+            # all corresponding elements from each tensor (e.g. by looping over
+            # them) and checking how many the max diff error shows up on (just
+            # a few bad elements should still be considered acceptable).
             ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
         assert ok
     if add_residual:
