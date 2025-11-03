@@ -13,7 +13,9 @@ def assumes(obj, attr, is_callable=False, is_instance_of=None):
     import inspect
     from dataclasses import is_dataclass
 
-    assumption_msg = f"LMcache currently assumes that {obj} has a(n) {attr} attribute"
+    assumption_msg = (
+        f"LMCache connector currently assumes that {obj} has a(n) {attr} attribute"
+    )
     if hasattr(obj, attr):
         attr_value = getattr(obj, attr)
     elif is_dataclass(obj) and attr in getattr(obj, "__dataclass_fields__", {}):

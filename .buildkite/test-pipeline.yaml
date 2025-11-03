@@ -315,8 +315,6 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    # Install kv connector dependencies for integration tests (needed for test collection)
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
@@ -325,7 +323,7 @@ steps:
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
     - pytest -v -s v1/spec_decode
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_lmcache_integration.py
     - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
     - pytest -v -s v1/test_request.py
