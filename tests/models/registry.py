@@ -712,6 +712,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
+        "PaddlePaddle/PaddleOCR-VL",
+        trust_remote_code=True,
+    ),
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo(
         "google/paligemma-3b-mix-224",
         extras={"v2": "google/paligemma2-3b-ft-docci-448"},
