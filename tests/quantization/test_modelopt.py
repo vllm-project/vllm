@@ -51,7 +51,7 @@ class AccuracyTestConfig:
         return model_args
 
 
-GSM8K_ACCURACY_CONFIGS = [
+GSM8K_FP8_ACCURACY_CONFIGS = [
     # Llama 3.1 8B Instruct FP8 quantized with ModelOpt
     AccuracyTestConfig(
         model_name="nvidia/Llama-3.1-8B-Instruct-FP8",
@@ -145,7 +145,7 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
     not is_quant_method_supported("modelopt"),
     reason="ModelOpt FP8 is not supported on this GPU type.",
 )
-@pytest.mark.parametrize("config", GSM8K_ACCURACY_CONFIGS)
+@pytest.mark.parametrize("config", GSM8K_FP8_ACCURACY_CONFIGS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_modelopt_fp8_gsm8k_accuracy(config: AccuracyTestConfig, tp_size: int):
     """Test ModelOpt FP8 quantization accuracy on GSM8K benchmark."""
@@ -168,7 +168,7 @@ def test_modelopt_fp8_gsm8k_accuracy(config: AccuracyTestConfig, tp_size: int):
 
     EXPECTED_VALUE = config.expected_value
     measured_value = results["results"][task]["exact_match,strict-match"]
-    
+
     assert (
         measured_value - config.rtol < EXPECTED_VALUE
         and measured_value + config.rtol > EXPECTED_VALUE
