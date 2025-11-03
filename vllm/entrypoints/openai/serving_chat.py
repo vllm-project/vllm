@@ -13,7 +13,6 @@ import partial_json_parser
 import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
-from pydantic import TypeAdapter
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
@@ -47,8 +46,6 @@ from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     DeltaToolCall,
     ErrorResponse,
-    FunctionCall,
-    FunctionDefinition,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
