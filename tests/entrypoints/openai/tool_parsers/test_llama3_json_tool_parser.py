@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import MagicMock, patch
+
 import pytest
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
@@ -240,3 +242,21 @@ def test_extract_tool_calls_missing_parameters_and_arguments_key(parser):
     assert result.tools_called is False
     assert len(result.tool_calls) == 0
     assert result.content == model_output
+
+
+def test_regex_timeout_handling(parser):
+    """Test regex timeout is handled gracefully"""
+    fake_problematic_input = "hello world[A(A=" + "\t)A(A=,\t" * 2
+
+    # create a mock regex that raises TimeoutError
+    mock_regex = MagicMock()
+    mock_regex.finditer.side_effect = TimeoutError("Regex timeout")
+
+    with patch.object(parser, "tool_call_start_regex", mock_regex):
+        result = parser.extract_tool_calls(fake_problematic_input, None)
+
+        # should treat as regular text when regex times out
+        assert result.content == fake_problematic_input
+        assert result.tools_called is False
+        assert len(result.tool_calls) == 0
+        mock_regex.finditer.assert_called_once()
