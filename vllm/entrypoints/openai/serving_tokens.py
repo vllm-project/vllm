@@ -83,9 +83,9 @@ class ServingTokens(OpenAIServing):
 
         model_name = self.models.model_name(lora_request)
 
-        request_id = "generate-tokens-" \
-                     f"{self._base_request_id(raw_request, request.request_id)}"
-
+        request_id = self._internal_request_id(
+            raw_request, "generate-tokens", request.request_id
+        )
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata

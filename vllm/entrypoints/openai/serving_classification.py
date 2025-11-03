@@ -208,7 +208,7 @@ class ServingClassification(ClassificationMixin):
         raw_request: Request,
     ) -> ClassificationResponse | ErrorResponse:
         model_name = self.models.model_name()
-        request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
+        request_id = self._internal_request_id(raw_request, self.request_id_prefix)
 
         ctx = ClassificationServeContext(
             request=request,
