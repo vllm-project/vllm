@@ -10,6 +10,19 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 
+def is_aiter_found() -> bool:
+    from importlib.util import find_spec
+
+    return find_spec("aiter") is not None
+
+
+# `find_spec` is not torch.compile compatible.
+# In cases where aiter availability might have
+# been checked in forward passes that are torch compiled.
+# we keep this global outside to not cause torch compile breaks.
+IS_AITER_FOUND = is_aiter_found()
+
+
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
     ROCm AITER package is supported on gfx9 archs.
@@ -18,11 +31,10 @@ def if_aiter_supported(func: Callable) -> Callable:
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         # checks the platform, device arch and aiter library existance.
-        from importlib.util import find_spec
 
         from vllm.platforms.rocm import on_gfx9
 
-        if current_platform.is_rocm() and on_gfx9() and find_spec("aiter") is not None:
+        if current_platform.is_rocm() and on_gfx9() and IS_AITER_FOUND:
             return func(*args, **kwargs)
         else:
             # Return None or do nothing if not supported
