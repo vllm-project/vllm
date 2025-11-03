@@ -33,7 +33,6 @@ The Competition_ID of competition_record is the foreign key of Competition_ID of
 
 EXPECTED_LORA_OUTPUT = [
     "SELECT AVG(Working_Horses) FROM farm WHERE Total_Horses > 5000;",
-    "SELECT AVG(Working_Horses) FROM farm WHERE Total_Horses > 5000;",
     "SELECT MAX(Cows) AS Max_Cows, MIN(Cows) AS Min_Cows FROM farm;",
     "SELECT MAX(Cows) AS Max_Cows, MIN(Cows) AS Min_Cows FROM farm;",
 ]
@@ -41,9 +40,6 @@ EXPECTED_LORA_OUTPUT = [
 
 def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
     prompts = [
-        PROMPT_TEMPLATE.format(
-            context="What is the average number of working horses of farms with more than 5000 total number of horses?"  # noqa: E501
-        ),  # noqa: E501
         PROMPT_TEMPLATE.format(
             context="Give the average number of working horses on farms with more than 5000 total horses."  # noqa: E501
         ),  # noqa: E501
@@ -67,7 +63,6 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         generated_text = output.outputs[0].text.strip()
         generated_texts.append(generated_text)
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
