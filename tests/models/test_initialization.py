@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import suppress
+from contextlib import ExitStack
 from functools import partial
 from unittest.mock import patch
 
@@ -94,10 +94,29 @@ def can_initialize(
             "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
         )
 
-    with (
-        patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
-        monkeypatch.context() as m,
-    ):
+    with ExitStack() as stack:
+        if model_arch == "DeepseekV32ForCausalLM":
+            # FLASHMLA_SPARSE backend requires Hopper (9.0+) or Blackwell (10.0+)
+            # Mock device capability support for initialization testing on L40 for CI
+            from vllm.v1.attention.backends.mla import flashmla_sparse
+
+            def mock_supports_compute_capability(cls, capability):  # noqa: ARG001
+                return True
+
+            stack.enter_context(
+                patch.object(
+                    flashmla_sparse.FlashMLASparseBackend,
+                    "supports_compute_capability",
+                    classmethod(mock_supports_compute_capability),
+                )
+            )
+
+        stack.enter_context(
+            patch.object(
+                V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1
+            )
+        )
+        m = stack.enter_context(monkeypatch.context())
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
@@ -105,22 +124,6 @@ def can_initialize(
             m.setenv("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        if model_arch == "DeepseekV32ForCausalLM":
-            # FLASHMLA_SPARSE backend requires Hopper (9.0+) or Blackwell (10.0+)
-            # Mock device capability to Hopper for initialization testing on L40 for CI
-            from vllm import platforms
-            from vllm.platforms.interface import DeviceCapability
-
-            def mock_get_device_capability(device_id: int = 0):  # noqa: ARG001
-                return DeviceCapability(major=9, minor=0)
-
-            with suppress(AttributeError):
-                platforms.current_platform.get_device_capability.cache_clear()  # type: ignore
-            m.setattr(
-                platforms.current_platform,
-                "get_device_capability",
-                mock_get_device_capability,
-            )
 
         LLM(
             model_info.default,
