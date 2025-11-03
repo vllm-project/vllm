@@ -183,10 +183,10 @@ class Platform:
     @classmethod
     def maybe_get_vit_flash_attn_backend(
         cls,
-        attn_backend: _Backend,
+        attn_backend: "_Backend",
         use_upstream_fa: bool,
-        attn_backend_override: _Backend | None = None,
-    ) -> tuple[_Backend, bool, Callable | None, bool]:
+        attn_backend_override: "_Backend" | None = None,
+    ) -> tuple["_Backend", bool, Callable | None, bool]:
         from vllm.attention.backends.registry import _Backend
 
         attn_backend = _Backend.TORCH_SDPA
