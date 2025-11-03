@@ -193,9 +193,6 @@ class ToolParserManager:
         """
         cls.lazy_parsers[name] = (module_path, class_name)
 
-    # ----------------------------------------------------------------------
-    # Unified decorator entry
-    # ----------------------------------------------------------------------
     @classmethod
     def register_module(
         cls,
@@ -242,9 +239,6 @@ class ToolParserManager:
 
         return _decorator
 
-    # ----------------------------------------------------------------------
-    # Diagnostic utilities
-    # ----------------------------------------------------------------------
     @classmethod
     def list_registered(cls) -> list[str]:
         """Return names of all eagerly and lazily registered tool parsers."""
