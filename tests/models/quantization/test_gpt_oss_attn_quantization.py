@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test attention quantization of gpt-oss model. The qkv_proj and o_proj in self_attention can be quantized or excluded.
+"""Test attention quantization of gpt-oss model.
+The qkv_proj and o_proj in self_attention can be either quantized or excluded.
 
 Run `pytest tests/models/quantization/test_gpt_oss_attn_quantization.py`.
 
