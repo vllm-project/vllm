@@ -340,6 +340,10 @@ _MULTIMODAL_MODELS = {
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
+    "PaddleOCRVLForConditionalGeneration": (
+        "paddleocr_vl",
+        "PaddleOCRVLForConditionalGeneration",
+    ),
     "PaliGemmaForConditionalGeneration": (
         "paligemma",
         "PaliGemmaForConditionalGeneration",

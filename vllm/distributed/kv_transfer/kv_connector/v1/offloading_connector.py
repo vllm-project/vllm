@@ -274,8 +274,8 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            num_gpu_blocks = num_blocks * self.block_size_factor
-            assert len(req.block_hashes) >= num_gpu_blocks
+            # NOTE: In async scheduling, placeholders may temporarily make
+            # len(req.block_hashes) < num_blocks * self.block_size_factor.
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
