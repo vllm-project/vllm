@@ -42,6 +42,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
+from vllm.entrypoints.context import HarmonyContext
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionToolsParam,
     ResponseInputOutputItem,
@@ -473,6 +474,20 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     else:
         raise ValueError(f"Unknown channel: {message.channel}")
 
+    return output_items
+
+
+def make_response_output_items_with_harmony(
+    context: HarmonyContext,
+) -> list[ResponseOutputItem]:
+    output_items: list[ResponseOutputItem] = []
+    num_init_messages = context.num_init_messages
+    for msg in context.messages[num_init_messages:]:
+        output_items.extend(parse_output_message(msg))
+    # Handle the generation stopped in the middle (if any).
+    last_items = parse_remaining_state(context.parser)
+    if last_items:
+        output_items.extend(last_items)
     return output_items
 
 
