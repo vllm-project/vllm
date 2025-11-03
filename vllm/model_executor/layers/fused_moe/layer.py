@@ -1008,7 +1008,7 @@ def maybe_roundup_hidden_size(
         hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size, act_dtype
         )
-    
+
     if moe_parallel_config.use_deepep_ll_kernels:
         hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
             hidden_size

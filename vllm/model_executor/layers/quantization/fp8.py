@@ -1329,6 +1329,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 apply_router_weight_on_input=apply_router_weight_on_input,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
+                workspace=layer.workspace,
             )
         elif self.fused_experts:
             result = self.fused_experts(
