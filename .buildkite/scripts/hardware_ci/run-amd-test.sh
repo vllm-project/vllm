@@ -173,6 +173,14 @@ fi
 PARALLEL_JOB_COUNT=8
 MYPYTHONPATH=".."
 
+# Test that we're launching on the machine that has
+# proper access to GPUs
+render_gid=$(getent group render | cut -d: -f3)
+if [[ -z "$render_gid" ]]; then
+  echo "Error: 'render' group not found. This is required for GPU access." >&2
+  exit 1
+fi
+
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
   # assign job count as the number of shards used   
@@ -186,7 +194,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
         --network=host \
         --shm-size=16gb \
-        --group-add $(getent group render | cut -d: -f3) \
+        --group-add "$render_gid" \
         --rm \
         -e HIP_VISIBLE_DEVICES="${GPU}" \
         -e HF_TOKEN \
@@ -218,7 +226,7 @@ else
           --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
           --network=host \
           --shm-size=16gb \
-          --group-add $(getent group render | cut -d: -f3) \
+          --group-add "$render_gid" \
           --rm \
           -e HF_TOKEN \
           -e AWS_ACCESS_KEY_ID \
