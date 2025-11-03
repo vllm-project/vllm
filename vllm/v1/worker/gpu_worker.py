@@ -10,6 +10,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
+from types import NoneType
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -24,7 +25,11 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (
+    ensure_kv_transfer_initialized,
+    get_kv_transfer_group,
+    has_kv_transfer_group,
+)
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_all_model_groups,
@@ -41,6 +46,7 @@ from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
 from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
+from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -326,6 +332,29 @@ class Worker(WorkerBase):
         if self.device_config.device.type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
             os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
+            if (
+                self.parallel_config.data_parallel_size > 1
+                and self.parallel_config.data_parallel_size_local > 0
+                and self.parallel_config.distributed_executor_backend
+                not in ["ray", "external_launcher"]
+                and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+            ):
+                # Use local DP rank if available, otherwise use global DP rank.
+                dp_local_rank = self.parallel_config.data_parallel_rank_local
+                if dp_local_rank is None:
+                    dp_local_rank = self.parallel_config.data_parallel_rank
+
+                tp_pp_world_size = (
+                    self.parallel_config.pipeline_parallel_size
+                    * self.parallel_config.tensor_parallel_size
+                )
+
+                # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
+                self.local_rank += dp_local_rank * tp_pp_world_size
+                assert self.local_rank < torch.cuda.device_count(), (
+                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
+                )
+
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
@@ -484,6 +513,21 @@ class Worker(WorkerBase):
 
         return int(self.available_kv_cache_memory_bytes)
 
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from this worker if available."""
+
+        if not has_kv_transfer_group():
+            return None
+
+        connector = get_kv_transfer_group()
+        # Return None for connectors that don't need to exchange handshake
+        # metadata across workers.
+        if (metadata := connector.get_handshake_metadata()) is None:
+            return None
+
+        tp_rank = get_tp_group().rank_in_group
+        return {tp_rank: metadata}
+
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
@@ -626,10 +670,15 @@ class Worker(WorkerBase):
         return self.model_runner.get_supported_tasks()
 
     @torch.inference_mode()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput"
+    ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
+
+    @torch.inference_mode()
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
+        self, scheduler_output: "SchedulerOutput"
+    ) -> ModelRunnerOutput | None:
         intermediate_tensors = None
         forward_pass = scheduler_output.total_num_scheduled_tokens > 0
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -648,13 +697,13 @@ class Worker(WorkerBase):
             )
 
         output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, AsyncModelRunnerOutput)):
+        if isinstance(output, (ModelRunnerOutput, NoneType)):
             return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
         assert (
-            parallel_config.distributed_executor_backend != ("external_launcher")
+            parallel_config.distributed_executor_backend != "external_launcher"
             and not get_pp_group().is_last_rank
         )
 

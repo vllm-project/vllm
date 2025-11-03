@@ -85,7 +85,9 @@ class VllmConfig:
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
-    observability_config: ObservabilityConfig | None = None
+    observability_config: ObservabilityConfig = Field(
+        default_factory=ObservabilityConfig
+    )
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
@@ -133,7 +135,6 @@ class VllmConfig:
         from vllm import __version__
 
         vllm_factors.append(__version__)
-        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -174,10 +175,7 @@ class VllmConfig:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.observability_config:
-            vllm_factors.append(self.observability_config.compute_hash())
-        else:
-            vllm_factors.append("None")
+        vllm_factors.append(self.observability_config.compute_hash())
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
@@ -294,6 +292,48 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    def _post_init_kv_transfer_config(self) -> None:
+        """Update KVTransferConfig based on top-level configs in VllmConfig.
+
+        Right now, this function reads the offloading settings from
+        CacheConfig and configures the KVTransferConfig accordingly.
+        """
+        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+            return
+
+        # If no KVTransferConfig is provided, create a default one.
+        if self.kv_transfer_config is None:
+            self.kv_transfer_config = KVTransferConfig()
+
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
+            raise ValueError(
+                "You must set kv_offloading_size when kv_offloading_backend is set."
+            )
+        num_kv_ranks = (
+            self.parallel_config.tensor_parallel_size
+            * self.parallel_config.pipeline_parallel_size
+        )
+
+        if kv_offloading_backend == "native":
+            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
+
+            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
+            # done after the model's KV cache is initialized
+            self.kv_transfer_config.kv_connector_extra_config.update(
+                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+            )
+        elif kv_offloading_backend == "lmcache":
+            self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
+            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
+            self.kv_transfer_config.kv_connector_extra_config = {
+                "lmcache.local_cpu": True,
+                "lmcache.max_local_cpu_size": kv_gb_per_rank,
+            }
+
+        # This is the same for all backends
+        self.kv_transfer_config.kv_role = "kv_both"
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -309,7 +349,6 @@ class VllmConfig:
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
-            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
         if self.quant_config is None and self.model_config is not None:
@@ -335,18 +374,9 @@ class VllmConfig:
         # we use the default mode. The default mode depends on other
         # settings (see the below code).
         if self.compilation_config.mode is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.mode = CompilationMode.VLLM_COMPILE
-                else:
-                    self.compilation_config.mode = CompilationMode.NONE
-
+            if self.model_config is not None and not self.model_config.enforce_eager:
+                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
-                # NB: Passing both --enforce-eager and a compilation mode
-                # in V0 means the compilation mode wins out.
                 self.compilation_config.mode = CompilationMode.NONE
         else:
             assert self.compilation_config.mode >= CompilationMode.NONE
@@ -374,10 +404,7 @@ class VllmConfig:
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
-                if (
-                    envs.VLLM_USE_V1
-                    and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-                ):
+                if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_AND_PIECEWISE
@@ -431,7 +458,7 @@ class VllmConfig:
                 # override related settings when enforce eager
                 self.compilation_config.max_cudagraph_capture_size = 0
                 self.compilation_config.cudagraph_capture_sizes = []
-            elif envs.VLLM_USE_V1:
+            else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
@@ -538,14 +565,11 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # Do this after all the updates to compilation_config.mode
-        if (
-            envs.VLLM_USE_V1
-            and self.compilation_config.mode == CompilationMode.VLLM_COMPILE
-        ):
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
 
         # final check of cudagraph mode after all possible updates
-        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike():
             if (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
@@ -590,10 +614,7 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if (
-            envs.VLLM_USE_V1
-            and not self.scheduler_config.disable_hybrid_kv_cache_manager
-        ):
+        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
@@ -669,6 +690,9 @@ class VllmConfig:
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
+
+        # Handle the KV connector configs
+        self._post_init_kv_transfer_config()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
