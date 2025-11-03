@@ -218,6 +218,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
 
 
 def get_default_cache_root():
@@ -1441,6 +1442,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
+    ),
+    # Format for saving torch.compile cache artifacts
+    # - "binary": saves as binary file
+    #     Safe for multiple vllm serve processes accessing the same torch compile cache.
+    # - "unpacked": saves as directory structure (for inspection/debugging)
+    #     NOT multiprocess safe - race conditions may occur with multiple processes.
+    #     Allows viewing and setting breakpoints in Inductor's code output files.
+    "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
+        "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
 }
 
