@@ -1,4 +1,4 @@
-# Pooling Models
+# Pooling
 
 vLLM also supports pooling models, such as embedding, classification and reward models.
 
@@ -10,6 +10,8 @@ before returning them.
     We currently support pooling models primarily as a matter of convenience. This is not guaranteed to have any performance improvement over using HF Transformers / Sentence Transformers directly.
 
     We are now planning to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
+
+## Overall
 
 ## Configuration
 
