@@ -157,7 +157,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     ) -> bool:
         return type(source_layer) is ColumnParallelLinear or (
             type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 1
+            and len(packed_modules_list) < 2
         )
 
 
