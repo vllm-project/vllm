@@ -15,16 +15,16 @@ Register a lazy module mapping.
 Example:
     ToolParserManager.register_lazy_module(
         name="kimi_k2",
-        module_path=f"{_TOOL_PARSER_LIB_PATH}.kimi_k2_parser",
+        module_path="vllm.entrypoints.openai.tool_parsers.kimi_k2_parser",
         class_name="KimiK2ToolParser",
     )
 """
 
 
 _TOOL_PARSERS_TO_REGISTER = {
-    "deepseek_v3": (
-        "deepseekv3_tool_parser",
-        "DeepSeekV3ToolParser",
+    "deepseek_v3": (  # name
+        "deepseekv3_tool_parser",  # filename
+        "DeepSeekV3ToolParser",  # class_name
     ),
     "deepseek_v31": (
         "deepseekv31_tool_parser",
@@ -134,8 +134,8 @@ _TOOL_PARSERS_TO_REGISTER = {
 
 
 def register_lazy_tool_parsers():
-    for name, (file_path, class_name) in _TOOL_PARSERS_TO_REGISTER.items():
-        module_path = f"vllm.entrypoints.openai.tool_parsers.{file_path}"
+    for name, (file_name, class_name) in _TOOL_PARSERS_TO_REGISTER.items():
+        module_path = f"vllm.entrypoints.openai.tool_parsers.{file_name}"
         ToolParserManager.register_lazy_module(name, module_path, class_name)
 
 
