@@ -60,39 +60,27 @@ NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.2}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 0.5; else echo 0.2; fi)}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 2048; fi)}  # limit sequence length for fault injection tests
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
 
-# Install ucx-fault-injector if fault injection is enabled
+# set ucx-fault-injector environment variables if fault injection is enabled
 if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
   UCX_INJECTOR_DIR="${GIT_ROOT}/.ucx-fault-injector"
-  echo "Installing ucx-fault-injector to ${UCX_INJECTOR_DIR}..."
-  mkdir -p "${UCX_INJECTOR_DIR}"
-  cd "${UCX_INJECTOR_DIR}"
-
-  # Download and extract the latest release
-  TARBALL="ucx-fault-injector-linux-amd64.tar.gz"
-  curl -LO "https://github.com/wseaton/ucx-fault-injector/releases/latest/download/${TARBALL}"
-  tar xzf "${TARBALL}" --strip-components=1
-  rm "${TARBALL}"
-
-  # Set path to the shared library
   export UCX_FAULT_INJECTOR_LIB="${UCX_INJECTOR_DIR}/libucx_fault_injector.so"
   export UCX_FAULT_CLIENT="${UCX_INJECTOR_DIR}/ucx-fault-client"
 
   if [[ ! -f "$UCX_FAULT_INJECTOR_LIB" ]]; then
     echo "ERROR: ucx-fault-injector library not found at $UCX_FAULT_INJECTOR_LIB"
+    echo "Please run install_ucx_fault_injector.sh first"
     exit 1
   fi
 
-  echo "ucx-fault-injector installed successfully"
+  echo "Using ucx-fault-injector:"
   echo "Library: $UCX_FAULT_INJECTOR_LIB"
   echo "Client: $UCX_FAULT_CLIENT"
-
-  cd "${GIT_ROOT}"
 fi
 
 SMI_BIN=$(which nvidia-smi || which rocm-smi)
