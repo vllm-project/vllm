@@ -42,16 +42,11 @@ class MedusaProposer:
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks)
 
-        # Early return for data-parallel rank > 0 where compute_logits
-        # returns empty list as a placeholder
+        # Non-primary DP/TP ranks emit an empty placeholder.
         if not logits:
             return []
 
-        # OPTIMIZATION: Reduce GPU-CPU synchronization overhead.
-        # Perform argmax on each head first (low memory), then stack results.
-        # This avoids creating large 3D tensor [batch, heads, vocab] and
-        # reduces sync overhead from O(num_heads) to O(1).
-        # Memory: O(batch * heads) instead of O(batch * heads * vocab_size)
+        # Argmax per head keeps memory light and cuts GPU→CPU syncs to one pass.
         argmax_tokens = [
             logit.argmax(dim=-1) for logit in logits
         ]  # List of [batch_size] tensors
