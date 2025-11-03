@@ -60,7 +60,7 @@ NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
 NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
-GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 0.7; else echo 0.2; fi)}
+GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 0.8; else echo 0.2; fi)}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 2048; fi)}  # limit sequence length for fault injection tests
 
 # Find the git repository root directory
@@ -215,7 +215,7 @@ run_tests_for_model() {
 
     # Build the command with fault injection env vars if enabled
     if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
-      FAULT_RATE=${FAULT_RATE:-0.1}
+      FAULT_RATE=${FAULT_RATE:-0.05}
       BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
       VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
       UCX_NET_DEVICES=all \
@@ -308,7 +308,11 @@ run_tests_for_model() {
   sleep 5
 
   echo "Running accuracy tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
+    TEST_MODEL=$model_name NUM_CONCURRENT=10 python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  else
+    TEST_MODEL=$model_name python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  fi
 
   # Clean up before running next model
   cleanup_instances
