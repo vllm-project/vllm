@@ -1242,6 +1242,32 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# PaddleOCR-VL
+def run_paddleocr_vl(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+
+    model_name = "PaddlePaddle/PaddleOCR-VL"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+        trust_remote_code=True,
+    )
+
+    placeholder = "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+    prompts = [
+        (f"<|begin_of_sentence|>User: {question}{placeholder}\nAssistant: ")
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # PaliGemma
 def run_paligemma(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1817,6 +1843,7 @@ model_example_map = {
     "NVLM_D": run_nvlm_d,
     "ovis": run_ovis,
     "ovis2_5": run_ovis2_5,
+    "paddleocr_vl": run_paddleocr_vl,
     "paligemma": run_paligemma,
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
