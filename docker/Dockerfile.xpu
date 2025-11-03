@@ -54,7 +54,7 @@ ENV VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
-    python3 setup.py install
+    pip install --no-build-isolation .
 
 CMD ["/bin/bash"]
 
@@ -64,14 +64,14 @@ FROM vllm-base AS vllm-openai
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install accelerate hf_transfer pytest pytest_asyncio lm_eval[api] modelscope
 
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip uninstall oneccl oneccl-devel -y
-
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
 
 # install nixl from source code
 RUN python3 /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
 ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/python3.12/dist-packages/.nixl.mesonpy.libs/plugins/"
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip uninstall oneccl oneccl-devel -y
 
 ENTRYPOINT ["vllm", "serve"]
