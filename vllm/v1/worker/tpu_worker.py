@@ -17,7 +17,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
-    has_kv_transfer_group,
 )
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -27,7 +26,7 @@ from vllm.platforms.tpu import USE_TPU_INFERENCE
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import report_usage_stats
@@ -255,13 +254,13 @@ class TPUWorker:
             tpu_kv_cache_bytes = tpu_kv_cache_bytes * head_size // padded_head_size
         return int(tpu_kv_cache_bytes)
 
+    def sample_tokens(self, grammar_output: "GrammarOutput") -> ModelRunnerOutput:
+        return self.model_runner.sample_tokens(grammar_output)
+
     def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
+        self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | None:
-        output = self.model_runner.execute_model(scheduler_output)
-        # every worker's output is needed when kv_transfer_group is set up
-        return output if self.is_driver_worker or has_kv_transfer_group() else None
+        return self.model_runner.execute_model(scheduler_output)
 
     def profile(self, is_start: bool = True):
         if self.rank < 1:
