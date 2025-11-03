@@ -1396,7 +1396,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer=tokenizer,
                 content=content,
                 enable_auto_tools=self.enable_auto_tools,
-                tool_parser=self.tool_parser,
+                tool_parser_cls=self.tool_parser,
             )
             tool_call_class = (
                 MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
@@ -1414,6 +1414,7 @@ class OpenAIServingChat(OpenAIServing):
                 request.tool_choice
                 and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
             ):
+                assert tool_calls is not None and len(tool_calls) > 0
                 message = ChatMessage(
                     role=role,
                     reasoning_content=reasoning_content,
@@ -1423,6 +1424,7 @@ class OpenAIServingChat(OpenAIServing):
 
             elif request.tool_choice and request.tool_choice == "required":
                 tool_call_class_items = []
+                assert tool_calls is not None and len(tool_calls) > 0
                 for tool_call in tool_calls:
                     tool_call_class_items.append(
                         tool_call_class(
@@ -1459,8 +1461,8 @@ class OpenAIServingChat(OpenAIServing):
                 # In the OpenAI API the finish_reason is "tools_called"
                 # if the tool choice is auto and the model produced a tool
                 # call. The same is not true for named function calls
-                auto_tools_called = len(tool_calls) > 0
-                if auto_tools_called:
+                auto_tools_called = tool_calls is not None and len(tool_calls) > 0
+                if tool_calls:
                     message = ChatMessage(
                         role=role,
                         reasoning_content=reasoning_content,
