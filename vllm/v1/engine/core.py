@@ -31,7 +31,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -132,6 +132,8 @@ class EngineCoreGuard(threading.Thread):  # changed
             self.ctx, worker_cmd_addr, zmq.ROUTER, bind=True
         )
         self.poller = zmq.Poller()
+        self.communicator_aborted = False
+        self.engine_running = True
 
     def run(self) -> None:
         """
@@ -142,111 +144,52 @@ class EngineCoreGuard(threading.Thread):  # changed
             # Check for engine fault signals
             try:
                 engine_exception = self.fault_signal_q.get_nowait()
-                logger.warning(
-                    "[EngineCoreGuard] Detected exception %s",
-                    engine_exception,
-                )
-                self._report_client_exception(engine_exception)
+                if isinstance(engine_exception, EngineLoopPausedError):
+                    # The busy loop stopped due to another critical exception,
+                    # put it back
+                    logger.info(
+                        "[EngineCoreGuard] Engine paused",
+                    )
+                else:
+                    logger.error(
+                        "[EngineCoreGuard] Detected exception %s",
+                        engine_exception,
+                    )
+                    self.engine_running = False
+                    self._report_client_exception(engine_exception)
             except queue.Empty:
                 pass
 
-            has_msg, cmd_str = self._recv_cmd(poll_timeout=poll_timeout_ms)
+            has_msg, _, cmd_str = recv_router_dealer_message(
+                self.client_cmd_socket, use_poller=True, poll_timeout=poll_timeout_ms
+            )
             if has_msg:
                 logger.info("[EngineCoreGuard] Received cmd: %s", cmd_str)
                 self._execute_cmd(cmd_str)
 
-    def _send_msg(
-        self, src_socket: zmq.Socket, msg: Any, serialize: bool = True
-    ) -> tuple[bool, str | None]:
-        """
-        Send message to ROUTER via the specified DEALER socket.
-        Args:
-            src_socket: DEALER socket for sending messages
-            msg: Message content
-            serialize: Whether to encode/serialize the message (default: True)
-        Returns:
-            (success, error_msg)
-        """
-        try:
-            if serialize:
-                msg_bytes = json.dumps(msg, ensure_ascii=False).encode("utf-8")
-            elif isinstance(msg, bytes):
-                msg_bytes = msg
-            elif isinstance(msg, str):
-                msg_bytes = msg.encode("utf-8")
-            else:
-                raise TypeError("Non-serialized messages must be str or bytes")
+    def _stop_worker_execution(self, soft_pause: bool):
+        if soft_pause:
+            pause_method = "pause_by_signal"
+        else:
+            pause_method = "pause_by_abort_communicators"
+            self.communicator_aborted = True
 
-            src_socket.send_multipart([b"", msg_bytes])
-            logger.debug("Sent message via %s: %s", src_socket, msg)
-            return True, None
-        except (zmq.ZMQError, UnicodeEncodeError, TypeError, ValueError) as e:
-            error = f"Send message failed: {e}"
-            logger.error(error)
-            return False, error
-        except Exception as e:
-            logger.exception("Unexpected error while sending message")
-            return False, str(e)
+        self._send_cmd_to_worker(pause_method)
 
-    def _recv_cmd(self, poll_timeout: int = 1000) -> tuple[bool, None | str]:
-        """
-        Receives client guard commands in non-blocking mode via ZMQ Poller.
-        Returns (False, None) on timeout, format error, or exception.
-        Message must follow DEALER format: [empty frame, content].
-
-        Args:
-            poll_timeout: Polling timeout in milliseconds (default: 1000)
-        Returns:
-            (Whether reception succeeded, decoded message string/None)
-        """
-        try:
-            # Use Poller for non-blocking reception
-            self.poller.register(self.client_cmd_socket, zmq.POLLIN)
-            socks = dict(self.poller.poll(poll_timeout))
-
-            # Check if a message has arrived
-            if (
-                self.client_cmd_socket in socks
-                and socks[self.client_cmd_socket] == zmq.POLLIN
-            ):
-                # DEALER message format: [empty frame, message content]
-                parts = self.client_cmd_socket.recv_multipart()
-
-                # Validate message format
-                assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
-
-                empty_frame, message_bytes = parts
-
-                # Validate empty frame
-                assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-
-                # Decode message content
-                message = message_bytes.decode("utf-8")
-                return (True, message)
-
-            # No message received within timeout
-            return (False, None)
-
-        except (zmq.ZMQError, UnicodeDecodeError) as e:
-            logger.error("error occurred while receiving message: %s", e)
-            return (False, None)
-        except Exception as e:
-            logger.error("Unexpected error occurred while receiving message: %s", e)
-            return (False, None)
-
-    def _stop_worker_execution(self):
+    def _send_cmd_to_worker(self, method_name, **kwargs):
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
                 identity = f"{tp_rank}_{pp_rank}".encode()
-                kwargs: dict[str, Any] = {}
-                serialized_stop_worker = serialize_method_call("pause", **kwargs)
+                method_json = serialize_method_call(method_name, **kwargs)
                 self.worker_cmd_socket.send_multipart(
-                    [identity, b"", serialized_stop_worker.encode("utf-8")]
+                    [identity, b"", method_json.encode("utf-8")]
                 )
+        # todo: need to recv results from worker after it sends back the result
 
     def _report_client_exception(self, exception: Exception) -> None:
         msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
-        self._send_msg(self.fault_report_socket, msg, serialize=False)
+        msg_bytes = msg.encode("utf-8")
+        self.fault_report_socket.send_multipart([b"", msg_bytes])
 
     def _execute_cmd(self, cmd_str):
         """
@@ -256,7 +199,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         logger.info("[EngineCoreGuard] Executing command: %s", method)
         try:
             success = run_method(self, method, args=(), kwargs=method_params)
-            logger.info("[EngineCoreGuard] Command succeeded: %s", success)
+            logger.info("[EngineCoreGuard] Command (%s) succeeded: %s", method, success)
 
         except Exception as e:
             logger.error(
@@ -268,28 +211,28 @@ class EngineCoreGuard(threading.Thread):  # changed
 
         self._send_execution_result(success)
 
-    def pause(self, timeout: int = 1) -> bool:
+    def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
         """
         Pause the busy loop safely.
         Args:
             timeout:wait for the busy loop to acknowledge the pause signal
+            soft_pause: if True, perform a soft pause using a flag; otherwise
+            abort the communicator
         """
         logger.info("[EngineCoreGuard] Start pausing EngineCore")
-        if self.busy_loop_active.is_set():
+        if self.engine_running:
             # Clear the flag to signal busy loop should pause
             self.busy_loop_active.clear()
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
             self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
-            self._stop_worker_execution()
+            self._stop_worker_execution(soft_pause=soft_pause)
             try:
                 # Wait for engine to acknowledge the pause via fault_signal_q
                 exception = self.fault_signal_q.get(timeout=timeout)
-                if not isinstance(exception, EngineLoopPausedError):
-                    # The busy loop stopped due to another critical exception,
-                    # put it back
-                    self.fault_signal_q.put(exception)
+                self.fault_signal_q.put(exception)
                 success = True
+                self.engine_running = False
             except queue.Empty:
                 # Timeout waiting for pause acknowledgment
                 success = False
@@ -306,15 +249,19 @@ class EngineCoreGuard(threading.Thread):  # changed
         handling logic is required, so a simple signal is sent to the
         fault_tolerance_queue to unblock the waiting thread.
         """
+        self._send_cmd_to_worker("restart_worker")
+
         # Nothing needs to be done for EngineCore
         self.cmd_q.put(None)
         # Ensure busy loop has been recovered.
         success = self.busy_loop_active.wait(timeout=timeout)
+        self.engine_running = success
         return success
 
     def _send_execution_result(self, success: bool):
         msg = {"engine_index": self.engine_index, "success": success}
-        self._send_msg(self.client_cmd_socket, msg, serialize=True)
+        msg_bytes = json.dumps(msg).encode("utf-8")
+        self.client_cmd_socket.send_multipart([b"", msg_bytes])
 
     def shutdown(self):
         if self.fault_report_socket is not None:

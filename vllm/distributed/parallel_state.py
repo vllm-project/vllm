@@ -1111,6 +1111,31 @@ def get_pipeline_model_parallel_group():
     return get_pp_group()
 
 
+def get_all_model_groups() -> list[GroupCoordinator]:
+    group_list = []
+    global _TP
+    if _TP:
+        group_list.append(_TP)
+
+    global _PP
+    if _PP:
+        group_list.append(_PP)
+
+    global _DCP
+    if _DCP:
+        group_list.append(_DCP)
+
+    global _DP
+    if _DP:
+        group_list.append(_DP)
+
+    global _EP
+    if _EP:
+        group_list.append(_EP)
+
+    return group_list
+
+
 @contextmanager
 def graph_capture(device: torch.device):
     """

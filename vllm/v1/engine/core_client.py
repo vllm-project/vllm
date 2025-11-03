@@ -33,7 +33,7 @@ from vllm.utils.network_utils import (
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
-    recv_msg,
+    recv_router_dealer_message,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -390,7 +390,7 @@ class ClientGuard:
             target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
         ).start()
 
-    async def handle_fault(self, instruction: str, timeout: int) -> bool:
+    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """
         Executes fault tolerance measures based on the fault tolerance instructions
          received from the api_server.
@@ -401,7 +401,10 @@ class ClientGuard:
         of the relevant components.
         """
         return await run_method(
-            self.fault_handler, "handle_fault", args=(instruction, timeout), kwargs={}
+            self.fault_handler,
+            "handle_fault",
+            args=(instruction, timeout),
+            kwargs=kwargs,
         )
 
     def fault_receiver(self):
@@ -414,7 +417,9 @@ class ClientGuard:
         error information from the engine core is missed.
         """
         while True:
-            sender_identity, message = recv_msg(self.fault_receiver_socket)
+            _, sender_identity, message = recv_router_dealer_message(
+                self.fault_receiver_socket
+            )
             if self.client_guard_dead:
                 logger.info("client guard dead, stop receiving fault")
                 break
@@ -435,7 +440,7 @@ class ClientGuard:
             # Pause will be invoked again during fault-tolerance handling,
             # so it's unnecessary to track whether all engines are currently
             # paused.
-            asyncio.run(self.handle_fault("pause", 1))
+            asyncio.run(self.handle_fault("pause", 2, soft_pause=True))
 
     def shutdown_guard(self):
         self.client_guard_dead = True
@@ -832,9 +837,9 @@ class MPClient(EngineCoreClient):
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
 
-    async def handle_fault(self, instruction: str, timeout: int) -> bool:
+    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """handle fault of current instance by instruction"""
-        return await self.client_guard.handle_fault(instruction, timeout)
+        return await self.client_guard.handle_fault(instruction, timeout, **kwargs)
 
     async def fault_reporter(self):
         return self.engine_status_dict.to_dict()
