@@ -90,13 +90,14 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import is_list_of, random_uuid
-from vllm.utils.asyncio import (
+from vllm.utils import random_uuid
+from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
     make_async,
     merge_async_iterators,
 )
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -344,22 +345,7 @@ class OpenAIServing:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
-        else:
-            processed_inputs = processor.input_preprocessor._prompt_to_llm_inputs(
-                prompt
-            )
 
-        if processed_inputs["type"] == "embeds":
-            raise NotImplementedError
-
-        # This is a workaround to fix multimodal beam search; this is a
-        # bandaid fix for 2 small problems:
-        # 1. Multi_modal_data on the processed_inputs currently resolves to
-        #    `None`.
-        # 2. preprocessing above expands the multimodal placeholders. However,
-        #    this happens again in generation, so the double expansion causes
-        #    a mismatch.
-        # TODO - would be ideal to handle this more gracefully.
         prompt_text: str | None
         prompt_token_ids: list[int]
         multi_modal_data: MultiModalDataDict | None
@@ -372,9 +358,16 @@ class OpenAIServing:
             prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
             multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
-        mm_processor_kwargs: dict[str, Any] | None = processed_inputs.get(
-            "mm_processor_kwargs"
-        )  # type: ignore
+        mm_processor_kwargs: dict[str, Any] | None = None
+
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
 
         tokenized_length = len(prompt_token_ids)
 
@@ -1296,6 +1289,21 @@ class OpenAIServing:
             return default
 
         return raw_request.headers.get("X-Request-Id", default)
+
+    @staticmethod
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
 
     @staticmethod
     def _get_decoded_token(

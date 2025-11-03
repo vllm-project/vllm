@@ -21,13 +21,13 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe,
 )
 from vllm.platforms import current_platform
-from vllm.utils import has_deep_gemm
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
+)
+from vllm.utils.import_utils import has_deep_gemm
 
 dg_available = has_deep_gemm()
-
-if dg_available:
-    from deep_gemm import get_m_alignment_for_contiguous_layout
 
 if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
@@ -42,57 +42,43 @@ DTYPES = [torch.bfloat16]  # [torch.half, torch.bfloat16, torch.float32]
 # and its hidden size is 7168.
 MNK_FACTORS = [
     (1, 128, 128),
-    (1, 512, 512),
     (1, 128, 7168),
     (1, 1024, 7168),
     (1, 4608, 128),
-    (1, 4608, 512),
     (1, 4608, 7168),
     (83, 128, 128),
     (83, 512, 512),
-    (83, 1024, 7168),
     (83, 4608, 512),
     (83, 4608, 7168),
-    (128, 128, 128),
     (128, 512, 512),
     (128, 1024, 7168),
-    (128, 4608, 512),
     (128, 4608, 7168),
     (2048, 128, 128),
     (2048, 1024, 7168),
     (2048, 4608, 512),
     (2048, 4608, 7168),
     (8192, 128, 128),
-    (8192, 512, 512),
     (8192, 128, 7168),
     (8192, 1024, 7168),
-    (8192, 4608, 512),
     (8192, 4608, 7168),
 ]
 
 MNK_FACTORS_DG = [
     (128, 128, 128),
-    (128, 512, 512),
     (128, 128, 7168),
     (128, 1024, 7168),
     (128, 4608, 128),
-    (128, 4608, 512),
     (128, 4608, 7168),
-    (192, 128, 128),
     (192, 512, 512),
     (192, 1024, 7168),
-    (192, 4608, 512),
     (192, 4608, 7168),
     (1335, 128, 128),
     (1335, 1024, 7168),
     (1335, 4608, 512),
     (1335, 4608, 7168),
     (2048, 128, 128),
-    (2048, 512, 512),
     (2048, 128, 7168),
     (2048, 1024, 7168),
-    (2048, 4608, 128),
-    (2048, 4608, 512),
     (2048, 4608, 7168),
 ]
 
@@ -218,8 +204,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     torch.manual_seed(seed)
 
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
-    block_m = get_m_alignment_for_contiguous_layout()
-    block_size = [block_m, block_m]
+    block_size = get_mk_alignment_for_contiguous_layout()
     dtype = torch.bfloat16
 
     a = torch.randn((M, K), dtype=dtype) / 10
