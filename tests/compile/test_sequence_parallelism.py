@@ -27,7 +27,6 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -117,10 +116,10 @@ class TestQuantModel(torch.nn.Module):
         # which expects a column-major layout.
         self.w = torch.rand(hidden_size, intermediate_size).to(dtype=FP8_DTYPE).t()
         self.wscale = torch.rand(1, dtype=torch.float32)
-        self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key,
-            self.w, self.wscale, self.scale)
+        self.fp8_linear = TestFP8Layer(
+            self.quant_key, self.quant_key, self.w, self.wscale, self.scale
+        )
 
-        
     def forward(self, hidden_states, residual):
         """
         Forward pass implementing the operations in the FX graph

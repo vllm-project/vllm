@@ -26,7 +26,6 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -91,21 +90,35 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             for _ in range(3)
         ]
 
-        self.fp8_linear_1 = TestFP8Layer(self.quant_key,self.quant_key,
-            self.weight[0],self.wscale[0], input_scale=self.input_scale[0])
-        
-        self.fp8_linear_2 = TestFP8Layer(self.quant_key,self.quant_key,
-            self.weight[1],self.wscale[1], input_scale=self.input_scale[1])
-        
-        self.fp8_linear_3 = TestFP8Layer(self.quant_key, self.quant_key,
-            self.weight[2], self.wscale[2],input_scale=self.input_scale[2])
+        self.fp8_linear_1 = TestFP8Layer(
+            self.quant_key,
+            self.quant_key,
+            self.weight[0],
+            self.wscale[0],
+            input_scale=self.input_scale[0],
+        )
+
+        self.fp8_linear_2 = TestFP8Layer(
+            self.quant_key,
+            self.quant_key,
+            self.weight[1],
+            self.wscale[1],
+            input_scale=self.input_scale[1],
+        )
+
+        self.fp8_linear_3 = TestFP8Layer(
+            self.quant_key,
+            self.quant_key,
+            self.weight[2],
+            self.wscale[2],
+            input_scale=self.input_scale[2],
+        )
 
     def forward(self, hidden_states):
         # avoid having graph input be an arg to a pattern directly
         z = torch.relu(hidden_states)
         x = resid = tensor_model_parallel_all_reduce(z)
         y = self.norm[0](x)
-
 
         z2 = self.fp8_linear_1(y)
 

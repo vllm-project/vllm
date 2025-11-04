@@ -24,7 +24,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Quant,
@@ -56,10 +55,14 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key,
-                self.weight, self.weight_scale, self.input_scale)
+            self.fp8_linear = TestFP8Layer(
+                self.quant_key,
+                self.quant_key,
+                self.weight,
+                self.weight_scale,
+                self.input_scale,
+            )
 
-        
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
         self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()
 

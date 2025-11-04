@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -51,9 +52,13 @@ strategy_to_parameter_type = {
 
 STATIC_QUANT = True
 DYNAMIC_QUANT = False
-quant_keys = {
-    STATIC_QUANT: (kFp8StaticTensorSym, kFp8StaticTensorSym),
-    DYNAMIC_QUANT: (kFp8DynamicTokenSym, kFp8StaticTensorSym),
+activation_quant_key_mapping = {
+    STATIC_QUANT: kFp8StaticTensorSym,
+    DYNAMIC_QUANT: kFp8DynamicTokenSym,
+}
+weight_quant_key_mapping = {
+    QuantizationStrategy.CHANNEL: kFp8StaticTokenSym,
+    QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
 }
 logger = init_logger(__name__)
 
@@ -78,7 +83,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            activation_quant_key, weight_quant_key = quant_keys[is_static_input_scheme]
+            activation_quant_key = activation_quant_key_mapping[is_static_input_scheme]
+            weight_quant_key = weight_quant_key_mapping[self.strategy]
             self.fp8_linear = init_fp8_linear_kernel(
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=weight_quant_key,
@@ -143,7 +149,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
 
-        layer.register_parameter("input_scale_ub", None)
+        layer.input_scale_ub = None
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:

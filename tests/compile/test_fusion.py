@@ -18,7 +18,6 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -74,12 +73,27 @@ class TestModel(torch.nn.Module):
         ]
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear_1 = TestFP8Layer(self.activation_quant_key, self.weight_quant_key,
-                            self.w[0], self.wscale[0], self.scale[0])
-            self.fp8_linear_2 = TestFP8Layer(self.activation_quant_key, self.weight_quant_key,
-                            self.w[1], self.wscale[1], self.scale[1])
-            self.fp8_linear_3 = TestFP8Layer(self.activation_quant_key, self.weight_quant_key,
-                            self.w[2], self.wscale[2], self.scale[2])
+            self.fp8_linear_1 = TestFP8Layer(
+                self.activation_quant_key,
+                self.weight_quant_key,
+                self.w[0],
+                self.wscale[0],
+                self.scale[0],
+            )
+            self.fp8_linear_2 = TestFP8Layer(
+                self.activation_quant_key,
+                self.weight_quant_key,
+                self.w[1],
+                self.wscale[1],
+                self.scale[1],
+            )
+            self.fp8_linear_3 = TestFP8Layer(
+                self.activation_quant_key,
+                self.weight_quant_key,
+                self.w[2],
+                self.wscale[2],
+                self.scale[2],
+            )
 
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
         self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()

@@ -17,9 +17,8 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
     CutlassScaledMMLinearKernel,
 )
-
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
-    FlashInferScaledMMLinearKernel
+    FlashInferScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
     ChannelWiseTorchScaledMMLinearKernel,
@@ -64,7 +63,7 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         PerTensorTorchScaledMMLinearKernel,
         RowWiseTorchScaledMMLinearKernel,
         ChannelWiseTorchScaledMMLinearKernel,
-        ],
+    ],
     PlatformEnum.ROCM: [
         ROCmScaledMMLinearKernel,
         PerTensorTorchScaledMMLinearKernel,
@@ -164,7 +163,7 @@ def init_fp8_linear_kernel(
 
     logger.info_once(
         "Selected %s for %s",
-        kernel_type.__class__.__name__,
+        kernel_type.__name__,
         module_name,
         scope="global",
     )

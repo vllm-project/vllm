@@ -28,7 +28,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import get_forward_context, set_forward_context
-
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -172,7 +171,6 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-
         hidden_size = self.num_qo_heads * self.head_size
         self.w = kwargs.get(
             "w",
@@ -184,8 +182,13 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
                 "scale": torch.tensor([1.0], dtype=torch.float32, device=self.device),
             },
         )
-        self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key, self.w["weight"],
-                self.w["wscale"], self.w["scale"])
+        self.fp8_linear = TestFP8Layer(
+            self.quant_key,
+            self.quant_key,
+            self.w["weight"],
+            self.w["wscale"],
+            self.w["scale"],
+        )
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         """Forward pass that creates the pattern to be fused."""
