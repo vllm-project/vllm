@@ -87,6 +87,7 @@ class PiecewiseBackend:
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
             )
+            self.to_be_compiled_ranges.add(range)
 
         for range in self.compile_ranges:
             self.range_entries[range] = RangeEntry(
@@ -100,6 +101,26 @@ class PiecewiseBackend:
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
+    def fakify_args(self, args: list[Any]) -> list[Any]:
+        # We need to pass fake example_inputs, otherwise torch.compile
+        # will fakify the example_inputs potentially causing some non dynamic
+        # dimension to be be duck shaped to other existing shapes that have hints
+        # matching their values.
+        # This is problem because it can lead to unintended specializations!
+        # if the new wrongly dynamic dim is specialized
+        # it will force specializing the whole shape
+        # torch.compile probably should not accept
+        # non fake tensors as example inputs!
+        fake_example_inputs = []
+        for node in self.graph.graph.nodes:
+            # All place holders come first
+            if node.op == "placeholder":
+                fake_example_inputs.append(node.meta["example_value"])
+            else:
+                break
+        assert len(fake_example_inputs) == len(args)
+        return fake_example_inputs
+
     def _maybe_compile_for_range_entry(self, range_entry: RangeEntry, args) -> Any:
         if not range_entry.compiled:
             range_entry.compiled = True
@@ -108,7 +129,7 @@ class PiecewiseBackend:
             # args are real arguments
             range_entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
-                args,
+                self.fakify_args(args),
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
                 graph_index=self.piecewise_compile_index,

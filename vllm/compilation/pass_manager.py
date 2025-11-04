@@ -155,5 +155,6 @@ class PostGradPassManager(CustomGraphPass):
 
         # See [HACK: Bug with Inductor graph partition and torch.compile cache]
         state["inductor_splitting_ops"].extend(self.inductor_splitting_ops)
+        state["compile_range"] = get_pass_context().compile_range
 
         return InductorPass.hash_dict(state)
