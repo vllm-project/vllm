@@ -24,10 +24,6 @@ __global__ void rms_norm_kernel(
   __shared__ float s_variance;
   float variance = 0.0f;
 
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
-#endif
-
   const scalar_t* input_row = input + block_id * input_stride;
 
   auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
@@ -70,10 +66,6 @@ __global__ void rms_norm_kernel(
     }
     v_out[i] = dst;
   }
-
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
-#endif
 }
 
 /* Function specialization in the case of FP16/BF16 tensors.
@@ -106,10 +98,6 @@ fused_add_rms_norm_kernel(
   auto* __restrict__ weight_v =
       reinterpret_cast<const _f16Vec<scalar_t, width>*>(weight);
 
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
-#endif
-
   for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
     int id = blockIdx.x * vec_hidden_size + idx;
     int64_t strided_id = blockIdx.x * vec_input_stride + idx;
@@ -136,9 +124,6 @@ fused_add_rms_norm_kernel(
     temp *= weight_v[idx];
     input_v[strided_id] = temp;
   }
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
-#endif
 }
 
 /* Generic fused_add_rms_norm_kernel
@@ -154,10 +139,6 @@ fused_add_rms_norm_kernel(
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
   float variance = 0.0f;
-
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
-#endif
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
     scalar_t z = input[blockIdx.x * input_stride + idx];
@@ -181,9 +162,6 @@ fused_add_rms_norm_kernel(
     input[blockIdx.x * input_stride + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
-#endif
 }
 
 }  // namespace vllm

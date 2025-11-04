@@ -29,10 +29,6 @@ __global__ void rms_norm_static_fp8_quant_kernel(
   __shared__ float s_variance;
   float variance = 0.0f;
 
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
-#endif
-
   const scalar_t* input_row = input + blockIdx.x * input_stride;
 
   auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
@@ -76,10 +72,6 @@ __global__ void rms_norm_static_fp8_quant_kernel(
           scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
     }
   }
-
-#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
-#endif
 }
 
 /* Function specialization in the case of FP16/BF16 tensors.
