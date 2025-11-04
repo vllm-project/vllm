@@ -22,15 +22,13 @@ if __name__ == "__main__":
         dist.broadcast_object_list(recv, src=0)
         ip, port = recv
 
-    stateless_pg = StatelessProcessGroup.create(ip, port, rank,
-                                                dist.get_world_size())
+    stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
 
     for pg in [dist.group.WORLD, stateless_pg]:
         test_result = all(in_the_same_node_as(pg, source_rank=0))
 
         expected = os.environ.get("VLLM_TEST_SAME_HOST", "1") == "1"
-        assert test_result == expected, \
-            f"Expected {expected}, got {test_result}"
+        assert test_result == expected, f"Expected {expected}, got {test_result}"
         if pg == dist.group.WORLD:
             print("Same node test passed! when using torch distributed!")
         else:

@@ -19,12 +19,12 @@ async def test_tool_call_with_tool_choice(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL],
         tool_choice=WEATHER_TOOL,
-        logprobs=False)
+        logprobs=False,
+    )
 
     choice = chat_completion.choices[0]
 
     assert choice.finish_reason != "tool_calls"  # "stop" or "length"
     assert choice.message.role == "assistant"
-    assert choice.message.tool_calls is None \
-           or len(choice.message.tool_calls) == 1
+    assert choice.message.tool_calls is None or len(choice.message.tool_calls) == 1
     assert len(choice.message.tool_calls[0].id) == 9  # length of 9 for mistral

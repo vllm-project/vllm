@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Logging configuration for vLLM."""
+
 import datetime
 import json
 import logging
@@ -22,8 +23,10 @@ VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
 VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 VLLM_LOGGING_STREAM = envs.VLLM_LOGGING_STREAM
 
-_FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
-           "[%(fileinfo)s:%(lineno)d] %(message)s")
+_FORMAT = (
+    f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+    "[%(fileinfo)s:%(lineno)d] %(message)s"
+)
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
@@ -50,7 +53,7 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
-    "disable_existing_loggers": False
+    "disable_existing_loggers": False,
 }
 
 
@@ -119,7 +122,8 @@ def _configure_vllm_root_logger() -> None:
             "VLLM_CONFIGURE_LOGGING evaluated to false, but "
             "VLLM_LOGGING_CONFIG_PATH was given. VLLM_LOGGING_CONFIG_PATH "
             "implies VLLM_CONFIGURE_LOGGING. Please enable "
-            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH.")
+            "VLLM_CONFIGURE_LOGGING or unset VLLM_LOGGING_CONFIG_PATH."
+        )
 
     if VLLM_CONFIGURE_LOGGING:
         logging_config = DEFAULT_LOGGING_CONFIG
@@ -128,13 +132,16 @@ def _configure_vllm_root_logger() -> None:
         if not path.exists(VLLM_LOGGING_CONFIG_PATH):
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
-                VLLM_LOGGING_CONFIG_PATH)
+                VLLM_LOGGING_CONFIG_PATH,
+            )
         with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
-            raise ValueError("Invalid logging config. Expected dict, got %s.",
-                             type(custom_config).__name__)
+            raise ValueError(
+                "Invalid logging config. Expected dict, got %s.",
+                type(custom_config).__name__,
+            )
         logging_config = custom_config
 
     for formatter in logging_config.get("formatters", {}).values():
@@ -168,7 +175,7 @@ logger = init_logger(__name__)
 
 
 def _trace_calls(log_path, root_dir, frame, event, arg=None):
-    if event in ['call', 'return']:
+    if event in ["call", "return"]:
         # Extract the filename, line number, function name, and the code object
         filename = frame.f_code.co_filename
         lineno = frame.f_lineno
@@ -188,26 +195,29 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
                 last_filename = ""
                 last_lineno = 0
                 last_func_name = ""
-            with open(log_path, 'a') as f:
+            with open(log_path, "a") as f:
                 ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
-                if event == 'call':
-                    f.write(f"{ts} Call to"
-                            f" {func_name} in {filename}:{lineno}"
-                            f" from {last_func_name} in {last_filename}:"
-                            f"{last_lineno}\n")
+                if event == "call":
+                    f.write(
+                        f"{ts} Call to"
+                        f" {func_name} in {filename}:{lineno}"
+                        f" from {last_func_name} in {last_filename}:"
+                        f"{last_lineno}\n"
+                    )
                 else:
-                    f.write(f"{ts} Return from"
-                            f" {func_name} in {filename}:{lineno}"
-                            f" to {last_func_name} in {last_filename}:"
-                            f"{last_lineno}\n")
+                    f.write(
+                        f"{ts} Return from"
+                        f" {func_name} in {filename}:{lineno}"
+                        f" to {last_func_name} in {last_filename}:"
+                        f"{last_lineno}\n"
+                    )
         except NameError:
             # modules are deleted during shutdown
             pass
     return partial(_trace_calls, log_path, root_dir)
 
 
-def enable_trace_function_call(log_file_path: str,
-                               root_dir: Optional[str] = None):
+def enable_trace_function_call(log_file_path: str, root_dir: Optional[str] = None):
     """
     Enable tracing of every function call in code under `root_dir`.
     This is useful for debugging hangs or crashes.
@@ -221,7 +231,8 @@ def enable_trace_function_call(log_file_path: str,
     logger.warning(
         "VLLM_TRACE_FUNCTION is enabled. It will record every"
         " function executed by Python. This will slow down the code. It "
-        "is suggested to be used for debugging hang or crashes only.")
+        "is suggested to be used for debugging hang or crashes only."
+    )
     logger.info("Trace frame log is saved to %s", log_file_path)
     if root_dir is None:
         # by default, this is the vllm root directory

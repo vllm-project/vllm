@@ -4,6 +4,7 @@
 
 Run `pytest tests/v1/tpu/test_basic.py`.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -32,8 +33,9 @@ MAX_NUM_REQS = [16, 1024]
 # TENSOR_PARALLEL_SIZES = [1, 4]
 
 
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This is a basic test for TPU only")
+@pytest.mark.skipif(
+    not current_platform.is_tpu(), reason="This is a basic test for TPU only"
+)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("tensor_parallel_size", TENSOR_PARALLEL_SIZES)
@@ -46,32 +48,36 @@ def test_basic(
     tensor_parallel_size: int,
     max_num_seqs: int,
 ) -> None:
-    prompt = "The next numbers of the sequence " + ", ".join(
-        str(i) for i in range(1024)) + " are:"
+    prompt = (
+        "The next numbers of the sequence "
+        + ", ".join(str(i) for i in range(1024))
+        + " are:"
+    )
     example_prompts = [prompt]
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
         with vllm_runner(
-                model,
-                # Note: max_num_batched_tokens == 1024 is needed here to
-                # actually test chunked prompt
-                max_num_batched_tokens=1024,
-                max_model_len=8192,
-                gpu_memory_utilization=0.7,
-                max_num_seqs=max_num_seqs,
-                tensor_parallel_size=tensor_parallel_size) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+            model,
+            # Note: max_num_batched_tokens == 1024 is needed here to
+            # actually test chunked prompt
+            max_num_batched_tokens=1024,
+            max_model_len=8192,
+            gpu_memory_utilization=0.7,
+            max_num_seqs=max_num_seqs,
+            tensor_parallel_size=tensor_parallel_size,
+        ) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         output = vllm_outputs[0][1]
 
         assert "1024" in output or "0, 1" in output
 
 
 @pytest.mark.skip(reason="Temporarily disabled due to timeout")
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This is a basic test for TPU only")
+@pytest.mark.skipif(
+    not current_platform.is_tpu(), reason="This is a basic test for TPU only"
+)
 @pytest.mark.parametrize("max_tokens", [8])
 @pytest.mark.parametrize("max_num_seqs", [16])
 def test_phi3(
@@ -96,9 +102,9 @@ def test_phi3(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        with vllm_runner(model,
-                         max_num_batched_tokens=256,
-                         max_num_seqs=max_num_seqs) as vllm_model:
+        with vllm_runner(
+            model, max_num_batched_tokens=256, max_num_seqs=max_num_seqs
+        ) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
         # vllm_outputs is a list of tuples whose first element is the token id
         # and the second element is the output (including the prompt).
@@ -110,10 +116,11 @@ def test_phi3(
 TP_SIZE_8 = 8
 
 
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This is a test for TPU only")
-@pytest.mark.skipif(tpu.num_available_chips() < TP_SIZE_8,
-                    reason=f"This test requires {TP_SIZE_8} TPU chips.")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This is a test for TPU only")
+@pytest.mark.skipif(
+    tpu.num_available_chips() < TP_SIZE_8,
+    reason=f"This test requires {TP_SIZE_8} TPU chips.",
+)
 def test_gemma3_27b_with_text_input_and_tp(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
@@ -137,10 +144,11 @@ def test_gemma3_27b_with_text_input_and_tp(
         m.setenv("VLLM_USE_V1", "1")
 
         with vllm_runner(
-                model,
-                max_num_batched_tokens=256,
-                max_num_seqs=max_num_seqs,
-                tensor_parallel_size=tensor_parallel_size) as vllm_model:
+            model,
+            max_num_batched_tokens=256,
+            max_num_seqs=max_num_seqs,
+            tensor_parallel_size=tensor_parallel_size,
+        ) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(prompts, max_tokens)
         # vllm_outputs is a list of tuples whose first element is the token id
         # and the second element is the output (including the prompt).
@@ -149,8 +157,9 @@ def test_gemma3_27b_with_text_input_and_tp(
             assert answer in generated_text
 
 
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This is a basic test for TPU only")
+@pytest.mark.skipif(
+    not current_platform.is_tpu(), reason="This is a basic test for TPU only"
+)
 def test_w8a8_quantization(
     vllm_runner: type[VllmRunner],
     monkeypatch: pytest.MonkeyPatch,
@@ -160,22 +169,25 @@ def test_w8a8_quantization(
     tensor_parallel_size = 1
     max_num_seqs = 4
 
-    prompt = "The next numbers of the sequence " + ", ".join(
-        str(i) for i in range(1024)) + " are:"
+    prompt = (
+        "The next numbers of the sequence "
+        + ", ".join(str(i) for i in range(1024))
+        + " are:"
+    )
     example_prompts = [prompt]
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
         with vllm_runner(
-                model,
-                max_num_batched_tokens=64,
-                max_model_len=4096,
-                gpu_memory_utilization=0.7,
-                max_num_seqs=max_num_seqs,
-                tensor_parallel_size=tensor_parallel_size) as vllm_model:
-            vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+            model,
+            max_num_batched_tokens=64,
+            max_model_len=4096,
+            gpu_memory_utilization=0.7,
+            max_num_seqs=max_num_seqs,
+            tensor_parallel_size=tensor_parallel_size,
+        ) as vllm_model:
+            vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
         output = vllm_outputs[0][1]
 
         assert "1024" in output or "0, 1" in output

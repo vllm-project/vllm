@@ -14,8 +14,10 @@ def test_cascade_attention(example_system_message, monkeypatch, attn_backend):
     prompt = "\n<User>: Implement fibonacci sequence in Python.\n<Claude>:"
 
     if attn_backend == "FLASHINFER":
-        pytest.skip("This test is failing with FlashInfer backend and "
-                    "needs investigation. See issue #25679.")
+        pytest.skip(
+            "This test is failing with FlashInfer backend and "
+            "needs investigation. See issue #25679."
+        )
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")

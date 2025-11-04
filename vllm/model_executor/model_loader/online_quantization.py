@@ -9,8 +9,7 @@ from torch import nn
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import (
-    process_weights_after_loading)
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 logger = init_logger(__name__)
 
@@ -63,7 +62,8 @@ logger = init_logger(__name__)
 
 
 def maybe_save_metadata_and_attributes_for_weight_reloading(
-        model: nn.Module, model_config: ModelConfig):
+    model: nn.Module, model_config: ModelConfig
+):
     # following is to support on the fly quantization, currently only supported
     # for torchao
     if model_config.quantization != "torchao":
@@ -73,10 +73,12 @@ def maybe_save_metadata_and_attributes_for_weight_reloading(
         # In case `process_weights_after_loading` is called multiple times
         # we'll skip it at later times
         logger.warning(
-            "process_weights_after_loading already called for model %s", model)
+            "process_weights_after_loading already called for model %s", model
+        )
         return
 
     from vllm.model_executor.model_loader.weight_utils import get_quant_config
+
     quant_config = get_quant_config(model_config, None)
 
     # If checkpoint is already torchao serialized, this means it's
@@ -86,8 +88,10 @@ def maybe_save_metadata_and_attributes_for_weight_reloading(
     # This step record the weights metadata and weight attributes so we can
     # restore the bfloat16 model weights during the relad step (R1 and R2)
     # see Notes in online_quantization.py for more details
-    if not (hasattr(quant_config, "is_checkpoint_torchao_serialized") and \
-       not quant_config.is_checkpoint_torchao_serialized):
+    if not (
+        hasattr(quant_config, "is_checkpoint_torchao_serialized")
+        and not quant_config.is_checkpoint_torchao_serialized
+    ):
         return
 
     # This is the I2 step of online quantiztion that saves
@@ -144,23 +148,23 @@ def _bond_method_to_cls(func, obj):
         return types.MethodType(func, obj)
 
 
-def load_weights_and_online_quantize(model_loader: DefaultModelLoader,
-                                     model: nn.Module,
-                                     model_config: ModelConfig) -> set[str]:
+def load_weights_and_online_quantize(
+    model_loader: DefaultModelLoader, model: nn.Module, model_config: ModelConfig
+) -> set[str]:
     # online quantization, right now only enabled for
     # torchao
     # R1, R2, R3, R4 in the Notes
 
     # TODO: Add fp8 support
-    assert model_config.quantization == "torchao", "online " \
-        "quantization is only enabled for torchao currently"
+    assert model_config.quantization == "torchao", (
+        "online quantization is only enabled for torchao currently"
+    )
     # TODO: use create_weights to restore the weights to original state
 
     # Step R1: First restore the quantized weights to original bfloat16
     # weights, with original metadata (shape, dtype, device)
     # and attributes, so that bfloat16 weights can be loaded properly
-    existing_param_names = dict(
-        model.named_parameters(remove_duplicate=False)).keys()
+    existing_param_names = dict(model.named_parameters(remove_duplicate=False)).keys()
     named_modules = dict(model.named_modules(remove_duplicate=False))
     model_device = None
 
@@ -170,9 +174,11 @@ def load_weights_and_online_quantize(model_loader: DefaultModelLoader,
         _dtype = d["dtype"]
         _device = d["device"]
         if model_device is not None:
-            assert model_device == _device, "Expecting all weights " \
-                "to be in the same device for now, got both: " \
+            assert model_device == _device, (
+                "Expecting all weights "
+                "to be in the same device for now, got both: "
                 f"{model_device} and {_device}"
+            )
         else:
             model_device = _device
 
@@ -180,9 +186,10 @@ def load_weights_and_online_quantize(model_loader: DefaultModelLoader,
             module_name, weight_name = name.rsplit(".", 1)
             module = named_modules[module_name]
             setattr(
-                module, weight_name,
-                torch.nn.Parameter(
-                    torch.empty(_shape, dtype=_dtype, device=_device)))
+                module,
+                weight_name,
+                torch.nn.Parameter(torch.empty(_shape, dtype=_dtype, device=_device)),
+            )
 
     # recorded_weight_attr is
     # {"weight_name": {"weight_attr_key": attr}}
@@ -196,8 +203,7 @@ def load_weights_and_online_quantize(model_loader: DefaultModelLoader,
     #     "layer.1.weight": ...,
     #    }
     # }
-    for full_weight_name, weight_attr_dict in \
-            model.recorded_weight_attr.items():
+    for full_weight_name, weight_attr_dict in model.recorded_weight_attr.items():
         for attr_name, attr in weight_attr_dict.items():
             module_name, weight_name = full_weight_name.rsplit(".", 1)
             module = named_modules[module_name]
@@ -207,7 +213,8 @@ def load_weights_and_online_quantize(model_loader: DefaultModelLoader,
 
     # Step I1: reload bfloat16 / high precision weights
     loaded_weights = model.load_weights(
-        model_loader.get_all_weights(model_config, model))
+        model_loader.get_all_weights(model_config, model)
+    )
 
     # Step I2: online quantize the weights
     # manually process weights after loading

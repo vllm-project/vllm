@@ -5,8 +5,11 @@ import os
 import pytest
 
 from tests.models.language.pooling_mteb_test.mteb_utils import (
-    MTEB_EMBED_TASKS, MTEB_EMBED_TOL, OpenAIClientMtebEncoder,
-    run_mteb_embed_task)
+    MTEB_EMBED_TASKS,
+    MTEB_EMBED_TOL,
+    OpenAIClientMtebEncoder,
+    run_mteb_embed_task,
+)
 from tests.utils import RemoteOpenAIServer
 
 os.environ["VLLM_LOGGING_LEVEL"] = "WARNING"
@@ -17,10 +20,7 @@ MAIN_SCORE = 0.7422994752439667
 
 @pytest.fixture(scope="module")
 def server():
-    args = [
-        "--runner", "pooling", "--enforce-eager",
-        "--disable-uvicorn-access-log"
-    ]
+    args = ["--runner", "pooling", "--enforce-eager", "--disable-uvicorn-access-log"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

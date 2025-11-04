@@ -9,13 +9,11 @@ T = TypeVar("T")
 
 
 @overload
-def bc_linter_skip(obj: T) -> T:
-    ...
+def bc_linter_skip(obj: T) -> T: ...
 
 
 @overload
-def bc_linter_skip(*, reason: str | None = ...) -> Callable[[T], T]:
-    ...
+def bc_linter_skip(*, reason: str | None = ...) -> Callable[[T], T]: ...
 
 
 def bc_linter_skip(obj: Any = None, *, reason: str | None = None):
@@ -34,13 +32,11 @@ def bc_linter_skip(obj: Any = None, *, reason: str | None = None):
 
 
 @overload
-def bc_linter_include(obj: T) -> T:
-    ...
+def bc_linter_include(obj: T) -> T: ...
 
 
 @overload
-def bc_linter_include(*, reason: str | None = ...) -> Callable[[T], T]:
-    ...
+def bc_linter_include(*, reason: str | None = ...) -> Callable[[T], T]: ...
 
 
 def bc_linter_include(obj: Any = None, *, reason: str | None = None):

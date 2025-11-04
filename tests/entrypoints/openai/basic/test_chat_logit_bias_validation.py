@@ -31,10 +31,7 @@ async def test_chat_logit_bias_valid(client, model_name):
 
     completion = await client.chat.completions.create(
         model=model_name,
-        messages=[{
-            "role": "user",
-            "content": "Testing valid logit bias"
-        }],
+        messages=[{"role": "user", "content": "Testing valid logit bias"}],
         max_tokens=5,
         logit_bias={str(valid_token_id): 1.0},
     )
@@ -51,10 +48,7 @@ async def test_chat_logit_bias_invalid(client, model_name):
     with pytest.raises(openai.BadRequestError) as excinfo:
         await client.chat.completions.create(
             model=model_name,
-            messages=[{
-                "role": "user",
-                "content": "Testing invalid logit bias"
-            }],
+            messages=[{"role": "user", "content": "Testing invalid logit bias"}],
             max_tokens=5,
             logit_bias={str(invalid_token_id): 1.0},
         )

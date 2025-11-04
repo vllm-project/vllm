@@ -15,13 +15,15 @@ PROMPT = "Hello my name is Robert and I"
 
 @pytest.fixture(scope="module")
 def llm() -> LLM:
-    return LLM(MODEL,
-               enforce_eager=True,
-               enable_prefix_caching=True,
-               long_prefill_token_threshold=2,
-               max_num_batched_tokens=6,
-               max_num_seqs=3,
-               block_size=16)
+    return LLM(
+        MODEL,
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        long_prefill_token_threshold=2,
+        max_num_batched_tokens=6,
+        max_num_seqs=3,
+        block_size=16,
+    )
 
 
 def test_concurrent_partial_prefill(llm):

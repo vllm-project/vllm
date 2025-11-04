@@ -44,14 +44,13 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.short_factor = short_factor
         self.long_factor = long_factor
 
-        scale = self.max_position_embeddings / \
-                self.original_max_position_embeddings
+        scale = self.max_position_embeddings / self.original_max_position_embeddings
         if scale <= 1.0:
             scaling_factor = 1.0
         else:
             scaling_factor = math.sqrt(
-                1 + math.log(scale) /
-                math.log(self.original_max_position_embeddings))
+                1 + math.log(scale) / math.log(self.original_max_position_embeddings)
+            )
         if short_mscale is None:
             short_mscale = scaling_factor
         if long_mscale is None:
@@ -61,22 +60,32 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         self.long_mscale = long_mscale
 
         short_cache = self._compute_cos_sin_cache(
-            original_max_position_embeddings, short_factor, short_mscale)
+            original_max_position_embeddings, short_factor, short_mscale
+        )
         short_cache = short_cache.to(dtype)
 
-        long_cache = self._compute_cos_sin_cache(max_position_embeddings,
-                                                 long_factor, long_mscale)
+        long_cache = self._compute_cos_sin_cache(
+            max_position_embeddings, long_factor, long_mscale
+        )
         long_cache = long_cache.to(dtype)
 
         long_short_cache = torch.cat([short_cache, long_cache], dim=0)
-        self.register_buffer("long_short_cos_sin_cache",
-                             long_short_cache,
-                             persistent=False)
+        self.register_buffer(
+            "long_short_cos_sin_cache", long_short_cache, persistent=False
+        )
 
     def _compute_inv_freq(self, rescale_factors: list[float]) -> torch.Tensor:
         rescale_factors = torch.tensor(rescale_factors, dtype=torch.float32)
-        inv_freq = 1.0 / (rescale_factors * (self.base**(torch.arange(
-            0, self.rotary_dim, 2, dtype=torch.float) / self.rotary_dim)))
+        inv_freq = 1.0 / (
+            rescale_factors
+            * (
+                self.base
+                ** (
+                    torch.arange(0, self.rotary_dim, 2, dtype=torch.float)
+                    / self.rotary_dim
+                )
+            )
+        )
         return inv_freq
 
     def _compute_cos_sin_cache(
@@ -105,10 +114,14 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         key = key.view(*key.shape[:-1], -1, self.head_size)
 
         k = self.original_max_position_embeddings
-        long_prompt_offset = (torch.any(positions > k).float() *
-                              torch.full_like(positions, k)).long()
-        idx = (torch.add(positions, long_prompt_offset)
-               if long_prompt_offset is not None else positions)
+        long_prompt_offset = (
+            torch.any(positions > k).float() * torch.full_like(positions, k)
+        ).long()
+        idx = (
+            torch.add(positions, long_prompt_offset)
+            if long_prompt_offset is not None
+            else positions
+        )
         idx = torch.add(idx, offsets) if offsets is not None else idx
         cos_sin = torch.index_select(self.long_short_cos_sin_cache, 0, idx)
 
@@ -116,13 +129,13 @@ class Phi3LongRoPEScaledRotaryEmbedding(nn.Module):
         cos = cos.repeat(1, 2).unsqueeze(-2)
         sin = sin.repeat(1, 2).unsqueeze(-2)
 
-        query_rot = query[..., :self.rotary_dim]
-        query_pass = query[..., self.rotary_dim:]
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
         query_rot = query_rot * cos + rotate_neox(query_rot) * sin
         query = torch.cat((query_rot, query_pass), dim=-1)
 
-        key_rot = key[..., :self.rotary_dim]
-        key_pass = key[..., self.rotary_dim:]
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
         key_rot = key_rot * cos + rotate_neox(key_rot) * sin
         key = torch.cat((key_rot, key_pass), dim=-1)
 

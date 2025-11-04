@@ -8,40 +8,47 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize)
+    create_flashinfer_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceNoOP)
-from vllm.utils.flashinfer import (flashinfer_cutlass_fused_moe,
-                                   has_flashinfer_cutlass_fused_moe)
+    TopKWeightAndReduceNoOP,
+)
+from vllm.utils.flashinfer import (
+    flashinfer_cutlass_fused_moe,
+    has_flashinfer_cutlass_fused_moe,
+)
 
 logger = init_logger(__name__)
 
 
-def is_valid_flashinfer_cutlass_fused_moe(hidden_states: torch.Tensor,
-                                          w1: torch.Tensor,
-                                          w2: torch.Tensor) -> bool:
+def is_valid_flashinfer_cutlass_fused_moe(
+    hidden_states: torch.Tensor, w1: torch.Tensor, w2: torch.Tensor
+) -> bool:
     """
     Check if the given problem size is supported by the FlashInfer CUTLASS MoE
     kernel.
     """
     if not has_flashinfer_cutlass_fused_moe():
-        logger.debug_once("FlashInferExperts disabled: "
-                          "flashinfer_cutlass_fused_moe not available.")
+        logger.debug_once(
+            "FlashInferExperts disabled: flashinfer_cutlass_fused_moe not available."
+        )
         return False
     # Data type checks
-    if (w1.dtype != torch.uint8 or w2.dtype != torch.uint8
-            or hidden_states.dtype
-            not in [torch.float32, torch.float16, torch.bfloat16]):
+    if (
+        w1.dtype != torch.uint8
+        or w2.dtype != torch.uint8
+        or hidden_states.dtype not in [torch.float32, torch.float16, torch.bfloat16]
+    ):
         logger.debug_once(
             "FlashInferExperts disabled: w1/w2 must be torch.uint8 "
             f"(got w1={w1.dtype}, w2={w2.dtype}), hidden_states must be "
-            f"float32, float16, or bfloat16 (got {hidden_states.dtype}).")
+            f"float32, float16, or bfloat16 (got {hidden_states.dtype})."
+        )
         return False
     return True
 
 
 class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
-
     def __init__(
         self,
         out_dtype: torch.dtype,
@@ -52,10 +59,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         tp_size: int = 1,
     ):
         super().__init__(quant_config)
-        assert quant_config.quant_dtype in (
-            "nvfp4", torch.float8_e4m3fn,
-            None), ("Only nvfp4, fp8, bfloat16 and"
-                    " float16 quantization are currently supported.")
+        assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
+            "Only nvfp4, fp8, bfloat16 and"
+            " float16 quantization are currently supported."
+        )
         self.ep_rank = ep_rank
         self.ep_size = ep_size
         self.tp_rank = tp_rank
@@ -64,10 +71,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @property
     def activation_formats(
-        self
+        self,
     ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        return (mk.FusedMoEActivationFormat.Standard,
-                mk.FusedMoEActivationFormat.Standard)
+        return (
+            mk.FusedMoEActivationFormat.Standard,
+            mk.FusedMoEActivationFormat.Standard,
+        )
 
     def supports_expert_map(self) -> bool:
         return False
@@ -110,10 +119,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
           of each tuple must be the number of tokens.
         """
         aq_m, aq_n = aq.shape
-        workspace2 = (0, )
-        output_shape = (aq_m,
-                        aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m,
-                                                                       aq_n)
+        workspace2 = (0,)
+        output_shape = (aq_m, aq_n * 2) if self.quant_dtype == "nvfp4" else (aq_m, aq_n)
         workspace_dtype = a.dtype
         workspace1 = output_shape
         # The workspace is determined by `aq`, since it comes after any
@@ -138,13 +145,16 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
         apply_router_weight_on_input: Optional[bool],
     ):
-
-        assert activation == "silu", ("Only activation silu is supported in "
-                                      "FlashInferExperts")
+        assert activation == "silu", (
+            "Only activation silu is supported in FlashInferExperts"
+        )
 
         if self.quant_dtype == torch.float8_e4m3fn:
             quant_scales = [
-                self.g1_alphas, self.a2_gscale, self.g2_alphas, self.a1_gscale
+                self.g1_alphas,
+                self.a2_gscale,
+                self.g2_alphas,
+                self.a1_gscale,
             ]
 
             a1q_scale = None  # not passing input_sf in fp8
@@ -153,8 +163,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         elif self.quant_dtype == "nvfp4":
             # Ensure w1_scale and w2_scale are not None before calling view
             assert self.w1_scale is not None and self.w2_scale is not None, (
-                "w1_scale and w2_scale must not "
-                "be None for FlashInferExperts")
+                "w1_scale and w2_scale must not be None for FlashInferExperts"
+            )
             # Flashinfer CUTLASS kernel takes scalar global scales,
             # min because inv_scale.
             quant_scales = [
@@ -209,7 +219,8 @@ def flashinfer_cutlass_moe_fp4(
         FlashInferExperts(
             out_dtype=hidden_states.dtype,
             quant_config=quant_config,
-        ))
+        ),
+    )
 
     return fused_experts(
         hidden_states=hidden_states,
@@ -252,7 +263,8 @@ def flashinfer_cutlass_moe(
             tp_size=tp_size,
             ep_rank=ep_rank,
             ep_size=ep_size,
-        ))
+        ),
+    )
 
     return fused_experts(
         hidden_states=hidden_states,

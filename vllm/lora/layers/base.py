@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
 
 class BaseLayerWithLoRA(nn.Module):
-
     def slice_lora_a(
         self, lora_a: Union[torch.Tensor, list[Union[torch.Tensor, None]]]
     ) -> Union[torch.Tensor, list[Union[torch.Tensor, None]]]:

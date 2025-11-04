@@ -8,8 +8,7 @@ from typing import ClassVar, Optional
 import regex as re
 import torch
 from torch._dynamo.utils import lazy_format_graph_code
-from torch._inductor.pattern_matcher import (PatternMatcherPass,
-                                             PatternPrettyPrinter)
+from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPrinter
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -24,20 +23,18 @@ class VllmInductorPass(InductorPass):
     An inductor pass with access to vLLM PassConfig.
     It provides timing, logging, and dumping utilities.
     """
+
     dump_prefix: ClassVar[Optional[int]] = None
     """Keep track of pass index for debug dump ordering."""
 
     def __init__(self, config: VllmConfig):
         self.pass_config = config.compilation_config.pass_config
-        self.model_dtype = config.model_config.dtype if config.model_config \
-            else None
-        self.device = config.device_config.device if config.device_config \
-            else None
+        self.model_dtype = config.model_config.dtype if config.model_config else None
+        self.device = config.device_config.device if config.device_config else None
         self.pass_name = self.__class__.__name__
 
     @staticmethod
     def time_and_log(call_fn):
-
         @functools.wraps(call_fn)
         def wrapped(self: VllmInductorPass, graph: torch.fx.Graph):
             self.begin()
@@ -51,8 +48,9 @@ class VllmInductorPass(InductorPass):
     def dump_graph(self, graph: torch.fx.Graph, stage: str):
         i = VllmInductorPass.dump_prefix
         i_str = "" if i is None else f".{i}"
-        lazy_format_graph_code(f"post_grad{i_str}.{self.pass_name}.{stage}",
-                               graph.owning_module)
+        lazy_format_graph_code(
+            f"post_grad{i_str}.{self.pass_name}.{stage}", graph.owning_module
+        )
 
     def begin(self):
         self._start_time = time.perf_counter_ns()
@@ -71,11 +69,13 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
     TODO(luka) move more utilities to this pass.
     """
+
     matched_count: int = 0
     """The number of matched patterns in the pass."""
 
     _OP_OVERLOAD_PATTERN: ClassVar[re.Pattern] = re.compile(
-        r"<OpOverload\(op='([^']*)', overload='([^']*)'\)>")
+        r"<OpOverload\(op='([^']*)', overload='([^']*)'\)>"
+    )
 
     def _replace_op_overloads(self, string: str) -> str:
         """Replace <OpOverload(..., ...)> with nicer formulations"""
@@ -102,19 +102,22 @@ class VllmPatternMatcherPass(VllmInductorPass):
         debug_dump_path.mkdir(parents=True, exist_ok=True)
 
         from vllm.utils import unique_filepath
+
         file_path = unique_filepath(
-            lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py")
+            lambda i: debug_dump_path / f"patterns.{self.pass_name}.{i}.py"
+        )
 
         with file_path.open("w") as f:
             print(
-                f'# This file was produced by VllmPatternMatcherPass.'
-                f'dump_patterns for {self.pass_name}.\n'
-                f'# It does its best to produce valid-Python-looking code but'
-                f' please add to dump_patterns if there are any errors.\n\n'
-                f'from torch._higher_order_ops.auto_functionalize import '
-                f'auto_functionalized as auto_functionalized\n'
-                f'from torch._inductor.pattern_matcher import *',
-                file=f)
+                f"# This file was produced by VllmPatternMatcherPass."
+                f"dump_patterns for {self.pass_name}.\n"
+                f"# It does its best to produce valid-Python-looking code but"
+                f" please add to dump_patterns if there are any errors.\n\n"
+                f"from torch._higher_order_ops.auto_functionalize import "
+                f"auto_functionalized as auto_functionalized\n"
+                f"from torch._inductor.pattern_matcher import *",
+                file=f,
+            )
 
             for node, patterns in pm_pass.patterns.items():
                 # fix the operator.getitem repr
@@ -133,18 +136,21 @@ class VllmPatternMatcherPass(VllmInductorPass):
 
                     # Assemble pattern
                     out_node = pp.pretty_print(pattern.pattern)
-                    pattern_repr = "\n".join([f"def pattern_{i}():"] + [
-                        f"{pp.memoized_objs_names[key]} = "
-                        f"{pp.memoized_objs_pp[key]}"
-                        for key in pp.memoized_objs_names
-                    ] + [f"return {out_node}"]).replace("\n", "\n    ")
+                    pattern_repr = "\n".join(
+                        [f"def pattern_{i}():"]
+                        + [
+                            f"{pp.memoized_objs_names[key]} = "
+                            f"{pp.memoized_objs_pp[key]}"
+                            for key in pp.memoized_objs_names
+                        ]
+                        + [f"return {out_node}"]
+                    ).replace("\n", "\n    ")
 
                     pattern_repr = self._replace_op_overloads(pattern_repr)
                     print(f"{pattern_repr}\n", file=f)
 
 
 class PrinterInductorPass(VllmInductorPass):
-
     def __init__(self, name: str, config: VllmConfig):
         super().__init__(config)
         self.name = name

@@ -14,6 +14,7 @@ from vllm.v1.request import Request
 
 class SchedulingPolicy(Enum):
     """Enum for scheduling policies."""
+
     FCFS = "fcfs"
     PRIORITY = "priority"
 
@@ -111,9 +112,7 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
         requests_to_remove = set(requests)
-        filtered_requests = [
-            req for req in self if req not in requests_to_remove
-        ]
+        filtered_requests = [req for req in self if req not in requests_to_remove]
         # deque does not support in-place filtering, so we need to clear
         # and extend
         self.clear()
@@ -150,8 +149,7 @@ class PriorityRequestQueue(RequestQueue):
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
-        heapq.heappush(self._heap,
-                       (request.priority, request.arrival_time, request))
+        heapq.heappush(self._heap, (request.priority, request.arrival_time, request))
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
@@ -169,15 +167,15 @@ class PriorityRequestQueue(RequestQueue):
 
     def prepend_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy.
-        
-        Note: In a priority queue, there is no concept of prepending to the 
+
+        Note: In a priority queue, there is no concept of prepending to the
         front. Requests are ordered by (priority, arrival_time)."""
         self.add_request(request)
 
     def prepend_requests(self, requests: RequestQueue) -> None:
         """Add all requests from another queue according to priority policy.
-        
-        Note: In a priority queue, there is no concept of prepending to the 
+
+        Note: In a priority queue, there is no concept of prepending to the
         front. Requests are ordered by (priority, arrival_time)."""
         for request in requests:
             self.add_request(request)
@@ -190,8 +188,9 @@ class PriorityRequestQueue(RequestQueue):
     def remove_requests(self, requests: Iterable[Request]) -> None:
         """Remove multiple specific requests from the queue."""
         requests_to_remove = set(requests)
-        self._heap = [(p, t, r) for p, t, r in self._heap
-                      if r not in requests_to_remove]
+        self._heap = [
+            (p, t, r) for p, t, r in self._heap if r not in requests_to_remove
+        ]
         heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:

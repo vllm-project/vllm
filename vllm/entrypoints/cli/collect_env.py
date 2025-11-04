@@ -14,7 +14,8 @@ if typing.TYPE_CHECKING:
 
 
 class CollectEnvSubcommand(CLISubcommand):
-    """The `collect-env` subcommand for the vLLM CLI. """
+    """The `collect-env` subcommand for the vLLM CLI."""
+
     name = "collect-env"
 
     @staticmethod
@@ -23,13 +24,14 @@ class CollectEnvSubcommand(CLISubcommand):
         collect_env_main()
 
     def subparser_init(
-            self,
-            subparsers: argparse._SubParsersAction) -> FlexibleArgumentParser:
+        self, subparsers: argparse._SubParsersAction
+    ) -> FlexibleArgumentParser:
         return subparsers.add_parser(
             "collect-env",
             help="Start collecting environment information.",
             description="Start collecting environment information.",
-            usage="vllm collect-env")
+            usage="vllm collect-env",
+        )
 
 
 def cmd_init() -> list[CLISubcommand]:

@@ -53,12 +53,14 @@ class DotsVisionConfig(PretrainedConfig):
 class DotsOCRConfig(Qwen2Config):
     model_type = "dots_ocr"
 
-    def __init__(self,
-                 image_token_id=151665,
-                 video_token_id=151656,
-                 vision_config: Optional[dict] = None,
-                 *args,
-                 **kwargs):
+    def __init__(
+        self,
+        image_token_id=151665,
+        video_token_id=151656,
+        vision_config: Optional[dict] = None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.image_token_id = image_token_id
         self.video_token_id = video_token_id

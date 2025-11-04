@@ -114,8 +114,10 @@ class _HfExamplesInfo:
         If the installed transformers version does not meet the requirements,
         perform the given action.
         """
-        if (self.min_transformers_version is None
-                and self.max_transformers_version is None):
+        if (
+            self.min_transformers_version is None
+            and self.max_transformers_version is None
+        ):
             return None
 
         current_version = TRANSFORMERS_VERSION
@@ -125,11 +127,17 @@ class _HfExamplesInfo:
         msg = f"`transformers=={current_version}` installed, but `transformers"
         # Only check the base version for the min/max version, otherwise preview
         # models cannot be run because `x.yy.0.dev0`<`x.yy.0`
-        if (check_min_version and min_version
-                and Version(cur_base_version) < Version(min_version)):
+        if (
+            check_min_version
+            and min_version
+            and Version(cur_base_version) < Version(min_version)
+        ):
             msg += f">={min_version}` is required to run this model."
-        elif (check_max_version and max_version
-              and Version(cur_base_version) > Version(max_version)):
+        elif (
+            check_max_version
+            and max_version
+            and Version(cur_base_version) > Version(max_version)
+        ):
             msg += f"<={max_version}` is required to run this model."
         else:
             return None

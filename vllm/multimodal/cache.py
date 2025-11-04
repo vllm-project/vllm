@@ -11,17 +11,24 @@ import torch
 from typing_extensions import TypeAlias, override
 
 from vllm.distributed.device_communicators.shm_object_storage import (
-    MsgpackSerde, SingleWriterShmObjectStorage, SingleWriterShmRingBuffer)
+    MsgpackSerde,
+    SingleWriterShmObjectStorage,
+    SingleWriterShmRingBuffer,
+)
 from vllm.envs import VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME
 from vllm.logger import init_logger
 from vllm.utils import GiB_bytes, LRUCache, MiB_bytes
-from vllm.utils.jsontree import (json_count_leaves, json_map_leaves,
-                                 json_reduce_leaves)
+from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 
-from .inputs import (MultiModalBatchedField, MultiModalFeatureSpec,
-                     MultiModalFieldElem, MultiModalKwargs,
-                     MultiModalKwargsItem, MultiModalKwargsItems,
-                     NestedTensors)
+from .inputs import (
+    MultiModalBatchedField,
+    MultiModalFeatureSpec,
+    MultiModalFieldElem,
+    MultiModalKwargs,
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    NestedTensors,
+)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -90,7 +97,6 @@ _V = TypeVar("_V", bound=MultiModalCacheValue)
 
 
 class MultiModalCache:
-
     @classmethod
     def get_leaf_size(cls, leaf: object) -> int:
         if isinstance(leaf, MultiModalProcessorCacheItem):
@@ -99,8 +105,15 @@ class MultiModalCache:
             return leaf.item_size
 
         # These are not subclasses of dict
-        if isinstance(leaf, (MultiModalKwargs, MultiModalKwargsItems,
-                             MultiModalKwargsItem, MultiModalFieldElem)):
+        if isinstance(
+            leaf,
+            (
+                MultiModalKwargs,
+                MultiModalKwargsItems,
+                MultiModalKwargsItem,
+                MultiModalFieldElem,
+            ),
+        ):
             return cls.get_item_size(leaf.data)  # type: ignore
 
         # sys.getsizeof doesn't work for tensors
@@ -116,8 +129,9 @@ class MultiModalCache:
         *,
         debug: bool = False,
     ) -> int:
-        size = json_reduce_leaves(operator.add,
-                                  json_map_leaves(cls.get_leaf_size, value))
+        size = json_reduce_leaves(
+            operator.add, json_map_leaves(cls.get_leaf_size, value)
+        )
 
         if debug:
             leaf_count = json_count_leaves(value)
@@ -241,17 +255,19 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
         raise NotImplementedError
 
 
-MultiModalProcessorCacheInItem: TypeAlias = \
-    Optional[tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]]]
+MultiModalProcessorCacheInItem: TypeAlias = Optional[
+    tuple[MultiModalKwargsItem, Sequence["ResolvedPromptUpdate"]]
+]
 
 
-MultiModalProcessorCacheOutItem: TypeAlias = \
-    tuple[Optional[MultiModalKwargsItem], Sequence["ResolvedPromptUpdate"]]
+MultiModalProcessorCacheOutItem: TypeAlias = tuple[
+    Optional[MultiModalKwargsItem], Sequence["ResolvedPromptUpdate"]
+]
 
 
 class BaseMultiModalProcessorCache(
-        BaseMultiModalCache[MultiModalProcessorCacheInItem,
-                            MultiModalProcessorCacheOutItem]):
+    BaseMultiModalCache[MultiModalProcessorCacheInItem, MultiModalProcessorCacheOutItem]
+):
     """The required interface for caches on P0."""
 
     @abstractmethod
@@ -405,15 +421,13 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             create=True,  # sender is the writer
         )
         self._shm_cache = SingleWriterShmObjectStorage(
-            max_object_size=mm_config.mm_shm_cache_max_object_size_mb *
-            MiB_bytes,
+            max_object_size=mm_config.mm_shm_cache_max_object_size_mb * MiB_bytes,
             n_readers=self.world_size,
             ring_buffer=ring_buffer,
             serde_class=MsgpackSerde,
         )
         # cache (prompt_updates, modality) for P0 only
-        self._p0_cache: dict[str, tuple[Sequence[ResolvedPromptUpdate],
-                                        str]] = {}
+        self._p0_cache: dict[str, tuple[Sequence[ResolvedPromptUpdate], str]] = {}
 
     @override
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -425,12 +439,10 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-
         if self._shm_cache.is_cached(mm_hash):
             address, monotonic_id = self._shm_cache.get_cached(mm_hash)
             prompt_updates, modality = self._p0_cache[mm_hash]
-            return self.address_as_item(address, monotonic_id,
-                                        modality), prompt_updates
+            return self.address_as_item(address, monotonic_id, modality), prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
@@ -440,15 +452,15 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             if len(self._p0_cache) >= 2 * len(self._shm_cache.key_index):
                 self.remove_dangling_items()
             self._p0_cache[mm_hash] = mm_item[1], mm_item[0].modality
-            address_item = self.address_as_item(address, monotonic_id,
-                                                mm_item[0].modality)
+            address_item = self.address_as_item(
+                address, monotonic_id, mm_item[0].modality
+            )
             return address_item, mm_item[1]
         except (ValueError, MemoryError) as e:
             # put may fail if the object is too large or
             # the cache is full.
             # In this case we log the error and keep the original mm_input.
-            logger.debug("Failed to cache mm_input with hash %s: %s", mm_hash,
-                         e)
+            logger.debug("Failed to cache mm_input with hash %s: %s", mm_hash, e)
             return mm_item
 
     @override
@@ -463,8 +475,9 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         for mm_hash in dangling_hashes:
             del self._p0_cache[mm_hash]
 
-    def address_as_item(self, address: int, monotonic_id: int,
-                        modality: str) -> MultiModalKwargsItem:
+    def address_as_item(
+        self, address: int, monotonic_id: int, modality: str
+    ) -> MultiModalKwargsItem:
         addr_elem = MultiModalFieldElem(
             modality=modality,
             key="address",
@@ -494,9 +507,10 @@ def _enable_processor_cache(
 
 def _enable_ipc_cache(vllm_config: "VllmConfig") -> bool:
     parallel_config = vllm_config.parallel_config
-    supports_ipc_cache = ((parallel_config._api_process_count == 1
-                           and parallel_config.data_parallel_size == 1)
-                          or parallel_config.data_parallel_external_lb)
+    supports_ipc_cache = (
+        parallel_config._api_process_count == 1
+        and parallel_config.data_parallel_size == 1
+    ) or parallel_config.data_parallel_external_lb
 
     return supports_ipc_cache
 
@@ -542,8 +556,8 @@ def processor_only_cache_from_config(
 
 
 class BaseMultiModalReceiverCache(
-        BaseMultiModalCache[Optional[MultiModalKwargsItem],
-                            MultiModalKwargsItem]):
+    BaseMultiModalCache[Optional[MultiModalKwargsItem], MultiModalKwargsItem]
+):
     """The required interface for caches on P1."""
 
     def get_and_update_features(
@@ -552,8 +566,7 @@ class BaseMultiModalReceiverCache(
     ) -> list["MultiModalFeatureSpec"]:
         """Update multimodal features with cached encoder outputs."""
         for feature in mm_features:
-            feature.data = self.get_and_update_item(feature.data,
-                                                    feature.identifier)
+            feature.data = self.get_and_update_item(feature.data, feature.identifier)
         return mm_features
 
 
@@ -623,8 +636,7 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
             create=False,  # Server is a reader
         )
         self._shm_cache = SingleWriterShmObjectStorage(
-            max_object_size=mm_config.mm_shm_cache_max_object_size_mb *
-            MiB_bytes,
+            max_object_size=mm_config.mm_shm_cache_max_object_size_mb * MiB_bytes,
             n_readers=self.world_size,
             ring_buffer=ring_buffer,
             serde_class=MsgpackSerde,

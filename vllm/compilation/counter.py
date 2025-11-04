@@ -41,7 +41,8 @@ class CompilationCounter:
             assert getattr(self, k) - getattr(old, k) == v, (
                 f"{k} not as expected, before it is {getattr(old, k)}"
                 f", after it is {getattr(self, k)}, "
-                f"expected diff is {v}")
+                f"expected diff is {v}"
+            )
 
 
 compilation_counter = CompilationCounter()

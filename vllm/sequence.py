@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Sequence and its related classes."""
+
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Union
 
@@ -8,8 +9,7 @@ import msgspec
 import torch
 
 if TYPE_CHECKING:
-    from vllm.v1.worker.kv_connector_model_runner_mixin import (
-        KVConnectorOutput)
+    from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 else:
     KVConnectorOutput = Any
 
@@ -36,6 +36,7 @@ class RequestMetrics:
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
     """
+
     arrival_time: float
     last_token_time: float
     first_scheduled_time: Optional[float]
@@ -53,7 +54,7 @@ class IntermediateTensors:
     """For all pipeline stages except the last, we need to return the hidden
     states and residuals to be sent to the next stage. This data structure
     contains the hidden states and residuals for a request.
-    
+
     Each stage also needs to handle its own kv_connector_output.
     """
 
@@ -87,17 +88,16 @@ class IntermediateTensors:
             return False
         if self.tensors.keys() != other.tensors.keys():
             return False
-        return all(
-            torch.equal(self.tensors[k], other.tensors[k])
-            for k in self.tensors)
+        return all(torch.equal(self.tensors[k], other.tensors[k]) for k in self.tensors)
 
     def __repr__(self) -> str:
         return f"IntermediateTensors(tensors={self.tensors})"
 
 
 class ExecuteModelRequest(
-        msgspec.Struct,
-        array_like=True,  # type: ignore[call-arg]
-        omit_defaults=True):  # type: ignore[call-arg]
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,
+):  # type: ignore[call-arg]
     # Placeholder. Remove.
     pass

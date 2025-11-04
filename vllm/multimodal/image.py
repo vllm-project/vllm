@@ -12,9 +12,9 @@ from PIL import Image
 from .base import MediaIO
 
 
-def rescale_image_size(image: Image.Image,
-                       size_factor: float,
-                       transpose: int = -1) -> Image.Image:
+def rescale_image_size(
+    image: Image.Image, size_factor: float, transpose: int = -1
+) -> Image.Image:
     """Rescale the dimensions of an image by a constant factor."""
     new_width = int(image.width * size_factor)
     new_height = int(image.height * size_factor)
@@ -26,7 +26,7 @@ def rescale_image_size(image: Image.Image,
 
 def rgba_to_rgb(
     image: Image.Image,
-    background_color: Union[tuple[int, int, int], list[int]] = (255, 255, 255)
+    background_color: Union[tuple[int, int, int], list[int]] = (255, 255, 255),
 ) -> Image.Image:
     """Convert an RGBA image to RGB with filled background color."""
     assert image.mode == "RGBA"
@@ -45,7 +45,6 @@ def convert_image_mode(image: Image.Image, to_mode: str):
 
 
 class ImageMediaIO(MediaIO[Image.Image]):
-
     def __init__(self, image_mode: str = "RGB", **kwargs) -> None:
         super().__init__()
 
@@ -59,18 +58,21 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
         # Extract RGBA background color from kwargs if provided
         # Default to white background for backward compatibility
-        rgba_bg = kwargs.get('rgba_background_color', (255, 255, 255))
+        rgba_bg = kwargs.get("rgba_background_color", (255, 255, 255))
         # Convert list to tuple for consistency
         if isinstance(rgba_bg, list):
             rgba_bg = tuple(rgba_bg)
 
         # Validate rgba_background_color format
-        if not (isinstance(rgba_bg, tuple) and len(rgba_bg) == 3
-                and all(isinstance(c, int) and 0 <= c <= 255
-                        for c in rgba_bg)):
+        if not (
+            isinstance(rgba_bg, tuple)
+            and len(rgba_bg) == 3
+            and all(isinstance(c, int) and 0 <= c <= 255 for c in rgba_bg)
+        ):
             raise ValueError(
                 "rgba_background_color must be a list or tuple of 3 integers "
-                "in the range [0, 255].")
+                "in the range [0, 255]."
+            )
         self.rgba_background_color = rgba_bg
 
     def _convert_image_mode(self, image: Image.Image) -> Image.Image:
@@ -108,11 +110,10 @@ class ImageMediaIO(MediaIO[Image.Image]):
             image.save(buffer, image_format)
             data = buffer.getvalue()
 
-        return pybase64.b64encode(data).decode('utf-8')
+        return pybase64.b64encode(data).decode("utf-8")
 
 
 class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
-
     def __init__(self) -> None:
         super().__init__()
 
@@ -127,4 +128,4 @@ class ImageEmbeddingMediaIO(MediaIO[torch.Tensor]):
         return torch.load(filepath, weights_only=True)
 
     def encode_base64(self, media: torch.Tensor) -> str:
-        return pybase64.b64encode(media.numpy()).decode('utf-8')
+        return pybase64.b64encode(media.numpy()).decode("utf-8")

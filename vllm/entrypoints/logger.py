@@ -15,7 +15,6 @@ logger = init_logger(__name__)
 
 
 class RequestLogger:
-
     def __init__(self, *, max_log_len: Optional[int]) -> None:
         self.max_log_len = max_log_len
 
@@ -25,8 +24,7 @@ class RequestLogger:
         prompt: Optional[str],
         prompt_token_ids: Optional[list[int]],
         prompt_embeds: Optional[torch.Tensor],
-        params: Optional[Union[SamplingParams, PoolingParams,
-                               BeamSearchParams]],
+        params: Optional[Union[SamplingParams, PoolingParams, BeamSearchParams]],
         lora_request: Optional[LoRARequest],
     ) -> None:
         max_log_len = self.max_log_len
@@ -41,9 +39,14 @@ class RequestLogger:
             "Received request %s: prompt: %r, "
             "params: %s, prompt_token_ids: %s, "
             "prompt_embeds shape: %s, "
-            "lora_request: %s.", request_id, prompt, params, prompt_token_ids,
+            "lora_request: %s.",
+            request_id,
+            prompt,
+            params,
+            prompt_token_ids,
             prompt_embeds.shape if prompt_embeds is not None else None,
-            lora_request)
+            lora_request,
+        )
 
     def log_outputs(
         self,
@@ -65,8 +68,7 @@ class RequestLogger:
 
         stream_info = ""
         if is_streaming:
-            stream_info = (" (streaming delta)"
-                           if delta else " (streaming complete)")
+            stream_info = " (streaming delta)" if delta else " (streaming complete)"
 
         logger.info(
             "Generated response %s%s: output: %r, "

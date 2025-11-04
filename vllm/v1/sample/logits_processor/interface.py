@@ -36,6 +36,7 @@ MovedRequest = tuple[int, int, MoveDirectionality]
 @dataclass(frozen=True)
 class BatchUpdate:
     """Persistent batch state change info for logitsprocs"""
+
     batch_size: int  # Current num reqs in batch
 
     # Metadata for requests added to, removed from, and moved
@@ -57,10 +58,10 @@ class BatchUpdate:
 
 
 class LogitsProcessor(ABC):
-
     @abstractmethod
-    def __init__(self, vllm_config: "VllmConfig", device: torch.device,
-                 is_pin_memory: bool) -> None:
+    def __init__(
+        self, vllm_config: "VllmConfig", device: torch.device, is_pin_memory: bool
+    ) -> None:
         raise NotImplementedError
 
     @abstractmethod

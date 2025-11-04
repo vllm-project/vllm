@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for mllama's multimodal preprocessing and profiling."""
+
 import pytest
 from torch import prod
 from transformers import Llama4Config
@@ -47,14 +48,17 @@ def test_profiling(model_id: str, max_model_len: int):
     image_size = hf_config.vision_config.image_size
     patch_size = hf_config.vision_config.patch_size
     downsample_ratio = int(
-        round(1.0 / (hf_config.vision_config.pixel_shuffle_ratio**2)))
-    tokens_per_patch = ((image_size // patch_size)**2) // downsample_ratio
+        round(1.0 / (hf_config.vision_config.pixel_shuffle_ratio**2))
+    )
+    tokens_per_patch = ((image_size // patch_size) ** 2) // downsample_ratio
     chunks_per_image = prod(mm_data["patches_per_image"])
     total_num_patches = chunks_per_image * tokens_per_patch
-    num_tiles = mm_data["aspect_ratios"][0][0] * mm_data["aspect_ratios"][0][
-        1]  # x-y separator tokens
-    total_tokens = total_num_patches.item() + num_tiles.item(
-    ) + 3  # image start, image, image end
+    num_tiles = (
+        mm_data["aspect_ratios"][0][0] * mm_data["aspect_ratios"][0][1]
+    )  # x-y separator tokens
+    total_tokens = (
+        total_num_patches.item() + num_tiles.item() + 3
+    )  # image start, image, image end
 
     profiled_tokens = profiler.get_mm_max_contiguous_tokens(
         max_model_len,
@@ -63,5 +67,6 @@ def test_profiling(model_id: str, max_model_len: int):
 
     assert total_tokens == profiled_tokens["image"]
     assert total_tokens == sum(
-        placeholder.length for placeholder in
-        decoder_dummy_data.multi_modal_placeholders["image"])
+        placeholder.length
+        for placeholder in decoder_dummy_data.multi_modal_placeholders["image"]
+    )

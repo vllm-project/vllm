@@ -35,5 +35,4 @@ def apply_bad_words(
     past_tokens_ids: list[list[int]],
 ) -> None:
     for i, bad_words_ids in bad_words_token_ids.items():
-        _apply_bad_words_single_batch(logits[i], bad_words_ids,
-                                      past_tokens_ids[i])
+        _apply_bad_words_single_batch(logits[i], bad_words_ids, past_tokens_ids[i])

@@ -14,7 +14,6 @@ if TYPE_CHECKING:
 
 
 class SchedulerInterface(ABC):
-
     @abstractmethod
     def schedule(self) -> "SchedulerOutput":
         """Schedule the requests to process in this scheduling step.
@@ -72,7 +71,7 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def add_request(self, request: "Request") -> None:
         """Add a new request to the scheduler's internal queue.
-        
+
         Args:
             request: The new request being added.
         """
@@ -91,7 +90,7 @@ class SchedulerInterface(ABC):
         1. When the request is aborted by the client.
         2. When the frontend process detects a stop string of the request after
            de-tokenizing its generated tokens.
-           
+
         Args:
             request_ids: A single or a list of request IDs.
             finished_status: The finished status of the given requests.

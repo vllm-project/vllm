@@ -12,12 +12,18 @@ if TYPE_CHECKING:
     from typing_extensions import LiteralString
 
 
-@pytest.mark.parametrize("PP_SIZE, MODEL_NAME", [
-    (2, "JackFram/llama-160m"),
-])
-@pytest.mark.parametrize("ATTN_BACKEND", [
-    "FLASH_ATTN",
-])
+@pytest.mark.parametrize(
+    "PP_SIZE, MODEL_NAME",
+    [
+        (2, "JackFram/llama-160m"),
+    ],
+)
+@pytest.mark.parametrize(
+    "ATTN_BACKEND",
+    [
+        "FLASH_ATTN",
+    ],
+)
 @create_new_process_for_each_test()
 def test_pp_cudagraph(
     monkeypatch: pytest.MonkeyPatch,

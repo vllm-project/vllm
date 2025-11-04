@@ -34,7 +34,8 @@ def serving() -> OpenAIServing:
 
 @pytest.mark.asyncio
 async def test_async_mistral_tokenizer_does_not_block_event_loop(
-        serving: OpenAIServing):
+    serving: OpenAIServing,
+):
     expected_tokens = [1, 2, 3]
 
     # Mock the blocking version to sleep
@@ -45,10 +46,9 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop(
     mock_tokenizer = Mock(spec=MistralTokenizer)
     mock_tokenizer.apply_chat_template.side_effect = mocked_apply_chat_template
 
-    task = serving._apply_mistral_chat_template_async(tokenizer=mock_tokenizer,
-                                                      messages=[],
-                                                      chat_template=None,
-                                                      tools=[])
+    task = serving._apply_mistral_chat_template_async(
+        tokenizer=mock_tokenizer, messages=[], chat_template=None, tools=[]
+    )
 
     # Ensure the event loop is not blocked
     blocked_count = 0
@@ -66,4 +66,4 @@ async def test_async_mistral_tokenizer_does_not_block_event_loop(
     # Ensure task completes
     tokens = await task
     assert tokens == expected_tokens, "Mocked blocking tokenizer was not called"
-    assert blocked_count == 0, ("Event loop blocked during tokenization")
+    assert blocked_count == 0, "Event loop blocked during tokenization"
