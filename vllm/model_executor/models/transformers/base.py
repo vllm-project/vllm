@@ -318,7 +318,7 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
         # vLLM does not support encoder-decoder models, so if any encoder layer is
         # found in a text only model, we assume the whole model is an encoder model
         if has_encoder(self.model) and not is_multimodal(self.config):
-            self.check_version("4.57.0.dev0", "encoder models support")
+            self.check_version("5.0.0.dev0", "encoder models support")
             attn_type = AttentionType.ENCODER_ONLY
         else:
             attn_type = AttentionType.DECODER
