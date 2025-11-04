@@ -142,6 +142,9 @@ class PassConfig:
         max_sizes = {
             k: int(v * MiB) for k, v in self.fi_allreduce_fusion_max_size_mb.items()
         }
+        logger.debug_once(
+            f"flashinfer_max_size: {max_sizes.get(world_size)}", scope="global"
+        )
 
         # return None if world size is not supported by flashinfer
         return max_sizes.get(world_size)

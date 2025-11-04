@@ -250,7 +250,9 @@ class CompilerManager:
             if graph_index == 0:
                 # adds some info logging for the first graph
                 if compile_range is None:
-                    logger.info_once("Cache the graph for dynamic shape for later use", scope="local")
+                    logger.info_once(
+                        "Cache the graph for dynamic shape for later use", scope="local"
+                    )
                 else:
                     logger.info_once(
                         "Cache the graph of compile range %s for later use",
@@ -280,7 +282,7 @@ class CompilerManager:
             compilation_config.compilation_time += elapsed
             if compile_range is None:
                 logger.info_once(
-                    "Compiling a graph for dynamic compile range takes %.2f s", 
+                    "Compiling a graph for dynamic compile range takes %.2f s",
                     elapsed,
                     scope="local",
                 )

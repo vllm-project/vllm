@@ -515,12 +515,13 @@ if flashinfer_comm is not None:
         device_capability = current_platform.get_device_capability().as_version_str()
         # Get one shot input size limit for the current world size
         # for the current device capability
-        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB. \
-                        get(device_capability, {}). \
-                        get(world_size, None)
+        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
+            device_capability, {}
+        ).get(world_size, None)
         # Use one shot if no max size is specified
-        use_oneshot = max_one_shot_size is None or \
-            current_tensor_size <= max_one_shot_size * MiB
+        use_oneshot = (
+            max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
+        )
 
         assert _FI_WORKSPACE_TENSOR is not None, (
             "Flashinfer must be enabled when using flashinfer"
