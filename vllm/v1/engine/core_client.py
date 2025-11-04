@@ -440,7 +440,7 @@ class ClientGuard:
             # Pause will be invoked again during fault-tolerance handling,
             # so it's unnecessary to track whether all engines are currently
             # paused.
-            asyncio.run(self.handle_fault("pause", 2, soft_pause=True))
+            self.fault_handler.submit_fault("pause", 2, soft_pause=True)
 
     def shutdown_guard(self):
         self.client_guard_dead = True
@@ -448,6 +448,7 @@ class ClientGuard:
         self.cmd_socket.close()
         self.fault_pub_socket.close()
         self.zmq_ctx.term()
+        logger.info("ClientGuard is closed.")
 
 
 @dataclass

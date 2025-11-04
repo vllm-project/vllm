@@ -104,7 +104,7 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
-    fault_tolerance_config: FaultToleranceConfig | None = None
+    fault_tolerance_config: FaultToleranceConfig = FaultToleranceConfig()
     """The configurations for fault tolerance."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
