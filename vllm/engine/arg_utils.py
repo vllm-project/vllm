@@ -54,7 +54,13 @@ from vllm.config import (
     VllmConfig,
     get_attr_docs,
 )
-from vllm.config.cache import BlockSize, CacheDType, MambaDType, PrefixCachingHashAlgo
+from vllm.config.cache import (
+    BlockSize,
+    CacheDType,
+    KVOffloadingBackend,
+    MambaDType,
+    PrefixCachingHashAlgo,
+)
 from vllm.config.device import Device
 from vllm.config.model import (
     ConvertOption,
@@ -80,7 +86,7 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.utils import check_gguf_file, is_s3
+from vllm.transformers_utils.utils import check_gguf_file, is_cloud_storage
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -554,6 +560,11 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
+    kv_offloading_size: float | None = CacheConfig.kv_offloading_size
+    kv_offloading_backend: KVOffloadingBackend | None = (
+        CacheConfig.kv_offloading_backend
+    )
+
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -896,6 +907,12 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-block-size", **cache_kwargs["mamba_block_size"]
+        )
+        cache_group.add_argument(
+            "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
+        )
+        cache_group.add_argument(
+            "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
         )
 
         # Multimodal related configs
@@ -1258,8 +1275,6 @@ class EngineArgs:
         self,
         target_model_config: ModelConfig,
         target_parallel_config: ParallelConfig,
-        enable_chunked_prefill: bool,
-        disable_log_stats: bool,
     ) -> SpeculativeConfig | None:
         """Initializes and returns a SpeculativeConfig object based on
         `speculative_config`.
@@ -1279,8 +1294,6 @@ class EngineArgs:
             {
                 "target_model_config": target_model_config,
                 "target_parallel_config": target_parallel_config,
-                "enable_chunked_prefill": enable_chunked_prefill,
-                "disable_log_stats": disable_log_stats,
             }
         )
         return SpeculativeConfig(**self.speculative_config)
@@ -1309,10 +1322,10 @@ class EngineArgs:
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
-        # Skip speculator detection for S3 models since HuggingFace cannot load
-        # configs directly from S3 URLs. S3 models can still use speculators with
-        # explicit --speculative-config.
-        if not is_s3(self.model):
+        # Skip speculator detection for cloud storage models (eg: S3, GCS) since
+        # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
+        # use speculators with explicit --speculative-config.
+        if not is_cloud_storage(self.model):
             (self.model, self.tokenizer, self.speculative_config) = (
                 maybe_override_with_speculators(
                     model=self.model,
@@ -1403,6 +1416,8 @@ class EngineArgs:
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
+            kv_offloading_size=self.kv_offloading_size,
+            kv_offloading_backend=self.kv_offloading_backend,
         )
 
         ray_runtime_env = None
@@ -1573,8 +1588,6 @@ class EngineArgs:
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
-            enable_chunked_prefill=self.enable_chunked_prefill,
-            disable_log_stats=self.disable_log_stats,
         )
 
         # make sure num_lookahead_slots is set appropriately depending on
@@ -1826,7 +1839,7 @@ class EngineArgs:
             incremental_prefill_supported = (
                 pooling_type is not None
                 and pooling_type.lower() == "last"
-                and is_causal
+                and bool(is_causal)
             )
 
             action = "Enabling" if incremental_prefill_supported else "Disabling"
