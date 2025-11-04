@@ -248,18 +248,21 @@ class SingleTypeKVCacheManager(ABC):
         Remove the blocks that are no longer needed from `blocks` and free the
         blocks. The removed blocks should be replaced by null_block.
         Need to be customized for each attention type.
+
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
         """
         # Remove the blocks that are no longer be in the sliding window and
         # skipped during the attention computation.
-        last_useful_token = self.get_last_useful_token(num_computed_tokens)
-        if last_useful_token <= 0:
+        num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
+        if num_skipped_tokens <= 0:
             # This indicates that ALL tokens are inside attention window.
             # Thus we do not need to free any blocks outside attention window.
+            # A typical case is full attention that we never free any token
+            # before the request is finished.
             return
-        last_useful_block = last_useful_token // self.block_size
+        last_useful_block = num_skipped_tokens // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
@@ -272,15 +275,15 @@ class SingleTypeKVCacheManager(ABC):
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
-    def get_last_useful_token(self, num_computed_tokens: int) -> int:
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the last token (leftmost token) index that is inside attn window.
+        Get the last token (leftmost token) index that is inside attention window.
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
-            The last token (leftmost token) index that is inside attn window.
+            The last token (leftmost token) index that is inside attention window.
         """
         # The default behavior is to not remove any blocks.
         return 0
@@ -414,7 +417,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 computed.pop()
         return computed_blocks
 
-    def get_last_useful_token(self, num_computed_tokens: int) -> int:
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
         Get the last token (leftmost token) index that is inside
         sliding window.
@@ -527,7 +530,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
                 break
         return computed_blocks
 
-    def get_last_useful_token(self, num_computed_tokens: int) -> int:
+    def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
         Get the last token (leftmost token) index that is inside chunked local
         attention window.
