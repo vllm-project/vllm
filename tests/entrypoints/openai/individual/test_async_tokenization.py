@@ -3,7 +3,7 @@
 
 import asyncio
 import random
-from typing import Callable
+from collections.abc import Callable
 
 import openai
 import pytest

@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Sequence
-from typing import Union
 
 import partial_json_parser
 from partial_json_parser.core.options import Allow
@@ -20,7 +19,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import extract_intermediate_diff
 from vllm.logger import init_logger
@@ -29,13 +27,13 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module(["internlm"])
 class Internlm2ToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
         self.position = 0
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # do not skip special tokens because internlm use the special
             # tokens to indicate the start and end of the tool calls
@@ -59,7 +57,7 @@ class Internlm2ToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         if "<|action_start|>" not in current_text:
             self.position = len(current_text)
             return DeltaMessage(content=delta_text)

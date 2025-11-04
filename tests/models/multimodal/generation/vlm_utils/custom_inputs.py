@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Custom input builders for edge-cases in different models."""
 
-from typing import Callable
+from collections.abc import Callable
 
 from vllm.assets.image import ImageAsset
 from vllm.multimodal.image import rescale_image_size
@@ -102,8 +102,8 @@ def multi_video_multi_aspect_ratio_inputs(
 def different_patch_input_cases_internvl():
     images = [asset.pil_image.resize((896, 896)) for asset in IMAGE_ASSETS]
     formatter = (
-        lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"
-    )  # noqa: E501
+        lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n"  # noqa: E501
+    )
     single_img_prompts = [
         "<image>\nWhat's the content in the center of the image?",
         "<image>\nWhat is the season?",

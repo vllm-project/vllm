@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
-from typing import Optional
+from typing import Optional, cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -29,7 +29,7 @@ class ParentRequest:
     max_num_generation_tokens: int
 
     # To efficiently obtain child sampling params
-    cached_child_sampling_params: Optional[SamplingParams]
+    cached_child_sampling_params: SamplingParams | None
 
     def __init__(self, request_id: str, sampling_params: SamplingParams) -> None:
         self.request_id = request_id
@@ -37,7 +37,7 @@ class ParentRequest:
 
         self.child_requests = set()
         self.output_aggregator = (
-            [None] * sampling_params.n
+            [cast(CompletionOutput, None)] * sampling_params.n
             if (sampling_params.output_kind == RequestOutputKind.FINAL_ONLY)
             else []
         )

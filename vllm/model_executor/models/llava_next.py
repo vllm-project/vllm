@@ -3,7 +3,7 @@
 
 from abc import abstractmethod
 from collections.abc import Iterable, Mapping
-from typing import Annotated, Final, Literal, Optional, Protocol, TypeVar, Union
+from typing import Annotated, Final, Literal, Protocol, TypeAlias, TypeVar
 
 import torch
 import torch.nn as nn
@@ -34,7 +34,6 @@ from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -56,11 +55,11 @@ class LlavaNextImagePixelInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
     pixel_values: Annotated[
-        Union[torch.Tensor, list[torch.Tensor]],
+        torch.Tensor | list[torch.Tensor],
         TensorShape("bn", "np", 3, "h", "w", dynamic_dims={"np"}),
     ]
 
-    image_sizes: Annotated[Optional[torch.Tensor], TensorShape("bn", 2)]
+    image_sizes: Annotated[torch.Tensor | None, TensorShape("bn", 2)]
     # This should be in `(height, width)` format.
 
 
@@ -76,7 +75,9 @@ class LlavaNextImageEmbeddingInputs(TensorSchema):
     data: Annotated[torch.Tensor, TensorShape("bn", "ifs", "hs")]
 
 
-LlavaNextImageInputs = Union[LlavaNextImagePixelInputs, LlavaNextImageEmbeddingInputs]
+LlavaNextImageInputs: TypeAlias = (
+    LlavaNextImagePixelInputs | LlavaNextImageEmbeddingInputs
+)
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
@@ -222,6 +223,8 @@ class LlavaNextMultiModalProcessor(
     dummy_inputs=LlavaDummyInputsBuilder,
 )
 class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             # mapping for new names in checkpoint saved after transformers v4.52
@@ -234,7 +237,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     )
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<image>"
 
@@ -293,7 +296,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[LlavaNextImageInputs]:
+    ) -> LlavaNextImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_sizes = kwargs.pop("image_sizes", None)
         image_embeds = kwargs.pop("image_embeds", None)
@@ -302,21 +305,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             return None
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
-            if not isinstance(image_sizes, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of image sizes. Got type: {type(image_sizes)}"
-                )
-
             expected_h = expected_w = self.config.vision_config.image_size
             return LlavaNextImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values),
-                image_sizes=flatten_bn(image_sizes, concat=True),
+                pixel_values=pixel_values,
+                image_sizes=image_sizes,
                 resolve_bindings={
                     "h": expected_h,
                     "w": expected_w,
@@ -324,21 +317,16 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, torch.Tensor):
-                raise ValueError(
-                    f"Incorrect type of image embeds. Got type: {type(image_embeds)}"
-                )
-
             return LlavaNextImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")
 
     def _image_pixels_to_features(
         self,
-        vision_tower: Union[CLIPVisionModel, SiglipVisionModel],
+        vision_tower: CLIPVisionModel | SiglipVisionModel,
         pixel_values: torch.Tensor,
     ) -> torch.Tensor:
         # NOTE: we skip the step to select the vision feature layer since
@@ -438,7 +426,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def _process_image_pixels(
         self,
         inputs: LlavaNextImagePixelInputs,
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, ...]]:
+    ) -> torch.Tensor | tuple[torch.Tensor, ...]:
         assert self.vision_tower is not None
 
         pixel_values = inputs["pixel_values"]
@@ -470,7 +458,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def _process_image_input(
         self,
         image_input: LlavaNextImageInputs,
-    ) -> Union[torch.Tensor, list[torch.Tensor]]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return [image_input["data"]]
 
@@ -505,9 +493,9 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
         # Multi-modal token ID may exceed vocab size
         handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
@@ -526,10 +514,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for LlaVA-NeXT.
 
         One key thing to understand is the `input_ids` already accounts for the
@@ -587,7 +575,7 @@ model_executor.models.llava_next.LlavaNextProcessingInfo.get_num_image_tokens].
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

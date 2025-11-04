@@ -1,24 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import os
 
 import pytest
 
 from vllm import LLM, SamplingParams
 
-if os.getenv("VLLM_USE_V1", "0") != "1":
-    pytest.skip("Test package requires V1", allow_module_level=True)
-
-MODEL = "meta-llama/Llama-3.2-1B"
+MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
 def llm() -> LLM:
-    # Disable prefix caching so that we can test prompt logprobs.
-    # TODO remove this after https://github.com/vllm-project/vllm/pull/13949
-    # is merged
-    return LLM(MODEL, enforce_eager=True, enable_prefix_caching=False)
+    return LLM(MODEL, enforce_eager=True)
 
 
 def test_n_gt_1(llm):
@@ -171,14 +164,6 @@ def test_allowed_token_ids(llm):
     # Reject out of vocabulary.
     with pytest.raises(ValueError):
         _ = llm.generate(PROMPT, SamplingParams(allowed_token_ids=[10000000]))
-
-
-def test_priority(llm):
-    """Check that we reject requests with priority."""
-
-    # Reject all allowed token ids
-    with pytest.raises(ValueError):
-        _ = llm.generate(PROMPT, priority=[1])
 
 
 def test_seed(llm):

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 
@@ -27,8 +27,8 @@ class QuarkW8A8Int8(QuarkScheme):
     def __init__(
         self,
         qscheme: str,
-        is_static_input_scheme: Optional[bool],
-        input_symmetric: Optional[bool],
+        is_static_input_scheme: bool | None,
+        input_symmetric: bool | None,
     ):
         self.qscheme = qscheme
         self.is_static_input_scheme = is_static_input_scheme
@@ -134,6 +134,6 @@ class QuarkW8A8Int8(QuarkScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor]
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)

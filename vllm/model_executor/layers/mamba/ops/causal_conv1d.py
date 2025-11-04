@@ -4,7 +4,6 @@
 # Copyright (c) 2024, Tri Dao.
 # Adapted from https://github.com/Dao-AILab/causal-conv1d/blob/main/causal_conv1d/causal_conv1d_interface.py
 
-from typing import Optional, Union
 
 import numpy as np
 import torch
@@ -27,10 +26,10 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     query_start_loc_ptr,
     batch_ptr,
     token_chunk_offset_ptr,
-    current_first_idx,  # (batch,)
-    current_last_idx,  # (batch,)
+    block_idx_first_scheduled_token,  # (batch,)
+    block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
-    context_lens,  # (batch,)
+    num_computed_tokens,  # (batch,)
     o_ptr,  # (dim, seqlen) - actually pointing to x_ptr
     # Matrix dimensions
     dim: tl.constexpr,
@@ -94,9 +93,9 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
         # In particular, if prefix caching is enabled, the program write additional cache states to "cache_indices_ptr"
 
         # Get the length of the completed sequence so far and compute the offset.
-        current_first_index = tl.load(current_first_idx + idx_seq)
-        current_last_index = tl.load(current_last_idx + idx_seq)
-        sequence_completed_index = tl.load(context_lens + idx_seq)
+        current_first_index = tl.load(block_idx_first_scheduled_token + idx_seq)
+        current_last_index = tl.load(block_idx_last_scheduled_token + idx_seq)
+        sequence_completed_index = tl.load(num_computed_tokens + idx_seq)
 
         # Compute the offset where the first stride_block_m-aligned first full block is
         # Value in "token-space"
@@ -469,17 +468,17 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
 def causal_conv1d_fn(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: Union[torch.Tensor, None],
+    bias: torch.Tensor | None,
     conv_states: torch.Tensor,
     query_start_loc: torch.Tensor,
-    cache_indices: Optional[torch.Tensor] = None,
-    has_initial_state: Optional[torch.Tensor] = None,
-    activation: Optional[str] = "silu",
+    cache_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    activation: str | None = "silu",
     pad_slot_id: int = PAD_SLOT_ID,
-    current_first_idx: Optional[torch.Tensor] = None,
-    current_last_idx: Optional[torch.Tensor] = None,
-    initial_state_idx: Optional[torch.Tensor] = None,
-    context_lens: Optional[torch.Tensor] = None,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
+    num_computed_tokens: torch.Tensor | None = None,
     block_size_to_align=0,
     metadata=None,
     validate_data=False,
@@ -523,13 +522,13 @@ def causal_conv1d_fn(
         for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
         in this case, the kernel will not process entries at
         indices 0 and 3
-    current_first_idx: (batch,), dtype int32
+    block_idx_first_scheduled_token: (batch,), dtype int32
         The pointer into cache_indices, where the first cache block to be filled is located.
-    current_last_idx: (batch,), dtype int32
+    block_idx_last_scheduled_token: (batch,), dtype int32
         The pointer into cache_indices, where the last cache block to be filled is located.
     initial_state_idx: (batch,), dtype int32
         The pointer into cache_indices, where the cache block containing the initial state is located.
-    context_lens: (batch,), dtype int32
+    num_computed_tokens: (batch,), dtype int32
         The number of tokens already completed for each sequence
     block_size_to_align: int
         The block size to align the cached states to
@@ -708,10 +707,10 @@ def causal_conv1d_fn(
         query_start_loc,
         batch_ptr,
         token_chunk_offset_ptr,
-        current_first_idx,
-        current_last_idx,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
         initial_state_idx,
-        context_lens,
+        num_computed_tokens,
         out,
         # Matrix dimensions
         dim,
@@ -735,7 +734,7 @@ def causal_conv1d_fn(
         HAS_BIAS=bias is not None,
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
-        IS_APC_ENABLED=current_last_idx is not None,
+        IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         USE_PAD_SLOT=pad_slot_id is not None,
         NP2_STATELEN=np2_statelen,
         # launch_cooperative_grid=True
@@ -756,7 +755,7 @@ def _causal_conv1d_update_kernel(
     conv_state_indices_ptr,
     num_accepted_tokens_ptr,
     query_start_loc_ptr,  # (batch + 1)
-    current_last_idx,  # (batch,)
+    block_idx_last_scheduled_token,  # (batch,)
     initial_state_idx,  # (batch,)
     o_ptr,  # (batch, dim, seqlen)
     # Matrix dimensions
@@ -802,7 +801,7 @@ def _causal_conv1d_update_kernel(
     if IS_APC_ENABLED:
         # Get the state from the initial_state_idx
         conv_state_init = tl.load(initial_state_idx + idx_seq)
-        current_last_index = tl.load(current_last_idx + idx_seq)
+        current_last_index = tl.load(block_idx_last_scheduled_token + idx_seq)
     else:
         conv_state_init = 0
         current_last_index = 0
@@ -1071,15 +1070,15 @@ def causal_conv1d_update(
     x: torch.Tensor,
     conv_state: torch.Tensor,
     weight: torch.Tensor,
-    bias: Optional[torch.Tensor] = None,
-    activation: Union[bool, str, None] = None,
-    conv_state_indices: Optional[torch.Tensor] = None,
-    num_accepted_tokens: Optional[torch.Tensor] = None,
-    query_start_loc: Optional[torch.Tensor] = None,
+    bias: torch.Tensor | None = None,
+    activation: bool | str | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+    num_accepted_tokens: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
     max_query_len: int = -1,
     pad_slot_id: int = PAD_SLOT_ID,
-    current_last_idx: Optional[torch.Tensor] = None,
-    initial_state_idx: Optional[torch.Tensor] = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
     validate_data=False,
 ):
     """
@@ -1097,7 +1096,7 @@ def causal_conv1d_update(
         If not None, the conv_state is a larger tensor along the batch dim,
         and we are selecting the batch coords specified by conv_state_indices.
         Useful for a continuous batching scenario.
-    current_last_idx: (batch,), dtype int32
+    block_idx_last_scheduled_token: (batch,), dtype int32
         The pointer into conv_state_indices, where the last cache block to be filled is located.
     initial_state_idx: (batch,), dtype int32
         The pointer into conv_state_indices, where the cache block containing the initial state is located.
@@ -1201,7 +1200,7 @@ def causal_conv1d_update(
         conv_state_indices,
         num_accepted_tokens,
         query_start_loc,
-        current_last_idx,
+        block_idx_last_scheduled_token,
         initial_state_idx,
         out,
         # Matrix dimensions
@@ -1230,7 +1229,7 @@ def causal_conv1d_update(
         KERNEL_WIDTH=width,
         SILU_ACTIVATION=activation in ["silu", "swish"],
         IS_VARLEN=query_start_loc is not None,
-        IS_APC_ENABLED=current_last_idx is not None,
+        IS_APC_ENABLED=block_idx_last_scheduled_token is not None,
         IS_SPEC_DECODING=num_accepted_tokens is not None,
         NP2_STATELEN=np2_statelen,
         USE_PAD_SLOT=pad_slot_id is not None,

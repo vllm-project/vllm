@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import dataclasses
 
 import pytest
 
-from vllm.config import CompilationLevel
-from vllm.utils import cuda_device_count_stateless
+from vllm.config import CompilationMode
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
 
@@ -23,7 +21,7 @@ class TestSetting:
 
 
 # we cannot afford testing the full Cartesian product
-# of all models and all levels
+# of all models and all modes
 @pytest.mark.parametrize(
     "test_setting",
     [
@@ -79,14 +77,15 @@ class TestSetting:
             method="encode",
         ),
         # vision language model
-        TestSetting(
-            model="microsoft/Phi-3.5-vision-instruct",
-            model_args=["--trust-remote-code", "--max-model-len", "2048"],
-            pp_size=2,
-            tp_size=1,
-            attn_backend="FLASH_ATTN",
-            method="generate_with_image",
-        ),
+        # See https://github.com/vllm-project/vllm/issues/26716.
+        # TestSetting(
+        #     model="microsoft/Phi-3.5-vision-instruct",
+        #     model_args=["--trust-remote-code", "--max-model-len", "2048"],
+        #     pp_size=2,
+        #     tp_size=1,
+        #     attn_backend="FLASH_ATTN",
+        #     method="generate_with_image",
+        # ),
     ],
 )
 def test_compile_correctness(
@@ -111,41 +110,44 @@ def test_compile_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
         final_args = [
-            "--enforce-eager",
             *model_args,
             "-pp",
             str(pp_size),
             "-tp",
             str(tp_size),
+            "-O.cudagraph_mode=none",
         ]
 
         all_args: list[list[str]] = []
         all_envs: list[dict[str, str] | None] = []
 
-        for level in [
-            CompilationLevel.NO_COMPILATION,
-            CompilationLevel.PIECEWISE,
+        for comp_mode in [
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+            CompilationMode.VLLM_COMPILE,
         ]:
-            all_args.append(final_args + [f"-O{level}"])
+            for mode in [CompilationMode.NONE, comp_mode]:
+                all_args.append(final_args + [f"-O.mode={mode}", "-O.backend=inductor"])
+
+            # inductor will change the output, so we only compare if the output
+            # is close, not exactly the same.
+            compare_all_settings(
+                model,
+                all_args,
+                all_envs,
+                method=method if method != "generate" else "generate_close",
+            )
+            all_envs.clear()
+            all_args.clear()
+
+        for mode in [
+            CompilationMode.NONE,
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+            CompilationMode.VLLM_COMPILE,
+        ]:
+            all_args.append(final_args + [f"-O.mode={mode}", "-O.backend=eager"])
             all_envs.append({})
-
-        # inductor will change the output, so we only compare if the output
-        # is close, not exactly the same.
-        compare_all_settings(
-            model,
-            all_args,
-            all_envs,
-            method=method if method != "generate" else "generate_close",
-        )
-        all_envs.clear()
-        all_args.clear()
-
-        for level in [
-            CompilationLevel.NO_COMPILATION,
-            CompilationLevel.DYNAMO_AS_IS,
-            CompilationLevel.DYNAMO_ONCE,
-        ]:
-            all_args.append(final_args + [f"-O{level}"])
             all_envs.append({})
 
         compare_all_settings(model, all_args * 3, all_envs, method=method)

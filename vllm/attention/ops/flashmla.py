@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # adapted from: https://github.com/deepseek-ai/FlashMLA/blob/main/flash_mla/flash_mla_interface.py
-from typing import Optional, Tuple
 
 import torch
 
@@ -31,21 +30,47 @@ else:
     _flashmla_extension_C_AVAILABLE = False
 
 
-def is_flashmla_supported() -> Tuple[bool, Optional[str]]:
-    """
-    Return: is_supported_flag, unsupported_reason (optional).
-    """
-    if not current_platform.is_cuda():
-        return False, "FlashMLA is only supported on CUDA devices."
-    if current_platform.get_device_capability()[0] != 9:
-        return False, "FlashMLA is only supported on Hopper devices."
+def _is_flashmla_available() -> tuple[bool, str | None]:
     if not _flashmla_C_AVAILABLE:
         return (
             False,
             "vllm._flashmla_C is not available, likely was not "
             "compiled due to insufficient nvcc version or a supported arch "
-            "(only sm90a currently) was not in the list of target arches to "
-            "compile for.",
+            "was not in the list of target arches to compile for.",
+        )
+    if not _flashmla_extension_C_AVAILABLE:
+        return (
+            False,
+            "vllm._flashmla_extension_C is not available, likely "
+            "was not compiled due to a build error.",
+        )
+
+    return True, None
+
+
+def is_flashmla_dense_supported() -> tuple[bool, str | None]:
+    """
+    Return: is_supported_flag, unsupported_reason (optional).
+    """
+    is_availble, maybe_reason = _is_flashmla_available()
+    if not is_availble:
+        return False, maybe_reason
+    if current_platform.get_device_capability()[0] != 9:
+        return False, "FlashMLA Dense is only supported on Hopper devices."
+    return True, None
+
+
+def is_flashmla_sparse_supported() -> tuple[bool, str | None]:
+    """
+    Return: is_supported_flag, unsupported_reason (optional).
+    """
+    is_availble, maybe_reason = _is_flashmla_available()
+    if not is_availble:
+        return False, maybe_reason
+    if current_platform.get_device_capability()[0] not in (9, 10):
+        return (
+            False,
+            "FlashMLA Sparse is only supported on Hopper and Blackwell devices.",
         )
     return True, None
 
@@ -54,10 +79,10 @@ def get_mla_metadata(
     cache_seqlens: torch.Tensor,
     num_q_tokens_per_head_k: int,
     num_heads_k: int,
-    num_heads_q: Optional[int] = None,
+    num_heads_q: int | None = None,
     is_fp8_kvcache: bool = False,
-    topk: Optional[int] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    topk: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
     - cache_seqlens: (batch_size), dtype torch.int32.
@@ -77,6 +102,12 @@ def get_mla_metadata(
             (num_sm_parts, TileSchedulerMetaDataSize), dtype torch.int32.
     - num_splits: (batch_size + 1), dtype torch.int32.
     """
+    if is_fp8_kvcache and topk is None:
+        return torch.ops._flashmla_extension_C.get_mla_decoding_metadata_dense_fp8(
+            cache_seqlens,
+            num_q_tokens_per_head_k,
+            num_heads_k,
+        )
     return torch.ops._flashmla_C.get_mla_decoding_metadata(
         cache_seqlens,
         num_q_tokens_per_head_k,
@@ -95,13 +126,13 @@ def flash_mla_with_kvcache(
     head_dim_v: int,
     tile_scheduler_metadata: torch.Tensor,
     num_splits: torch.Tensor,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     causal: bool = False,
-    descale_q: Optional[torch.Tensor] = None,
-    descale_k: Optional[torch.Tensor] = None,
+    descale_q: torch.Tensor | None = None,
+    descale_k: torch.Tensor | None = None,
     is_fp8_kvcache: bool = False,
-    indices: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    indices: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
     - q: (batch_size, seq_len_q, num_heads_q, head_dim).
@@ -183,7 +214,7 @@ def flash_mla_sparse_prefill(
     indices: torch.Tensor,
     sm_scale: float,
     d_v: int = 512,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Sparse attention prefill kernel
 

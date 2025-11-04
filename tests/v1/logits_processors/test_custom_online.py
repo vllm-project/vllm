@@ -4,15 +4,13 @@
 import os
 import random
 import sys
-from typing import Any, Optional
+from typing import Any
 
 import openai
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServerCustom, create_new_process_for_each_test
-
-# yapf: disable
 from tests.v1.logits_processors.utils import (
     DUMMY_LOGITPROC_ARG,
     DUMMY_LOGITPROC_FQCN,
@@ -25,11 +23,9 @@ from tests.v1.logits_processors.utils import (
 )
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 
-# yapf: enable
-
 
 def _server_with_logitproc_entrypoint(
-    env_dict: Optional[dict[str, str]],
+    env_dict: dict[str, str] | None,
     model: str,
     vllm_serve_args: list[str],
 ) -> None:
@@ -52,7 +48,7 @@ def _server_with_logitproc_entrypoint(
 
 
 def _server_with_logitproc_module(
-    env_dict: Optional[dict[str, str]],
+    env_dict: dict[str, str] | None,
     model: str,
     vllm_serve_args: list[str],
 ) -> None:

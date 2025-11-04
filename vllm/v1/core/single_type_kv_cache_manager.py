@@ -3,8 +3,9 @@
 import itertools
 from abc import ABC, abstractmethod
 from collections import defaultdict
+from collections.abc import Sequence
 
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
 from vllm.v1.kv_cache_interface import (
@@ -61,7 +62,10 @@ class SingleTypeKVCacheManager(ABC):
         self._null_block = block_pool.null_block
 
     def get_num_blocks_to_allocate(
-        self, request_id: str, num_tokens: int, new_computed_blocks: list[KVCacheBlock]
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
     ) -> int:
         """
         Get the number of blocks needed to be allocated for the request.
@@ -93,7 +97,7 @@ class SingleTypeKVCacheManager(ABC):
         return num_new_blocks + num_evictable_computed_blocks
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: list[KVCacheBlock]
+        self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
     ) -> None:
         """
         Add the new computed blocks to the request.
@@ -147,7 +151,7 @@ class SingleTypeKVCacheManager(ABC):
             num_tokens: The total number of tokens that need to be cached
                 (including tokens that are already cached).
         """
-        num_cached_blocks = self.num_cached_block[request.request_id]
+        num_cached_blocks = self.num_cached_block.get(request.request_id, 0)
         num_full_blocks = num_tokens // self.block_size
 
         if num_cached_blocks >= num_full_blocks:
@@ -182,21 +186,17 @@ class SingleTypeKVCacheManager(ABC):
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> int:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
-        Get the number of common prefix blocks for all requests in the RUNNING
-        state.
+        Get the number of common prefix blocks for all requests with allocated
+        KV cache.
 
         Args:
-            request_id: The request ID.
-            num_running_requests: The total number of requests in the RUNNING
-                state.
+            running_request_id: The request ID.
 
         Returns:
-            The number of common prefix blocks for all requests in the RUNNING
-                state.
+            The number of common prefix blocks for all requests with allocated
+            KV cache.
         """
 
         raise NotImplementedError
@@ -302,13 +302,11 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         # No need to remove blocks for full attention.
         pass
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> int:
-        blocks = self.req_to_blocks[request_id]
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+        blocks = self.req_to_blocks[running_request_id]
         num_common_blocks = 0
         for block in blocks:
-            if block.ref_cnt == num_running_requests:
+            if block.ref_cnt == len(self.req_to_blocks):
                 num_common_blocks += 1
             else:
                 break
@@ -396,7 +394,13 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         # skipped during the attention computation.
         last_useful_token = num_computed_tokens - self.sliding_window + 1
         last_useful_block = last_useful_token // self.block_size
+        if last_useful_block <= 0:
+            # Early return if tokens are not enough to fill the sliding window
+            return
         blocks = self.req_to_blocks[request_id]
+        if blocks[last_useful_block - 1] == self._null_block:
+            # Early return if there are no blocks to remove
+            return
         removed_blocks: list[KVCacheBlock] = []
         for i in range(last_useful_block - 1, -1, -1):
             if blocks[i] == self._null_block:
@@ -408,9 +412,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> int:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
         NOTE(Chen): The prefix blocks are null blocks for sliding window layers.
         So it's not correct to count ref_cnt like FullAttentionManager. Return
@@ -544,9 +546,7 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> int:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
         cascade attention is not supported by chunked local attention.
         """
@@ -584,8 +584,7 @@ class MambaManager(SingleTypeKVCacheManager):
                     #  hit_length = len(hit_blocks_other_attn[0])
                     #               * self.other_block_size
                     # so we insert dummy blocks at the beginning:
-                    if i > 0:
-                        computed.extend([block_pool.null_block] * i)
+                    computed.extend([block_pool.null_block] * i)
                     computed.append(cached)
                 break  # we just need the last match - early stopping
 
@@ -597,16 +596,17 @@ class MambaManager(SingleTypeKVCacheManager):
         #  (for which find_longest_cache_hit returns block_pool.null_block)
         pass
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> int:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
         cascade attention is not supported by mamba
         """
         return 0
 
     def get_num_blocks_to_allocate(
-        self, request_id: str, num_tokens: int, new_computed_blocks: list[KVCacheBlock]
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: Sequence[KVCacheBlock],
     ) -> int:
         # Allocate extra `num_speculative_blocks` blocks for
         # speculative decoding (MTP/EAGLE) with linear attention.
@@ -638,7 +638,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     """Manager for cross-attention KV cache in encoder-decoder models."""
 
     def save_new_computed_blocks(
-        self, request_id: str, new_computed_blocks: list[KVCacheBlock]
+        self, request_id: str, new_computed_blocks: Sequence[KVCacheBlock]
     ) -> None:
         # We do not cache blocks for cross-attention to be shared between
         # requests, so  `new_computed_blocks` should always be empty.
@@ -649,9 +649,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         # requests, so this method is not relevant.
         raise ValueError("Should not be called as prefix caching is disabled.")
 
-    def get_num_common_prefix_blocks(
-        self, request_id: str, num_running_requests: int
-    ) -> int:
+    def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         # Cross-attention blocks contain request-specific encoder states
         # and are not shared between different requests
         return 0

@@ -13,9 +13,6 @@ Covers:
 5) Multiple stop conditions
 """
 
-import os
-from typing import Optional, Union
-
 import pytest
 
 from vllm import LLM, SamplingParams
@@ -34,9 +31,9 @@ class MinTokensTestCase:
         name: str,
         min_tokens: int,
         max_tokens: int,
-        stop: Optional[Union[str, list[str]]] = None,
-        expected_min_len: Optional[int] = None,
-        expected_exact_len: Optional[int] = None,
+        stop: str | list[str] | None = None,
+        expected_min_len: int | None = None,
+        expected_exact_len: int | None = None,
     ):
         self.name = name
         self.min_tokens = min_tokens
@@ -161,9 +158,6 @@ MIN_TOKENS_TEST_CASES = [
 @pytest.fixture(scope="module")
 def llm_v1():
     """Create V1 LLM instance for testing"""
-    # Ensure V1 engine is used
-    os.environ["VLLM_USE_V1"] = "1"
-
     llm = LLM(
         model=TEST_MODEL,
         tensor_parallel_size=1,
@@ -503,6 +497,6 @@ if __name__ == "__main__":
     
     Usage:
         cd vllm/
-        VLLM_USE_V1=1 python -m pytest tests/v1/e2e/test_min_tokens.py -v
+        python -m pytest tests/v1/e2e/test_min_tokens.py -v
     """
     pytest.main([__file__, "-v"])

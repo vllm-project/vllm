@@ -58,7 +58,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from auto_round import AutoRound
 
 model_name = "Qwen/Qwen3-0.6B"
-model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype="auto")
+model = AutoModelForCausalLM.from_pretrained(model_name, dtype="auto")
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 
 bits, group_size, sym = 4, 128, True

@@ -13,7 +13,7 @@ from vllm.v1.attention.backends.utils import (
     split_attn_metadata,
     split_decodes_and_prefills,
 )
-from vllm.v1.worker.ubatch_splitting import create_ubatch_slices
+from vllm.v1.worker.ubatch_utils import create_ubatch_slices
 
 
 @pytest.fixture

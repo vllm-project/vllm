@@ -2,8 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import json
 from dataclasses import fields
 from enum import Enum
@@ -29,7 +27,9 @@ from vllm.sampling_params import (
 )
 
 if TYPE_CHECKING:
-    from vllm.config import TokenizerMode
+    from vllm.config.model import TokenizerMode
+else:
+    TokenizerMode = str
 
 NGRAM_SPEC_CONFIG = {
     "model": "[ngram]",
@@ -103,7 +103,6 @@ def test_guided_decoding_deprecated():
     PARAMS_MODELS_BACKENDS_TOKENIZER_MODE,
 )
 def test_structured_output(
-    monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
     unsupported_json_schema: dict[str, Any],
     sample_sql_ebnf: str,
@@ -115,8 +114,6 @@ def test_structured_output(
     model_name: str,
     speculative_config: dict[str, Any],
 ):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
 
@@ -620,15 +617,12 @@ Make the response as short as possible.
     ],
 )
 def test_structured_output_with_reasoning_matrices(
-    monkeypatch: pytest.MonkeyPatch,
     backend: str,
     tokenizer_mode: TokenizerMode,
     reasoning_parser: str,
     model_name: str,
     speculative_config: dict[str, Any] | None,
 ):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
     if current_platform.is_tpu() and speculative_config:
         pytest.skip("TPU does not support speculative decoding")
 
@@ -691,13 +685,10 @@ def test_structured_output_with_reasoning_matrices(
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("model_name, tokenizer_mode", PARAMS_MODELS_TOKENIZER_MODE)
 def test_structured_output_auto_mode(
-    monkeypatch: pytest.MonkeyPatch,
     unsupported_json_schema: dict[str, Any],
     model_name: str,
     tokenizer_mode: str,
 ):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
     llm = LLM(
         model=model_name,
         max_model_len=1024,
@@ -739,9 +730,7 @@ def test_structured_output_auto_mode(
 
 
 @pytest.mark.skip_global_cleanup
-def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
+def test_guidance_no_additional_properties():
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
         max_model_len=1024,
@@ -801,12 +790,9 @@ def test_guidance_no_additional_properties(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.parametrize("backend", ["guidance", "xgrammar", "outlines"])
 def test_structured_output_batched_with_non_structured_outputs_requests(
-    monkeypatch: pytest.MonkeyPatch,
     sample_json_schema: dict[str, Any],
     backend: str,
 ):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
     # Don't use eager execution on TPUs because we want to test for no
     # recompilation at runtime
     enforce_eager = bool(not current_platform.is_tpu())
@@ -878,3 +864,49 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
             # non-structured outputs requests should not return a valid JSON here
             with pytest.raises(ValueError):
                 output_json = json.loads(generated_text)
+
+
+@pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
+def test_structured_output_with_structural_tag(
+    monkeypatch: pytest.MonkeyPatch,
+    guided_decoding_backend: str,
+):
+    monkeypatch.setenv("VLLM_USE_V1", "1")
+
+    llm = LLM(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        guided_decoding_backend=guided_decoding_backend,
+    )
+
+    structural_tag_config = {
+        "type": "structural_tag",
+        "format": {
+            "type": "triggered_tags",
+            "tags": [
+                {"begin": "hello_flag", "content": {"type": "any_text"}, "end": "hello"}
+            ],
+            "triggers": ["hello"],
+            "stop_after_first": False,
+        },
+    }
+
+    sampling_params = SamplingParams(
+        temperature=0.0,
+        max_tokens=500,
+        guided_decoding=StructuredOutputsParams(
+            structural_tag=json.dumps(structural_tag_config)
+        ),
+    )
+
+    prompt = "Hello and repete hello 10 times, do not say anything else. Only say hello hello hello, now start"
+    outputs = llm.generate(prompt, sampling_params=sampling_params, use_tqdm=True)
+    assert outputs is not None
+    for output in outputs:
+        assert output is not None
+        assert isinstance(output, RequestOutput)
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        assert generated_text is not None
+        assert "hello_flag" in generated_text, (
+            f"Expected 'hello_flag' to be in generated text, but got: {generated_text}"
+        )

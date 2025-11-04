@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 from compressed_tensors.quantization import ActivationOrdering
@@ -17,9 +17,6 @@ from vllm.model_executor.layers.quantization.kernels.mixed_precision import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_repeat_scales_on_all_ranks,
 )
-
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -28,8 +25,6 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
-
-# yapf: enable
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -47,9 +42,9 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self,
         strategy: str,
         num_bits: int,
-        group_size: Optional[int] = None,
-        symmetric: Optional[bool] = True,
-        actorder: Optional[ActivationOrdering] = None,
+        group_size: int | None = None,
+        symmetric: bool | None = True,
+        actorder: ActivationOrdering | None = None,
     ):
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
@@ -219,6 +214,6 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
-        self, layer: torch.nn.Module, x: torch.Tensor, bias: Optional[torch.Tensor]
+        self, layer: torch.nn.Module, x: torch.Tensor, bias: torch.Tensor | None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(layer, x, bias)

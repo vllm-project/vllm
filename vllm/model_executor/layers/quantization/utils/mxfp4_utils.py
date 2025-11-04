@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
-
-OCP_MX_BLOCK_SIZE = 32
 
 
 def _swizzle_mxfp4(quant_tensor, scale, num_warps):
@@ -73,17 +72,17 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps):
 
 def _can_support_mxfp4(
     use_grouped_topk: bool = False,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    expert_map: Optional[torch.Tensor] = None,
-    custom_routing_function: Optional[Callable] = None,
-    e_score_correction_bias: Optional[torch.Tensor] = None,
+    topk_group: int | None = None,
+    num_expert_group: int | None = None,
+    expert_map: torch.Tensor | None = None,
+    custom_routing_function: Callable | None = None,
+    e_score_correction_bias: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
     scoring_func: str = "softmax",
     activation: str = "swigluoai",
-    expert_load_view: Optional[torch.Tensor] = None,
-    logical_to_physical_map: Optional[torch.Tensor] = None,
-    logical_replica_count: Optional[torch.Tensor] = None,
+    expert_load_view: torch.Tensor | None = None,
+    logical_to_physical_map: torch.Tensor | None = None,
+    logical_replica_count: torch.Tensor | None = None,
 ):
     return not (
         use_grouped_topk
@@ -144,6 +143,14 @@ def _quant_dequant_mxfp4_fake(
     return torch.empty_like(x)
 
 
+# Protect these operations into a torch custom op to avoid errors as
+# torch._dynamo.exc.Unsupported: Attempted to call function marked as skipped
+# Explanation: Dynamo does not know how to trace the builtin
+# `kernel_ext.PyCapsule.dq_uint8_mxfp4_to_half.` This function is either a
+# Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python
+# extension (perhaps created with pybind).
+# TODO: Make sure there is no way to avoid having these functions
+# marked as skipped by dynamo.
 try:
     direct_register_custom_op(
         op_name="dequant_mxfp4",

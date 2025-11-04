@@ -18,7 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnectorMetadata,
 )
 from vllm.forward_context import ForwardContext
-from vllm.utils import sha256
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     get_request_block_hasher,
@@ -127,7 +127,7 @@ class RequestRunner:
             kv_role="kv_both",
             kv_connector_extra_config={
                 "spec_name": "MockOffloadingSpec",
-                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",
+                "spec_module_path": "tests.v1.kv_connector.unit.test_offloading_connector",  # noqa: E501
                 "block_size": offloaded_block_size,
             },
         )

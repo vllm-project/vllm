@@ -13,7 +13,7 @@ import torch
 from tests.kernels.utils import baseline_scaled_mm, opcheck, to_fp8, to_int8
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 MNK_FACTORS = [
     (1, 256, 128),
@@ -88,10 +88,7 @@ def cutlass_fp8_gemm_helper(
     # make scales K-major for blockwise quant, doesn't affect 1D scales
     scale_b = scale_b.t().contiguous().t()
 
-    if use_bias:
-        bias = torch.rand((n,), device=device, dtype=out_dtype) * 10
-    else:
-        bias = None
+    bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
@@ -122,10 +119,7 @@ def cutlass_int8_gemm_helper(
     scale_a = torch.randn(a_scales_shape, device=device, dtype=torch.float32)
     scale_b = torch.randn(b_scales_shape, device=device, dtype=torch.float32)
 
-    if use_bias:
-        bias = torch.rand((n,), device=device, dtype=out_dtype) * 10
-    else:
-        bias = None
+    bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
     out = ops.cutlass_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)

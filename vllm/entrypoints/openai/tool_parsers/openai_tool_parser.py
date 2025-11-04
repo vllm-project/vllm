@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
@@ -16,19 +14,19 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer import AnyTokenizer
+else:
+    AnyTokenizer = object
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("openai")
 class OpenAIToolParser(ToolParser):
-    def __init__(self, tokenizer: AnyTokenizer):
+    def __init__(self, tokenizer: "AnyTokenizer"):
         super().__init__(tokenizer)
 
     def extract_tool_calls(

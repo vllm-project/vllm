@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
 
 import torch
 
@@ -27,7 +26,7 @@ class PagedAttentionMetadata:
 
     # (batch_size,). The length of sequences (entire tokens seen so far) per
     # sequence.
-    seq_lens_tensor: Optional[torch.Tensor]
+    seq_lens_tensor: torch.Tensor | None
     # Maximum sequence length in the batch. 0 if it is prefill-only batch.
     max_decode_seq_len: int
     # (batch_size, max_blocks_per_seq).
@@ -36,12 +35,12 @@ class PagedAttentionMetadata:
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
-    block_tables: Optional[torch.Tensor]
+    block_tables: torch.Tensor | None
 
 
 class PagedAttention:
     @staticmethod
-    def get_supported_head_sizes() -> List[int]:
+    def get_supported_head_sizes() -> list[int]:
         return [32, 64, 80, 96, 112, 120, 128, 192, 256]
 
     @staticmethod
@@ -51,7 +50,7 @@ class PagedAttention:
         num_kv_heads: int,
         head_size: int,
         cache_dtype_str: str = "auto",
-    ) -> Tuple[int, ...]:
+    ) -> tuple[int, ...]:
         return (2, num_blocks, block_size * num_kv_heads * head_size)
 
     @staticmethod
@@ -59,7 +58,7 @@ class PagedAttention:
         kv_cache: torch.Tensor,
         num_kv_heads: int,
         head_size: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         x = 16 // kv_cache.element_size()
         num_blocks = kv_cache.shape[1]
 
@@ -102,7 +101,7 @@ class PagedAttention:
         kv_cache_dtype: str,
         num_kv_heads: int,
         scale: float,
-        alibi_slopes: Optional[torch.Tensor],
+        alibi_slopes: torch.Tensor | None,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         tp_rank: int = 0,
@@ -211,8 +210,8 @@ class PagedAttention:
         query_start_loc: torch.Tensor,
         seq_lens_tensor: torch.Tensor,
         max_query_len: int,
-        alibi_slopes: Optional[torch.Tensor],
-        sliding_window: Optional[int],
+        alibi_slopes: torch.Tensor | None,
+        sliding_window: int | None,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ) -> torch.Tensor:
@@ -255,7 +254,7 @@ class PagedAttention:
 
     @staticmethod
     def copy_blocks(
-        kv_caches: List[torch.Tensor],
+        kv_caches: list[torch.Tensor],
         src_to_dists: torch.Tensor,
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]

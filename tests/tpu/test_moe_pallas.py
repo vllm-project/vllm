@@ -9,14 +9,10 @@ import pytest
 import torch
 import torch_xla
 
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe as pallas_moe
 from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as torch_moe,
 )
-
-# yapf: enable
 from vllm.platforms import current_platform
 
 if not current_platform.is_tpu():

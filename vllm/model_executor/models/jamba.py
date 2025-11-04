@@ -4,7 +4,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional
 
 import torch
 from torch import nn
@@ -39,7 +38,13 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaMLP as JambaMLP
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsMambaPrefixCaching,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -54,11 +59,11 @@ class JambaMoE(nn.Module):
     def __init__(
         self,
         config: JambaConfig,
-        num_experts: Optional[int] = None,
-        top_k: Optional[int] = None,
-        params_dtype: Optional[torch.dtype] = None,
-        tp_size: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        num_experts: int | None = None,
+        top_k: int | None = None,
+        params_dtype: torch.dtype | None = None,
+        tp_size: int | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -111,10 +116,10 @@ class JambaMambaDecoderLayer(nn.Module):
         self,
         config: JambaConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        is_lora_enabled: Optional[bool] = False,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        is_lora_enabled: bool | None = False,
         prefix: str = "",
         **kwargs,
     ) -> None:
@@ -159,7 +164,7 @@ class JambaMambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -181,9 +186,9 @@ class JambaAttentionDecoderLayer(nn.Module):
         self,
         config: JambaConfig,
         layer_idx: int,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         **kwargs,
     ) -> None:
@@ -266,7 +271,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -348,8 +353,8 @@ class JambaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -455,7 +460,14 @@ class JambaModel(nn.Module):
         return loaded_params
 
 
-class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid):
+class JambaForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsMambaPrefixCaching,
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".self_attn.": ".", ".A_log": ".A"},
     )
@@ -478,12 +490,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Jamba currently does not support prefix caching"
-        )
 
         super().__init__()
         self.config = config
@@ -523,8 +531,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.model(
@@ -568,7 +576,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHyb
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
@@ -605,10 +613,14 @@ class JambaForSequenceClassification(JambaForCausalLM):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.score
+                ),
                 "classify": Pooler.for_classify(
-                    pooler_config,
-                    classifier=self.score,
+                    pooler_config, classifier=self.score, act_fn="classify"
+                ),
+                "score": Pooler.for_classify(
+                    pooler_config, classifier=self.score, act_fn="score"
                 ),
             }
         )

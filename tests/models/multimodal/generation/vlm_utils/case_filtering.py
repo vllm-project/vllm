@@ -100,6 +100,9 @@ def get_parametrized_options(
         # num_frames is video only
         if test_type == VLMTestType.VIDEO:
             iter_kwargs["num_video_frames"] = ensure_wrapped(test_info.num_video_frames)
+            iter_kwargs["needs_video_metadata"] = ensure_wrapped(
+                test_info.needs_video_metadata
+            )
 
         # No sizes passed for custom inputs, since inputs are directly provided
         if test_type not in (VLMTestType.CUSTOM_INPUTS, VLMTestType.AUDIO):
@@ -114,7 +117,6 @@ def get_parametrized_options(
                 raise ValueError("Test has type CUSTOM_INPUTS, but none given")
             iter_kwargs["custom_test_opts"] = test_info.custom_test_opts
 
-        # yapf: disable
         # Wrap all model cases in a pytest parameter & pass marks through
         return [
             pytest.param(
@@ -122,10 +124,10 @@ def get_parametrized_options(
                 ExpandableVLMTestArgs(
                     **{k: v for k, v in zip(iter_kwargs.keys(), case)}
                 ),
-                marks=test_info.marks if test_info.marks is not None else []
-            ) for case in list(itertools.product(*iter_kwargs.values()))
+                marks=test_info.marks if test_info.marks is not None else [],
+            )
+            for case in list(itertools.product(*iter_kwargs.values()))
         ]
-        # yapf: enable
 
     # Get a list per model type, where each entry contains a tuple of all of
     # that model type's cases, then flatten them into the top level so that

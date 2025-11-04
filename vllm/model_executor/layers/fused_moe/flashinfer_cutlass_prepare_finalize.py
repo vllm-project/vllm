@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -11,6 +10,9 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
+    TopKWeightAndReduceNoOP,
+)
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
@@ -36,14 +38,17 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return None
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return None
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
+
+    def output_is_reduced(self) -> bool:
+        return False
 
     def _apply_router_weight_on_input(
         self,
@@ -83,7 +88,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -158,13 +163,15 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
+        if not self.use_dp:
+            return a1, None, None, topk_ids, topk_weights
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -174,14 +181,13 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             quant_config.block_shape,
             is_fp4_scale_swizzled=not self.use_dp,
         )
-        if self.use_dp:
-            topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
-                [topk_weights, topk_ids, a1q, a1q_scale],
-                dim=0,
-                sizes=get_local_sizes(),
-            )
-            if quant_config.quant_dtype == "nvfp4":
-                a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+        topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
+            [topk_weights, topk_ids, a1q, a1q_scale],
+            dim=0,
+            sizes=get_local_sizes(),
+        )
+        if quant_config.quant_dtype == "nvfp4":
+            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -194,6 +200,8 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
+        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP)
+
         if self.use_dp:
             fused_expert_output = get_dp_group().reduce_scatterv(
                 fused_expert_output, dim=0, sizes=get_local_sizes()

@@ -233,7 +233,6 @@ async def test_fetch_video_http_with_dynamic_loader(
         assert metadata_sync["video_backend"] == "opencv_dynamic"
 
 
-# yapf: disable
 @pytest.mark.parametrize(
     "case",
     [
@@ -264,7 +263,6 @@ async def test_fetch_video_http_with_dynamic_loader(
                 ("image", 0),
             ],
         ),
-
         # Two modalities
         ## Internally sorted
         dict(
@@ -276,7 +274,7 @@ async def test_fetch_video_http_with_dynamic_loader(
                 "audio": [
                     PlaceholderRange(offset=0, length=2),
                     PlaceholderRange(offset=2, length=3),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("audio", 0),
@@ -295,7 +293,7 @@ async def test_fetch_video_http_with_dynamic_loader(
                 "audio": [
                     PlaceholderRange(offset=5, length=2),
                     PlaceholderRange(offset=11, length=4),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -314,7 +312,7 @@ async def test_fetch_video_http_with_dynamic_loader(
                 "audio": [
                     PlaceholderRange(offset=11, length=4),
                     PlaceholderRange(offset=5, length=2),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 1),
@@ -323,7 +321,6 @@ async def test_fetch_video_http_with_dynamic_loader(
                 ("audio", 0),
             ],
         ),
-
         # Three modalities
         ## Internally sorted
         dict(
@@ -339,7 +336,7 @@ async def test_fetch_video_http_with_dynamic_loader(
                     PlaceholderRange(offset=3, length=4),
                     PlaceholderRange(offset=7, length=5),
                     PlaceholderRange(offset=12, length=6),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("audio", 0),
@@ -363,7 +360,7 @@ async def test_fetch_video_http_with_dynamic_loader(
                 ],
                 "video": [
                     PlaceholderRange(offset=8, length=5),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -386,7 +383,7 @@ async def test_fetch_video_http_with_dynamic_loader(
                 ],
                 "video": [
                     PlaceholderRange(offset=8, length=5),
-                ]
+                ],
             },
             expected_modality_idxs=[
                 ("image", 0),
@@ -398,7 +395,6 @@ async def test_fetch_video_http_with_dynamic_loader(
         ),
     ],
 )
-# yapf: enable
 def test_argsort_mm_positions(case):
     mm_positions = case["mm_positions"]
     expected_modality_idxs = case["expected_modality_idxs"]
@@ -413,13 +409,16 @@ def test_argsort_mm_positions(case):
 @pytest.mark.parametrize("num_frames", [-1, 32, 1800])
 async def test_allowed_media_domains(video_url: str, num_frames: int):
     connector = MediaConnector(
-        media_io_kwargs={"video": {
-            "num_frames": num_frames,
-        }},
+        media_io_kwargs={
+            "video": {
+                "num_frames": num_frames,
+            }
+        },
         allowed_media_domains=[
             "www.bogotobogo.com",
             "github.com",
-        ])
+        ],
+    )
 
     video_sync, metadata_sync = connector.fetch_video(video_url)
     video_async, metadata_async = await connector.fetch_video_async(video_url)

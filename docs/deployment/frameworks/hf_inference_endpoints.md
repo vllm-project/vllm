@@ -32,28 +32,28 @@ This is the easiest way to get started with vLLM on Hugging Face Inference Endpo
     import os
 
     client = OpenAI(
-        base_url = DEPLOYMENT_URL,
-        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+        base_url=DEPLOYMENT_URL,
+        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
     )
 
     chat_completion = client.chat.completions.create(
-        model = "HuggingFaceTB/SmolLM3-3B",
-        messages = [
+        model="HuggingFaceTB/SmolLM3-3B",
+        messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "text",
-                        "text": "Give me a brief explanation of gravity in simple terms."
+                        "text": "Give me a brief explanation of gravity in simple terms.",
                     }
-                ]
+                ],
             }
         ],
-        stream = True
+        stream=True,
     )
 
     for message in chat_completion:
-        print(message.choices[0].delta.content, end = "")
+        print(message.choices[0].delta.content, end="")
     ```
 
 !!! note
@@ -61,7 +61,7 @@ This is the easiest way to get started with vLLM on Hugging Face Inference Endpo
 
 ### Method 2: Guided Deployment (Transformers Models)
 
-This method applies to models with the `transformers` library tag in their metadata. It allows you to deploy a model directly from the Hub UI without manual configuration.
+This method applies to models with the [`transformers` library tag](https://huggingface.co/models?library=transformers) in their metadata. It allows you to deploy a model directly from the Hub UI without manual configuration.
 
 1. Navigate to a model on [Hugging Face Hub](https://huggingface.co/models).  
    For this example we will use the [`ibm-granite/granite-docling-258M`](https://huggingface.co/ibm-granite/granite-docling-258M) model. You can verify that the model is compatible by checking the front matter in the [README](https://huggingface.co/ibm-granite/granite-docling-258M/blob/main/README.md), where the library is tagged as `library: transformers`.
@@ -86,34 +86,34 @@ This method applies to models with the `transformers` library tag in their metad
     import os
 
     client = OpenAI(
-        base_url = DEPLOYMENT_URL,
-        api_key = os.environ["HF_TOKEN"] # https://huggingface.co/settings/tokens
+        base_url=DEPLOYMENT_URL,
+        api_key=os.environ["HF_TOKEN"],  # https://huggingface.co/settings/tokens
     )
 
     chat_completion = client.chat.completions.create(
-        model = "ibm-granite/granite-docling-258M",
-        messages = [
+        model="ibm-granite/granite-docling-258M",
+        messages=[
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png"
-                        }
+                            "url": "https://huggingface.co/ibm-granite/granite-docling-258M/resolve/main/assets/new_arxiv.png",
+                        },
                     },
                     {
                         "type": "text",
-                        "text": "Convert this page to docling."
-                    }
+                        "text": "Convert this page to docling.",
+                    },
                 ]
             }
         ],
-        stream = True
+        stream=True,
     )
 
     for message in chat_completion:
-        print(message.choices[0].delta.content, end = "")
+        print(message.choices[0].delta.content, end="")
     ```
 
 !!! note
@@ -128,7 +128,7 @@ Some models require manual deployment because they:
 
 These models cannot be deployed using the **Deploy** button on the model card.
 
-In this guide, we demonstrate manual deployment using the [rednote-hilab/dots.ocr](https://huggingface.co/rednote-hilab/dots.ocr) model, an OCR model integrated with vLLM (see vLLM [PR](https://github.com/vllm-project/vllm/pull/24645)).
+In this guide, we demonstrate manual deployment using the [`rednote-hilab/dots.ocr`](https://huggingface.co/rednote-hilab/dots.ocr) model, an OCR model integrated with vLLM (see vLLM [PR](https://github.com/vllm-project/vllm/pull/24645)).
 
 1. Start a new deployment. Go to [Inference Endpoints](https://endpoints.huggingface.co/) and click `New`.
 

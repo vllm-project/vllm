@@ -5,7 +5,7 @@ import os
 import threading
 import time
 import traceback
-from typing import Optional, cast
+from typing import cast
 
 import openai  # use the official client for correctness check
 import pytest
@@ -46,7 +46,7 @@ class MultinodeInternalLBServerManager:
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.servers: list[Optional[tuple[RemoteOpenAIServer, list[str]]]] = [None] * (
+        self.servers: list[tuple[RemoteOpenAIServer, list[str]] | None] = [None] * (
             dp_size // dp_per_node
         )
         self.server_threads: list[threading.Thread] = []
@@ -175,7 +175,7 @@ class APIOnlyServerManager:
         self.tp_size = tp_size
         self.api_server_count = api_server_count
         self.base_server_args = base_server_args
-        self.servers: list[Optional[tuple[RemoteOpenAIServer, list[str]]]] = [None] * 2
+        self.servers: list[tuple[RemoteOpenAIServer, list[str]] | None] = [None] * 2
         self.server_threads: list[threading.Thread] = []
 
     def __enter__(self) -> list[tuple[RemoteOpenAIServer, list[str]]]:

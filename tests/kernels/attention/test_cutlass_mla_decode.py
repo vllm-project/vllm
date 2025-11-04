@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 import random
-from typing import Optional
 
 import pytest
 import torch
@@ -17,7 +16,7 @@ def cal_diff(
     y: torch.Tensor,
     name: str,
     use_fp8: bool = False,
-    diff_threshold: Optional[float] = None,
+    diff_threshold: float | None = None,
 ) -> None:
     x, y = x.double(), y.double()
     cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
@@ -66,10 +65,7 @@ def test_cutlass_mla_decode(
     b, s_q, mean_sk, h_q, h_kv, d, dv, block_size, causal, varlen, torch_dtype
 ):
     device = torch.device("cuda:0")
-    if torch_dtype == torch.float8_e4m3fn:
-        init_dtype = torch.bfloat16
-    else:
-        init_dtype = torch_dtype
+    init_dtype = torch.bfloat16 if torch_dtype == torch.float8_e4m3fn else torch_dtype
     torch.set_default_dtype(init_dtype)
     torch.set_default_device(device)
     torch.cuda.set_device(device)

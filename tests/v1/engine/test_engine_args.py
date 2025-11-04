@@ -5,17 +5,10 @@ from argparse import ArgumentError
 
 import pytest
 
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
-
-if not envs.VLLM_USE_V1:
-    pytest.skip(
-        "Skipping V1 tests. Rerun with `VLLM_USE_V1=1` to test.",
-        allow_module_level=True,
-    )
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def test_prefix_caching_from_cli():

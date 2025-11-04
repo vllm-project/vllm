@@ -3,7 +3,7 @@
 """PyTorch MAMBA model."""
 
 from collections.abc import Iterable
-from typing import Optional
+from itertools import islice
 
 import torch
 from torch import nn
@@ -29,6 +29,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from vllm.sequence import IntermediateTensors
@@ -48,10 +49,10 @@ class MambaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: MambaConfig,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        is_lora_enabled: Optional[bool] = False,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        is_lora_enabled: bool | None = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -82,7 +83,7 @@ class MambaDecoderLayer(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         **kwargs,
     ):
         if residual is None:
@@ -148,8 +149,8 @@ class MambaModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -162,8 +163,7 @@ class MambaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions, hidden_states=hidden_states, residual=residual
             )
@@ -194,15 +194,13 @@ class MambaModel(nn.Module):
         return loaded_params
 
 
-class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
+class MambaForCausalLM(
+    nn.Module, HasInnerState, IsAttentionFree, SupportsPP, SupportsMambaPrefixCaching
+):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
         self.scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Mamba does not support prefix caching"
-        )
 
         super().__init__()
         self.config = config
@@ -244,8 +242,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states = self.backbone(
