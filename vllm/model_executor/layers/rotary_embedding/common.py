@@ -77,7 +77,11 @@ def dispatch_rotary_emb_function(
     if current_platform.is_cuda():
         return apply_rotary_emb
 
-    if current_platform.is_rocm():
+    # if torch compile is not enabled
+    # use rotary embedding function from flash_attn package
+    # otherwise use the naive pytorch embedding implementation
+    # is faster when torch compile is enabled.
+    if current_platform.is_rocm() and not torch.compiler.is_compiling():
         if find_spec("flash_attn") is not None:
             from flash_attn.ops.triton.rotary import apply_rotary
 
@@ -87,11 +91,10 @@ def dispatch_rotary_emb_function(
                 "flash_attn is not installed. Falling back to PyTorch "
                 "implementation for rotary embeddings."
             )
-
     if default is not None:
         return default
-    else:
-        return apply_rotary_emb_torch
+
+    return apply_rotary_emb_torch
 
 
 # yarn functions
