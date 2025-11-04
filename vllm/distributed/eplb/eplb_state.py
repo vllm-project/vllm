@@ -890,10 +890,6 @@ class EplbState:
         """
         Initiates the asynchronous expert weight transfer by executing the
         prepared P2P communication operations.
-
-        Args:
-            reqs: A list to which the communication requests will be appended.
-                  These requests can then be waited upon later.
         """
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
