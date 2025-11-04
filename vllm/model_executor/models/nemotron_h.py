@@ -20,6 +20,7 @@
 
 import typing
 from collections.abc import Callable, Iterable
+from itertools import islice
 
 import torch
 from torch import nn
@@ -549,7 +550,7 @@ class NemotronHModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             len(config.hybrid_override_pattern), get_layer, prefix=f"{prefix}.layers"
         )
-        self.make_empty_intmd_tensors = make_empty_intermediate_tensors_factory(
+        self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
 
@@ -564,7 +565,7 @@ class NemotronHModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -576,8 +577,7 @@ class NemotronHModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        residual = None
-        for i, layer in enumerate(self.layers):
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -633,6 +633,9 @@ class NemotronHModel(nn.Module):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
 
+                if is_pp_missing_parameter(name, self):
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -676,6 +679,9 @@ class NemotronHModel(nn.Module):
                         break
                 else:
                     if is_expert_weight:
+                        continue
+
+                    if is_pp_missing_parameter(name, self):
                         continue
 
                     param = params_dict[name]
@@ -792,7 +798,9 @@ class NemotronHForCausalLM(
             self.unpadded_vocab_size, config.vocab_size
         )
 
-        self.make_empty_intmd_tensors = self.model.make_empty_intmd_tensors
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
         # Set MoE hyperparameters
         if self.model.has_moe:
