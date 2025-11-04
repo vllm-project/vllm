@@ -80,7 +80,6 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     get_model_path,
     is_interleaved,
@@ -711,12 +710,11 @@ class EngineArgs:
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
-            action=ReasoningParserAction,
+            # Choices are dynamic to include plugins so they are validated later
             **structured_outputs_kwargs["reasoning_parser"],
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser-plugin",
-            # This choice is a special case because it's not static
             **structured_outputs_kwargs["reasoning_parser_plugin"],
         )
         # Deprecated guided decoding arguments
@@ -2062,19 +2060,3 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
-
-
-class ReasoningParserAction(argparse.Action):
-    def __call__(self, parser, namespace, values, option_string=None):
-        reasoning_parser_plugin = getattr(namespace, "reasoning_parser_plugin", None)
-        if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
-            ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
-
-        valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
-        if values is not None and values not in valid_reasoning_parses:
-            raise KeyError(
-                f"invalid reasoning parser: {values} "
-                f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
-            )
-
-        setattr(namespace, self.dest, values)

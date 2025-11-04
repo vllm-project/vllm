@@ -9,6 +9,7 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
+from vllm.reasoning import ReasoningParserManager
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
@@ -63,6 +64,19 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
+        if self.reasoning_parser_plugin and len(self.reasoning_parser_plugin) > 3:
+            ReasoningParserManager.import_reasoning_parser(self.reasoning_parser_plugin)
+
+        valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+        if (
+            self.reasoning_parser != ""
+            and self.reasoning_parser not in valid_reasoning_parses
+        ):
+            raise ValueError(
+                f"invalid reasoning parser: {self.reasoning_parser} "
+                f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+            )
+
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "
