@@ -58,7 +58,6 @@ def get_attn_backend(
     )
 
 
-@cache
 def _cached_get_attn_backend(
     backend,
     head_size: int,
