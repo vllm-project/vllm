@@ -6,8 +6,11 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.constants import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
-                                       STR_INVALID_VAL)
+from vllm.attention.constants import (
+    STR_BACKEND_ENV_VAR,
+    STR_FLASH_ATTN_VAL,
+    STR_INVALID_VAL,
+)
 from vllm.attention.selector import _cached_get_attn_backend, get_attn_backend
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
