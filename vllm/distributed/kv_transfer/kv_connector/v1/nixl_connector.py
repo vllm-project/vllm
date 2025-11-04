@@ -1332,29 +1332,29 @@ class NixlConnectorWorker:
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
         # block_size_ratio > 1:
-        # remote: |         0|          1|          8|         12|
-        # local:          | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
-        remote_block_len = nixl_agent_meta.block_lens[0]
+        # remote:     |          0|          1|          8|         12|
+        # new remote: | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
+        # local:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         remote_block_size = nixl_agent_meta.block_size
         block_size_ratio = remote_block_size / self.block_size
         self.dst_block_size_ratio[engine_id] = block_size_ratio
-        shift_block_0 = remote_block_len if block_size_ratio > 1 else 0
 
-        num_blocks = nixl_agent_meta.num_blocks
         expanded_num_blocks = math.ceil(block_size_ratio)
-        if block_size_ratio > 1:
-            num_blocks -= 1
 
         # when block_size_ratio > 1, one prefill block is n decode_block
         # loop n times of decode block_len to match to prefill
         if engine_id not in self.dst_num_blocks:
-            self.dst_num_blocks[engine_id] = num_blocks * expanded_num_blocks
+            self.dst_num_blocks[engine_id] = (
+                nixl_agent_meta.num_blocks * expanded_num_blocks
+            )
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
 
         self._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, num_blocks * expanded_num_blocks
+            nixl_agent_meta,
+            remote_tp_size,
+            nixl_agent_meta.num_blocks * expanded_num_blocks,
         )
 
         # Number of D TP workers reading from a single P TP worker. This is
@@ -1380,7 +1380,7 @@ class NixlConnectorWorker:
                 if not replicates_kv_cache
                 else 0
             )
-            for block_id in range(num_blocks):
+            for block_id in range(nixl_agent_meta.num_blocks):
                 block_offset = block_id * nixl_agent_meta.block_lens[i]
                 for sub_block_id in range(expanded_num_blocks):
                     expanded_block_offset = (
@@ -1389,26 +1389,19 @@ class NixlConnectorWorker:
                     # For each block, grab the heads chunk belonging to rank_i
                     # of size remote_nheads // tp_ratio, which correspond to
                     # self.block_len == remote_block_len//tp_ratio bytes.
-                    addr = (
-                        base_addr + expanded_block_offset + rank_offset + shift_block_0
-                    )
+                    addr = base_addr + expanded_block_offset + rank_offset
                     # (addr, len, device id)
                     blocks_data.append((addr, kv_block_len, nixl_agent_meta.device_id))
 
             if self._use_flashinfer:
                 # With FlashInfer index V separately to allow head splitting.
-                for block_id in range(num_blocks):
+                for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_lens[i]
                     for sub_block_id in range(expanded_num_blocks):
                         expanded_block_offset = (
                             block_offset + sub_block_id * self.block_len_per_layer[i]
                         )
-                        addr = (
-                            base_addr
-                            + expanded_block_offset
-                            + rank_offset
-                            + shift_block_0
-                        )
+                        addr = base_addr + expanded_block_offset + rank_offset
                         v_addr = addr + nixl_agent_meta.block_lens[i] // 2
                         blocks_data.append(
                             (v_addr, kv_block_len, nixl_agent_meta.device_id)
@@ -1879,7 +1872,7 @@ class NixlConnectorWorker:
         block_size_ratio_inv = None
         if block_size_ratio > 1:
             remote_block_ids = self.get_mapped_blocks(
-                np.asarray(remote_block_ids) - 1, block_size_ratio
+                np.asarray(remote_block_ids), block_size_ratio
             )
 
             # NOTE: We need find free blocks to pad for local, because
