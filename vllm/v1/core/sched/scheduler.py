@@ -8,7 +8,10 @@ from collections.abc import Iterable
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
+from vllm.distributed.ec_transfer.ec_connector.base import (
+    ECConnectorMetadata,
+    ECConnectorRole,
+)
 from vllm.distributed.ec_transfer.ec_connector.factory import ECConnectorFactory
 from vllm.distributed.kv_events import EventPublisherFactory, KVEventBatch
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
@@ -17,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -668,13 +672,17 @@ class Scheduler(SchedulerInterface):
         # 2. Wrap up all the KV cache load / save ops into an opaque object
         # 3. Clear the internal states of the connector
         if self.connector is not None:
-            meta = self.connector.build_connector_meta(scheduler_output)
+            meta: KVConnectorMetadata = self.connector.build_connector_meta(
+                scheduler_output
+            )
             scheduler_output.kv_connector_metadata = meta
 
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
-            meta = self.ec_connector.build_connector_meta(scheduler_output)
-            scheduler_output.ec_connector_metadata = meta
+            ec_meta: ECConnectorMetadata = self.ec_connector.build_connector_meta(
+                scheduler_output
+            )
+            scheduler_output.ec_connector_metadata = ec_meta
 
         self._update_after_schedule(scheduler_output)
         return scheduler_output
