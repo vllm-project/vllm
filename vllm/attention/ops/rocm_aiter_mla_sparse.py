@@ -185,25 +185,31 @@ def rocm_fp8_paged_mqa_logits(
     """
 
     if rocm_aiter_ops.is_enabled():
-        from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits_stage1
+        batch_size, next_n, heads, head_dim = q_fp8.shape
+        num_blocks, block_size, _, _ = kv_cache_fp8.shape
 
-        batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
+        from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits
+
+        out_logits = torch.full(
+            [batch_size * next_n, max_model_len],
             float("-inf"),
             device="cuda",
             dtype=torch.float32,
         )
-        deepgemm_fp8_paged_mqa_logits_stage1(
+        deepgemm_fp8_paged_mqa_logits(
             q_fp8,
             kv_cache_fp8,
             weights,
-            out_qk,
+            out_logits,
             context_lens,
             block_tables,
             max_model_len,
+            ChunkK=256,
+            Preshuffle=block_size == 64,
+            KVBlockSize=block_size,
+            WavePerEU=2,
         )
-        return out_qk.sum(dim=0)
+        return out_logits
     else:
         return fp8_paged_mqa_logits_torch(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
