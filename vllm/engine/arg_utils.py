@@ -497,7 +497,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
-
+    reasoning_parser_plugin: str | None = None
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -711,9 +711,13 @@ class EngineArgs:
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
-            # This choice is a special case because it's not static
-            choices=list(ReasoningParserManager.reasoning_parsers),
+            action=ReasoningParserAction,
             **structured_outputs_kwargs["reasoning_parser"],
+        )
+        structured_outputs_group.add_argument(
+            "--reasoning-parser-plugin",
+            # This choice is a special case because it's not static
+            **structured_outputs_kwargs["reasoning_parser_plugin"],
         )
         # Deprecated guided decoding arguments
         for arg, type in [
@@ -1635,6 +1639,11 @@ class EngineArgs:
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
 
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
+
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
         if self.guided_decoding_backend is not None:
@@ -2053,3 +2062,19 @@ def human_readable_int(value):
 
     # Regular plain number.
     return int(value)
+
+
+class ReasoningParserAction(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        reasoning_parser_plugin = getattr(namespace, "reasoning_parser_plugin", None)
+        if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+            ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
+        valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+        if values is not None and values not in valid_reasoning_parses:
+            raise KeyError(
+                f"invalid reasoning parser: {values} "
+                f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+            )
+
+        setattr(namespace, self.dest, values)

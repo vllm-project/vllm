@@ -37,6 +37,9 @@ class StructuredOutputsConfig:
     reasoning_parser: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
+    reasoning_parser_plugin: str = ""
+    """Path to a dynamically reasoning parser plugin that can be dynamically
+    loaded and registered."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 

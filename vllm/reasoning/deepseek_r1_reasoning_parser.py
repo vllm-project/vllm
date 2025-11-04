@@ -4,7 +4,7 @@
 from collections.abc import Sequence
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
+from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
