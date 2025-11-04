@@ -23,7 +23,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -31,7 +30,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("seed_oss")
 class SeedOssToolParser(ToolParser):
     TOOL_CALL_START = "<seed:tool_call>"
     TOOL_CALL_END = "</seed:tool_call>"

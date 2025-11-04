@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers import Ernie45ToolParser
+from vllm.entrypoints.openai.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
