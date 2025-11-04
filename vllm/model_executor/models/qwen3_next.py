@@ -33,7 +33,7 @@ from vllm.model_executor.layers.fla.ops import (
     chunk_gated_delta_rule,
     fused_recurrent_gated_delta_rule,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -1150,7 +1150,7 @@ class QwenNextMixtureOfExperts(MixtureOfExperts):
     def set_moe_parameters(self):
         self.expert_weights = []
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, Qwen3NextDecoderLayer) and isinstance(
