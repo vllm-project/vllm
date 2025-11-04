@@ -38,7 +38,7 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    prefill_max_num_batched_tokens: int | None = None
+    prefill_max_num_batched_tokens: int = Field(default=None, ge=1)
     """Maximum number of tokens to be processed in a single iteration when there
     are no decode requests. If not set (None), defaults to max_num_batched_tokens.
     Must satisfy: prefill_max_num_batched_tokens >= max_num_batched_tokens."""
@@ -163,6 +163,7 @@ class SchedulerConfig:
 
     @field_validator(
         "max_num_batched_tokens",
+        "prefill_max_num_batched_tokens",
         "max_num_seqs",
         "max_model_len",
         "enable_chunked_prefill",
