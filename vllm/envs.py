@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
+    VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.8"
@@ -738,6 +739,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VIDEO_LOADER_BACKEND": lambda: os.getenv(
         "VLLM_VIDEO_LOADER_BACKEND", "opencv"
     ),
+    # Media connector implementation.
+    # - "http": Default connector that supports fetching media via HTTP.
+    #
+    # Custom implementations can be registered
+    # via `@MEDIA_CONNECTOR_REGISTRY.register("my_custom_media_connector")` and
+    # imported at runtime.
+    # If a non-existing backend is used, an AssertionError will be thrown.
+    "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
     # [DEPRECATED] Cache size (in GiB per process) for multimodal input cache
     # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB": lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
