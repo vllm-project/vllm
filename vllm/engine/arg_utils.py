@@ -86,7 +86,7 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.utils import check_gguf_file, is_s3
+from vllm.transformers_utils.utils import check_gguf_file, is_cloud_storage
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -438,8 +438,6 @@ class EngineArgs:
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
-    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
-    rope_theta: float | None = ModelConfig.rope_theta
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
@@ -617,8 +615,6 @@ class EngineArgs:
         )
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
-        model_group.add_argument("--rope-scaling", **model_kwargs["rope_scaling"])
-        model_group.add_argument("--rope-theta", **model_kwargs["rope_theta"])
         model_group.add_argument(
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
@@ -1184,8 +1180,6 @@ class EngineArgs:
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
-            rope_scaling=self.rope_scaling,
-            rope_theta=self.rope_theta,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
@@ -1310,10 +1304,10 @@ class EngineArgs:
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
-        # Skip speculator detection for S3 models since HuggingFace cannot load
-        # configs directly from S3 URLs. S3 models can still use speculators with
-        # explicit --speculative-config.
-        if not is_s3(self.model):
+        # Skip speculator detection for cloud storage models (eg: S3, GCS) since
+        # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
+        # use speculators with explicit --speculative-config.
+        if not is_cloud_storage(self.model):
             (self.model, self.tokenizer, self.speculative_config) = (
                 maybe_override_with_speculators(
                     model=self.model,
