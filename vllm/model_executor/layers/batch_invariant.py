@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import functools
 import os
 from collections import namedtuple
 from collections.abc import Callable
@@ -846,6 +847,7 @@ def get_batch_invariant_attention_block_size() -> AttentionBlockSize:
     return AttentionBlockSize(block_m=16, block_n=16)
 
 
+@functools.cache
 def vllm_is_batch_invariant():
     env_key = "VLLM_BATCH_INVARIANT"
     is_overridden = False
