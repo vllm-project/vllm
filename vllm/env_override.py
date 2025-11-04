@@ -370,9 +370,8 @@ if is_torch_equal("2.9.0"):
 
     # `custom_should_partition_ops` is a new config after 2.9.0. So this would
     # not overwrite any user configs.
-    dummy_config = _Config(default=[])
     torch._inductor.config._config["custom_should_partition_ops"] = _ConfigEntry(
-        dummy_config
+        _Config(default=[])
     )
 
     PythonWrapperCodegen.memory_plan_reuse = memory_plan_reuse_patched
