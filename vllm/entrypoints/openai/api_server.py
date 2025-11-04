@@ -409,9 +409,9 @@ async def pause_generation(
     clear_cache: bool = Query(True),
 ) -> JSONResponse:
     """Pause generation requests to allow weight updates.
-    
+
     Args:
-        mode: Pause mode - "force" aborts running requests (default), 
+        mode: Pause mode - "force" aborts running requests (default),
               "gentle" waits for requests to finish.
         clear_cache: Whether to clear KV cache and prefix cache after draining.
     """
@@ -420,7 +420,10 @@ async def pause_generation(
     if not hasattr(engine, "pause_generation"):
         return JSONResponse(
             content={
-                "error": "Pause/resume not supported by current engine. Set VLLM_USE_V1=1."
+                "error": (
+                    "Pause/resume not supported by current engine. "
+                    "Set VLLM_USE_V1=1."
+                )
             },
             status_code=HTTPStatus.NOT_IMPLEMENTED.value,
         )
@@ -453,7 +456,10 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
     if not hasattr(engine, "resume_generation"):
         return JSONResponse(
             content={
-                "error": "Pause/resume not supported by current engine. Set VLLM_USE_V1=1."
+                "error": (
+                    "Pause/resume not supported by current engine. "
+                    "Set VLLM_USE_V1=1."
+                )
             },
             status_code=HTTPStatus.NOT_IMPLEMENTED.value,
         )
@@ -480,7 +486,10 @@ async def pause_status(raw_request: Request) -> JSONResponse:
             content={
                 "is_paused": False,
                 "num_unfinished_requests": 0,
-                "error": "Pause/resume not supported by current engine. Set VLLM_USE_V1=1.",
+                "error": (
+                    "Pause/resume not supported by current engine. "
+                    "Set VLLM_USE_V1=1."
+                ),
             }
         )
 

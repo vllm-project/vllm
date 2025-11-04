@@ -154,6 +154,7 @@ class AsyncLLM(EngineClient):
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
         self._is_paused = False
+        self._pause_resume_lock = asyncio.Lock()  # Ensures pause/resume atomicity
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -567,74 +568,87 @@ class AsyncLLM(EngineClient):
         if mode not in {"gentle", "force"}:
             raise ValueError(f"Unsupported pause mode: {mode!r}")
 
-        async with self._pause_cond:
-            if self._is_paused:
+        # Use lock to ensure atomicity with resume_generation
+        async with self._pause_resume_lock:
+            async with self._pause_cond:
+                if self._is_paused:
+                    return {
+                        "paused": True,
+                        "mode": mode,
+                        "message": "Already paused",
+                        "aborted_requests": 0,
+                        "cache_cleared": False,
+                    }
+
+                self._is_paused = True
+
+            start_time = time.perf_counter()
+            aborted_requests = 0
+            cache_cleared = False
+
+            try:
+                if mode == "force":
+                    # Get all tracked request IDs directly from output_processor
+                    request_ids = list(self.output_processor.request_states.keys())
+                    aborted_requests = len(request_ids)
+                    if request_ids:
+                        await self.abort(request_ids)
+
+                # Wait for all requests to drain
+                while (
+                    self.output_processor.has_unfinished_requests()
+                    or self.engine_core.dp_engines_running()
+                ):
+                    await asyncio.sleep(0.05)
+
+                # Clear cache if requested
+                if clear_cache:
+                    await self.reset_prefix_cache()
+                    await self.reset_mm_cache()
+                    cache_cleared = True
+
+                elapsed = time.perf_counter() - start_time
                 return {
                     "paused": True,
                     "mode": mode,
-                    "message": "Already paused",
-                    "aborted_requests": 0,
-                    "cache_cleared": False,
+                    "message": "Generation paused successfully",
+                    "elapsed_seconds": elapsed,
+                    "aborted_requests": aborted_requests,
+                    "cache_cleared": cache_cleared,
                 }
 
-            self._is_paused = True
-
-        start_time = time.perf_counter()
-        aborted_requests = 0
-
-        if mode == "force":
-            # Get all tracked request IDs directly from output_processor
-            request_ids = list(self.output_processor.request_states.keys())
-            aborted_requests = len(request_ids)
-            if request_ids:
-                await self.abort(request_ids)
-
-        # Wait for all requests to drain
-        while self.output_processor.has_unfinished_requests() or \
-              self.engine_core.dp_engines_running():
-            await asyncio.sleep(0.05)
-
-        # Clear cache if requested
-        cache_cleared = False
-        if clear_cache:
-            await self.reset_prefix_cache()
-            await self.reset_mm_cache()
-            cache_cleared = True
-
-        elapsed = time.perf_counter() - start_time
-        return {
-            "paused": True,
-            "mode": mode,
-            "message": "Generation paused successfully",
-            "elapsed_seconds": elapsed,
-            "aborted_requests": aborted_requests,
-            "cache_cleared": cache_cleared,
-        }
+            except Exception:
+                # If pause fails, reset state to allow future requests
+                async with self._pause_cond:
+                    self._is_paused = False
+                    self._pause_cond.notify_all()
+                # Re-raise the exception so API returns HTTP 500 with error details
+                raise
 
     async def resume_generation(self) -> dict[str, Any]:
         """Resume generation after :meth:`pause_generation`."""
 
-        async with self._pause_cond:
-            if not self._is_paused:
-                return {
-                    "paused": False,
-                    "message": "Not paused",
-                }
+        # Use lock to ensure atomicity with pause_generation
+        async with self._pause_resume_lock:
+            async with self._pause_cond:
+                if not self._is_paused:
+                    return {
+                        "paused": False,
+                        "message": "Not paused",
+                    }
 
-            self._is_paused = False
-            self._pause_cond.notify_all()  # Wake up all waiting requests
+                self._is_paused = False
+                self._pause_cond.notify_all()  # Wake up all waiting requests
 
-        return {
-            "paused": False,
-            "message": "Generation resumed",
-        }
+            return {
+                "paused": False,
+                "message": "Generation resumed",
+            }
 
     async def get_pause_status(self) -> dict[str, Any]:
         """Return the current pause status."""
-
         return {
             "is_paused": self._is_paused,
-            "num_unfinished_requests": self.output_processor.get_num_unfinished_requests(),
         }
 
     async def encode(
