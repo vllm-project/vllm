@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from fnmatch import fnmatch
 from typing import TYPE_CHECKING, Any, Optional
 
 import torch
@@ -85,7 +86,70 @@ QUANT_ALGOS = ["FP8", "NVFP4"]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
 
-class ModelOptFp8Config(QuantizationConfig):
+class ModelOptQuantConfigBase(QuantizationConfig):
+    LinearMethodCls: type = LinearMethodBase
+    FusedMoEMethodCls: type = FusedMoEMethodBase
+
+    def __init__(
+        self,
+        exclude_modules: list[str] | None = None,
+    ):
+        super().__init__()
+        self.exclude_modules = exclude_modules or []
+
+    def is_layer_excluded(self, prefix: str) -> bool:
+        """
+        Check if a layer should be excluded from quantization.
+
+        Handles both exact matching (for fused layers) and ModelOpt wildcard matching.
+
+        The ModelOpt exclude_modules list is a list of wildcards.
+        """
+        if self.exclude_modules is None:
+            return False
+
+        # First check exact matching with fused layer support
+        if is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping):
+            return True
+
+        # modelopt exclude modules are not simple strings, they are wildcards
+        for wildcard_pattern in self.exclude_modules:
+            if fnmatch(prefix, wildcard_pattern):
+                return True
+
+        return False
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> Optional["QuantizeMethodBase"]:
+        from vllm.attention.layer import Attention  # Avoid circular import
+
+        # handle kv-cache first so we can focus only on weight quantization thereafter
+        if isinstance(layer, Attention):
+            return ModelOptFp8KVCacheMethod(self)
+
+        # handle exclusion
+        if self.is_layer_excluded(prefix):
+            if isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
+            return None
+
+        # Check if this is a vision model layer that should not be quantized
+        # TODO: this special hard coded logic is not needed after the next release of
+        # ModelOpt where they are handled natually by the exclude_modules config
+        if "vision_tower" in prefix or "vision_model" in prefix:
+            return UnquantizedLinearMethod()
+
+        # now, the layer is quantized, handle it here
+        if isinstance(layer, LinearBase):
+            return self.LinearMethodCls(self)
+        elif isinstance(layer, FusedMoE):
+            return self.FusedMoEMethodCls(self, layer)
+
+        return None
+
+
+class ModelOptFp8Config(ModelOptQuantConfigBase):
     """Config class for ModelOpt FP8."""
 
     def __init__(
@@ -94,10 +158,9 @@ class ModelOptFp8Config(QuantizationConfig):
         kv_cache_quant_method: str | None = None,
         exclude_modules: list[str] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(exclude_modules)
         self.is_checkpoint_fp8_serialized = is_checkpoint_fp8_serialized
         self.kv_cache_quant_method = kv_cache_quant_method
-        self.exclude_modules = exclude_modules or []
         if is_checkpoint_fp8_serialized:
             logger.warning(
                 "Detected ModelOpt fp8 checkpoint. Please note that"
@@ -188,53 +251,6 @@ class ModelOptFp8Config(QuantizationConfig):
         is_checkpoint_fp8_serialized = "FP8" in quant_method
 
         return cls(is_checkpoint_fp8_serialized, kv_cache_quant_method, exclude_modules)
-
-    def is_layer_excluded(self, prefix: str) -> bool:
-        """
-        Check if a layer should be excluded from quantization.
-        Handles both exact matching (for fused layers) and substring matching.
-
-        This method handles both regular models and multimodal models that use
-        the language_model prefix. For multimodal models, it checks if the
-        module name (without the language_model prefix) is in the exclude list.
-        """
-        if self.exclude_modules is None:
-            return False
-
-        # First check exact matching with fused layer support
-        if is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping):
-            return True
-
-        # Then check substring matching for patterns not caught by exact match
-        for module in self.exclude_modules:
-            # Skip exact matches already handled above
-            if module != prefix and (
-                module in prefix
-                or (
-                    prefix.startswith("language_model.")
-                    and module in prefix.removeprefix("language_model.")
-                )
-            ):
-                return True
-        return False
-
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
-        if isinstance(layer, LinearBase):
-            if self.is_layer_excluded(prefix):
-                return UnquantizedLinearMethod()
-            # Check if this is a vision model layer that should not be quantized
-            if "vision_tower" in prefix or "vision_model" in prefix:
-                return UnquantizedLinearMethod()
-            return ModelOptFp8LinearMethod(self)
-        elif isinstance(layer, Attention):
-            return ModelOptFp8KVCacheMethod(self)
-        elif isinstance(layer, FusedMoE):
-            return ModelOptFp8MoEMethod(self, layer)
-        return None
 
 
 class ModelOptFp8LinearMethod(LinearMethodBase):
@@ -670,7 +686,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
 
-class ModelOptNvFp4Config(QuantizationConfig):
+ModelOptFp8Config.LinearMethodCls = ModelOptFp8LinearMethod
+ModelOptFp8Config.FusedMoEMethodCls = ModelOptFp8MoEMethod
+
+
+class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     """Config class for ModelOpt FP4."""
 
     def __init__(
@@ -861,54 +881,13 @@ class ModelOptNvFp4Config(QuantizationConfig):
             group_size,
         )
 
-    def is_layer_excluded(self, prefix: str) -> bool:
-        """
-        Check if a layer should be excluded from quantization.
-        Handles both exact matching (for fused layers) and pattern matching.
-        """
-        # First check exact matching with fused layer support
-        if is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping):
-            return True
-
-        # Check regex pattern matching for patterns not caught by exact match
-        import regex as re
-
-        for pattern in self.exclude_modules:
-            # Skip patterns that would be caught by exact matching
-            if "*" in pattern or "." in pattern:
-                regex_str = pattern.replace(".", r"\.").replace("*", r".*")
-                if re.fullmatch(regex_str, prefix):
-                    return True
-        return False
-
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
-
-        skip_layer = self.is_layer_excluded(prefix)
-        if isinstance(layer, LinearBase):
-            if skip_layer:
-                return UnquantizedLinearMethod()
-            # Check if this is a vision model layer that should not be quantized
-            if "vision_tower" in prefix or "vision_model" in prefix:
-                return UnquantizedLinearMethod()
-            return ModelOptNvFp4LinearMethod(self)
-        elif isinstance(layer, Attention):
-            return ModelOptFp8KVCacheMethod(self)
-        elif isinstance(layer, FusedMoE):
-            if skip_layer:
-                return None
-            return ModelOptNvFp4FusedMoE(self, layer.moe_config, layer)
-        return None
-
 
 class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     """
     Supports loading kv-cache scaling factors from FP8 checkpoints.
     """
 
-    def __init__(self, quant_config: ModelOptFp8Config | ModelOptNvFp4Config):
+    def __init__(self, quant_config: ModelOptQuantConfigBase):
         super().__init__(quant_config)
 
 
@@ -1762,3 +1741,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 k=x.shape[1],
                 e=layer.w13_weight.shape[0],
             )
+
+
+ModelOptNvFp4Config.LinearMethodCls = ModelOptNvFp4LinearMethod
+ModelOptNvFp4Config.FusedMoEMethodCls = ModelOptNvFp4FusedMoE
