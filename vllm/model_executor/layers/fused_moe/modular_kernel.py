@@ -10,6 +10,7 @@ from typing import final
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
@@ -801,27 +802,33 @@ class FusedMoEModularKernel(torch.nn.Module):
         # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
         # DP+EP due to the random token routing.
         is_profile_run = get_forward_context().attn_metadata is None
-        if is_profile_run and self.fused_experts.supports_chunking():
-            max_workspace_13, max_workspace_2, max_fused_out_shape = (
-                self.fused_experts.workspace_shapes(
-                    envs.VLLM_FUSED_MOE_CHUNK_SIZE,
-                    N,
-                    K,
-                    top_k,
-                    global_num_experts,
-                    local_num_experts,
-                    expert_tokens_meta,
+        if is_profile_run:
+            parallel_config = get_current_vllm_config().parallel_config
+            is_dp_ep = (
+                parallel_config.data_parallel_size > 1
+                and parallel_config.enable_expert_parallel
+            )
+            if is_dp_ep and self.fused_experts.supports_chunking():
+                max_workspace_13, max_workspace_2, max_fused_out_shape = (
+                    self.fused_experts.workspace_shapes(
+                        envs.VLLM_FUSED_MOE_CHUNK_SIZE,
+                        N,
+                        K,
+                        top_k,
+                        global_num_experts,
+                        local_num_experts,
+                        expert_tokens_meta,
+                    )
                 )
-            )
-            buffers.workspace13.get(
-                max_workspace_13, device=device, dtype=workspace_dtype
-            )
-            buffers.workspace2.get(
-                max_workspace_2, device=device, dtype=workspace_dtype
-            )
-            buffers.fused_out.get(
-                max_fused_out_shape, device=device, dtype=workspace_dtype
-            )
+                buffers.workspace13.get(
+                    max_workspace_13, device=device, dtype=workspace_dtype
+                )
+                buffers.workspace2.get(
+                    max_workspace_2, device=device, dtype=workspace_dtype
+                )
+                buffers.fused_out.get(
+                    max_fused_out_shape, device=device, dtype=workspace_dtype
+                )
 
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
