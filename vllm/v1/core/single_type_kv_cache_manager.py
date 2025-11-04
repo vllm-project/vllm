@@ -248,6 +248,9 @@ class SingleTypeKVCacheManager(ABC):
         Remove and free the blocks that are no longer needed for attention computation.
         The removed blocks should be replaced by null_block.
 
+        This function depends on `get_num_skipped_tokens`, which need to be implemented
+        differently for each attention type.
+
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
