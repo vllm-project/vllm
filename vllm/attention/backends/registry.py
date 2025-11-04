@@ -70,7 +70,7 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
     # Placeholder for third-party/custom backends - must be registered before use
     CUSTOM = ""
 
-    def get_path(self) -> str:
+    def get_path(self, include_classname: bool = True) -> str:
         """Get the class path for this backend (respects overrides).
 
         Returns:
@@ -85,6 +85,8 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
                 f"Backend {self.name} must be registered before use. "
                 f"Use register_backend(Backend.{self.name}, 'your.module.YourClass')"
             )
+        if not include_classname:
+            path = path.rsplit(".", 1)[0]
         return path
 
     def get_class(self) -> "type[AttentionBackend]":
