@@ -198,6 +198,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
+    VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
@@ -1359,6 +1360,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    # Use AITER Triton fused rope + zeros + reshape_and_cache
+    "VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE":
+    lambda: bool(int(os.getenv("VLLM_ROCM_USE_AITER_TRITON_FUSED_ROPE_ZEROS_KV_CACHE", "0"))),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
     # If the server_label of your mcp tool is not in this list it will
