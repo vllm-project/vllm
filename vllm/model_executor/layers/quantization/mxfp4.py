@@ -43,7 +43,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
-    get_padding_alignment
+    get_padding_alignment,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
