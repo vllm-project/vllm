@@ -281,9 +281,17 @@ def rocm_aiter_fused_moe_impl(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
+
+    # Check if input is already pre-quantized (from mori dispatch)
+    input_is_pre_quantized = (
+        a1_scale is not None and hidden_states.dtype == current_platform.fp8_dtype()
+    )
+    dtype = output_dtype if input_is_pre_quantized else None
 
     activation = ActivationType(activation_method)
     quant_type = QuantType(quant_method)
@@ -302,6 +310,8 @@ def rocm_aiter_fused_moe_impl(
         w2_scale,
         a1_scale,
         a2_scale,
+        num_local_tokens=expert_num_tokens,
+        dtype=dtype,
     )
 
 
@@ -319,6 +329,8 @@ def rocm_aiter_fused_moe_fake(
     w2_scale: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
 
@@ -434,7 +446,10 @@ def rocm_aiter_fused_experts(
     activation: str = "silu",
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
+    expert_num_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
     quant_config: FusedMoEQuantConfig | None = None,
+    a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
@@ -518,9 +533,11 @@ def rocm_aiter_fused_experts(
             activation_method=activation_method,
             w1_scale=quant_config.w1_scale,
             w2_scale=quant_config.w2_scale,
-            a1_scale=quant_config.a1_scale,
+            a1_scale=quant_config.a1_scale if a1q_scale is None else a1q_scale,
             a2_scale=quant_config.a2_scale,
             doweight_stage1=apply_router_weight_on_input,
+            expert_num_tokens=expert_num_tokens,
+            output_dtype=output_dtype,
         )
 
 

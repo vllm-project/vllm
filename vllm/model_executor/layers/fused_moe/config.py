@@ -683,6 +683,10 @@ class FusedMoEParallelConfig:
     def use_deepep_ll_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "deepep_low_latency"
 
+    @property
+    def use_mori_kernels(self):
+        return self.use_all2all_kernels and envs.VLLM_ALL2ALL_BACKEND == "mori"
+
     @staticmethod
     def flatten_tp_across_dp(
         tp_size: int, dp_size: int, dp_rank: int
@@ -874,6 +878,10 @@ class FusedMoEConfig:
     @property
     def use_deepep_ll_kernels(self):
         return self.moe_parallel_config.use_deepep_ll_kernels
+
+    @property
+    def use_mori_kernels(self):
+        return self.moe_parallel_config.use_mori_kernels
 
     @property
     def use_flashinfer_cutlass_kernels(self):

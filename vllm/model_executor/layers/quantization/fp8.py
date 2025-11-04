@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+    is_rocm_aiter_moe_enabled,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -1092,8 +1095,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            self.rocm_aiter_moe_enabled
-            or self.use_marlin
+            self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
@@ -1112,13 +1114,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
+            AiterMoriExperts,
             BatchedTritonOrDeepGemmExperts,
             TritonOrDeepGemmExperts,
         )
 
-        assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
-            "Marlin and ROCm AITER are not supported with all2all yet."
-        )
+        assert not self.use_marlin, "Marlin is not supported with all2all yet."
 
         assert self.moe_quant_config is not None
 
@@ -1141,6 +1142,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
                 allow_deep_gemm=self.allow_deep_gemm,
+            )
+        elif self.moe.use_mori_kernels and is_rocm_aiter_moe_enabled():
+            logger.debug("AiterMoriExperts for Mori integration %s", self.moe)
+            return AiterMoriExperts(
+                max_num_tokens=self.moe.max_num_tokens,
+                quant_config=self.moe_quant_config,
             )
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             experts = select_cutlass_fp8_gemm_impl(
@@ -1295,13 +1302,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # can override fused_experts or cutlass but not rocm or marlin.
         #
         topk_weights, topk_ids, zero_expert_result = select_result
-
-        if self.rocm_aiter_moe_enabled:
+        if self.rocm_aiter_moe_enabled and self.fused_experts is None:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
                 rocm_aiter_fused_experts,
             )
 
-            assert self.fused_experts is None
             result = rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
@@ -1340,7 +1345,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=True,
+                inplace=not self.moe.use_mori_kernels,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 apply_router_weight_on_input=apply_router_weight_on_input,

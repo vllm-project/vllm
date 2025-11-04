@@ -163,6 +163,7 @@ if TYPE_CHECKING:
     VLLM_ALL2ALL_BACKEND: Literal[
         "naive",
         "pplx",
+        "mori",
         "deepep_high_throughput",
         "deepep_low_latency",
         "allgather_reducescatter",
@@ -217,6 +218,7 @@ if TYPE_CHECKING:
     VLLM_NCCL_INCLUDE_PATH: str | None = None
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
+    VLLM_MORI_CONFIG_PATH: str | None = None
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
 
@@ -1185,6 +1187,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "allgather_reducescatter": all2all implementation based on allgather and
     #  reducescatter
     # - "pplx": use pplx kernels
+    # - "mori": use mori kernels (currently, only low-latency is supported)
     # - "deepep_high_throughput", use deepep high-throughput kernels
     # - "deepep_low_latency", use deepep low-latency kernels
     # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
@@ -1194,6 +1197,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         [
             "naive",
             "pplx",
+            "mori",
             "deepep_high_throughput",
             "deepep_low_latency",
             "allgather_reducescatter",
@@ -1439,6 +1443,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - VLLM_GC_DEBUG='{"top_objects":5}': enable GC debugger with
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
+    # Path to JSON configuration file for mori all2all parameters
+    # If set, mori will use parameters from this JSON file instead of defaults
+    "VLLM_MORI_CONFIG_PATH": lambda: os.getenv("VLLM_MORI_CONFIG_PATH", None),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
