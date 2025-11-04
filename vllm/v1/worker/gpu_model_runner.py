@@ -2562,12 +2562,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         effective_drafter_max_model_len = (
                             self.speculative_config.draft_model_config.max_model_len
                         )
-                    input_fits_in_drafter = spec_decode_common_attn_metadata and (
-                        spec_decode_common_attn_metadata.max_seq_len
-                        + self.speculative_config.num_speculative_tokens
-                        <= effective_drafter_max_model_len
+                    input_fits_in_drafter = bool(
+                        spec_decode_common_attn_metadata
+                        and (
+                            spec_decode_common_attn_metadata.max_seq_len
+                            + self.speculative_config.num_speculative_tokens
+                            <= effective_drafter_max_model_len
+                        )
                     )
-                    local_should_run_drafter = (
+                    local_should_run_drafter = bool(
                         use_padded_batch_for_eagle and input_fits_in_drafter
                     )
 
@@ -2734,12 +2737,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 effective_drafter_max_model_len = (
                     self.speculative_config.draft_model_config.max_model_len
                 )
-            input_fits_in_drafter = spec_decode_common_attn_metadata and (
-                spec_decode_common_attn_metadata.max_seq_len
-                + self.speculative_config.num_speculative_tokens
-                <= effective_drafter_max_model_len
+            input_fits_in_drafter = bool(
+                spec_decode_common_attn_metadata
+                and (
+                    spec_decode_common_attn_metadata.max_seq_len
+                    + self.speculative_config.num_speculative_tokens
+                    <= effective_drafter_max_model_len
+                )
             )
-            should_run_drafter = use_padded_batch_for_eagle and input_fits_in_drafter
+            should_run_drafter = bool(
+                use_padded_batch_for_eagle and input_fits_in_drafter
+            )
 
         if should_run_drafter:
             # EAGLE speculative decoding can use the GPU sampled tokens
