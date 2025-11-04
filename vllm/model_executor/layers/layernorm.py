@@ -192,14 +192,16 @@ class RMSNorm(CustomOp):
         if residual is not None:
             # Handle sequence parallelism: when residual is scattered, align x
             seq_len = residual.size(0)
-            
+
             # Add assertion to help Dynamo understand the constraint
-            torch._assert(x.size(0) >= seq_len, "x must be at least as long as residual")
-            
+            torch._assert(
+                x.size(0) >= seq_len, "x must be at least as long as residual"
+            )
+
             # Slice x to match residual's sequence length
             # After this, x.shape[0] should be tracked as seq_len by Dynamo
             x = x[:seq_len]
-            
+
             # residual promoted f16->f32 automatically,
             # otherwise Inductor eliminates the casts to and from f16,
             # increasing memory usage (and complicating pattern matching)

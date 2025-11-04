@@ -356,18 +356,17 @@ def is_residual_scattered_for_sp(
     # When sequence parallelism is enabled, we always pad num_input_tokens
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
-    
+
     # Check if using torch native RMSNorm (no custom op)
     # When using torch native, residual should NOT be scattered during tracing
     # SequenceParallelismPass will handle scattering in the optimized graph
     custom_ops = vllm_config.compilation_config.custom_ops
-    
+
     # If "none" is in custom_ops, all custom ops are disabled by default
     # Unless explicitly enabled with "+rms_norm"
-    if "none" in custom_ops:
-        # Using torch native unless explicitly enabled
-        if "+rms_norm" not in custom_ops:
-            return False  # Don't scatter residual, let SequenceParallelismPass handle it
+    # Using torch native unless explicitly enabled
+    if "none" in custom_ops and "+rms_norm" not in custom_ops:
+        return False  # Don't scatter residual, let SequenceParallelismPass handle it
 
     if (
         not vllm_config.compilation_config.splitting_ops
