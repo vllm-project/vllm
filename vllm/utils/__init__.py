@@ -30,13 +30,27 @@ def __getattr__(name: str) -> Any:  # noqa: D401 - short deprecation docstring
     """Module-level getattr to handle deprecated utilities."""
     if name in _DEPRECATED_MAPPINGS:
         submodule_name = _DEPRECATED_MAPPINGS[name]
+
+        # Determine if the submodule is outside vllm.utils
+        # (e.g., "attention.constants" vs "profiling")
+        if "." in submodule_name:
+            # Module is outside vllm.utils, construct full path from vllm root
+            full_module_path = f"vllm.{submodule_name}"
+            new_location = f"vllm.{submodule_name}.{name}"
+        else:
+            # Module is within vllm.utils (existing behavior)
+            full_module_path = f"vllm.utils.{submodule_name}"
+            new_location = f"vllm.utils.{submodule_name}.{name}"
+
         warnings.warn(
             f"vllm.utils.{name} is deprecated and will be removed in a future version. "
-            f"Use vllm.utils.{submodule_name}.{name} instead.",
+            f"Use {new_location} instead.",
             DeprecationWarning,
             stacklevel=2,
         )
-        module = __import__(f"vllm.utils.{submodule_name}", fromlist=[submodule_name])
+
+        # Import the module and return the attribute
+        module = __import__(full_module_path, fromlist=[submodule_name.split(".")[-1]])
         return getattr(module, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
