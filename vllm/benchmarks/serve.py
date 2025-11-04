@@ -189,9 +189,16 @@ async def get_request(
             total_requests,
             request_rate,
         )
+        assert current_request_rate > 0.0, (
+            f"Obtained non-positive request rate {current_request_rate}."
+        )
         request_rates.append(current_request_rate)
         if current_request_rate == float("inf"):
             delay_ts.append(0)
+        elif burstiness == float("inf"):
+            # when burstiness tends to infinity, the delay time becomes constant
+            # and tends to the inverse of the request rate
+            delay_ts.append(1.0 / current_request_rate)
         else:
             theta = 1.0 / (current_request_rate * burstiness)
 
