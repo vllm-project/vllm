@@ -600,9 +600,9 @@ class WorkerProc:
                     nonlocal shutdown
                     shutdown = True
                     # Shut down message queues
-                    if worker.rpc_broadcast_mq is not None:
+                    if worker is not None and worker.rpc_broadcast_mq is not None:
                         worker.rpc_broadcast_mq.shutdown()
-                    if worker.worker_response_mq is not None:
+                    if worker is not None and worker.worker_response_mq is not None:
                         worker.worker_response_mq.shutdown()
 
                 except Exception as e:

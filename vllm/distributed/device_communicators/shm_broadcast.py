@@ -71,12 +71,10 @@ class SpinCondition:
     def __init__(
         self,
         is_reader: bool,
-        local_notify_socket: zmq.Socket,
-        cancel_socket: zmq.Socket | None = None,
+        context: zmq.Context,
+        notify_address: str,
         busy_loop_s: float = 1,
     ):
-        # Writers should have PUB socket, readers have SUB socket
-        self.local_notify_socket = local_notify_socket
         self.is_reader = is_reader
 
         if is_reader:
@@ -86,61 +84,41 @@ class SpinCondition:
             # Time to keep busy-looping on the shm buffer before going idle
             self.busy_loop_s = busy_loop_s
 
-            assert cancel_socket is not None, "Readers require a cancel socket"
-            self.cancel_socket = cancel_socket
+            # Readers subscribe to write notifications
+            self.local_notify_socket: zmq.Socket = context.socket(SUB)
+            # Set zmq.CONFLATE to only keep the last message that the socket
+            # receives. This prevents us from piling up notification messages
+            # under high load when we aren't polling the socket.
+            self.local_notify_socket.setsockopt(zmq.CONFLATE, 1)
+            # Subscribe to all messages on the socket
+            self.local_notify_socket.setsockopt_string(SUBSCRIBE, "")
+            self.local_notify_socket.connect(notify_address)
 
+            # Readers require a process-local socket to poll for cancellation
+            cancel_path = get_open_zmq_inproc_path()
+            self.write_cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
+            self.write_cancel_socket.bind(cancel_path)
+            self.read_cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
+            self.read_cancel_socket.connect(cancel_path)
+
+            # Poller allows waiting on either `.notify()` or `.cancel()`
             self.poller = zmq.Poller()
-            self.poller.register(self.cancel_socket, zmq.POLLIN)
+            self.poller.register(self.read_cancel_socket, zmq.POLLIN)
             self.poller.register(self.local_notify_socket, zmq.POLLIN)
-
         else:
+            # Writer side publishes write notifications
+            self.local_notify_socket: zmq.Socket = context.socket(PUB)  # type: ignore
+            # Set high water mark to 1- we don't need to send a massive amount of
+            # pings during busy operation. PUB sockets will silently drop subsequent
+            # messages after the high water mark is reached.
+            self.local_notify_socket.setsockopt(zmq.SNDHWM, 1)
+            self.local_notify_socket.bind(notify_address)
+
             self.last_read = 0
             self.busy_loop_s = 0
-            self.cancel_socket = None
+            self.read_cancel_socket = None
+            self.write_cancel_socket = None
             self.poller = None
-
-    @classmethod
-    def create_notifier(
-        cls, context: zmq.Context, notify_address: str
-    ) -> "SpinCondition":
-        """Builds the writer-process side of the SpinCondition which can notify
-        all readers of a write"""
-        local_notify_socket: zmq.Socket = context.socket(PUB)
-        # Set high water mark to 1- we don't need to send a massive amount of
-        # pings during busy operation. PUB sockets will silently drop subsequent
-        # messages after the high water mark is reached.
-        local_notify_socket.setsockopt(zmq.SNDHWM, 1)
-        local_notify_socket.bind(notify_address)
-
-        return cls(is_reader=False, local_notify_socket=local_notify_socket)
-
-    @classmethod
-    def create_waiter(
-        cls, context: zmq.Context, notify_address: str
-    ) -> "SpinCondition":
-        """Builds the reader-process side of the SpinCondition which can wait
-        for notifications from the writer"""
-        local_notify_socket: zmq.Socket = context.socket(SUB)
-        # Set high water mark to 1- we don't need to store a massive amount of
-        # notifications during busy operation. SUB sockets will silently drop
-        # inbound messages after the high water mark is reached.
-        # TODO: maybe instead zmq.ZMQ_CONFLATE
-        # local_notify_socket.setsockopt(zmq.CONFLATE, 1)
-        local_notify_socket.setsockopt(zmq.RCVHWM, 1)
-
-        local_notify_socket.bind(notify_address)
-
-        cancel_path = get_open_zmq_inproc_path()
-        cancel_socket: zmq.Socket = context.socket(zmq.PAIR)
-        cancel_socket.bind(cancel_path)
-
-        print("\n\n\n\n CREATING WAITER WITH NOTIFY ADDR", notify_address)
-
-        return cls(
-            is_reader=True,
-            local_notify_socket=local_notify_socket,
-            cancel_socket=cancel_socket,
-        )
 
     def record_read(self):
         self.last_read = time.monotonic()
@@ -149,9 +127,10 @@ class SpinCondition:
         # Sends cancellation ping that will cause the reader to wake up.
         # This is done from a monitor thread in the same process as the reader.
         if self.is_reader:
-            self.cancel_socket.send(b"\x00")
+            logger.debug("Canceling waiting reads on SHM Buffer")
+            self.write_cancel_socket.send(b"\x00")
 
-    def wait(self, timeout_ms: float | None) -> None:
+    def wait(self, timeout_ms: float | None = None) -> None:
         """Wait for data on the shared memory buffer.
 
         Yields the scheduler then returns immediately if it has been less than
@@ -168,18 +147,14 @@ class SpinCondition:
         else:
             events = dict(self.poller.poll(timeout=timeout_ms))
 
-            if self.cancel_socket in events:
+            if self.read_cancel_socket in events:
                 # return immediately on cancel
                 return
 
             if self.local_notify_socket in events:
-                # Read all pings off the socket
-                while True:
-                    try:
-                        self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
-                    except zmq.Again:
-                        # Return when socket has nothing to read
-                        return
+                # Since zmq.CONFLATE is set, there will only be one notification
+                # to read from the socket
+                self.local_notify_socket.recv(flags=zmq.NOBLOCK, copy=False)
 
     def notify(self):
         """Notifies all readers to wake up"""
@@ -377,8 +352,8 @@ class MessageQueue:
 
             # Create the notification side of the SpinCondition
             local_notify_addr = get_open_zmq_ipc_path()
-            self._spin_condition: SpinCondition = SpinCondition.create_notifier(
-                context, local_notify_addr
+            self._spin_condition = SpinCondition(
+                is_reader=False, context=context, notify_address=local_notify_addr
             )
         else:
             self.buffer = None  # type: ignore
@@ -386,7 +361,7 @@ class MessageQueue:
             self.local_socket = None
             self.current_idx = -1
             local_notify_addr = None
-            self._spin_condition = None
+            self._spin_condition = None  # type: ignore
 
         remote_addr_ipv6 = False
         if n_remote_reader > 0:
@@ -451,9 +426,9 @@ class MessageQueue:
             self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
-
-            self._spin_condition = SpinCondition.create_waiter(
-                context, handle.local_notify_addr
+            assert isinstance(handle.local_notify_addr, str)
+            self._spin_condition = SpinCondition(
+                is_reader=True, context=context, notify_address=handle.local_notify_addr
             )
         else:
             self.buffer = None  # type: ignore
@@ -509,7 +484,7 @@ class MessageQueue:
             assert recv == b"READY"
 
     def shutdown(self):
-        """ "If this is an idle reader, wakes it up so it can clean up and shut
+        """If this is an idle reader, wakes it up so it can clean up and shut
         down"""
         self.shutting_down = True
         if self._spin_condition is not None:
@@ -581,15 +556,13 @@ class MessageQueue:
     ):
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
-        if not indefinite:
+        if not indefinite and timeout is not None:
             deadline = start_time + timeout
         else:
             deadline = math.inf
         n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
-                # print("buzzy loop read", self.current_idx, indefinite, timeout)
-
                 read_flag = metadata_buffer[self.local_reader_rank + 1]
                 written_flag = metadata_buffer[0]
                 if not written_flag or read_flag:
@@ -602,7 +575,6 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     if not indefinite:
-                        print("timeout spinnin")
                         self._spin_condition.wait(
                             timeout_ms=min(
                                 VLLM_RINGBUFFER_WARNING_INTERVAL,
@@ -611,7 +583,6 @@ class MessageQueue:
                             * 1000
                         )
                     else:
-                        print("no-timeout spin")
                         self._spin_condition.wait()
 
                     if self.shutting_down:
