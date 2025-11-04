@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import triton.profiler as proton
 from tqdm import tqdm
 
 import vllm.envs as envs
@@ -2434,13 +2435,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         Returns:
             Model output tensor
         """
-        return self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            **model_kwargs,
-        )
+        with proton.cpu_timed_scope("_model_forward"):
+            return self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
 
     @torch.inference_mode()
     def execute_model(

@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from enum import Enum
 from typing import Optional
-
+import triton.profiler as proton
 import torch
 from torch.nn.parameter import Parameter
 
@@ -29,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
+    create_expt_assignment,
 )
 from vllm.model_executor.layers.fused_moe.trtllm_moe import TrtLlmGenExperts
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -52,6 +53,9 @@ from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.distributed import get_dp_group, get_ep_group
+
+from triton_kenerls.distributed import symm_mem_pool
 
 logger = init_logger(__name__)
 
@@ -92,6 +96,7 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
         return get_mxfp4_backend_with_lora()
 
     if current_platform.is_cuda():
+        return Mxfp4Backend.TRITON
         if (
             current_platform.is_device_capability(90)
             and has_flashinfer()
@@ -208,6 +213,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        
+        if self.mxfp4_backend == Mxfp4Backend.TRITON and moe.dp_size != 0:
+
+            self.expt_assignment = create_expt_assignment(EP=moe.ep_size, n_expts_tot=moe.num_experts, device=torch.cuda.current_device())
+            self.symm_mem_pool = symm_mem_pool.initialize(
+                1024 * 1024,
+                dtype=torch.uint8,
+                device=torch.cuda.current_device(),
+                group=get_dp_group().device_group
+            )
+            # self.symm_handle = torch_symm_mem.rendezvous(self.symm_mem_pool, get_dp_group().device_group)
+
 
     def create_weights(
         self,
@@ -1056,18 +1073,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
                 triton_kernel_moe_forward,
             )
-
-            return triton_kernel_moe_forward(
-                hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
-                gating_output=router_logits,
-                topk=top_k,
-                renormalize=renormalize,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
+            
+            with proton.cpu_timed_scope("triton_kernel_moe_forward"):
+                return triton_kernel_moe_forward(
+                    hidden_states=x,
+                    w1=self.w13_weight_triton_tensor,
+                    w2=self.w2_weight_triton_tensor,
+                    gating_output=router_logits,
+                    topk=top_k,
+                    renormalize=renormalize,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                    expt_assignment = self.expt_assignment,
+                    symm_mem_pool = self.symm_mem_pool,
+                    quant_config=self.moe_quant_config,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
