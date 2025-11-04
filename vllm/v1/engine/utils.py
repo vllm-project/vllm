@@ -1434,8 +1434,8 @@ class FaultHandler:
                 all_success = False
 
         if instruction == "retry" and all_success:
-            for engine_id, _ in self.engine_status_dict.items():
-                self.engine_status_dict[int(engine_id)] = "Healthy"
+            for engine_index, _ in self.engine_status_dict.items():
+                self.engine_status_dict[engine_index] = "Healthy"
             # todo: should we also clear the engine_exception_q here?
         return all_success
 
