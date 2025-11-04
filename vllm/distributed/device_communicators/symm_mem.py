@@ -101,7 +101,7 @@ class SymmMemCommunicator:
             logger.warning(
                 "SymmMemCommunicator: symmetric memory initialization failed. "
                 "Communicator is not available."
-                "To disable this warning"
+                "To suppress this warning"
                 "Set env `VLLM_ALLREDUCE_USE_SYMM_MEM` to False.",
                 exc_info=e,
             )
