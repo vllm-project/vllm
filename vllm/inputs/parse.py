@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from typing import (TYPE_CHECKING, Literal, NamedTuple, Optional, TypedDict,
-                    Union, cast, overload)
+                    Union, cast)
 
 from typing_extensions import TypeIs
 
@@ -16,34 +16,12 @@ if TYPE_CHECKING:
     import torch
 
 
-class ParsedText(TypedDict):
-    content: str
-    is_tokens: Literal[False]
-
-
-class ParsedTokens(TypedDict):
-    content: list[int]
-    is_tokens: Literal[True]
-
-
-@overload
-def parse_and_batch_prompt(
-    prompt: Union[str, list[str]], ) -> Sequence[ParsedText]:
-    ...
-
-
-@overload
-def parse_and_batch_prompt(
-    prompt: Union[list[int], list[list[int]]], ) -> Sequence[ParsedTokens]:
-    ...
-
-
-def parse_and_batch_prompt(
+def parse_raw_prompts(
     prompt: Union[str, list[str], list[int], list[list[int]]],
-) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
+) -> Union[Sequence[TextPrompt], Sequence[TokensPrompt]]:
     if isinstance(prompt, str):
         # case 1: a string
-        return [ParsedText(content=prompt, is_tokens=False)]
+        return [TextPrompt(prompt=prompt)]
 
     if isinstance(prompt, list):
         if len(prompt) == 0:
@@ -52,13 +30,11 @@ def parse_and_batch_prompt(
         if is_list_of(prompt, str):
             # case 2: array of strings
             prompt = cast(list[str], prompt)
-            return [
-                ParsedText(content=elem, is_tokens=False) for elem in prompt
-            ]
+            return [TextPrompt(prompt=elem) for elem in prompt]
         if is_list_of(prompt, int):
             # case 3: array of tokens
             prompt = cast(list[int], prompt)
-            return [ParsedTokens(content=prompt, is_tokens=True)]
+            return [TokensPrompt(prompt_token_ids=prompt)]
         if is_list_of(prompt, list):
             prompt = cast(list[list[int]], prompt)
             if len(prompt[0]) == 0:
@@ -66,10 +42,7 @@ def parse_and_batch_prompt(
 
             if is_list_of(prompt[0], int):
                 # case 4: array of token arrays
-                return [
-                    ParsedTokens(content=elem, is_tokens=True)
-                    for elem in prompt
-                ]
+                return [TokensPrompt(prompt_token_ids=elem) for elem in prompt]
 
     raise TypeError("prompt must be a string, array of strings, "
                     "array of tokens, or array of token arrays")
@@ -97,26 +70,6 @@ class ParsedEmbedsPrompt(TypedDict):
 
 ParsedSingletonPrompt = Union[ParsedStrPrompt, ParsedTextPrompt,
                               ParsedTokensPrompt, ParsedEmbedsPrompt]
-
-
-@overload
-def parse_singleton_prompt(prompt: str) -> ParsedStrPrompt:
-    ...
-
-
-@overload
-def parse_singleton_prompt(prompt: TextPrompt) -> ParsedTextPrompt:
-    ...
-
-
-@overload
-def parse_singleton_prompt(prompt: TokensPrompt) -> ParsedTokensPrompt:
-    ...
-
-
-@overload
-def parse_singleton_prompt(prompt: EmbedsPrompt) -> ParsedEmbedsPrompt:
-    ...
 
 
 def parse_singleton_prompt(prompt: SingletonPrompt) -> ParsedSingletonPrompt:

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import enum
 import os
 import platform
@@ -162,6 +163,22 @@ class Platform:
             return int(physical_device_id)
         else:
             return device_id
+
+    @classmethod
+    def import_core_kernels(cls) -> None:
+        """ Import any platform-specific C kernels. """
+        try:
+            import vllm._C  # noqa: F401
+        except ImportError as e:
+            logger.warning("Failed to import from vllm._C: %r", e)
+
+    @classmethod
+    def try_import_moe_kernels(cls) -> bool:
+        """ Import any platform-specific MoE kernels. """
+        with contextlib.suppress(ImportError):
+            import vllm._moe_C  # noqa: F401
+            return True
+        return False
 
     @classmethod
     def get_vit_attn_backend(cls, head_size: int,
