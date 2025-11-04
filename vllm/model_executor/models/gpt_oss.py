@@ -32,7 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (

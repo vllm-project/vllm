@@ -108,9 +108,10 @@ class InputBatch:
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
-        self.is_token_ids = torch.zeros(
+        self.is_token_ids_tensor = torch.zeros(
             (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
         )
+        self.is_token_ids = self.is_token_ids_tensor.numpy()
         # Store prompt embeddings per request to avoid OOM from large upfront
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
@@ -203,7 +204,7 @@ class InputBatch:
         self.num_accepted_tokens_cpu = self.num_accepted_tokens_cpu_tensor.numpy()
 
         # lora related
-        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int32)
+        self.request_lora_mapping = np.zeros((self.max_num_reqs,), dtype=np.int64)
         self.lora_id_to_request_ids: dict[int, set[str]] = {}
         self.lora_id_to_lora_request: dict[int, LoRARequest] = {}
 
