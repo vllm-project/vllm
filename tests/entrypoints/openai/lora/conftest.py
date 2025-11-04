@@ -8,6 +8,7 @@ import pytest
 def zephyr_lora_files():
     """Download zephyr LoRA files once per test session."""
     from huggingface_hub import snapshot_download
+
     return snapshot_download(repo_id="typeof/zephyr-7b-beta-lora")
 
 
@@ -25,8 +26,7 @@ def zephyr_lora_added_tokens_files(zephyr_lora_files):
     tokenizer = AutoTokenizer.from_pretrained("HuggingFaceH4/zephyr-7b-beta")
     # Copy tokenizer to adapter and add some unique tokens
     # 32000, 32001, 32002
-    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"],
-                                 special_tokens=True)
+    added = tokenizer.add_tokens(["vllm1", "vllm2", "vllm3"], special_tokens=True)
     assert added == 3
     tokenizer.save_pretrained(tmp_model_dir)
     yield tmp_model_dir
