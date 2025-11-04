@@ -86,7 +86,6 @@ class EagleProposer:
             and not self.speculative_config.enforce_eager
         )
 
-        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
@@ -1053,6 +1052,9 @@ class EagleProposer:
         assert cudagraph_runtime_mode != CUDAGraphMode.FULL, (
             "Eagle drafter doesn't support full cudagraphs at this moment"
         )
+        # overwrite runtime mode to NONE if enforce_eager
+        if self.speculative_config.enforce_eager:
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         max_query_len = uniform_query_len if uniform_decode else num_tokens
 

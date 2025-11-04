@@ -3601,11 +3601,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 and self.speculative_config.use_eagle()
             ):
                 assert isinstance(self.drafter, EagleProposer)
-                use_cudagraphs = (
-                    cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-                    and not self.speculative_config.enforce_eager
-                )
-                self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
+                # no cudagraph for profile run
+                self.drafter.dummy_run(num_tokens)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
@@ -3950,9 +3947,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Note: Currently only PIECEWISE mode is supported for eagle
             # drafter.
             # TODO: add full cudagraph support for drafter.
-            if self.speculative_config and self.speculative_config.use_eagle():
+            if (
+                self.speculative_config
+                and self.speculative_config.use_eagle()
+                and not self.speculative_config.enforce_eager
+            ):
                 assert isinstance(self.drafter, EagleProposer)
                 logger.info("Start capturing cudagraphs for drafter...")
+                # when not enforce_eager, eagle drafter share the same cudagraph_mode
                 if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
                     capture_sizes, keys, runtime_mode = (
                         self.drafter.cudagraph_dispatcher.get_capture_cases(
@@ -4312,11 +4314,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         # At this moment, we assume the drafter and main model shares the
-        # same cudagraph_mode
+        # same cudagraph_mode if not speculative_config.enforce_eager
         if self.speculative_config and self.speculative_config.use_eagle():
             assert isinstance(self.drafter, EagleProposer)
             assert not cudagraph_mode.has_full_cudagraphs(), (
                 "Eagle drafter does not support full cudagraphs yet"
+            )
+            cudagraph_mode = (
+                self.compilation_config.cudagraph_mode
+                if not self.speculative_config.enforce_eager
+                else CUDAGraphMode.NONE
             )
             # uniform_query_len is 1 for drafter
             # TODO: let uniform_query_lens = [1, self.uniform_decode_query_len]
@@ -4324,39 +4331,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # https://github.com/vllm-project/vllm/issues/21984 for details
             # and an implementation in https://github.com/vllm-project/vllm/pull/24539  # noqa: E501
             self.drafter.cudagraph_dispatcher.initialize_cudagraph_keys(
-                self.compilation_config.cudagraph_mode, uniform_query_lens=1
-            )
-
-        # At this moment, we assume the drafter and main model shares the
-        # same cudagraph_mode
-        if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
-            assert not cudagraph_mode.has_full_cudagraphs(), (
-                "Eagle drafter does not support full cudagraphs yet"
-            )
-            # uniform_query_len is 1 for drafter
-            # TODO: let uniform_query_lens = [1, self.uniform_decode_query_len]
-            # for drafter once Padded speculation is supported. See:
-            # https://github.com/vllm-project/vllm/issues/21984 for details
-            # and an implementation in https://github.com/vllm-project/vllm/pull/24539  # noqa: E501
-            self.drafter.cudagraph_dispatcher.initialize_cudagraph_keys(
-                self.compilation_config.cudagraph_mode, uniform_query_lens=1
-            )
-
-        # At this moment, we assume the drafter and main model shares the
-        # same cudagraph_mode
-        if self.speculative_config and self.speculative_config.use_eagle():
-            assert isinstance(self.drafter, EagleProposer)
-            assert not cudagraph_mode.has_full_cudagraphs(), (
-                "Eagle drafter does not support full cudagraphs yet"
-            )
-            # uniform_query_len is 1 for drafter
-            # TODO: let uniform_query_lens = [1, self.uniform_decode_query_len]
-            # for drafter once Padded speculation is supported. See:
-            # https://github.com/vllm-project/vllm/issues/21984 for details
-            # and an implementation in https://github.com/vllm-project/vllm/pull/24539  # noqa: E501
-            self.drafter.cudagraph_dispatcher.initialize_cudagraph_keys(
-                self.compilation_config.cudagraph_mode, uniform_query_lens=1
+                cudagraph_mode, uniform_query_lens=1
             )
 
     def calculate_reorder_batch_threshold(self) -> None:
