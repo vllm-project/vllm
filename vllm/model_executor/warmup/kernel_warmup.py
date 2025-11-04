@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING
 import torch
 
 import vllm.envs as envs
-from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.platforms import current_platform
@@ -23,26 +22,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-
-def flashinfer_autotune_supported(vllm_config: VllmConfig) -> bool:
-    """
-    Record known issues with vllm + flashinfer autotune here. Return True if
-    and only if flashinfer autotune will run through without issues.
-    """
-    is_tp_or_dp = (vllm_config.parallel_config.data_parallel_size > 1) or (
-        vllm_config.parallel_config.tensor_parallel_size > 1
-    )
-    is_fi_mxfp4_backend = (
-        envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16
-        or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
-    ) or (
-        current_platform.is_cuda() and current_platform.is_device_capability(100)
-    )  # on >=sm100, default mxfp4 backend is flashinfer
-    is_eager = vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-
-    return not (is_tp_or_dp and is_fi_mxfp4_backend and is_eager)
 
 
 def kernel_warmup(worker: "Worker"):
@@ -58,11 +37,7 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     # FlashInfer autotune for Hopper (SM 9.0) and Blackwell (SM 10.0) GPUs
-    if (
-        has_flashinfer()
-        and current_platform.has_device_capability(90)
-        and flashinfer_autotune_supported(worker.vllm_config)
-    ):
+    if has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
     # FlashInfer attention warmup
