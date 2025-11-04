@@ -46,43 +46,43 @@ torch.backends.cuda.enable_cudnn_sdp(False)
 def _get_backend_priorities(
     use_mla: bool,
     device_capability: DeviceCapability,
-) -> dict[AttentionBackendEnum, int]:
+) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     from vllm.attention.backends.registry import AttentionBackendEnum
 
     if use_mla:
         if device_capability.major == 10:
-            return {
-                AttentionBackendEnum.CUTLASS_MLA: 0,
-                AttentionBackendEnum.FLASHINFER_MLA: 1,
-                AttentionBackendEnum.FLASHMLA: 2,
-                AttentionBackendEnum.FLASH_ATTN_MLA: 3,
-                AttentionBackendEnum.TRITON_MLA: 4,
-                AttentionBackendEnum.FLASHMLA_SPARSE: 5,
-            }
+            return [
+                AttentionBackendEnum.CUTLASS_MLA,
+                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.FLASHMLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+            ]
         else:
-            return {
-                AttentionBackendEnum.FLASHMLA: 0,
-                AttentionBackendEnum.FLASH_ATTN_MLA: 1,
-                AttentionBackendEnum.FLASHINFER_MLA: 2,
-                AttentionBackendEnum.TRITON_MLA: 3,
-                AttentionBackendEnum.FLASHMLA_SPARSE: 4,
-            }
+            return [
+                AttentionBackendEnum.FLASHMLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.FLASHINFER_MLA,
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASHMLA_SPARSE,
+            ]
     else:
         if device_capability.major == 10:
-            return {
-                AttentionBackendEnum.FLASHINFER: 0,
-                AttentionBackendEnum.FLASH_ATTN: 1,
-                AttentionBackendEnum.TRITON_ATTN: 2,
-                AttentionBackendEnum.FLEX_ATTENTION: 3,
-            }
+            return [
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
         else:
-            return {
-                AttentionBackendEnum.FLASH_ATTN: 0,
-                AttentionBackendEnum.FLASHINFER: 1,
-                AttentionBackendEnum.TRITON_ATTN: 2,
-                AttentionBackendEnum.FLEX_ATTENTION: 3,
-            }
+            return [
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
 
 
 def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
@@ -306,7 +306,7 @@ class CudaPlatformBase(Platform):
         invalid_reasons = {}
 
         backend_priorities = _get_backend_priorities(use_mla, device_capability)
-        for backend, priority in backend_priorities.items():
+        for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()
                 invalid_reasons_i = backend_class.validate_configuration(
