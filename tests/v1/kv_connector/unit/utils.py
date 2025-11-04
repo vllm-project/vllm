@@ -254,7 +254,7 @@ def create_model_runner_output(
 
 
 class TestSharedStorageConnector(SharedStorageConnector):
-    def __init__(self, config: VllmConfig, role):
+    def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = SharedStorageConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
