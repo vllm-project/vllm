@@ -2431,27 +2431,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                # Flag to track if this rank has 0 tokens
                 has_zero_tokens = not scheduler_output.total_num_scheduled_tokens
 
                 if has_zero_tokens and self.parallel_config.data_parallel_size > 1:
-                    # With spec decode + DP, participate in DP coordination
-                    # before continuing to the should_run_drafter sync.
-                    import torch.distributed as dist
-
-                    from vllm.distributed.parallel_state import get_dp_group
-                    from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
-
-                    # Participate in the coordinate call that other ranks
-                    # make in _prepare_inputs
+                    # With spec decode + DP, participate in the coordinate call that
+                    # other ranks make in _prepare_inputs, even though this rank has
+                    # 0 tokens.
                     _, num_tokens_across_dp = coordinate_batch_across_dp(
                         num_tokens_unpadded=0,
                         parallel_config=self.parallel_config,
                         allow_microbatching=False,
                         allow_dp_padding=False,
                     )
-
-                    # Set empty metadata for 0-token case
                     spec_decode_common_attn_metadata = None
                 elif has_zero_tokens:
                     # Single DP rank with 0 tokens - return immediately

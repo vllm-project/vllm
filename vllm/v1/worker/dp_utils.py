@@ -123,9 +123,6 @@ def _synchronize_dp_ranks(
         parallel_config=parallel_config,
     )
 
-    # Enable DP padding if ANY rank wants it (not just if all ranks want it).
-    # This handles the case where one rank has 0 tokens and doesn't need padding,
-    # but other ranks need padding for CUDA graphs.
     should_dp_pad = bool(torch.any(tensor[3] == 1).item())
 
     # Check conditions for microbatching
