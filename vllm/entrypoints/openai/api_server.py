@@ -31,7 +31,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
-from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -818,7 +817,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
-    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
+    elif isinstance(generator, PoolingResponse | IOProcessorResponse):
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, PoolingBytesResponse):
         return StreamingResponse(
@@ -1151,7 +1150,7 @@ if envs.VLLM_SERVER_DEV_MODE:
             return Response(status_code=200)
         response: list[Any] = []
         for result in results:
-            if result is None or isinstance(result, (dict, list)):
+            if result is None or isinstance(result, dict | list):
                 response.append(result)
             else:
                 response.append(str(result))
@@ -1548,50 +1547,69 @@ class SSEDecoder:
         return "".join(self.content_buffer)
 
 
-def _log_streaming_response(response, response_body: list) -> None:
-    """Log streaming response with robust SSE parsing."""
-    from starlette.concurrency import iterate_in_threadpool
+def _log_streaming_response(
+    body_iterator: AsyncIterator[bytes],
+) -> AsyncIterator[bytes]:
+    """Wrap an async body iterator to log SSE content while streaming."""
 
     sse_decoder = SSEDecoder()
     chunk_count = 0
+    done_logged = False
 
-    def buffered_iterator():
-        nonlocal chunk_count
-
-        for chunk in response_body:
+    async def generator():
+        nonlocal chunk_count, done_logged
+        async for section in body_iterator:
             chunk_count += 1
-            yield chunk
+            try:
+                events = sse_decoder.decode_chunk(section)
+                for event in events:
+                    if event["type"] == "data":
+                        content = sse_decoder.extract_content(event["data"])
+                        sse_decoder.add_content(content)
+                    elif event["type"] == "done" and not done_logged:
+                        full_content = sse_decoder.get_complete_content()
+                        if full_content:
+                            if len(full_content) > 2048:
+                                full_content = full_content[:2048]
+                            logger.info(
+                                (
+                                    "response_body={streaming_complete: content=%r, "
+                                    "chunks=%d}"
+                                ),
+                                full_content,
+                                chunk_count,
+                            )
+                        else:
+                            logger.info(
+                                (
+                                    "response_body={streaming_complete: no_content, "
+                                    "chunks=%d}"
+                                ),
+                                chunk_count,
+                            )
+                        done_logged = True
+            except Exception:
+                # Best-effort logging; never break streaming
+                pass
+            yield section
+        # In case no explicit DONE was received, log buffered content once
+        if not done_logged:
+            full_content = sse_decoder.get_complete_content()
+            if full_content:
+                if len(full_content) > 2048:
+                    full_content = full_content[:2048]
+                logger.info(
+                    "response_body={streaming_complete: content=%r, chunks=%d}",
+                    full_content,
+                    chunk_count,
+                )
+            else:
+                logger.info(
+                    "response_body={streaming_complete: no_content, chunks=%d}",
+                    chunk_count,
+                )
 
-            # Parse SSE events from chunk
-            events = sse_decoder.decode_chunk(chunk)
-
-            for event in events:
-                if event["type"] == "data":
-                    content = sse_decoder.extract_content(event["data"])
-                    sse_decoder.add_content(content)
-                elif event["type"] == "done":
-                    # Log complete content when done
-                    full_content = sse_decoder.get_complete_content()
-                    if full_content:
-                        # Truncate if too long
-                        if len(full_content) > 2048:
-                            full_content = full_content[:2048] + ""
-                            "...[truncated]"
-                        logger.info(
-                            "response_body={streaming_complete: "
-                            "content='%s', chunks=%d}",
-                            full_content,
-                            chunk_count,
-                        )
-                    else:
-                        logger.info(
-                            "response_body={streaming_complete: no_content, chunks=%d}",
-                            chunk_count,
-                        )
-                    return
-
-    response.body_iterator = iterate_in_threadpool(buffered_iterator())
-    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
+    return generator()
 
 
 def _log_non_streaming_response(response_body: list) -> None:
@@ -1673,19 +1691,27 @@ def build_app(args: Namespace) -> FastAPI:
         @app.middleware("http")
         async def log_response(request: Request, call_next):
             response = await call_next(request)
-            response_body = [section async for section in response.body_iterator]
-            response.body_iterator = iterate_in_threadpool(iter(response_body))
-            # Check if this is a streaming response by looking at content-type
-            content_type = response.headers.get("content-type", "")
-            is_streaming = content_type == "text/event-stream; charset=utf-8"
+            # Determine if this is SSE streaming; preserve streaming semantics
+            content_type = response.headers.get("content-type", "").lower()
+            is_streaming = content_type.startswith("text/event-stream")
 
-            # Log response body based on type
-            if not response_body:
-                logger.info("response_body={<empty>}")
-            elif is_streaming:
-                _log_streaming_response(response, response_body)
+            original_iter = response.body_iterator
+
+            if is_streaming:
+                response.body_iterator = _log_streaming_response(original_iter)
             else:
-                _log_non_streaming_response(response_body)
+
+                async def tee_non_streaming():
+                    body_chunks: list[bytes] = []
+                    async for section in original_iter:
+                        body_chunks.append(section)
+                        yield section
+                    if not body_chunks:
+                        logger.info("response_body={<empty>}")
+                    else:
+                        _log_non_streaming_response(body_chunks)
+
+                response.body_iterator = tee_non_streaming()
             return response
 
     for middleware in args.middleware:
