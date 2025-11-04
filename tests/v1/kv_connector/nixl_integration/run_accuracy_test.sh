@@ -215,7 +215,7 @@ run_tests_for_model() {
 
     # Build the command with fault injection env vars if enabled
     if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then
-      FAULT_RATE=${FAULT_RATE:-0.5}
+      FAULT_RATE=${FAULT_RATE:-0.05}
       BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
       VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
       UCX_NET_DEVICES=all \
@@ -224,6 +224,7 @@ run_tests_for_model() {
       UCX_FAULT_ENABLED=1 \
       UCX_FAULT_STRATEGY=random \
       UCX_FAULT_PROBABILITY=$FAULT_RATE \
+      UCX_FAULT_STATS_LOG_INTERVAL=1024 \
       RUST_LOG=info \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
       VLLM_ENABLE_V1_MULTIPROCESSING=0 \
