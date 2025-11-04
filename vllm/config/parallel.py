@@ -316,7 +316,7 @@ class ParallelConfig:
 
     def stateless_init_dp_group(
         self,
-        gloo_comm_timeout: int,
+        gloo_comm_timeout: int = 30,
         enable_fault_tolerance: bool = False,
     ) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
@@ -527,15 +527,11 @@ class ParallelConfig:
                 current_platform.is_cuda()
                 and cuda_device_count_stateless() < self.world_size
             ):
-                if not ray_found:
-                    raise ValueError(
-                        "Unable to load Ray: "
-                        f"{ray_utils.ray_import_err}. Ray is "
-                        "required for multi-node inference, "
-                        "please install Ray with `pip install "
-                        "ray`."
-                    )
-                backend = "ray"
+                gpu_count = cuda_device_count_stateless()
+                raise ValueError(
+                    f"Tensor parallel size ({self.world_size}) cannot be "
+                    f"larger than the number of available GPUs ({gpu_count})."
+                )
             elif self.data_parallel_backend == "ray":
                 logger.info(
                     "Using ray distributed inference because "

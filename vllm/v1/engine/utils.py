@@ -174,9 +174,18 @@ class CoreEngineProcManager:
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
             for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                # Adjust device control in DP for non-CUDA platforms
+                # as well as external and ray launchers
+                # For CUDA platforms, we use torch.cuda.set_device()
                 with (
                     set_device_control_env_var(vllm_config, local_dp_rank)
-                    if (data_parallel)
+                    if (
+                        data_parallel
+                        and (
+                            not current_platform.is_cuda_alike()
+                            or vllm_config.parallel_config.use_ray
+                        )
+                    )
                     else contextlib.nullcontext()
                 ):
                     proc.start()
@@ -1300,9 +1309,8 @@ def wait_for_instruction_result(
             if not has_msg:
                 continue
 
-            if isinstance(identity, str):
-                identity = identity.encode("utf-8")
-
+            assert identity is not None
+            assert response is not None
             response_dict = json.loads(response)
             recv_uuid = response_dict.get("method_uuid")
 
@@ -1339,7 +1347,7 @@ class FaultHandler:
         self.cmd_socket = cmd_socket
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
-        self.engine_status_dict = engine_status_dict
+        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
         self.engine_identity_to_index: dict[bytes, int] = {
             identity: i for i, identity in enumerate(client_cmd_registry)
         }
@@ -1426,8 +1434,8 @@ class FaultHandler:
                 all_success = False
 
         if instruction == "retry" and all_success:
-            for engine_id, _ in self.engine_status_dict.items():
-                self.engine_status_dict[engine_id] = "Healthy"
+            for engine_index, _ in self.engine_status_dict.items():
+                self.engine_status_dict[engine_index] = "Healthy"
             # todo: should we also clear the engine_exception_q here?
         return all_success
 

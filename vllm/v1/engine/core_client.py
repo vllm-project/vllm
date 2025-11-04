@@ -375,7 +375,7 @@ class ClientGuard:
 
         self.engine_exception_q_lock = engine_exception_q_lock
 
-        self.engine_status_dict = engine_status_dict
+        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
 
         self.fault_handler = FaultHandler(
             self.cmd_socket,
@@ -507,10 +507,11 @@ class BackgroundResources:
                         with contextlib.suppress(Exception):
                             task.cancel()
 
-            if in_loop(loop):
-                close_sockets_and_tasks()
-            elif loop and not loop.is_closed():
-                loop.call_soon_threadsafe(close_sockets_and_tasks)
+            if loop is not None:
+                if in_loop(loop):
+                    close_sockets_and_tasks()
+                elif not loop.is_closed():
+                    loop.call_soon_threadsafe(close_sockets_and_tasks)
             else:
                 # Loop has been closed, try to clean up directly.
                 del tasks
@@ -680,7 +681,7 @@ class MPClient(EngineCoreClient):
                     "addresses.fault_pub_socket_addr should not be None at"
                     "fault tolerance scenario"
                 )
-                self.engine_status_dict = ThreadSafeDict()
+                self.engine_status_dict: ThreadSafeDict[int, str] = ThreadSafeDict()
                 for engine_id in range(vllm_config.parallel_config.data_parallel_size):
                     self.engine_status_dict[engine_id] = "Healthy"
                 self.client_guard = ClientGuard(
@@ -1282,6 +1283,7 @@ class DPAsyncMPClient(AsyncMPClient):
             return
 
         assert self.stats_update_address is not None
+        stats_addr: str = self.stats_update_address
         assert len(self.engine_ranks_managed) > 0
         # NOTE: running and waiting counts are all global from
         # the Coordinator include all global EngineCores. This
@@ -1292,9 +1294,7 @@ class DPAsyncMPClient(AsyncMPClient):
 
         async def run_engine_stats_update_task():
             with (
-                make_zmq_socket(
-                    self.ctx, self.stats_update_address, zmq.XSUB, linger=0
-                ) as socket,
+                make_zmq_socket(self.ctx, stats_addr, zmq.XSUB, linger=0) as socket,
                 make_zmq_socket(
                     self.ctx, self.first_req_sock_addr, zmq.PAIR, bind=False, linger=0
                 ) as first_req_rcv_socket,
