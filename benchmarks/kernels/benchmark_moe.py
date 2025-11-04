@@ -590,6 +590,7 @@ def main(args: argparse.Namespace):
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
         "Glm4MoeForCausalLM",
+        "NemotronHForCausalLM",
     ):
         E = config.n_routed_experts
         topk = config.num_experts_per_tok
