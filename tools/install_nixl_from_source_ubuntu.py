@@ -228,7 +228,7 @@ def build_and_install_prerequisites(args):
         "-m",
         "pip",
         "install",
-        "--no-deps",
+        "--no-deps",  # w/o "no-deps", it will install cuda-torch
         newly_built_wheel,
     ]
     if args.force_reinstall:
