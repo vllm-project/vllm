@@ -159,7 +159,7 @@ def test_rms_norm(
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
     if quant_dtype == torch.int8:
-        assert torch.allclose(ref_scales, ops_scales, rtol=0.1, atol=1)
+        assert torch.allclose(ref_scales, ops_scales, atol=1e-6)
         # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)
     else:
