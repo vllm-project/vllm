@@ -130,15 +130,14 @@ __global__ void rms_norm_per_block_quant_kernel_3(
   // RMS Norm + Quant
   int token_idx = blockIdx.x * hidden_size / group_size;
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
-    for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
-      auto token_group_idx = token_idx + i / group_size;
-      token_scale[token_group_idx] = 1.0f / token_scale[token_group_idx];
-    }
+    // Don't invert token_scale here: do it inside the norm_and_quant kernel
+    // We do it because particular elements of token_scale can be shared
+    // between multiple threads, so this way, we avoid extra synchronization
+    // overhead.
     vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
         out, input, weight, rms[blockIdx.x], token_scale + token_idx,
         hidden_size, residual, group_size);
   } else {
-    // FP8 - Do not invert s_token_scale for exact match with FBGemm
     vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
         out, input, weight, rms[blockIdx.x], token_scale + token_idx,
         hidden_size, residual, group_size);

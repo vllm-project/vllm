@@ -148,7 +148,11 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
     // Norm
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     // Quant
-    auto scale_val = (group_size > 0 ? scale[i / group_size] : *scale);
+    // If groupwise is_scale_inverted is true, so we invert the scale here.
+    auto scale_val =
+        (group_size > 0 ? (is_scale_inverted ? 1.0f / scale[i / group_size]
+                                             : scale[i / group_size])
+                        : *scale);
     output[token_offset + i] =
         ScaledQuant<scalar_out_t, is_scale_inverted>::quant_fn(x, scale_val);
   }
