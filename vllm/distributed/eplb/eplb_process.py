@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import multiprocessing as mp
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import suppress
 from multiprocessing import Queue
 from queue import Empty
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -13,6 +14,9 @@ import torch.distributed as dist
 from vllm.logger import init_logger
 
 from .eplb_expert_mapper import BipartiteExpertUpdate, GreedyExpertUpdate
+
+if TYPE_CHECKING:
+    from .eplb_state import ExpertMapperArgs, RebalanceTaskArgs
 
 logger = init_logger(__name__)
 
@@ -23,7 +27,14 @@ class EPLBProcess:
     rearrangement processes
     """
 
-    def __init__(self, target_func: Callable, num_wait_worker_iterations: int):
+    def __init__(
+        self,
+        target_func: Callable[
+            [torch.Tensor, int, int, int, int],
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor],
+        ],
+        num_wait_worker_iterations: int,
+    ):
         """
         Initialize asynchronous process manager
 
@@ -82,7 +93,25 @@ class EPLBProcess:
             self.cleanup()
             raise
 
-    def pack_update_info(self, update_info_generator):
+    def pack_update_info(
+        self,
+        update_info_generator: Iterable[
+            tuple[
+                dict[int, list[tuple[int, int]]],
+                dict[int, list[tuple[int, int]]],
+                torch.Tensor,
+                int,
+            ]
+        ],
+    ) -> list[
+        tuple[
+            list[tuple[int, int]],
+            list[tuple[int, int]],
+            list[list[int]],
+            list[list[int]],
+            int,
+        ]
+    ]:
         """
         Collects and packages expert update information across all MoE layers
         into a structured list for later processing or transfer.
@@ -129,7 +158,7 @@ class EPLBProcess:
 
         return list(zip(send_all, recv_all, phy2log_all, log2phy_all, layer_ids))
 
-    def generate_log2phy_map(self, expert_map):
+    def generate_log2phy_map(self, expert_map: torch.Tensor) -> torch.Tensor:
         """
         Generates a logical-to-physical expert mapping for all ranks based on an
         initial expert distribution map. This map indicates which physical expert
@@ -273,7 +302,9 @@ class EPLBProcess:
         finally:
             logger.debug("EPLB worker process exiting")
 
-    def submit_task(self, args, expert_mapper_args) -> bool:
+    def submit_task(
+        self, args: "RebalanceTaskArgs", expert_mapper_args: "ExpertMapperArgs"
+    ) -> bool:
         """
         Submit a task to the asynchronous process
 
@@ -414,7 +445,7 @@ class EPLBProcess:
         return self._is_post_processing
 
     @is_post_processing.setter
-    def is_post_processing(self, value: bool):
+    def is_post_processing(self, value: bool) -> None:
         self._is_post_processing = value
 
     @property

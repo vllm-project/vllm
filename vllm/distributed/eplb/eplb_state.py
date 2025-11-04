@@ -29,7 +29,7 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import numpy
 import torch
@@ -437,7 +437,7 @@ class EplbState:
             num_moe_layers=model.num_moe_layers,
         )
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         # Initialize asynchronous process manager
         if self.enable_async:
             self._async_processor = EPLBProcess(
@@ -592,12 +592,17 @@ class EplbState:
                 self.logical_to_physical_map[self.cur_layer_id].copy_(
                     padded[self.cur_layer_id]
                 )
+                expert_weights = cast(
+                    Sequence[Sequence[torch.Tensor]], model.expert_weights
+                )
                 for recv_expert_info in self.recv_expert_list:
                     local_expert_to_replace, buffer_tensor_id = recv_expert_info
+                    if buffer_tensor_id >= len(self.buffer_tensor_list):
+                        raise IndexError(
+                            f"buffer_tensor_id {buffer_tensor_id} out of range"
+                        )
                     for expert_tensor, buffer_tensor in zip(
-                        model.expert_weights[self.cur_layer_id][
-                            local_expert_to_replace
-                        ],
+                        expert_weights[self.cur_layer_id][local_expert_to_replace],
                         self.buffer_tensor_list[buffer_tensor_id],
                     ):
                         expert_tensor.copy_(buffer_tensor)
@@ -808,7 +813,7 @@ class EplbState:
 
         return num_replicas, num_groups, num_nodes, num_gpus
 
-    def step_before_forward(self, model):
+    def step_before_forward(self, model) -> None:
         """
         Executes operations before the model's forward pass.
         If the EPLB process indicates it should process (e.g., a rearrangement
@@ -852,12 +857,12 @@ class EplbState:
 
     def generate_expert_d2d_transfer_task(
         self,
-        expert_weights,
-        expert_send_info,
-        expert_recv_info,
-        updated_expert_map,
-        layer_id,
-    ):
+        expert_weights: Sequence[Sequence[torch.Tensor]],
+        expert_send_info: Sequence[tuple[int, int]],
+        expert_recv_info: Sequence[tuple[int, int]],
+        updated_expert_map: torch.Tensor,
+        layer_id: int,
+    ) -> None:
         """
         Generates the expert data-to-data transfer tasks (send and receive operations)
         for a given layer based on the provided send/receive information and the new
@@ -868,7 +873,7 @@ class EplbState:
                               to send.
             expert_recv_info: List of (source_rank, global_expert_id) for experts to
                               receive.
-            updated_expert_map: The new expert map for the layer.
+            updated_expert_map: New expert map for the layer (global->local).
             layer_id: The ID of the MoE layer.
         """
         num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
@@ -881,7 +886,7 @@ class EplbState:
         )
         self.prepare_recv(expert_recv_info, updated_expert_map)
 
-    def async_expert_weight_transfer(self):
+    def async_expert_weight_transfer(self) -> None:
         """
         Initiates the asynchronous expert weight transfer by executing the
         prepared P2P communication operations.
@@ -897,8 +902,12 @@ class EplbState:
         logger.info("Expert weights start to transfer")
 
     def prepare_send(
-        self, expert_weights, expert_send_info, num_local_experts, layer_id
-    ):
+        self,
+        expert_weights: Sequence[Sequence[torch.Tensor]],
+        expert_send_info: Sequence[tuple[int, int]],
+        num_local_experts: int,
+        layer_id: int,
+    ) -> None:
         for dst_rank, global_expert_id_to_send in expert_send_info:
             local_expert_id_to_send = idx_global_to_local(
                 global_expert_id_to_send,
@@ -912,7 +921,11 @@ class EplbState:
                     )
                 )
 
-    def prepare_recv(self, expert_recv_info, updated_expert_map):
+    def prepare_recv(
+        self,
+        expert_recv_info: Sequence[Sequence[torch.Tensor]],
+        updated_expert_map: torch.Tensor,
+    ) -> None:
         for buffer_tensor_id, (recv_rank, global_expert_id_to_recv) in enumerate(
             expert_recv_info
         ):
@@ -927,7 +940,7 @@ class EplbState:
             ].item()
             self.recv_expert_list.append((local_expert_id_to_replace, buffer_tensor_id))
 
-    def rebalance_expert_weight_flag(self):
+    def rebalance_expert_weight_flag(self) -> bool:
         """
         Determines whether expert rebalancing should be triggered in the current
         iteration. This typically occurs right before the expert weight update phase.
@@ -939,7 +952,7 @@ class EplbState:
             self.expert_rearrangement_step_interval - 1
         )
 
-    def update_expert_map_flag(self):
+    def update_expert_map_flag(self) -> bool:
         """
         Determines if expert maps should be updated in the current iteration. This
         is typically true for a short window after the EPLB update and worker wait.
@@ -952,17 +965,13 @@ class EplbState:
         )
         return 0 <= map_update_counter < self.num_moe_layers
 
-    def compute_and_set_moe_load(self):
+    def compute_and_set_moe_load(self) -> torch.Tensor:
         """
         Computes the MoE load across all ranks and sets it in the shared dictionary.
         It gathers local expert load from all ranks and combines them.
 
-        Args:
-            is_clear: If True, indicates a clear operation
-                      (though not explicitly used here).
-
         Returns:
-            The gathered MoE load tensor.
+            The gathered MoE load tenso with shape (num_moe_layers, num_logical_expert).
         """
         local_load = self.expert_load_pass.clone()
 
@@ -1029,7 +1038,7 @@ class EplbState:
 
         return global_expert_load
 
-    def rebalance_task(self, input_args, expert_mapper_args):
+    def rebalance_task(self, input_args, expert_mapper_args) -> None:
         # Submit task to asynchronous process
         if self._async_processor is None:
             logger.error("Async processor is not initialized, cannot submit task")
