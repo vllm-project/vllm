@@ -23,6 +23,7 @@ logger = init_logger(__name__)
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
         self,
+        moe_layer: torch.nn.Module,
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         shared_experts: torch.nn.Module | None,
@@ -31,7 +32,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         # Find better way to copy attributes?  Should we even copy attributes?
         # self.__dict__.update(old_quant_method.__dict__)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        experts = old_quant_method.select_gemm_impl(prepare_finalize, self)
+        experts = old_quant_method.select_gemm_impl(prepare_finalize, moe_layer)
         self.fused_experts = FusedMoEModularKernel(
             prepare_finalize,
             experts,

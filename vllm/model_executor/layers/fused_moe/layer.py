@@ -617,7 +617,7 @@ class FusedMoE(CustomOp):
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
             self.quant_method = FusedMoEModularMethod(
-                self.quant_method, prepare_finalize, self.shared_experts
+                self, self.quant_method, prepare_finalize, self.shared_experts
             )
 
     @property
