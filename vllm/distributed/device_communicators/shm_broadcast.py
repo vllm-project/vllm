@@ -610,7 +610,6 @@ class MessageQueue:
                 # found a block that is not read by this reader
                 # let caller read from the buffer
                 with self.buffer.get_data(self.current_idx) as buf:
-                    logger.info("READ!")
                     yield buf
 
                 # caller has read from the buffer
@@ -623,9 +622,6 @@ class MessageQueue:
 
     def enqueue(self, obj, timeout: float | None = None):
         """Write to message queue with optional timeout (in seconds)"""
-
-        logger.info("WRITE!")
-
         assert self._is_writer, "Only writers can enqueue"
         all_buffers: list[SizedBuffer] = [b""]
         total_bytes = 6  # 2 bytes for oob buffer count, 4 for main buffer size
@@ -645,14 +641,10 @@ class MessageQueue:
         )
         if self.n_local_reader > 0:
             if total_bytes + len(all_buffers[0]) >= self.buffer.max_chunk_bytes:
-                logger.info("Write over ZMQ!")
-
                 with self.acquire_write(timeout) as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send_multipart(all_buffers, copy=False)
             else:
-                logger.info("Write over Buf!")
-
                 # Byte 0: 0
                 # Bytes 1-2: Count of buffers
                 # Then each buffer follows, preceded by 4 bytes containing its length:
