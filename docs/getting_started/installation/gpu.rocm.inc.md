@@ -12,7 +12,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above, and torch 2.8.0 and above.
 # --8<-- [start:requirements]
 
 - GPU: MI210/MI250 (gfx90a), MI300/MI325 (gfx942), MI350/MI355 (gfx950), Radeon RX 7900 series (gfx1100/1101), Radeon RX 9000 series (gfx1200/1201)
-- ROCm 6.3 or above
+- ROCm 6.0 or above
     - MI350/MI355 requires ROCm 7.0 or above
 
 # --8<-- [end:requirements]
@@ -29,7 +29,7 @@ Currently, there are no pre-built ROCm wheels.
 # --8<-- [start:build-wheel-from-source]
 
 !!! tip
-    - If you find that the following installation steps do not work for you, please check [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base) for the latest installation steps used to build the nightly/release images for ROCm.
+    - If you find that the following installation steps do not work for you, please refer to [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base) for the latest installation steps used to build the nightly/release images for ROCm.
 
 1. Install prerequisites (skip if you are already in an environment/docker with the following installed):
 
@@ -76,7 +76,7 @@ Currently, there are no pre-built ROCm wheels.
         - The validated `$TRITON_BRANCH` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
         - If you see HTTP issue related to downloading packages during building triton, please try again as the HTTP error is intermittent.
 
-3. Optionally, Install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention)
+3. Optionally, install [flash attention for ROCm](https://github.com/Dao-AILab/flash-attention)
 
     Install ROCm's latest flash attention (v2.8.3) following the instructions from [ROCm/flash-attention](https://github.com/Dao-AILab/flash-attention#amd-rocm-support):
 
