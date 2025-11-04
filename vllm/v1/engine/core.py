@@ -15,6 +15,7 @@ from logging import DEBUG
 from typing import Any, TypeVar, cast
 
 import msgspec
+import torch
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
@@ -34,10 +35,15 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
-    generate_scheduler_kv_cache_config,
     get_kv_cache_configs,
     get_request_block_hasher,
     init_none_hash,
+)
+from vllm.v1.core.kv_cache_utils import (
+    generate_scheduler_kv_cache_config as scheduler_kv_cache_config,
+)
+from vllm.v1.core.kv_cache_utils import (
+    get_kv_cache_config_from_groups as get_kv_cache_config,
 )
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -217,10 +223,43 @@ class EngineCore:
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
+        from vllm.v1.engine.initialization_errors import (
+            InsufficientMemoryError,
+            ModelLoadingError,
+            get_cuda_error_suggestions,
+            get_memory_suggestions,
+            log_initialization_info,
+        )
+
         start = time.time()
 
-        # Get all kv cache needed by the model
-        kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        # Log detailed initialization info for debugging
+        log_initialization_info(vllm_config)
+
+        try:
+            # Get all kv cache needed by the model
+            kv_cache_specs = self.model_executor.get_kv_cache_specs()
+        except Exception as e:
+            error_details = str(e)
+            suggestions = []
+
+            if (
+                "out of memory" in error_details.lower()
+                or "cuda" in error_details.lower()
+            ):
+                suggestions = get_cuda_error_suggestions(error_details)
+            else:
+                suggestions = [
+                    "Verify the model path and configuration are correct",
+                    "Check if the model is compatible with your vLLM version",
+                    "Ensure all required dependencies are installed",
+                ]
+
+            raise ModelLoadingError(
+                model_name=vllm_config.model_config.model,
+                error_details=error_details,
+                suggestions=suggestions,
+            ) from e
 
         has_kv_cache = any(kv_cache_spec for kv_cache_spec in kv_cache_specs)
         if has_kv_cache:
@@ -234,32 +273,147 @@ class EngineCore:
                     kv_cache_specs
                 )
             else:
-                # Profiles the peak memory usage of the model to determine how
-                # much memory can be allocated for kv cache.
-                available_gpu_memory = self.model_executor.determine_available_memory()
-                self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+                try:
+                    # Profiles the peak memory usage of the model to
+                    # determine how much memory can be allocated for kv cache.
+                    available_gpu_memory = (
+                        self.model_executor.determine_available_memory()
+                    )
+                    self.available_gpu_memory_for_kv_cache = available_gpu_memory[0]
+
+                    # Log memory profiling results
+                    logger.info(
+                        "Available GPU memory for KV cache: %.2f GiB",
+                        self.available_gpu_memory_for_kv_cache / 1024**3,
+                    )
+
+                except Exception as e:
+                    error_details = str(e)
+
+                    # Check if this is a memory-related error
+                    if (
+                        "out of memory" in error_details.lower()
+                        and torch.cuda.is_available()
+                    ):
+                        # Try to get current memory info for better error
+                        # reporting
+                        free_memory, total_memory = torch.cuda.mem_get_info()
+                        suggestions = get_memory_suggestions(
+                            required_memory=int(total_memory * 0.1),
+                            # Estimate
+                            available_memory=free_memory,
+                            current_gpu_utilization=vllm_config.cache_config.gpu_memory_utilization,
+                            max_model_len=vllm_config.model_config.max_model_len,
+                        )
+
+                        raise InsufficientMemoryError(
+                            required_memory=int(total_memory * 0.1),
+                            # Rough estimate
+                            available_memory=free_memory,
+                            memory_type="GPU",
+                            suggestions=suggestions,
+                        ) from e
+
+                    # For other errors during memory determination
+                    suggestions = get_cuda_error_suggestions(error_details)
+                    raise ModelLoadingError(
+                        model_name=vllm_config.model_config.model,
+                        error_details=(f"Memory profiling failed: {error_details}"),
+                        suggestions=suggestions,
+                    ) from e
         else:
             # Attention free models don't need memory for kv cache
             available_gpu_memory = [0] * len(kv_cache_specs)
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
-        kv_cache_configs = get_kv_cache_configs(
-            vllm_config, kv_cache_specs, available_gpu_memory
+        try:
+            # Get the kv cache tensor size
+            kv_cache_configs = [
+                get_kv_cache_config(
+                    vllm_config,
+                    kv_cache_spec_one_worker,
+                    available_gpu_memory_one_worker,
+                )
+                for kv_cache_spec_one_worker, available_gpu_memory_one_worker in zip(
+                    kv_cache_specs, available_gpu_memory
+                )
+            ]
+        except ValueError as e:
+            # This typically happens when there's insufficient KV cache
+            # memory. The original error from check_enough_kv_cache_memory
+            # should be re-raised as it already has good error messages,
+            # but we can enhance it further
+            raise e
+
+        try:
+            # Since we use a shared centralized controller, we need the
+            # `kv_cache_config` to be consistent across all workers to make sure
+            # all the memory operators can be applied to all workers.
+            available_memory = [self.available_gpu_memory_for_kv_cache] * len(
+                kv_cache_configs
+            )
+            kv_cache_configs = get_kv_cache_configs(
+                vllm_config, kv_cache_specs, available_memory
+            )
+        except Exception as e:
+            logger.error("Failed to unify KV cache configurations across workers")
+            raise ModelLoadingError(
+                model_name=vllm_config.model_config.model,
+                error_details=(f"KV cache configuration unification failed: {str(e)}"),
+                suggestions=[
+                    "This is typically caused by inconsistent memory "
+                    "availability across GPUs",
+                    "Ensure all GPUs have similar memory availability",
+                    "Check for memory fragmentation or other processes "
+                    "using GPU memory",
+                ],
+            ) from e
+
+        # All workers have the same kv_cache_config except layer names, so use
+        # an arbitrary one to initialize the scheduler.
+        assert all(
+            [
+                cfg.num_blocks == kv_cache_configs[0].num_blocks
+                for cfg in kv_cache_configs
+            ]
         )
-        scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
-        num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+        num_gpu_blocks = kv_cache_configs[0].num_blocks
         num_cpu_blocks = 0
 
-        # Initialize kv cache and warmup the execution
-        self.model_executor.initialize_from_config(kv_cache_configs)
+        try:
+            # Initialize kv cache and warmup the execution
+            self.model_executor.initialize_from_config(kv_cache_configs)
+        except Exception as e:
+            error_details = str(e)
+            suggestions = []
+
+            if "out of memory" in error_details.lower():
+                suggestions = get_cuda_error_suggestions(error_details)
+            else:
+                suggestions = [
+                    "Check model configuration compatibility",
+                    "Verify CUDA installation and GPU drivers",
+                    "Try reducing batch size or model parallelism",
+                ]
+
+            raise ModelLoadingError(
+                model_name=vllm_config.model_config.model,
+                error_details=(
+                    f"Model executor initialization failed: {error_details}"
+                ),
+                suggestions=suggestions,
+            ) from e
 
         elapsed = time.time() - start
-        logger.info_once(
+        logger.info(
             ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
             elapsed,
-            scope="local",
         )
+        logger.info(
+            "Successfully initialized with %d GPU blocks for KV cache", num_gpu_blocks
+        )
+
         return num_gpu_blocks, num_cpu_blocks, scheduler_kv_cache_config
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
