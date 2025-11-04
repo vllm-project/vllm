@@ -8,6 +8,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
+from vllm.triton_utils import triton
 
 logger = init_logger(__name__)
 
@@ -98,6 +99,8 @@ def _can_support_mxfp4(
         or logical_replica_count
     )
 
+def get_padding_alignment():
+    return 256 if triton.runtime.driver.active.get_current_target().arch in ("gfx950", ) else 128
 
 def _dequant_mxfp4(
     x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
