@@ -681,7 +681,7 @@ class MPClient(EngineCoreClient):
                     "addresses.fault_pub_socket_addr should not be None at"
                     "fault tolerance scenario"
                 )
-                self.engine_status_dict = ThreadSafeDict()
+                self.engine_status_dict: ThreadSafeDict[int, str] = ThreadSafeDict()
                 for engine_id in range(vllm_config.parallel_config.data_parallel_size):
                     self.engine_status_dict[engine_id] = "Healthy"
                 self.client_guard = ClientGuard(

@@ -335,7 +335,7 @@ def recv_router_dealer_message(
     socket: zmq.Socket,
     use_poller: bool = False,
     poll_timeout: int = 1000,
-) -> tuple[bool, None | str, None | str]:
+) -> tuple[bool, None | bytes, None | str]:
     """
     Receive multipart ZMQ messages, automatically inferring message format
     based on socket type (ROUTER or DEALER).

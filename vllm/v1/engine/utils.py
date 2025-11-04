@@ -1309,10 +1309,7 @@ def wait_for_instruction_result(
             if not has_msg:
                 continue
 
-            if isinstance(identity, str):
-                assert identity is not None
-                identity = identity.encode("utf-8")
-
+            assert identity is not None
             assert response is not None
             response_dict = json.loads(response)
             recv_uuid = response_dict.get("method_uuid")
