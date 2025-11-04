@@ -2066,7 +2066,7 @@ class FusedMoE(CustomOp):
             )
 
         # DeepSeekv2 uses grouped_top_k
-        if use_grouped_topk:
+        elif use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
             if is_rocm_aiter_moe_enabled():
