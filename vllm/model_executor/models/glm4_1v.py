@@ -370,7 +370,7 @@ class Glm4vVisionAttention(nn.Module):
                 cu_seqlens_k=cu_seqlens,
                 max_seqlen_q=max_seqlen,
                 max_seqlen_k=max_seqlen,
-                dropout_p=0,
+                dropout_p=0.0,
                 causal=False,
             )
 

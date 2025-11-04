@@ -190,6 +190,9 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
+        if vllm_is_batch_invariant():
+            max_num_splits = 1
+
         scheduler_metadata = self._schedule_decode(
             num_reqs=seq_lens_cpu.numel(),
             cu_query_lens=query_start_loc_device,
@@ -214,9 +217,6 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # output buffer.
             self.scheduler_metadata[n:] = 0
             scheduler_metadata = self.scheduler_metadata[:n]
-
-        if vllm_is_batch_invariant():
-            max_num_splits = 1
 
         metadata = FlashAttnMLADecodeMetadata(
             block_table=block_table_tensor,
