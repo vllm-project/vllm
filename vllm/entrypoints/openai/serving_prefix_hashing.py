@@ -91,7 +91,7 @@ class OpenAIServingTokenization(OpenAIServing):
         self,
         request: TokenizeRequest,
         raw_request: Request,
-    ) -> Union[TokenizeResponse, ErrorResponse]:
+    ) -> Union[List[str], ErrorResponse]:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
