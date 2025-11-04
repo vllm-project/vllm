@@ -40,6 +40,17 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.device = base_layer.w2_weight.device
         self._inject_lora_into_fused_moe()
 
+    def _normalize_keys(self, config: dict[str, int]) -> dict[str, int]:
+        normalized_config = {}
+        for key, value in config.items():
+            if key.islower():
+                if key.startswith("block_"):
+                    normalized_key = "BLOCK_SIZE_" + key.split("_")[-1].upper()
+                else:
+                    normalized_key = key.upper()
+            normalized_config[normalized_key] = value
+        return normalized_config
+
     def _get_lora_moe_configs(
         self,
         op_prefix: str,
@@ -81,7 +92,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
             shrink_config = get_config_func(M)
             expand_config = get_config_func(M)
-
+        shrink_config = self._normalize_keys(shrink_config)
+        expand_config = self._normalize_keys(expand_config)
         return shrink_config, expand_config
 
     def _inject_lora_into_fused_moe(self):
@@ -148,9 +160,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
                 # get the block size of m from customized config or default config
                 max_loras = self.w1_lora_a_stacked.shape[0]
-                block_size = shrink_config.get("BLOCK_SIZE_M") or shrink_config.get(
-                    "block_m", 64
-                )
                 (
                     sorted_token_ids_lora,
                     expert_ids_lora,
@@ -158,7 +167,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 ) = self.punica_wrapper.moe_lora_align_block_size(
                     curr_topk_ids,
                     num_tokens,
-                    block_size,
+                    shrink_config["BLOCK_SIZE_M"],
                     self.base_layer.local_num_experts,
                     max_loras,
                     self.adapter_enabled,
