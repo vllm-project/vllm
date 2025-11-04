@@ -155,7 +155,6 @@ def test_suffix_decoding_acceptance(
     )
 
     # Run several times and check that the accepted tokens increase.
-    spec_llm.chat(test_prompts, sampling_config)
     num_draft = []
     num_accept = []
     for i in range(10):  # Run multiple times to warm up the cache.

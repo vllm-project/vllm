@@ -171,7 +171,7 @@ class Executor(ABC):
         args: tuple = (),
         kwargs: dict | None = None,
         non_block: Literal[True] = True,
-    ) -> list[Future[_R]]:
+    ) -> Future[list[_R]]:
         pass
 
     @abstractmethod
@@ -219,7 +219,7 @@ class Executor(ABC):
 
     def sample_tokens(
         self, grammar_output: GrammarOutput | None, non_block: bool = False
-    ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
+    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
         output = self.collective_rpc(  # type: ignore[call-overload]
             "sample_tokens", args=(grammar_output,), non_block=non_block
         )
