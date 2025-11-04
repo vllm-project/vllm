@@ -230,14 +230,12 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
 
 class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
-
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
-
         if per_tensor_activation_scales and per_tensor_weight_scales:
             return (
                 False,
