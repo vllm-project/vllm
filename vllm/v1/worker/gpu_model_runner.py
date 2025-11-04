@@ -2516,21 +2516,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         scheduler_output, self.vllm_config
                     )
 
-            # Synchronize should_run_drafter across all DP ranks after preprocessing
-            # but before any drafter execution. This ensures all ranks sync at the
-            # same execution point.
-            should_run_drafter = False
-            if (
-                self.speculative_config is not None
-                and self.parallel_config.data_parallel_size > 1
-            ):
-                import torch.distributed as dist
-
-                from vllm.distributed.parallel_state import get_dp_group
-
-                dp_rank = self.parallel_config.data_parallel_rank
-
-                # Compute local should_run_drafter value
+            if self.speculative_config is not None:
                 if has_tokens:
                     # Compute whether this rank wants to run the drafter
                     use_padded_batch_for_eagle = (
@@ -2557,32 +2543,38 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             <= effective_drafter_max_model_len
                         )
                     )
-                    local_should_run_drafter = bool(
+                    should_run_drafter = bool(
                         use_padded_batch_for_eagle and input_fits_in_drafter
                     )
                 else:
-                    # 0-token rank cannot run drafter
-                    local_should_run_drafter = False
+                    # This rank has 0 tokens, so it cannot run the drafter
+                    should_run_drafter = False
 
-                # Synchronize across all DP ranks - all must agree
-                device = get_dp_group().device
-                group = get_dp_group().device_group
-                if self.parallel_config.disable_nccl_for_dp_synchronization:
-                    device = "cpu"
-                    group = get_dp_group().cpu_group
+                # Sync across all DP ranks if DP > 1. Only run the drafter if all ranks
+                # agree to run it.
+                if self.parallel_config.data_parallel_size > 1:
+                    import torch.distributed as dist
 
-                drafter_flag = torch.tensor(
-                    [1 if local_should_run_drafter else 0],
-                    device=device,
-                    dtype=torch.int32,
-                )
-                dist.all_reduce(drafter_flag, op=dist.ReduceOp.MIN, group=group)
-                should_run_drafter = bool(drafter_flag.item())
+                    from vllm.distributed.parallel_state import get_dp_group
 
-            # Store the synchronized should_run_drafter value for later use
-            self._should_run_drafter_for_current_batch = should_run_drafter
+                    device = get_dp_group().device
+                    group = get_dp_group().device_group
+                    if self.parallel_config.disable_nccl_for_dp_synchronization:
+                        device = "cpu"
+                        group = get_dp_group().cpu_group
 
-            # 0-token rank can now return after participating in sync
+                    drafter_flag = torch.tensor(
+                        [1 if should_run_drafter else 0],
+                        device=device,
+                        dtype=torch.int32,
+                    )
+                    dist.all_reduce(drafter_flag, op=dist.ReduceOp.MIN, group=group)
+                    should_run_drafter = bool(drafter_flag.item())
+            else:
+                # No speculative decoding configured
+                should_run_drafter = False
+
+            # Having participated in the sync, the 0-token rank can now return
             if not has_tokens:
                 if not has_kv_transfer_group():
                     return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2700,44 +2692,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
-
-        # Use the synchronized should_run_drafter value from preprocessing
-        # When DP > 1, this was already synchronized across all ranks
-        should_run_drafter = getattr(
-            self, "_should_run_drafter_for_current_batch", False
-        )
-
-        # For single DP rank, compute it locally
-        if self.parallel_config.data_parallel_size == 1:
-            use_padded_batch_for_eagle = (
-                self.speculative_config
-                and self.speculative_config.use_eagle()
-                and not self.speculative_config.disable_padded_drafter_batch
-            )
-            effective_drafter_max_model_len = self.max_model_len
-            if effective_drafter_max_model_len is None:
-                effective_drafter_max_model_len = self.model_config.max_model_len
-            if (
-                self.speculative_config
-                and self.speculative_config.draft_model_config is not None
-                and (
-                    self.speculative_config.draft_model_config.max_model_len is not None
-                )
-            ):
-                effective_drafter_max_model_len = (
-                    self.speculative_config.draft_model_config.max_model_len
-                )
-            input_fits_in_drafter = bool(
-                spec_decode_common_attn_metadata
-                and (
-                    spec_decode_common_attn_metadata.max_seq_len
-                    + self.speculative_config.num_speculative_tokens
-                    <= effective_drafter_max_model_len
-                )
-            )
-            should_run_drafter = bool(
-                use_padded_batch_for_eagle and input_fits_in_drafter
-            )
 
         if should_run_drafter:
             # EAGLE speculative decoding can use the GPU sampled tokens
