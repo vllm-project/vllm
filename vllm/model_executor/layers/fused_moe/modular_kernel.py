@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     count_expert_num_tokens,
     disable_inplace,
 )
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
