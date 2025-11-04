@@ -1604,6 +1604,10 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
         return loaded_params
 
 
+class DeepseekForCausalLM(DeepseekV2ForCausalLM):
+    pass
+
+
 class DeepseekV3ForCausalLM(DeepseekV2ForCausalLM):
     pass
 
