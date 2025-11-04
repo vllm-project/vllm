@@ -316,7 +316,7 @@ class ParallelConfig:
 
     def stateless_init_dp_group(
         self,
-        gloo_comm_timeout: int,
+        gloo_comm_timeout: int = 30,
         enable_fault_tolerance: bool = False,
     ) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes

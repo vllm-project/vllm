@@ -375,7 +375,7 @@ class ClientGuard:
 
         self.engine_exception_q_lock = engine_exception_q_lock
 
-        self.engine_status_dict = engine_status_dict
+        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
 
         self.fault_handler = FaultHandler(
             self.cmd_socket,
