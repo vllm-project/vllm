@@ -146,9 +146,6 @@ class OpenAIServingTokenization(OpenAIServing):
                           dict) and "prompt_token_ids" in engine_prompt:
                 input_ids.extend(engine_prompt["prompt_token_ids"])
 
-        token_strs = None
-        if request.return_token_strs:
-            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
         prefix_chunk_size = getattr(request, 'prefix_chunk_size', 256)
         bash_chain = compute_chunked_hashes(tokens=input_ids, chunk_size=prefix_chunk_size)
         return bash_chain
