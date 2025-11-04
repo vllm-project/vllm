@@ -672,8 +672,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         elif self.fused_experts is not None:
-            if self.moe.has_bias:
-                raise ValueError("FusedMoEModularKernel does not support bias.")
             result = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -2068,7 +2066,7 @@ class FusedMoE(CustomOp):
             )
 
         # DeepSeekv2 uses grouped_top_k
-        if use_grouped_topk:
+        elif use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
             if is_rocm_aiter_moe_enabled():
