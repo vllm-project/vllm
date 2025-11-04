@@ -249,10 +249,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_multimodal_pruning_enabled = False
         self.max_model_len = model_config.max_model_len
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
-        if scheduler_config.enable_hybrid_chunked_prefill:
-            self.max_num_tokens = scheduler_config.prefill_max_num_batched_tokens
-        else:
-            self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        # Use the larger of max_num_batched_tokens and prefill_max_num_batched_tokens
+        # for memory profiling to ensure we allocate enough memory
+        self.max_num_tokens = max(
+            scheduler_config.max_num_batched_tokens,
+            scheduler_config.prefill_max_num_batched_tokens,
+        )
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Broadcast PP output for external_launcher (torchrun)

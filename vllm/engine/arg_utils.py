@@ -424,6 +424,9 @@ class EngineArgs:
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = SchedulerConfig.max_num_batched_tokens
+    prefill_max_num_batched_tokens: int | None = (
+        SchedulerConfig.prefill_max_num_batched_tokens
+    )
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -483,7 +486,6 @@ class EngineArgs:
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
     enable_chunked_prefill: bool | None = SchedulerConfig.enable_chunked_prefill
-    enable_hybrid_chunked_prefill: bool = SchedulerConfig.enable_hybrid_chunked_prefill
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
@@ -1006,6 +1008,10 @@ class EngineArgs:
             "--max-num-batched-tokens", **scheduler_kwargs["max_num_batched_tokens"]
         )
         scheduler_group.add_argument(
+            "--prefill-max-num-batched-tokens",
+            **scheduler_kwargs["prefill_max_num_batched_tokens"],
+        )
+        scheduler_group.add_argument(
             "--max-num-seqs", **scheduler_kwargs["max_num_seqs"]
         )
         scheduler_group.add_argument(
@@ -1029,10 +1035,6 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--enable-chunked-prefill", **scheduler_kwargs["enable_chunked_prefill"]
-        )
-        scheduler_group.add_argument(
-            "--enable-hybrid-chunked-prefill",
-            **scheduler_kwargs["enable_hybrid_chunked_prefill"],
         )
         scheduler_group.add_argument(
             "--disable-chunked-mm-input", **scheduler_kwargs["disable_chunked_mm_input"]
@@ -1578,11 +1580,11 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            prefill_max_num_batched_tokens=self.prefill_max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             num_lookahead_slots=num_lookahead_slots,
             enable_chunked_prefill=self.enable_chunked_prefill,
-            enable_hybrid_chunked_prefill=self.enable_hybrid_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
             is_encoder_decoder=model_config.is_encoder_decoder,

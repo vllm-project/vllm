@@ -224,13 +224,15 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens: dict[str, int] = {}
 
         token_budget = self.max_num_scheduled_tokens
-        # Check if there are any requests in the decode phase in the running queue
-        # when hybrid chunked prefill is enabled.
-        has_decode_requests = True
-        if self.scheduler_config.enable_hybrid_chunked_prefill:
-            has_decode_requests = self._has_decode_reqs
-            if not has_decode_requests:
-                token_budget = self.prefill_max_num_scheduled_tokens
+        # Check if there are any requests in the decode phase in the running queue.
+        # If no decode requests and prefill_max_num_batched_tokens is larger,
+        # use the larger budget for better throughput.
+        has_decode_requests = self._has_decode_reqs
+        if (
+            not has_decode_requests
+            and self.prefill_max_num_scheduled_tokens > self.max_num_scheduled_tokens
+        ):
+            token_budget = self.prefill_max_num_scheduled_tokens
 
         # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -499,7 +501,6 @@ class Scheduler(SchedulerInterface):
                     # pooling requests to be chunked
                     if (
                         not self.scheduler_config.chunked_prefill_enabled
-                        and not self.scheduler_config.enable_hybrid_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
                         self.waiting.pop_request()
@@ -626,8 +627,8 @@ class Scheduler(SchedulerInterface):
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         if (
-            self.scheduler_config.enable_hybrid_chunked_prefill
-            and not has_decode_requests
+            not has_decode_requests
+            and self.prefill_max_num_scheduled_tokens > self.max_num_scheduled_tokens
         ):
             assert total_num_scheduled_tokens <= self.prefill_max_num_scheduled_tokens
         else:

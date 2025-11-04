@@ -5,7 +5,7 @@ import hashlib
 from dataclasses import InitVar, field
 from typing import Any, Literal
 
-from pydantic import Field, SkipValidation, model_validator
+from pydantic import SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
@@ -37,10 +37,10 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
-    prefill_max_num_batched_tokens: int = Field(init=False)
-    """Prefill maximum number of tokens to be processed in a single iteration.
-
-    This config is used when there are no decoding requests."""
+    prefill_max_num_batched_tokens: int | None = None
+    """Maximum number of tokens to be processed in a single iteration when there
+    are no decode requests. If not set (None), defaults to max_num_batched_tokens.
+    Must satisfy: prefill_max_num_batched_tokens >= max_num_batched_tokens."""
 
     max_num_seqs: SkipValidation[int] = None  # type: ignore
     """Maximum number of sequences to be processed in a single iteration.
@@ -79,11 +79,6 @@ class SchedulerConfig:
     enable_chunked_prefill: SkipValidation[bool] = None  # type: ignore
     """If True, prefill requests can be chunked based
     on the remaining max_num_batched_tokens."""
-
-    enable_hybrid_chunked_prefill: bool = False
-    """If True, prefill requests will only be chunked when there are decode 
-    requests present, otherwise they will proceed with normal prefill 
-    computation to increase throughput."""
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
@@ -183,9 +178,6 @@ class SchedulerConfig:
                 " prefix caching; disabling both."
             )
 
-        self.prefill_max_num_batched_tokens = max(
-            self.max_model_len, DEFAULT_MAX_NUM_BATCHED_TOKENS
-        )
         if self.max_num_batched_tokens is None:
             if self.enable_chunked_prefill:
                 self.max_num_batched_tokens = DEFAULT_MAX_NUM_BATCHED_TOKENS
@@ -203,18 +195,10 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
-                self.prefill_max_num_batched_tokens = max(
-                    self.prefill_max_num_batched_tokens,
-                    POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
             if self.is_multimodal_model:
                 # The value needs to be at least the number of multimodal tokens
                 self.max_num_batched_tokens = max(
                     self.max_num_batched_tokens,
-                    MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
-                )
-                self.prefill_max_num_batched_tokens = max(
-                    self.prefill_max_num_batched_tokens,
                     MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
             # When using default settings,
@@ -223,10 +207,11 @@ class SchedulerConfig:
             self.max_num_batched_tokens = min(
                 self.max_num_seqs * self.max_model_len, self.max_num_batched_tokens
             )
-            self.prefill_max_num_batched_tokens = min(
-                self.max_num_seqs * self.max_model_len,
-                self.prefill_max_num_batched_tokens,
-            )
+
+        # Initialize prefill_max_num_batched_tokens based on user input
+        if self.prefill_max_num_batched_tokens is None:
+            # Default to max_num_batched_tokens
+            self.prefill_max_num_batched_tokens = self.max_num_batched_tokens
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
@@ -318,12 +303,13 @@ class SchedulerConfig:
                 f"max_num_partial_prefills ({self.max_num_partial_prefills})."
             )
 
-        if self.enable_hybrid_chunked_prefill and not self.chunked_prefill_enabled:
+        # Validate prefill_max_num_batched_tokens
+        if self.prefill_max_num_batched_tokens < self.max_num_batched_tokens:
             raise ValueError(
-                "Hybrid chunked prefill can only be enabled when chunked "
-                "prefill is enabled. Please set --enable-chunked-prefill=True "
-                "or disable hybrid chunked prefill by setting "
-                "--enable-hybrid-chunked-prefill=False."
+                f"prefill_max_num_batched_tokens "
+                f"({self.prefill_max_num_batched_tokens}) must be greater "
+                f"than or equal to max_num_batched_tokens "
+                f"({self.max_num_batched_tokens})."
             )
 
         return self
