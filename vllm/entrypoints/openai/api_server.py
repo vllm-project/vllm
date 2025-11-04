@@ -1553,11 +1553,27 @@ def _log_streaming_response(
     """Wrap an async body iterator to log SSE content while streaming."""
 
     sse_decoder = SSEDecoder()
-    chunk_count = 0
-    done_logged = False
+
+    def _log_final_content(content: str, count: int):
+        """Helper to log the final content."""
+        if content:
+            # Truncate if too long
+            if len(content) > 2048:
+                content = content[:2048]
+            logger.info(
+                "response_body={streaming_complete: content=%r, chunks=%d}",
+                content,
+                count,
+            )
+        else:
+            logger.info(
+                "response_body={streaming_complete: no_content, chunks=%d}",
+                count,
+            )
 
     async def generator():
-        nonlocal chunk_count, done_logged
+        chunk_count = 0
+        done_logged = False
         async for section in body_iterator:
             chunk_count += 1
             try:
@@ -1567,47 +1583,17 @@ def _log_streaming_response(
                         content = sse_decoder.extract_content(event["data"])
                         sse_decoder.add_content(content)
                     elif event["type"] == "done" and not done_logged:
-                        full_content = sse_decoder.get_complete_content()
-                        if full_content:
-                            if len(full_content) > 2048:
-                                full_content = full_content[:2048]
-                            logger.info(
-                                (
-                                    "response_body={streaming_complete: content=%r, "
-                                    "chunks=%d}"
-                                ),
-                                full_content,
-                                chunk_count,
-                            )
-                        else:
-                            logger.info(
-                                (
-                                    "response_body={streaming_complete: no_content, "
-                                    "chunks=%d}"
-                                ),
-                                chunk_count,
-                            )
+                        _log_final_content(
+                            sse_decoder.get_complete_content(), chunk_count
+                        )
                         done_logged = True
-            except Exception:
+            except Exception as e:
                 # Best-effort logging; never break streaming
-                pass
+                logger.warning("Error parsing response stream for logging: %s", e)
             yield section
         # In case no explicit DONE was received, log buffered content once
         if not done_logged:
-            full_content = sse_decoder.get_complete_content()
-            if full_content:
-                if len(full_content) > 2048:
-                    full_content = full_content[:2048]
-                logger.info(
-                    "response_body={streaming_complete: content=%r, chunks=%d}",
-                    full_content,
-                    chunk_count,
-                )
-            else:
-                logger.info(
-                    "response_body={streaming_complete: no_content, chunks=%d}",
-                    chunk_count,
-                )
+            _log_final_content(sse_decoder.get_complete_content(), chunk_count)
 
     return generator()
 
