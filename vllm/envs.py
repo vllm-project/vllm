@@ -207,7 +207,6 @@ if TYPE_CHECKING:
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
-    VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK: bool = True
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
@@ -219,6 +218,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
 
 
 def get_default_cache_root():
@@ -252,6 +252,9 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
+    from vllm.model_executor.layers.batch_invariant import (
+        vllm_is_batch_invariant,
+    )
     from vllm.utils.torch_utils import is_torch_equal_or_newer
 
     default_value = (
@@ -260,7 +263,10 @@ def use_aot_compile() -> bool:
         else "0"
     )
 
-    return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    return (
+        not vllm_is_batch_invariant()
+        and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
+    )
 
 
 def env_with_choices(
@@ -1400,11 +1406,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE", "0"))
     ),
-    # Allow DeepEP to use nvlink for internode_ll kernel, turn this on for
-    # better latency on GB200 like system
-    "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK": lambda: bool(
-        int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK", "1"))
-    ),
     # Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel,
     # turn this for better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
@@ -1441,6 +1442,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
+    ),
+    # Format for saving torch.compile cache artifacts
+    # - "binary": saves as binary file
+    #     Safe for multiple vllm serve processes accessing the same torch compile cache.
+    # - "unpacked": saves as directory structure (for inspection/debugging)
+    #     NOT multiprocess safe - race conditions may occur with multiple processes.
+    #     Allows viewing and setting breakpoints in Inductor's code output files.
+    "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
+        "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
 }
 
@@ -1566,7 +1576,6 @@ def compute_hash() -> str:
         "VLLM_NVFP4_GEMM_BACKEND",
         "VLLM_USE_FBGEMM",
         "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE",
-        "VLLM_DEEPEP_LOW_LATENCY_ALLOW_NVLINK",
         "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL",
     ]
     for key in environment_variables_to_hash:

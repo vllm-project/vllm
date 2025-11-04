@@ -134,6 +134,8 @@ def use_fused_moe_lora_kernel(
     )
     expert_ids = torch.empty((max_loras * max_num_m_blocks,), dtype=torch.int32)
     num_tokens_post_padded = torch.empty((max_loras,), dtype=torch.int32)
+    adapter_enabled = torch.ones(max_loras + 1, dtype=torch.int32)
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32)
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -147,6 +149,8 @@ def use_fused_moe_lora_kernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
+        adapter_enabled,
+        lora_ids,
     )
 
     config = {
@@ -172,6 +176,8 @@ def use_fused_moe_lora_kernel(
         num_tokens_post_padded,
         max_lora_rank,
         top_k_num,
+        lora_ids,
+        adapter_enabled,
         config["BLOCK_SIZE_M"],
         config["BLOCK_SIZE_N"],
         config["BLOCK_SIZE_K"],
