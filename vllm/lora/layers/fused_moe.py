@@ -111,6 +111,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config["BLOCK_SIZE_M"],
                     self.base_layer.local_num_experts,
                     max_loras,
+                    self.adapter_enabled,
                     expert_map,
                 )
 
@@ -138,6 +139,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_lora_rank,
                     top_k,
                     config,
+                    self.adapter_enabled,
                 )
 
                 result = func(*args, **kwargs)
@@ -196,6 +198,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     max_lora_rank,
                     top_k,
                     config,
+                    self.adapter_enabled,
                     True,
                 )
 
@@ -226,6 +229,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
+        self.adapter_enabled = torch.tensor(
+            [0] * (max_loras + 1), dtype=torch.int, device=self.device
+        )
 
         self.w1_lora_a_stacked = torch.zeros(
             (
@@ -313,6 +320,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.w3_lora_b_stacked[index] = 0
         self.w2_lora_a_stacked[index] = 0
         self.w2_lora_b_stacked[index] = 0
+        self.adapter_enabled[index] = 0
 
     def set_lora(
         self,
@@ -322,8 +330,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         embeddings_tensor: torch.Tensor | None,
         bias: torch.Tensor | None = None,
     ):
-        self.reset_lora(index)
         """Overwrites lora tensors at index."""
+        self.reset_lora(index)
+        self.adapter_enabled[index] = 1
         for eid in range(len(lora_a) // 3):
             w1_lora_a = lora_a[eid * 3]
             w2_lora_a = lora_a[eid * 3 + 1]
