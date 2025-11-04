@@ -421,8 +421,7 @@ async def pause_generation(
         return JSONResponse(
             content={
                 "error": (
-                    "Pause/resume not supported by current engine. "
-                    "Set VLLM_USE_V1=1."
+                    "Pause/resume not supported by current engine."
                 )
             },
             status_code=HTTPStatus.NOT_IMPLEMENTED.value,
@@ -457,8 +456,7 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
         return JSONResponse(
             content={
                 "error": (
-                    "Pause/resume not supported by current engine. "
-                    "Set VLLM_USE_V1=1."
+                    "Pause/resume not supported by current engine."
                 )
             },
             status_code=HTTPStatus.NOT_IMPLEMENTED.value,
@@ -487,8 +485,7 @@ async def pause_status(raw_request: Request) -> JSONResponse:
                 "is_paused": False,
                 "num_unfinished_requests": 0,
                 "error": (
-                    "Pause/resume not supported by current engine. "
-                    "Set VLLM_USE_V1=1."
+                    "Pause/resume not supported by current engine."
                 ),
             }
         )
