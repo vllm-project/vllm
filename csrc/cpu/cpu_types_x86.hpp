@@ -424,6 +424,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   float reduce_min() const { return _mm512_reduce_min_ps(reg); }
 
+  float get_last_elem() const { return _mm512_cvtss_f32(reg); }
+
   template <int group_size>
   float reduce_sub_sum(int idx) {
     static_assert(VEC_ELEM_NUM % group_size == 0);

@@ -155,8 +155,10 @@ class TileGemm224<c10::BFloat16> {
 
 // 1-2-2 pattern, for 0 < m <= 16
 // TILE 0, (1): load A matrix, use extra 1 tile for prefetch, row num should be
-// m, m TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row
-// num should be 16 TILE 6, 7, (6, 7): store results C matrix, row num should be
+// m, m
+// TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row
+// num should be 16
+// TILE 6, 7, (6, 7): store results C matrix, row num should be
 // m
 template <typename kv_cache_t>
 class TileGemm122 {
@@ -238,7 +240,7 @@ class TileGemm122<c10::BFloat16> {
     const int32_t k_times =
         dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
     const int32_t k_group_times = k_times / 2;
-    const bool has_tile_loop = (k_times % 2 == 1);
+    const bool has_tail = (k_times % 2 == 1);
 
     if (accum_c) {
       _tile_loadd(6, c_tile_6, c_stride);
@@ -276,7 +278,7 @@ class TileGemm122<c10::BFloat16> {
       b_tile_5 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
     }
 
-    if (has_tile_loop) {
+    if (has_tail) {
       _tile_loadd(0, a_tile_0, a_tile_stride);
       _tile_stream_loadd(2, b_tile_2, b_stride);
       _tile_dpbf16ps(6, 0, 2);

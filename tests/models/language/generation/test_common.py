@@ -60,6 +60,10 @@ AITER_MODEL_LIST = [
             ],
         ),
         pytest.param(
+            "google/gemma-2-9b",  # test hybrid attention
+            marks=[pytest.mark.cpu_model],
+        ),
+        pytest.param(
             "zai-org/chatglm3-6b",  # chatglm (text-only)
         ),
         pytest.param(

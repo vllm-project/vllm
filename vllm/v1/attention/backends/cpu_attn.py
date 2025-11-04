@@ -251,6 +251,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
             )
+        print("........", self.sliding_window)
 
     def forward(
         self,
@@ -323,6 +324,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             )
 
         if attn_metadata.use_sdpa_prefill:
+            assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"
             num_decode_tokens = attn_metadata.num_decode_tokens
             self._run_sdpa_forward(
                 query[num_decode_tokens:num_actual_tokens],
