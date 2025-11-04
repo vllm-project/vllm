@@ -756,6 +756,7 @@ class SiglipVisionTransformer(nn.Module):
             inputs_embeds=hidden_states,
             return_all_hidden_states=select_layers is not None,
         )
+
         if self.post_layernorm is not None:
             encoder_outputs = self.post_layernorm(encoder_outputs)
 
@@ -916,8 +917,7 @@ class SiglipVisionModel(nn.Module):
         return loaded_params
 
 
-# Adapted from:
-# https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
+# Adapted from: https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
 class SiglipTextEmbeddings(nn.Module):
     def __init__(self, config: SiglipTextConfig):
         super().__init__()
