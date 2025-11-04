@@ -58,11 +58,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        if stat_loggers is not None:
-            raise NotImplementedError(
-                "Passing StatLoggers to LLMEngine is not yet supported."
-            )
-
         self.vllm_config = vllm_config
         self.observability_config = vllm_config.observability_config
         self.model_config = vllm_config.model_config
