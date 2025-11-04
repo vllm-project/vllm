@@ -12,6 +12,7 @@ import torch
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
@@ -26,6 +27,8 @@ from vllm.v1.worker.ubatching import (
     dbo_register_recv_hook,
     dbo_yield,
 )
+
+logger = init_logger(__name__)
 
 #
 # This file defines a set of base classes used to make MoE kernels more modular.
@@ -802,13 +805,19 @@ class FusedMoEModularKernel(torch.nn.Module):
         # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
         # DP+EP due to the random token routing.
         is_profile_run = get_forward_context().attn_metadata is None
-        if is_profile_run:
+        if is_profile_run and self.fused_experts.supports_chunking():
             parallel_config = get_current_vllm_config().parallel_config
             is_dp_ep = (
                 parallel_config.data_parallel_size > 1
                 and parallel_config.enable_expert_parallel
             )
-            if is_dp_ep and self.fused_experts.supports_chunking():
+            if is_dp_ep:
+                logger.info(
+                    "DP+EP buffer reservation: profile_run detected, "
+                    "allocating max workspace buffers (chunk_size=%d, dp=%d)",
+                    envs.VLLM_FUSED_MOE_CHUNK_SIZE,
+                    parallel_config.data_parallel_size,
+                )
                 max_workspace_13, max_workspace_2, max_fused_out_shape = (
                     self.fused_experts.workspace_shapes(
                         envs.VLLM_FUSED_MOE_CHUNK_SIZE,
@@ -820,6 +829,13 @@ class FusedMoEModularKernel(torch.nn.Module):
                         expert_tokens_meta,
                     )
                 )
+                logger.info(
+                    "DP+EP buffer reservation sizes: "
+                    "workspace13=%s, workspace2=%s, fused_out=%s",
+                    max_workspace_13,
+                    max_workspace_2,
+                    max_fused_out_shape,
+                )
                 buffers.workspace13.get(
                     max_workspace_13, device=device, dtype=workspace_dtype
                 )
@@ -829,6 +845,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 buffers.fused_out.get(
                     max_fused_out_shape, device=device, dtype=workspace_dtype
                 )
+                logger.info("DP+EP buffer reservation: buffers allocated successfully")
 
         # Get intermediate workspace shapes based off the chunked M size.
         workspace13_shape, workspace2_shape, _ = self.fused_experts.workspace_shapes(
