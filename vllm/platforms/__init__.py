@@ -7,7 +7,8 @@ from typing import TYPE_CHECKING
 
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
-from vllm.utils import resolve_obj_by_qualname, supports_xccl
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import supports_xccl
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
@@ -59,7 +60,7 @@ def cuda_platform_plugin() -> str | None:
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
     try:
-        from vllm.utils import import_pynvml
+        from vllm.utils.import_utils import import_pynvml
 
         pynvml = import_pynvml()
         pynvml.nvmlInit()
@@ -221,10 +222,12 @@ def resolve_current_platform_cls_qualname() -> str:
         )
     elif len(activated_builtin_plugins) == 1:
         platform_cls_qualname = builtin_platform_plugins[activated_builtin_plugins[0]]()
-        logger.info("Automatically detected platform %s.", activated_builtin_plugins[0])
+        logger.debug(
+            "Automatically detected platform %s.", activated_builtin_plugins[0]
+        )
     else:
         platform_cls_qualname = "vllm.platforms.interface.UnspecifiedPlatform"
-        logger.info("No platform detected, vLLM is running on UnspecifiedPlatform")
+        logger.debug("No platform detected, vLLM is running on UnspecifiedPlatform")
     return platform_cls_qualname
 
 

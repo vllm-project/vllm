@@ -7,6 +7,8 @@ from typing import Any
 
 import torch
 
+from vllm.utils.torch_utils import is_torch_equal_or_newer
+
 
 def set_random_seed(seed: int) -> None:
     from vllm.platforms import current_platform
@@ -83,3 +85,10 @@ def get_moe_expert_mapping(
             if child_map is not None:
                 return child_map()
         return []
+
+
+def maybe_disable_graph_partition(current_backend: str) -> dict[str, bool]:
+    if current_backend == "inductor" and is_torch_equal_or_newer("2.9.0.dev"):
+        return {"graph_partition": False}
+    else:
+        return {}
