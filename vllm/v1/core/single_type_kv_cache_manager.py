@@ -245,16 +245,14 @@ class SingleTypeKVCacheManager(ABC):
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         """
-        Remove the blocks that are no longer needed from `blocks` and free the
-        blocks. The removed blocks should be replaced by null_block.
-        Need to be customized for each attention type.
+        Remove and free the blocks that are no longer needed for attention computation.
+        The removed blocks should be replaced by null_block.
 
         Args:
             request_id: The request ID.
             num_computed_tokens: The number of tokens that have been computed.
         """
-        # Remove the blocks that are no longer be in the sliding window and
-        # skipped during the attention computation.
+        # Remove the blocks that will be skipped during attention computation.
         num_skipped_tokens = self.get_num_skipped_tokens(num_computed_tokens)
         if num_skipped_tokens <= 0:
             # This indicates that ALL tokens are inside attention window.
@@ -262,10 +260,12 @@ class SingleTypeKVCacheManager(ABC):
             # A typical case is full attention that we never free any token
             # before the request is finished.
             return
-        last_useful_block = num_skipped_tokens // self.block_size
+        num_skipped_blocks = num_skipped_tokens // self.block_size
         blocks = self.req_to_blocks[request_id]
         removed_blocks: list[KVCacheBlock] = []
-        for i in range(last_useful_block - 1, -1, -1):
+        # Because the block starts from index 0, the num_skipped_block-th block
+        # corresponds to index num_skipped_blocks - 1.
+        for i in range(num_skipped_blocks - 1, -1, -1):
             if blocks[i] == self._null_block:
                 # If the block is already a null block, the blocks before it
                 # should also have been set to null blocks by the previous calls
@@ -277,15 +277,15 @@ class SingleTypeKVCacheManager(ABC):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the last token (leftmost token) index that is inside attention window.
+        Get the number of tokens that will be skipped for attention computation.
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
-            The last token (leftmost token) index that is inside attention window.
+            The number of tokens that will be skipped for attention computation.
         """
-        # The default behavior is to not remove any blocks.
+        # The default behavior is to not skip any tokens.
         return 0
 
 
@@ -419,15 +419,27 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the last token (leftmost token) index that is inside
-        sliding window.
+        Get the number of tokens that will be skipped for attention computation.
+
+        For sliding window, this corresponds to the tokens that are prior to
+        the current sliding window.
+
+        For example, if sliding_window is 4 and num_computed_tokens is 7
+        (i.e., tokens 0~6 have been computed):
+
+            Tokens:   [ 0  1  2 | 3  4  5  6 ]
+                        ^^^^^   ^^^^^^^^^^^^
+                      skipped    sliding window
+
+        The current window contains tokens 3~6. Tokens 0~2 will be skipped for
+        attention computation since they are outside the sliding window.
+        Thus, get_num_skipped_tokens(7) == 3.
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
-            The last token (leftmost token) index that is inside
-            sliding window.
+            The number of tokens that will be skipped for attention computation.
         """
         return num_computed_tokens - self.sliding_window + 1
 
@@ -532,22 +544,45 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
-        Get the last token (leftmost token) index that is inside chunked local
-        attention window.
+        Get the number of tokens that will be skipped for attention computation.
+
+        For chunked local attention, this corresponds to the tokens that are on
+        the left side of the current chunk.
+
+        Example 1:
+        # chunk size = 8, num_computed_tokens = 13
+        # Tokens:  0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 | ...
+        #          | ----- computed -------------|
+        #                                         ^^ next token to be computed
+        #         [skipped]         [current chunk/attended]
+        # Output: get_num_skipped_tokens(13) == 8
+
+        Example 2:
+        # chunk size = 8, num_computed_tokens = 8
+        # Tokens:  0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 | ...
+        #          | --- computed -|
+        #                            ^ next token to be computed
+        #         [skipped]        |[current chunk/attended]
+        # Output: get_num_skipped_tokens(8) == 8
+
+        Example 3:
+        # chunk size = 8, num_computed_tokens = 7
+        # Tokens:  0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 | ...
+        #          |--computed-|
+        #                        ^ next token to be computed
+        #          |[current chunk]|
+        # Output: get_num_skipped_tokens(7) == 0
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
-            The last token (leftmost token) index that is inside chunked local
-            attention window.
+            The number of tokens that will be skipped for attention computation.
         """
-        local_attention_start_idx = (
-            (num_computed_tokens)
-            // self.attention_chunk_size
-            * self.attention_chunk_size
-        )
-        return local_attention_start_idx
+        num_skipped_tokens = (
+            num_computed_tokens // self.attention_chunk_size
+        ) * self.attention_chunk_size
+        return num_skipped_tokens
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
