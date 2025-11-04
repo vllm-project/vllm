@@ -28,14 +28,15 @@ physical experts.
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
-from typing import Any, Literal
+from dataclasses import dataclass, field
+from typing import Any
 
 import numpy
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ParallelConfig
+from vllm.config.parallel import ExpertMapperPolicy
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_node_count,
@@ -47,7 +48,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .eplb_process import EPLBProcess
 from .rebalance_algo import rebalance_experts
-from .rebalance_execute import rearrange_expert_weights_inplace
+from .rebalance_execute import idx_global_to_local, rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
 
@@ -64,7 +65,7 @@ class RebalanceTaskArgs:
 @dataclass
 class ExpertMapperArgs:
     num_moe_layers: int
-    policy_type: Literal["greedy", "bipartite"]
+    policy_type: ExpertMapperPolicy
     phyhsical_to_logical_map: torch.Tensor
 
 
@@ -213,6 +214,36 @@ class EplbState:
     cur_layer_id: int = -1
     """
     Records the current moe layer being precessed for expert weight transfer.
+    """
+
+    num_moe_layers: int = 0
+    """
+    Number of Mixture-of-Experts (MoE) layers in the model.
+    """
+
+    buffer_tensor_list: list[list[torch.Tensor]] = field(default_factory=list)
+    """
+    A two-dimensional list storing temporary tensor buffers for expert weight
+    communication. Each inner list corresponds to a layer, and each element represents
+    a buffer tensor used during transfer or update operations.
+    """
+
+    recv_expert_list: list[tuple[int, int]] = field(default_factory=list)
+    """
+    A list of tuples representing the experts to be received. Each tuple contains
+    (local_expert_id, buffer_tensor_id) indicating where the received weights should
+    be placed.
+    """
+
+    comm_op_list: list[Any] = field(default_factory=list)
+    """
+    A list storing pending communication operations (send/receive tasks)
+    for expert weight transfer.
+    """
+
+    reqs: list[Any] = field(default_factory=list)
+    """
+    A list to which the communication requests will be appended.
     """
 
     @staticmethod
@@ -386,7 +417,7 @@ class EplbState:
             expert_rearrangement_step = 0
         expert_mapper_args = ExpertMapperArgs(
             model.num_moe_layers,
-            parallel_config.eplb_config.expert_mapper_policy_type,
+            parallel_config.eplb_config.expert_mapper_policy,
             None,
         )
         return cls(
@@ -403,6 +434,7 @@ class EplbState:
             ),
             enable_async=parallel_config.eplb_config.enable_async,
             expert_mapper_args=expert_mapper_args,
+            num_moe_layers=model.num_moe_layers,
         )
 
     def __post_init__(self):
@@ -510,14 +542,14 @@ class EplbState:
                 self.expert_rearrangement_step = 0
                 self.rearrange(model)
         else:
-            if self.should_trigger_rebalance():
-                global_expert_load_window = self.compute_and_set_moe_load()
+            if self.rebalance_expert_weight_flag():
+                global_expert_load = self.compute_and_set_moe_load()
                 ep_group = get_ep_group().device_group
                 num_replicas, num_groups, num_nodes, num_gpus = (
                     self.prepare_rebalance_env(model=model, ep_group=ep_group)
                 )
                 self.rebalance_task_args = RebalanceTaskArgs(
-                    global_expert_load_window.cpu(),
+                    global_expert_load.cpu(),
                     num_replicas,
                     num_groups,
                     num_nodes,
@@ -535,11 +567,48 @@ class EplbState:
 
                 self.rebalance_task(input_args, expert_mapper_args)
 
+            if self.update_expert_map_flag():
+                for req in self.reqs:
+                    req.wait()
+                if self.comm_op_list is not None:
+                    self.comm_op_list.clear()
+                phy2log_map, log2phy_map = self._require_maps()
+
+                if self.physical_to_logical_map.shape[1] != phy2log_map.shape[1]:
+                    self.physical_to_logical_map[self.cur_layer_id] = phy2log_map[
+                        self.cur_layer_id
+                    ].to(self.physical_to_logical_map.device)
+                else:
+                    self.physical_to_logical_map[self.cur_layer_id].copy_(
+                        phy2log_map[self.cur_layer_id]
+                    )
+                max_physical_slots = log2phy_map.shape[-1]
+                assert max_physical_slots <= self.logical_to_physical_map.shape[-1]
+                padded = torch.nn.functional.pad(
+                    log2phy_map,
+                    (0, self.logical_to_physical_map.shape[-1] - max_physical_slots),
+                    value=-1,
+                )
+                self.logical_to_physical_map[self.cur_layer_id].copy_(
+                    padded[self.cur_layer_id]
+                )
+                for recv_expert_info in self.recv_expert_list:
+                    local_expert_to_replace, buffer_tensor_id = recv_expert_info
+                    for expert_tensor, buffer_tensor in zip(
+                        model.expert_weights[self.cur_layer_id][
+                            local_expert_to_replace
+                        ],
+                        self.buffer_tensor_list[buffer_tensor_id],
+                    ):
+                        expert_tensor.copy_(buffer_tensor)
+            logger.debug(
+                "[EPLB] finished update expert weight for layer: %s", self.cur_layer_id
+            )
             self.expert_rearrangement_step += 1
             if self.expert_rearrangement_step >= (
                 self.expert_rearrangement_step_interval
                 + self.num_wait_worker_iterations
-                + model.num_moe_layers
+                + self.num_moe_layers
             ):
                 self.expert_rearrangement_step = 0
 
@@ -748,59 +817,46 @@ class EplbState:
         if not self._async_processor:
             logger.error("Async processor is not initialized")
             return None
-        if self._async_processor.step():
-            for layer_id in range(model.num_moe_layers):
-                logger.info("layer_id=%s", layer_id)
-                self.shuffle_layer_async(model, layer_id)
-
-    def get_at_index(self, model, result, layer_id) -> list[Any]:
-        if not result:
-            raise ValueError("Queue is empty, cannot retrieve element")
-        size = len(result)
-        # check if queue length matches the of layers
-        if size != model.num_moe_layers:
-            logger.info("size=%s, num_moe_layers=%s", size, model.num_moe_layers)
-            raise ValueError(
-                f"Queue length {size} does not match "
-                "the number of moe layers in the model"
-            )
-        if layer_id < 0 or layer_id >= size:
-            raise ValueError(f"Index {layer_id} out of range for queue of size {size}")
-        return result[layer_id]
-
-    def shuffle_layer_async(self, model, layer_id):
-        """
-        Initiates asynchronous shuffling of experts for a specific MoE layer.
-        This method retrieves the necessary information from `eplb_process`,
-        prepares the weight loader for transfer tasks, and starts the
-        asynchronous communication.
-
-        Args:
-            layer: The ID of the MoE layer to shuffle.
-        """
-        if not self._async_processor:
-            logger.error("Async processor is not initialized")
+        self._async_processor.step()
+        process_result = self._async_processor.result
+        if process_result is None:
+            logger.warning("Async processor result is None, skipping layer.")
             return None
-        if self._async_processor._should_process():
-            (expert_send_info, expert_recv_info, updated_expert_map, _, layer_id) = (
-                self.get_at_index(model, self._async_processor.result, layer_id)
-            )
 
-            updated_expert_map_this_rank = torch.from_numpy(
-                numpy.array(updated_expert_map)
-            )
-            self.generate_expert_d2d_transfer_task(
-                model,
+        if isinstance(process_result, list) and len(process_result) > 0:
+            result = process_result.pop(0)
+            if not result:
+                raise ValueError("Results is empty, cannot retrieve element")
+            (
                 expert_send_info,
                 expert_recv_info,
-                updated_expert_map_this_rank,
-                layer_id + len(model.model.layers) - model.num_moe_layers,
+                updated_phy2log_map,
+                _,
+                layer_id,
+            ) = result
+            if layer_id < 0 or layer_id >= self.num_moe_layers:
+                raise ValueError(f"Index {layer_id} out of range for moe layers")
+            updated_phy2log_map_this_rank = torch.from_numpy(
+                numpy.array(updated_phy2log_map)
             )
-            self.reqs = []
+            num_dense_layers = len(model.model.layers) - self.num_moe_layers
+            self.generate_expert_d2d_transfer_task(
+                model.expert_weights,
+                expert_send_info,
+                expert_recv_info,
+                updated_phy2log_map_this_rank,
+                layer_id + num_dense_layers,
+            )
+            self.reqs.clear()
             self.async_expert_weight_transfer()
 
     def generate_expert_d2d_transfer_task(
-        self, model, expert_send_info, expert_recv_info, updated_expert_map, layer_id
+        self,
+        expert_weights,
+        expert_send_info,
+        expert_recv_info,
+        updated_expert_map,
+        layer_id,
     ):
         """
         Generates the expert data-to-data transfer tasks (send and receive operations)
@@ -815,12 +871,15 @@ class EplbState:
             updated_expert_map: The new expert map for the layer.
             layer_id: The ID of the MoE layer.
         """
+        num_local_physical_experts = next(iter(expert_weights[0])).shape[0]
         if not (expert_send_info or expert_recv_info):
             return
         self.cur_layer_id = layer_id
         self.comm_op_list = []
-        self.prepare_send(model, expert_send_info, layer_id)
-        self.prepare_recv(model, expert_recv_info, updated_expert_map)
+        self.prepare_send(
+            expert_weights, expert_send_info, num_local_physical_experts, layer_id
+        )
+        self.prepare_recv(expert_recv_info, updated_expert_map)
 
     def async_expert_weight_transfer(self):
         """
@@ -835,58 +894,40 @@ class EplbState:
         if self.comm_op_list:
             ret_list = torch.distributed.batch_isend_irecv(self.comm_op_list)
             self.reqs.extend(ret_list)
+        logger.info("Expert weights start to transfer")
 
-    def prepare_send(self, model, expert_send_info, layer_id):
-        """
-        Prepare asynchronous send tasks (isend) for expert weights. This method is
-        intended to be called when setting up communication for a specific layer.
-        """
-        ep_group = get_ep_group().device_group
-        ep_rank = ep_group.rank()
-        ep_size = ep_group.size()
-
-        num_local_physical_experts = model.num_physical_experts // ep_size
-
-        start = ep_rank * num_local_physical_experts
-        end = start + num_local_physical_experts
-
-        row = self.physical_to_logical_map[layer_id, start:end]
-
-        for dst_rank, logical_expert_id_to_send in expert_send_info:
-            matches = (
-                (row == logical_expert_id_to_send).nonzero(as_tuple=False).view(-1)
+    def prepare_send(
+        self, expert_weights, expert_send_info, num_local_experts, layer_id
+    ):
+        for dst_rank, global_expert_id_to_send in expert_send_info:
+            local_expert_id_to_send = idx_global_to_local(
+                global_expert_id_to_send,
+                num_local_experts,
+                get_ep_group().device_group.rank(),
             )
-            if matches.numel() == 0:
-                continue
-            local_slot_idx = matches[0].item()
-            for param_tensor in model.expert_weights[layer_id]:
-                src_tensor = param_tensor[local_slot_idx]
+            for src_tensor in expert_weights[layer_id][local_expert_id_to_send]:
                 self.comm_op_list.append(
                     torch.distributed.P2POp(
                         torch.distributed.isend, src_tensor, dst_rank
                     )
                 )
 
-    def prepare_recv(self, model, expert_recv_info, updated_expert_map):
-        layer_weights = list(model.expert_weights[self.cur_layer_id])
-        for recv_rank, global_expert_id_to_recv in expert_recv_info:
-            if isinstance(updated_expert_map, torch.Tensor):
-                local_expert_to_replace = updated_expert_map[
-                    global_expert_id_to_recv
-                ].item()
-            else:
-                local_expert_to_replace = int(
-                    updated_expert_map[global_expert_id_to_recv]
-                )
-            for param_tensor in layer_weights:
-                dst_tensor = param_tensor[local_expert_to_replace]
+    def prepare_recv(self, expert_recv_info, updated_expert_map):
+        for buffer_tensor_id, (recv_rank, global_expert_id_to_recv) in enumerate(
+            expert_recv_info
+        ):
+            for buffer_tensor in self.buffer_tensor_list[buffer_tensor_id]:
                 self.comm_op_list.append(
                     torch.distributed.P2POp(
-                        torch.distributed.irecv, dst_tensor, recv_rank
+                        torch.distributed.irecv, buffer_tensor, recv_rank
                     )
                 )
+            local_expert_id_to_replace = updated_expert_map[
+                global_expert_id_to_recv
+            ].item()
+            self.recv_expert_list.append((local_expert_id_to_replace, buffer_tensor_id))
 
-    def should_trigger_rebalance(self):
+    def rebalance_expert_weight_flag(self):
         """
         Determines whether expert rebalancing should be triggered in the current
         iteration. This typically occurs right before the expert weight update phase.
@@ -897,6 +938,19 @@ class EplbState:
         return self.expert_rearrangement_step == (
             self.expert_rearrangement_step_interval - 1
         )
+
+    def update_expert_map_flag(self):
+        """
+        Determines if expert maps should be updated in the current iteration. This
+        is typically true for a short window after the EPLB update and worker wait.
+
+        Returns:
+            True if expert maps should be updated, False otherwise
+        """
+        map_update_counter = self.expert_rearrangement_step - (
+            self.expert_rearrangement_step_interval + self.num_wait_worker_iterations
+        )
+        return 0 <= map_update_counter < self.num_moe_layers
 
     def compute_and_set_moe_load(self):
         """
@@ -913,16 +967,23 @@ class EplbState:
         local_load = self.expert_load_pass.clone()
 
         if torch.distributed.is_initialized():
-            self.world_size = torch.distributed.get_world_size()
+            ep_group = get_ep_group().device_group
             self.device = local_load.device
-            if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape)
+            ep_world_size = ep_group.size()
+
+            if (
+                self._gather_buffer is None
+                or self._gather_buffer.shape[0] != ep_world_size
+                or tuple(self._gather_buffer.shape[1:]) != tuple(local_load.shape)
+            ):
+                shape = (ep_world_size, *local_load.shape)
                 self._gather_buffer = torch.empty(
                     shape, dtype=local_load.dtype, device=self.device
                 )
 
-            torch.distributed.all_gather_into_tensor(self._gather_buffer, local_load)
-
+            torch.distributed.all_gather_into_tensor(
+                self._gather_buffer, local_load, group=ep_group
+            )
             moe_load = self._gather_buffer.permute(1, 0, 2)
             L, W, E_local = moe_load.shape
             physical_view = moe_load.permute(0, 2, 1).reshape(L, W * E_local)
@@ -1010,6 +1071,21 @@ class EplbState:
         """Clean up async process resources"""
         if self._async_processor:
             self._async_processor.cleanup()
+
+    def _require_process(self) -> "EPLBProcess":
+        if self._async_processor is None:
+            raise RuntimeError("EPLB process not initialized")
+        return self._async_processor
+
+    def _require_maps(self) -> tuple[torch.Tensor, torch.Tensor]:
+        proc = self._require_process()
+        phy2log = proc.phy2log_map
+        if phy2log is None:
+            raise RuntimeError("phy2log_map is None")
+        log2phy = proc.log2phy_map
+        if log2phy is None:
+            raise RuntimeError("log2phy_map is None")
+        return phy2log, log2phy
 
 
 def _node_count_with_rank_mapping(

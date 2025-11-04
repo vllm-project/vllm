@@ -13,7 +13,6 @@ import torch.distributed as dist
 from vllm.logger import init_logger
 
 from .eplb_expert_mapper import BipartiteExpertUpdate, GreedyExpertUpdate
-from .eplb_state import ExpertMapperArgs, RebalanceTaskArgs
 
 logger = init_logger(__name__)
 
@@ -40,14 +39,17 @@ class EPLBProcess:
         # Process management related
         self._process: mp.Process | None = None
         self._input_queue: Queue | None = None
-        self._result_queue: Queue | None = None
+        self._output_queue: Queue | None = None
         self._exception_queue: Queue | None = None
+        self._map_queue: Queue | None = None
         self._step_counter = 0
-        self._result: tuple | None = None
+        self._result: list | None = None
         self._is_running = False
         self._has_pending_task = False
         self._is_post_processing = False
         self.rank_id = dist.get_rank()
+        self._log2phy_map: torch.Tensor | None = None
+        self._phy2log_map: torch.Tensor | None = None
 
         # Initialize process and queues
         self._initialize_process()
@@ -57,14 +59,20 @@ class EPLBProcess:
         try:
             # Initialize queues
             self._input_queue = Queue()
-            self._result_queue = Queue()
+            self._output_queue = Queue()
             self._exception_queue = Queue()
+            self._map_queue = Queue()
 
             # Start the process
             self._process = mp.Process(
                 target=self._worker_loop,
                 name="EPLBProcess",
-                args=(self._input_queue, self._result_queue, self._exception_queue),
+                args=(
+                    self._input_queue,
+                    self._output_queue,
+                    self._exception_queue,
+                    self._map_queue,
+                ),
             )
             self._process.start()
             self._is_running = True
@@ -76,11 +84,34 @@ class EPLBProcess:
 
     def pack_update_info(self, update_info_generator):
         """
-        Pack a list of update info tuples for efficient IPC.
+        Collects and packages expert update information across all MoE layers
+        into a structured list for later processing or transfer.
+
+        Args:
+            update_info_generator: An iterable that yields tuples of
+                (send_info, recv_info, new_expert_map, layer_id),
+                where each element represents expert redistribution data
+                for a specific MoE layer.
+
+        Returns:
+            A list of tuples, where each tuple corresponds to one MoE layer and
+            contains:
+                - send_all: List of experts this rank needs to send.
+                - recv_all: List of experts this rank needs to receive.
+                - phy2log_all: Physical-to-logical expert mapping for this rank.
+                - log2phy_all: Logical-to-physical expert mapping for this rank.
+                - layer_ids: The layer index associated with this update.
+
+        Notes:
+            This function aggregates expert communication plans
+            (`send_info`, `recv_info`) and mapping updates
+            (`phy2log`, `log2phy`) for each layer. The collected information is
+            used by asynchronous processors or weight-transfer routines during
+            expert rebalancing.
         """
         send_all = []
         recv_all = []
-        maps = []
+        phy2log_all = []
         log2phy_all = []
         layer_ids = []
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
@@ -89,14 +120,14 @@ class EPLBProcess:
             send_all.append(send_info_this_rank)
             recv_all.append(recv_info_this_rank)
 
-            maps.append(new_expert_map[self.rank_id].numpy().tolist())
+            phy2log_all.append(new_expert_map[self.rank_id].numpy().tolist())
 
             log2phy_map = self.generate_log2phy_map(new_expert_map)
             log2phy_all.append(log2phy_map[self.rank_id].numpy().tolist())
 
             layer_ids.append(layer_id)
 
-        return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
+        return list(zip(send_all, recv_all, phy2log_all, log2phy_all, layer_ids))
 
     def generate_log2phy_map(self, expert_map):
         """
@@ -151,25 +182,40 @@ class EPLBProcess:
         return log2phy_map
 
     def _worker_loop(
-        self, input_queue: Queue, output_queue: Queue, exception_queue: Queue
+        self,
+        input_queue: Queue,
+        output_queue: Queue,
+        exception_queue: Queue,
+        map_queue: Queue,
     ) -> None:
         """Subprocess worker loop that processes tasks continuously"""
         try:
             while True:
                 # Get arguments from input queue
                 try:
-                    args, expert_mapper_args = input_queue.get(timeout=1.0)
+                    item = input_queue.get(timeout=1.0)
                     # Sentinel value to stop the process
+                    if item is None:
+                        break
+                    args, expert_mapper_args = item
                     if args is None or expert_mapper_args is None:
                         break
 
                     # Execute target function
-                    result = self.target_func(*args)
+                    result = self.target_func(
+                        args.global_expert_load_window,
+                        args.num_replicas,
+                        args.num_groups,
+                        args.num_nodes,
+                        args.num_gpus,
+                    )
 
-                    new_physical_to_logical_map = result[0]
+                    self._phy2log_map = result[0]
+                    self._log2phy_map = result[1]
+
                     policy_type = expert_mapper_args.policy_type
                     # Generate migration information
-                    new_deployment = new_physical_to_logical_map.reshape(
+                    new_deployment = self._phy2log_map.reshape(
                         expert_mapper_args.num_moe_layers,
                         args.num_gpus,
                         -1,
@@ -189,12 +235,30 @@ class EPLBProcess:
                         update_info = GreedyExpertUpdate(
                             new_deployment, old_deployment
                         ).generate()
+                    else:
+                        update_info = GreedyExpertUpdate(
+                            new_deployment, old_deployment
+                        ).generate()
+
+                    # NEW: send maps via dedicated queue (CPU tensors)
+                    try:
+                        map_queue.put(
+                            (
+                                self._phy2log_map.detach().cpu().contiguous(),
+                                self._log2phy_map.detach().cpu().contiguous(),
+                            )
+                        )
+                    except Exception:
+                        logger.exception("Failed to send maps to parent via map_queue")
+
+                    # Keep the original output payload unchanged
                     output_queue.put(self.pack_update_info(update_info))
 
                 except Empty:
                     # Timeout, check if we should continue
                     continue
                 except Exception as e:
+                    # Preserve original semantics for output_queue
                     output_queue.put(None)
                     if hasattr(e, "add_note"):
                         import traceback
@@ -209,9 +273,7 @@ class EPLBProcess:
         finally:
             logger.debug("EPLB worker process exiting")
 
-    def submit_task(
-        self, args: RebalanceTaskArgs, expert_mapper_args: ExpertMapperArgs
-    ) -> bool:
+    def submit_task(self, args, expert_mapper_args) -> bool:
         """
         Submit a task to the asynchronous process
 
@@ -275,19 +337,32 @@ class EPLBProcess:
 
     def _should_process(self) -> bool:
         """Determine if results need processing"""
-        if not self._process or not self._result_queue:
+        if not self._process or not self._output_queue:
             return True
 
         return (
             self._step_counter >= self._num_wait_worker_iterations
             or not self._process.is_alive()
-            or not self._result_queue.empty()
+            or not self._output_queue.empty()
         )
 
     def _fetch_result(self) -> None:
         """Retrieve subprocess results"""
-        if self._result_queue and not self._result_queue.empty():
-            self._result = self._result_queue.get()
+        # NEW: first, try to refresh maps from map_queue (non-blocking; keep the latest)
+        if self._map_queue:
+            while True:
+                try:
+                    p2l, l2p = self._map_queue.get_nowait()
+                    self._phy2log_map = p2l
+                    self._log2phy_map = l2p
+                except Empty:
+                    break
+                except Exception:
+                    logger.exception("Failed to receive maps from map_queue")
+
+        # Original result fetching logic remains unchanged
+        if self._output_queue and not self._output_queue.empty():
+            self._result = self._output_queue.get()
         else:
             self._result = None
             logger.warning("Asynchronous process completed but no result was returned")
@@ -297,7 +372,7 @@ class EPLBProcess:
         # Send sentinel value to stop the process
         if self._input_queue:
             with suppress(Exception):
-                self._input_queue.put(None)
+                self._input_queue.put((None, None))
 
         if self._process:
             if self._process.is_alive():
@@ -305,7 +380,12 @@ class EPLBProcess:
                 self._process.join(timeout=1.0)
             self._process = None
 
-        for q in (self._input_queue, self._result_queue, self._exception_queue):
+        for q in (
+            self._input_queue,
+            self._output_queue,
+            self._exception_queue,
+            self._map_queue,
+        ):
             if q:
                 with suppress(Exception):
                     q.close()
@@ -313,8 +393,9 @@ class EPLBProcess:
                     q.join_thread()
 
         self._input_queue = None
-        self._result_queue = None
+        self._output_queue = None
         self._exception_queue = None
+        self._map_queue = None
         self._is_running = False
         self._has_pending_task = False
 
@@ -337,9 +418,19 @@ class EPLBProcess:
         self._is_post_processing = value
 
     @property
-    def result(self) -> tuple | None:
+    def result(self) -> list | None:
         """Return processing results"""
         return self._result
+
+    @property
+    def log2phy_map(self) -> torch.Tensor | None:
+        """Return logical to physical map"""
+        return self._log2phy_map
+
+    @property
+    def phy2log_map(self) -> torch.Tensor | None:
+        """Return physical to logical map"""
+        return self._phy2log_map
 
     def __del__(self):
         """Ensure resource cleanup when object is destroyed"""

@@ -50,7 +50,7 @@ class ComposeExpertUpdate:
                     self._map_to_yield(layer_id),
                     layer_id,
                 )
-
+                continue
             # Main planning
             self._plan_transfers(
                 layer_id,
