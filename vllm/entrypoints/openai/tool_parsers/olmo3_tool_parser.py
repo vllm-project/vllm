@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
@@ -31,7 +30,6 @@ class _UnexpectedAstError(Exception):
     pass
 
 
-@ToolParserManager.register_module("olmo3")
 class Olmo3PythonicToolParser(ToolParser):
     """
     Tool call parser for Olmo 3 models that produce tool calls as

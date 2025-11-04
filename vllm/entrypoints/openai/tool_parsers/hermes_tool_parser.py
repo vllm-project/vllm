@@ -20,7 +20,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -28,7 +27,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("hermes")
 class Hermes2ProToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)
