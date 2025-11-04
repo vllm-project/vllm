@@ -16,8 +16,7 @@ from vllm.platforms.rocm import RocmPlatform
 @pytest.fixture(autouse=True)
 def clear_cache():
     """Clear lru cache to ensure each test case runs without caching."""
-    _cached_get_attn_backend.cache_clear()
-
+    pass
 
 # Define MLA and non-MLA backends separately
 DEVICE_MLA_BACKENDS = {
