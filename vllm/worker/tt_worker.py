@@ -538,7 +538,7 @@ def device_params_from_override_tt_config(override_tt_config, trace_mode):
 
     if trace_mode:
         # Set the most common value as default, override later
-        device_params["trace_region_size"] = 25000000
+        device_params["trace_region_size"] = 50000000
         if override_tt_config and "trace_region_size" in override_tt_config:
             device_params["trace_region_size"] = override_tt_config[
                 "trace_region_size"]

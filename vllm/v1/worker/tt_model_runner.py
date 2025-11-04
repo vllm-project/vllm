@@ -405,9 +405,6 @@ class TTModelRunner:
             top_p=top_p[0],
         )
 
-        assert not TTPlatform.compat_sampling_possible, (
-            "Compatibility sampling is not yet supported in V1 TT backend")
-        sampling_params_list: list[Any] = []
         compat_sampling_used = False
         sampling_metadata = None
 
@@ -424,8 +421,8 @@ class TTModelRunner:
             seq_groups=None,  # Not used in V1
             block_tables=block_tables,
             unpadded_batch_size=num_reqs,
+            perform_device_sampling=None,  #currently unused in v1
             tt_sampling_params=tt_sampling_params,
-            sampling_params_list=sampling_params_list,
             compat_sampling_used=compat_sampling_used,
             sampling_metadata=sampling_metadata,
             multi_modal_kwargs=multi_modal_kwargs,
@@ -635,9 +632,6 @@ class TTModelRunner:
         input_tokens = torch.cat(input_tokens_list, dim=0)
         block_tables = torch.cat(block_tables_list, dim=0)
 
-        assert not TTPlatform.compat_sampling_possible, (
-            "Compatibility sampling is not yet supported in V1 TT backend")
-        sampling_params_list: list[Any] = []
         compat_sampling_used = False
         sampling_metadata = None
 
@@ -659,8 +653,8 @@ class TTModelRunner:
             seq_groups=None,
             block_tables=block_tables,
             unpadded_batch_size=batch_size_per_dp,
+            perform_device_sampling=None,  #currently unused in v1
             tt_sampling_params=sampling_params_per_dp,
-            sampling_params_list=sampling_params_list,
             compat_sampling_used=compat_sampling_used,
             sampling_metadata=sampling_metadata,
             multi_modal_kwargs=multi_modal_kwargs,

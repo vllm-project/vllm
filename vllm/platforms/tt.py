@@ -78,7 +78,8 @@ class TTPlatform(Platform):
                 and "sample_on_device_mode" in override_tt_config):
             sample_on_device_mode = override_tt_config["sample_on_device_mode"]
             assert sample_on_device_mode in [
-                "all", "decode_only"
+                "all",
+                "decode_only",
             ], f"Invalid sample_on_device_mode: {sample_on_device_mode}"
         else:
             sample_on_device_mode = None
@@ -89,11 +90,8 @@ class TTPlatform(Platform):
         # It is off by default, and enabled only on request
         # or if any of the requests in the batch require it.
         # For now, it is only supported with host-side sampling.
-        cls.compat_sampling_possible = (  # type: ignore[attr-defined]
-            sample_on_device_mode is None)
 
-        if cls.compat_sampling_possible and envs.VLLM_USE_V1:  # type: ignore[attr-defined]
-            cls.compat_sampling_possible = False  # type: ignore[attr-defined]
+        if envs.VLLM_USE_V1:  # type: ignore[attr-defined]
             logger.warning(
                 "Disabling compatibility sampling as it's not yet support for "
                 "V1 TT backend.")
@@ -114,10 +112,6 @@ class TTPlatform(Platform):
                 logger.info(
                     "Compatibility sampling mode enabled for all requests")
         cls.always_compat_sampling = always_compat_sampling  # type: ignore[attr-defined]
-
-        if cls.always_compat_sampling and not cls.compat_sampling_possible:  # type: ignore[attr-defined]
-            raise ValueError("Compatibility sampling mode only works with"
-                             "sample_on_device_mode=None")
 
         # must perform local import to get around circular import
         from vllm.model_executor.model_loader.utils import (
@@ -149,7 +143,8 @@ class TTPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:
-        # The sampling code tries to use pinned memory in case we're using GPUs.
+        # The regular v0 vLLM sampling code tries
+        # to use pinned memory in case we're using GPUs.
         return False
 
     # Require DP ranks to gather batches to a single driver
@@ -178,25 +173,10 @@ class TTPlatform(Platform):
                 raise ValueError(
                     f"Currently not supporting prompt_logprobs on "
                     f"{cls.device_name}")
-            if cls.compat_sampling_required(
-                    params
-            ) and not cls.compat_sampling_possible:  # type: ignore[attr-defined]
-                raise ValueError(
-                    "Sampling params beyond temperature, "
-                    "top_k, top_p require compatibility sampling mode"
-                    " which is only available with"
-                    "sample_on_device_mode=None. "
-                    f"Supplied params: {params}")
-            sample_mode = cls.sample_on_device_mode  # type: ignore[attr-defined]
-            non_greedy = cls.non_greedy_decoding_on_device  # type: ignore[attr-defined]
-            if (params.temperature > 0.0 and sample_mode is not None
-                    and not non_greedy):
-                raise ValueError(
-                    "Non-greedy decoding on-device is not supported by this "
-                    f"model implementation. Supplied params: {params}")
 
     @staticmethod
     def compat_sampling_required(sampling_params) -> bool:
+        # anything beyond top-k top-p sampling requires compat sampling
         return (sampling_params.presence_penalty != 0.0
                 or sampling_params.frequency_penalty != 0.0
                 or sampling_params.repetition_penalty != 1.0
