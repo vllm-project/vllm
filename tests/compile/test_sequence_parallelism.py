@@ -27,9 +27,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
+
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
@@ -114,18 +112,15 @@ class TestQuantModel(torch.nn.Module):
         # Initialize weights
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=self.quant_key,
-            weight_quant_key=self.quant_key,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
         self.scale = torch.rand(1, dtype=torch.float32)
         # Create a weight that is compatible with torch._scaled_mm,
         # which expects a column-major layout.
         self.w = torch.rand(hidden_size, intermediate_size).to(dtype=FP8_DTYPE).t()
         self.wscale = torch.rand(1, dtype=torch.float32)
+        self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key,
+            self.w, self.wscale, self.scale)
 
+        
     def forward(self, hidden_states, residual):
         """
         Forward pass implementing the operations in the FX graph
@@ -150,8 +145,7 @@ class TestQuantModel(torch.nn.Module):
         # layer normalization
         norm_output, residual_output = self.norm(all_reduce, residual)
         # scaled_mm with static input quantization
-        layer = TestFP8Layer(None, None, self.scale.to(norm_output.device))
-        fp8_linear_result = self.fp8_linear.apply(layer, norm_output)
+        fp8_linear_result = self.fp8_linear(norm_output)
 
         return fp8_linear_result, residual_output
 

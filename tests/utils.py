@@ -49,6 +49,8 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import init_fp8_linear_kernel
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -1414,11 +1416,45 @@ def flat_product(*iterables: Iterable[Any]):
 
 
 class TestFP8Layer(torch.nn.Module):
-    """Helper class for ScaledMMLinearKernels."""
+    """
+    Test helper class for evaluating FP8 linear operations with quantization.
 
-    def __init__(self, weight, weight_scale, input_scale):
+    It supports configurable activation and weight quantization parameters,
+    and provides a forward method that applies the FP8 linear transformation
+    with optional bias.
+
+    Args:
+        activation_quant_key (QuantKey): Key for activation quantization configuration.
+        weight_quant_key (QuantKey): Key for weight quantization configuration.
+        weight (torch.Tensor): Weight tensor for linear transformation.
+        weight_scale (torch.Tensor): Per-tensor or per-group scale for weights.
+        input_scale (torch.Tensor): Scale tensor for input quantization.
+        out_dtype (torch.dtype, optional): Output tensor data type. Defaults to torch.get_default_dtype().
+    """
+    def __init__(self,
+            activation_quant_key: QuantKey,
+            weight_quant_key: QuantKey,
+            weight:torch.Tensor,
+            weight_scale:torch.Tensor,
+            input_scale:torch.Tensor,
+            out_dtype: torch.dtype = torch.get_default_dtype()
+        ):
         super().__init__()
         self.weight_scale = weight_scale
         self.weight = weight
         self.input_scale = input_scale
         self.input_scale_ub = None
+        
+        self.kernel = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=out_dtype,
+            module_name=self.__class__.__name__,
+        )
+    
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.kernel.quant_fp8.enabled()
+
+    def forward(self, y: torch.Tensor, bias: torch.Tensor | None=None) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)
+

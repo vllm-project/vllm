@@ -20,14 +20,12 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
+from ..utils import TestFP8Layer
 
 from .backend import TestBackend
 
@@ -43,20 +41,14 @@ class TestSiluMul(torch.nn.Module):
         self.silu_and_mul = SiluAndMul()
         self.weight_scale = torch.rand(1, dtype=torch.float32)
         self.input_scale = torch.rand(1, dtype=torch.float32)
-        self.input_scale_ub = None
         if TEST_FP8:
             self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=self.quant_key,
-                weight_quant_key=self.quant_key,
-                out_dtype=torch.get_default_dtype(),
-                module_name=self.__class__.__name__,
-            )
-
+            self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key, self.weight,
+                                    self.weight_scale, self.input_scale)
     def forward(self, x):
         y = self.silu_and_mul(x)
         if TEST_FP8:
-            return self.fp8_linear.apply_weights(self, y)
+            return self.fp8_linear(y)
         else:
             return y
 
@@ -90,18 +82,13 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
         if TEST_FP8:
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=self.quant_key,
-                weight_quant_key=self.quant_key,
-                out_dtype=torch.get_default_dtype(),
-                module_name=self.__class__.__name__,
-            )
             self.weight = (
                 torch.rand(hidden_size, intermediate_size).to(dtype=FP8_DTYPE).t()
             )
             self.weight_scale = torch.rand(1, dtype=torch.float32)
             self.input_scale = torch.rand(1, dtype=torch.float32)
-            self.input_scale_ub = None
+            self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key,
+                self.weight, self.weight_scale, self.input_scale)
 
     def forward(self, hidden_states, residual):
         # Reshape input
@@ -117,7 +104,7 @@ class TestFusedAddRMSNorm(torch.nn.Module):
         if TEST_FP8:
             self.input_scale = self.input_scale.to(norm_output.device)
             # scaled_mm with static input quantization
-            fp8_linear_result = self.fp8_linear.apply_weights(self, norm_output)
+            fp8_linear_result = self.fp8_linear(norm_output)
 
             return fp8_linear_result, residual_output
 

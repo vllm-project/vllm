@@ -24,9 +24,7 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
+
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Quant,
@@ -36,7 +34,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..utils import override_cutlass_fp8_supported
+from ..utils import TestFP8Layer, override_cutlass_fp8_supported
 from .backend import TestBackend
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -55,22 +53,19 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
         self.silu_and_mul = SiluAndMul()
         self.weight_scale = torch.rand(1, dtype=torch.float32)
         self.input_scale = torch.rand(1, dtype=torch.float32)
-        self.input_scale_ub = None
         self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=self.quant_key,
-                weight_quant_key=self.quant_key,
-                out_dtype=torch.get_default_dtype(),
-                module_name=self.__class__.__name__,
-            )
+            self.fp8_linear = TestFP8Layer(self.quant_key, self.quant_key,
+                self.weight, self.weight_scale, self.input_scale)
+
+        
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
-        self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
+        self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = self.fp8_linear.apply_weights(self, y)
+        x2 = self.fp8_linear(y)
         return x2
 
     def ops_in_model_before(self):
