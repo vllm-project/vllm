@@ -690,7 +690,8 @@ steps:
   - tests/models/test_initialization.py
   commands:
     # Run a subset of model initialization tests
-    - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+    #- pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
+    - pytest -v -s models
 
 - label: Basic Models Tests (Extra Initialization) %N
   timeout_in_minutes: 45
