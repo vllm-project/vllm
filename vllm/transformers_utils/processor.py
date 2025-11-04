@@ -172,7 +172,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
         )
         call_kwargs_annotations = call_kwargs.annotation if call_kwargs else None
         # if the processor has explicit kwargs annotation, use it
-        if call_kwargs_annotations is not None:
+        if call_kwargs_annotations not in (None, inspect._empty):
             # get_type_hints will parse all type annotations at runtime,
             # and if an annotation refers to a type or
             # name that hasn’t been imported or defined, it will raise an error.
