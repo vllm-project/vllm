@@ -226,7 +226,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        self.moe = layer
         layer.quant_config = self.quant_config
         bit8_pack_factor = self.quant_config.bit8_pack_factor
         group_size = self.quant_config.group_size
@@ -381,7 +380,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
         if enable_eplb:
             raise NotImplementedError("EPLB not supported for `MoeWNA16Method` yet.")
 

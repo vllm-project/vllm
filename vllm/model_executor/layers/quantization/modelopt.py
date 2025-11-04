@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    is_valid_flashinfer_cutlass_fused_moe,
-)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
@@ -605,7 +602,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert self.fused_experts is None
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
@@ -638,24 +634,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        #
-        # Note: the order here is important. self.fused_experts can override
-        # cutlass or fused_experts.
-        #
-        if self.fused_experts is not None:
-            return self.fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert not renormalize
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
@@ -1647,8 +1626,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
             from vllm.model_executor.models.llama4 import Llama4MoE
 
-            assert self.fused_experts is None
-
             a1_gscale = layer.w13_input_scale_quant
             (hidden_states_fp4, hidden_states_scale_linear_fp4) = (
                 flashinfer.fp4_quantize(
@@ -1720,13 +1697,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        #
-        # Note: the order here is important. self.fused_experts can override
-        # flashinfer cutlass, cutlass fp4 or fused_experts but not marlin or
-        # trtllm.
-        #
         if self.use_marlin:
-            assert self.fused_experts is None
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -1747,23 +1718,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
 
-        elif self.fused_experts is not None:
-            assert (
-                self.allow_flashinfer
-                and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        elif (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        ):
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                flashinfer_cutlass_moe_fp4,
             )
 
-            assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight
-            ), "Flashinfer CUTLASS Fused MoE not applicable!"
+            assert self.moe_quant_config is not None
 
-            return self.fused_experts(
+            return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=False,  # TODO(shuw): fix later, now output is high prec
+                quant_config=self.moe_quant_config,
+                inplace=False,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
