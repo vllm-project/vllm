@@ -71,6 +71,13 @@ if current_platform.is_cuda():
             attention_fusions=0,
             allreduce_fusions=65,
         ),
+        ModelBackendTestCase(
+            model_name="meta-llama/Llama-3.1-8B-Instruct",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.FLASHINFER,
+            attention_fusions=32,
+            allreduce_fusions=65,
+        ),
     ]
 
 elif current_platform.is_rocm():
