@@ -650,7 +650,7 @@ class AsyncLLM(EngineClient):
 
         return {
             "is_paused": self._is_paused,
-            "num_unfinished_requests": self.output_processor.num_unfinished_requests(),
+            "num_unfinished_requests": self.output_processor.get_num_unfinished_requests(),
         }
 
     async def encode(
