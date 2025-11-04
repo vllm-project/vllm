@@ -6,7 +6,7 @@ import hashlib
 import os
 from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
@@ -175,6 +175,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
     name = "inductor_standalone"
 
+    def __init__(self, save_format: Literal["binary", "unpacked"]):
+        self.save_format = save_format
+
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
         hash_str = hashlib.md5(
@@ -220,7 +223,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
         if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            compiled_graph.save(path=path, format="unpacked")
+            compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
 
@@ -237,7 +240,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle[1], str)
         path = handle[1]
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
-            path=path, format="unpacked"
+            path=path, format=self.save_format
         )
         from torch._inductor.compile_fx import graph_returns_tuple
 

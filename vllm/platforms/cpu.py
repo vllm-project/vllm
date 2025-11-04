@@ -316,7 +316,8 @@ class CpuPlatform(Platform):
 
         if (
             platform.system() == "Linux"
-            and Platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and Platform.get_cpu_architecture()
+            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
             and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
         ):
             # We need to LD_PRELOAD PyTorch's libgomp, otherwise only

@@ -6,7 +6,7 @@ KV cache helper for store.
 
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 import torch
 
@@ -138,8 +138,11 @@ class KVOutputAggregator:
         return cls(connector.get_finished_count() or world_size)
 
     def aggregate(
-        self, outputs: list[ModelRunnerOutput], output_rank: int = 0
-    ) -> ModelRunnerOutput:
+        self, outputs: list[ModelRunnerOutput | None], output_rank: int = 0
+    ) -> ModelRunnerOutput | None:
+        if not outputs[output_rank]:
+            return None
+
         # Aggregate kv_connector_output from all workers
 
         def update_finished_set(
@@ -161,6 +164,7 @@ class KVOutputAggregator:
         aggregated_kv_connector_stats = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
+            assert model_runner_output is not None
             kv_output = model_runner_output.kv_connector_output
             if not kv_output:
                 continue
@@ -204,6 +208,7 @@ class KVOutputAggregator:
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
+        assert output is not None
         output.kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
@@ -215,39 +220,25 @@ class KVOutputAggregator:
         return output
 
     def async_aggregate(
-        self, output_futures: Sequence[Future[ModelRunnerOutput]], output_rank: int = 0
-    ) -> Future[ModelRunnerOutput]:
-        """Takes a list of futures and returns a single future which resolves
-        to the respective list of outputs."""
-        result_future: Future[ModelRunnerOutput] = Future()
+        self,
+        output_future: Future[Sequence[ModelRunnerOutput | None]],
+        output_rank: int = 0,
+    ) -> Future[ModelRunnerOutput | None]:
+        """Takes a future that resolves to a list of outputs and returns a future
+        which resolves to a single aggregated output."""
+        result_future: Future[ModelRunnerOutput | None] = Future()
 
-        outputs: list[ModelRunnerOutput | None] = [None] * len(output_futures)
+        def callback(fut):
+            if result_future.done():
+                return
+            try:
+                result_future.set_result(self.aggregate(fut.result(), output_rank))
+            except CancelledError:
+                result_future.cancel()
+            except Exception as e:
+                result_future.set_exception(e)
 
-        def make_callback(idx):
-            def callback(fut):
-                if result_future.done():
-                    return
-
-                try:
-                    outputs[idx] = fut.result()
-                except CancelledError:
-                    result_future.cancel()
-                except Exception as e:
-                    result_future.set_exception(e)
-
-                # this check assumes io_thread_pool uses a single thread
-                if all(outputs):
-                    result_future.set_result(
-                        self.aggregate(
-                            cast(list[ModelRunnerOutput], outputs), output_rank
-                        )
-                    )
-
-            return callback
-
-        for i, output_future in enumerate(output_futures):
-            output_future.add_done_callback(make_callback(i))
-
+        output_future.add_done_callback(callback)
         return result_future
 
 
