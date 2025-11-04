@@ -59,9 +59,7 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
-
   for (int idx = threadIdx.x; idx < hidden_size / VEC_SIZE; idx += blockDim.x) {
-    // Make a local copy of the entire pack
     vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[idx];
     vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[idx];
 #pragma unroll
@@ -196,9 +194,7 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
 
-  // When num_tokens is large, use a smaller block size.
-  // Smaller blocks increase occupancy by allowing more concurrent
-  // blocks per SM, improving latency hiding and overall throughput.
+  // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));

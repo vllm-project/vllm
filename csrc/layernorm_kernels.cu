@@ -17,14 +17,9 @@ __global__ void rms_norm_kernel(
     const int64_t input_stride,
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
-  const int block_size = blockDim.x;
-  const int block_id = blockIdx.x;
-  const int thread_id = threadIdx.x;
-
   __shared__ float s_variance;
   float variance = 0.0f;
-
-  const scalar_t* input_row = input + block_id * input_stride;
+  const scalar_t* input_row = input + blockIdx.x * input_stride;
 
   auto vec_op = [&variance](const vec_n_t<scalar_t, VEC_SIZE>& vec) {
 #pragma unroll
@@ -38,25 +33,23 @@ __global__ void rms_norm_kernel(
     variance += x * x;
   };
   vllm::vectorize_read_with_alignment<VEC_SIZE>(
-      input_row, hidden_size, thread_id, block_size, vec_op, scalar_op);
+      input_row, hidden_size, threadIdx.x, blockDim.x, vec_op, scalar_op);
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, block_size);
+  variance = BlockReduce(reduceStore).Reduce(variance, CubAddOp{}, blockDim.x);
 
-  if (thread_id == 0) {
+  if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
   }
   __syncthreads();
 
-  scalar_t* out_row = out + block_id * hidden_size;
+  scalar_t* out_row = out + blockIdx.x * hidden_size;
   auto* v_in = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(input_row);
   auto* v_w = reinterpret_cast<const vec_n_t<scalar_t, VEC_SIZE>*>(weight);
   auto* v_out = reinterpret_cast<vec_n_t<scalar_t, VEC_SIZE>*>(out_row);
-
-  for (int i = thread_id; i < hidden_size / VEC_SIZE; i += block_size) {
+  for (int i = threadIdx.x; i < hidden_size / VEC_SIZE; i += blockDim.x) {
     vec_n_t<scalar_t, VEC_SIZE> dst;
-    // Make a local copy of the entire pack
     vec_n_t<scalar_t, VEC_SIZE> src1 = v_in[i];
     vec_n_t<scalar_t, VEC_SIZE> src2 = v_w[i];
 #pragma unroll
@@ -184,9 +177,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   int num_tokens = input_view.numel() / hidden_size;
   int64_t input_stride = input_view.stride(-2);
 
-  // When num_tokens is large, use a smaller block size.
-  // Smaller blocks increase occupancy by allowing more concurrent
-  // blocks per SM, improving latency hiding and overall throughput.
+  // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input_view));
