@@ -122,7 +122,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.metrics.prometheus import get_prometheus_registry
 from vllm.version import __version__ as VLLM_VERSION
 
-router = APIRouter(tags=["Jinja APIs"])
+router = APIRouter(tags=["vLLM APIs"])
 
 logger = init_logger("vllm.entrypoints.jinja.api_server")
 
