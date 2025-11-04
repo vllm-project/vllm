@@ -6,7 +6,6 @@ import queue
 import signal
 import threading
 import time
-from collections import deque
 from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -143,12 +142,12 @@ class EngineCore:
         # schedule and execute batches, and is required by pipeline parallelism
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
-        self.batch_queue: Optional[deque[tuple[Future[ModelRunnerOutput],
-                                               SchedulerOutput]]] = None
+        self.batch_queue: Optional[queue.Queue[tuple[Future[ModelRunnerOutput],
+                                                      SchedulerOutput]]] = None
         if self.batch_queue_size > 1:
             logger.info("Batch queue is enabled with size %d",
                         self.batch_queue_size)
-            self.batch_queue = deque(maxlen=self.batch_queue_size)
+            self.batch_queue = queue.Queue(self.batch_queue_size)
 
         self.request_block_hasher: Optional[Callable[[Request],
                                                      list[BlockHash]]] = None
@@ -312,44 +311,44 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
-        batch_queue = self.batch_queue
-        assert batch_queue is not None
+        assert self.batch_queue is not None
 
+        engine_core_outputs = None
+        scheduler_output = None
         # Try to schedule a new batch if the batch queue is not full, but
         # the scheduler may return an empty batch if all requests are scheduled.
         # Note that this is not blocking.
-        assert len(batch_queue) < self.batch_queue_size
-
-        model_executed = False
-        if self.scheduler.has_requests():
+        if not self.batch_queue.full():
             scheduler_output = self.scheduler.schedule()
-            future = self.model_executor.execute_model(scheduler_output,
-                                                       non_block=True)
-            batch_queue.appendleft(
-                (future, scheduler_output))  # type: ignore[arg-type]
+            if scheduler_output.total_num_scheduled_tokens > 0:
+                # In v0.11.0, execute_model has non_block parameter
+                # We need non_block=True to get a Future
+                future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True)
+                self.batch_queue.put_nowait(
+                    (future, scheduler_output))  # type: ignore
 
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
-            if model_executed and len(batch_queue) < self.batch_queue_size \
-                and not batch_queue[-1][0].done():
-                # Don't block on next worker response unless the queue is full
-                # or there are no more requests to schedule.
-                return None, True
+        scheduled_batch = (scheduler_output is not None
+                           and scheduler_output.total_num_scheduled_tokens > 0)
 
-        elif not batch_queue:
-            # Queue is empty. We should not reach here since this method should
-            # only be called when the scheduler contains requests or the queue
-            # is non-empty.
-            return None, False
+        # If no more requests can be scheduled and the job queue is not empty,
+        # block until the first batch in the job queue is finished.
+        # TODO(comaniac): Ideally we should peek the first batch in the
+        # job queue to check if it's finished before scheduling a new batch,
+        # but peeking the first element in a queue is not thread-safe,
+        # so we need more work.
+        if not scheduled_batch and not self.batch_queue.empty():
+            future, scheduler_output = self.batch_queue.get_nowait()
 
-        # Block until the next result is available.
-        future, scheduler_output = batch_queue.pop()
-        model_output = self.execute_model_with_error_logging(
-            lambda _: future.result(), scheduler_output)
+            # Blocking until the first result is available.
+            model_output = self.execute_model_with_error_logging(
+                lambda _: future.result(), scheduler_output)
 
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output)
+            self.batch_queue.task_done()
+            engine_core_outputs = (self.scheduler.update_from_output(
+                scheduler_output, model_output))
 
-        return engine_core_outputs, model_executed
+        return engine_core_outputs, scheduled_batch
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -732,7 +731,7 @@ class EngineCoreProc(EngineCore):
 
         waited = False
         while not self.engines_running and not self.scheduler.has_requests() \
-                and not self.batch_queue:
+                and (self.batch_queue is None or self.batch_queue.empty()):
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
@@ -891,7 +890,8 @@ class EngineCoreProc(EngineCore):
         # Keep references to outputs and buffers until zmq is finished
         # with them (outputs may contain tensors/np arrays whose
         # backing buffers were extracted for zero-copy send).
-        pending = deque[tuple[zmq.MessageTracker, Any, bytearray]]()
+        from collections import deque as DequeType
+        pending = DequeType[tuple[zmq.MessageTracker, Any, bytearray]]()
 
         # We must set linger to ensure the ENGINE_CORE_DEAD
         # message is sent prior to closing the socket.
