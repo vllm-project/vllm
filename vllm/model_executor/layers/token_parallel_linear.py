@@ -126,9 +126,7 @@ class TokenParallelQKVLinear(QKVParallelLinear):
 
         metadata = getattr(get_forward_context(), "tknp_metadata", None)
         if (metadata is None or metadata._dummy_run
-                or metadata.tokens_per_rank is None
-                or metadata.rank_start_loc is None
-                or metadata.stage != "prefill"):
+                or metadata.tokens_per_rank is None):
             return self._fallback_forward(x, metadata)
 
         tokens_per_rank = metadata.tokens_per_rank

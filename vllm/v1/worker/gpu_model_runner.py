@@ -376,7 +376,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.tknp_tokens_per_rank_cache[assigned_rank] += len(req_data.prompt_token_ids)
 
             if self.root_rank:
-                logger.info(f"[TKNP] Assigned request {req_id} to rank {assigned_rank}, new tokens {len(req_data.prompt_token_ids)}")
+                logger.debug(f"[TKNP] Assigned request {req_id} to rank {assigned_rank}, new tokens {len(req_data.prompt_token_ids)}")
 
     def _cleanup_finished_request_ranks(
         self,
@@ -391,7 +391,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         for req_id in scheduler_output.finished_req_ids:
             self.req_to_tknp_rank.pop(req_id, None)
 
-    def _build_token_parallel_metadata_with_cached_ranks(
+    def _build_token_parallel_metadata(
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
@@ -415,20 +415,94 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             stage = "prefill"
             tokens_per_rank = self.tknp_tokens_per_rank_cache
-            
+
+        rank = get_tknp_rank()
+        
         return TokenParallelMetadata(
             num_reqs=self.input_batch.num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             stage=stage,
             tknp_enabled=True,
-            tknp_rank=get_tknp_rank(),
+            tknp_rank=rank,
             token_parallel_world_size=get_tknp_world_size(),
             tokens_per_rank=tokens_per_rank,
+            local_num_tokens=tokens_per_rank[rank],
         )
 
-    def _tknp_attn_metadata_slicing(self, attn_metadata):
+    def _tknp_slicing(self, 
+                      attn_metadata: dict[str, Any],
+                      tknp_metadata: TokenParallelMetadata,
+                      positions: torch.Tensor,):
+        """Slice attention metadata, positions tensor for token parallelism.
+        Selects the appropriate slices of attention metadata and positions from the full tensors.
+        TODO: This might not be the most efficient approach, revisit after KV cache optimization.
+
+        Args:
+            attn_metadata (dict): Dictionary mapping layer names to FlashAttentionMetadata
+            tknp_metadata (TokenParallelMetadata): Token parallel metadata with rank assignments
+            positions (torch.Tensor): The complete positions tensors for all requests
+        """
+        rank = tknp_metadata.tknp_rank
+        num_actual_tokens = tknp_metadata.local_num_tokens.item()
+        tokens_per_rank = tknp_metadata.tokens_per_rank
         
-        pass
+        # global sequence lengths
+        key_0 = attn_metadata.keys().__iter__().__next__()
+        # global_seq_lens = attn_metadata[next(iter(attn_metadata))].seq_lens  # Get from any layer
+        global_seq_lens = attn_metadata[key_0].seq_lens  # Get from any layer
+        
+        # token locations
+        tkns_start_loc = np.cumsum(np.concatenate(([0], tokens_per_rank[:-1])))
+        tkns_end_loc = np.cumsum(tokens_per_rank)
+
+        # request locations
+        tknp_reqs_start_loc = np.cumsum(np.concatenate(([0], self.tknp_reqs_per_rank[:-1])))
+        tknp_reqs_end_loc = np.cumsum(self.tknp_reqs_per_rank)
+
+        # local data
+        req_start_idx, req_end_idx = tknp_reqs_start_loc[rank], tknp_reqs_end_loc[rank]
+        tkn_start_idx, tkn_end_idx = tkns_start_loc[rank], tkns_end_loc[rank]
+        # logger.debug(f"[RANK {rank}] TKNP Slicing: reqs {req_start_idx}-{req_end_idx}, tokens {tkn_start_idx}-{tkn_end_idx}")
+        
+        local_seq_lens = global_seq_lens[req_start_idx:req_end_idx].contiguous()
+        new_query_start_locs = torch.cumsum(
+            torch.cat([torch.tensor([0], device=local_seq_lens.device), local_seq_lens]), dim=0,
+            dtype=torch.int32
+        )
+        new_max_seq_len = local_seq_lens.max().item()
+        new_num_reqs = local_seq_lens.size(0)
+        new_max_query_len = 1 if tknp_metadata.stage == "decode" else new_max_seq_len
+        
+        # slice position tensor
+        positions = positions[tkn_start_idx:tkn_end_idx].contiguous()
+        
+        processed_metadata_ids = set()
+        for layer_name, metadata in attn_metadata.items():
+            metadata_id = id(metadata)
+
+            if metadata_id not in processed_metadata_ids:
+                metadata.num_actual_tokens = num_actual_tokens
+                metadata.query_start_loc = new_query_start_locs
+                metadata.max_query_len = new_max_query_len
+                metadata.max_seq_len = new_max_seq_len
+                metadata.num_reqs = new_num_reqs
+                metadata.seq_lens = local_seq_lens
+                
+                # slot mappings
+                new_slot_mapping = metadata.slot_mapping[tkn_start_idx:tkn_end_idx].contiguous()
+                metadata.slot_mapping = new_slot_mapping
+                
+                # block tables
+                new_block_table = metadata.block_table[req_start_idx:req_end_idx].contiguous()
+                metadata.block_table = new_block_table
+                
+                processed_metadata_ids.add(metadata_id)
+                
+            else:
+                logger.debug(f"[RANK {rank}] Layer {layer_name} shares metadata with previous layer, skipping slice")
+        return attn_metadata, positions
+
+
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
         """
@@ -1086,7 +1160,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         tknp_metadata: Optional[TokenParallelMetadata] = None
         
         if token_parallel_enabled:
-            tknp_metadata = self._build_token_parallel_metadata_with_cached_ranks(
+            tknp_metadata = self._build_token_parallel_metadata(
                 scheduler_output,
                 num_scheduled_tokens,
                 int(total_num_scheduled_tokens),
@@ -1786,8 +1860,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         
-        print(f"[gpu_model_runner.py] Scheduler output: {scheduler_output}")
-        
         # TKNP: Assign ranks to new requests (cached for efficiency)
         if is_tknp_initialized() and get_tknp_world_size() > 1:
             self._assign_token_parallel_ranks(scheduler_output)
@@ -1806,6 +1878,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
          spec_decode_metadata,
          num_scheduled_tokens_np, tknp_metadata) = (self._prepare_inputs(scheduler_output))
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
             # Use piecewise CUDA graphs.
@@ -1863,9 +1936,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             positions = self.positions[:num_input_tokens]
 
         # TKNP
-        if tknp_metadata and tknp_metadata.tknp_enabled:
-            positions = self._slice_positions_for_token_parallel(
-                positions, tknp_metadata, num_input_tokens)
+        if is_tknp_initialized() and get_tknp_world_size() > 1:
+            # positions = self._slice_positions_for_token_parallel(
+            #     positions, tknp_metadata, num_input_tokens)
+            attn_metadata, positions = self._tknp_slicing(attn_metadata, tknp_metadata, positions)
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -1891,14 +1965,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.maybe_setup_kv_connector(scheduler_output)
 
             # TKNP DEBUG START
-            # print(f"Attention metadata: {attn_metadata}")
-            attn_metadata_keys = list(attn_metadata.keys())
-            # print all the keys 
+            # attn_metadata_keys = list(attn_metadata.keys()) 
             # print(f"Attention metadata keys: {attn_metadata_keys}")
             # print(f"[{get_tknp_rank()}] [gpu_model_runner.py] Input Ids: {input_ids}")
-            print(f"[{get_tknp_rank()}] [gpu_model_runner.py] Attention metadata [{attn_metadata_keys[0]}]: {attn_metadata[attn_metadata_keys[0]]}")
-            # logger.info(f"Input ids shape: {input_ids.shape if input_ids is not None else 'N/A'}")
-            # logger.info(f"Positions shape: {positions.shape if positions is not None else 'N/A'}")
+            # print(f"[{get_tknp_rank()}] [gpu_model_runner.py] Positions: {positions}")
+            # print(f"[{get_tknp_rank()}] [gpu_model_runner.py] Attention metadata [{attn_metadata_keys[0]}]: {attn_metadata[attn_metadata_keys[0]]}")
             # TKNP DEBUG END
 
             model_output = self.model(
@@ -1908,8 +1979,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
             )
 
-            # print(f"[gpu_model_runner.py] Model output {model_output}")
-            # print(f"[gpu_model_runner.py] Model output shape {model_output.shape if model_output is not None else 'N/A'}")
             self.maybe_wait_for_kv_save()
 
         if self.use_aux_hidden_state_outputs:

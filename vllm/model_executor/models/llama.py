@@ -228,22 +228,11 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # if is_root_rank():
-        #     # print("hidden_states shape:", hidden_states.shape)
-        #     logger.info("TKNP RANK [%d], layer: %d hidden_states shape: %s", get_tknp_rank(), self.layer_idx, hidden_states.shape)
-        #     print(f"TKNP RANK {get_tknp_rank()}: layer {self.layer_idx} LlamaAttention forward input hidden_states: {hidden_states}")
 
         qkv, _ = self.qkv_proj(hidden_states)        
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-
         attn_output = self.attn(q, k, v)
-
-        # if is_root_rank():
-        #     # print("attn_output shape:", attn_output.shape)
-        #     logger.info("TKNP RANK [%d], layer: %d attn_output shape: %s", get_tknp_rank(), self.layer_idx, attn_output.shape)
-        #     print(f"TKNP RANK {get_tknp_rank()}: layer {self.layer_idx} LlamaAttention forward attn_output: {attn_output}")
-            
         output, _ = self.o_proj(attn_output)
 
         return output
