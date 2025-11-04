@@ -762,7 +762,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     out=output_actual_tokens[num_decode_tokens + num_extend_tokens :],
                 )
 
-            # calculate for chunk prefills
+            # calculate for extends
             if num_extends > 0:
                 assert attn_metadata.extend_metadata is not None
                 extend_tokens_slice = slice(
