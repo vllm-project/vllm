@@ -110,12 +110,12 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_size_mb: dict[int, float] = field(default_factory=dict)
-    """The thresholds of the communicated tensor sizes under which
+    fi_allreduce_fusion_max_size_mb: float | None = None
+    """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
-    dictionary mapping each world size to the threshold in MB
-        { <world size>: <max size in mb> }
-    Unspecified world sizes will fallback to
+    float in MB.
+    Unspecified will fallback to default values 
+    which are compute capability and world size dependent.
         FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
             "9.0": {
                 2: 64,  # 64MB
@@ -139,15 +139,14 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
-        max_sizes = {
-            k: int(v * MiB) for k, v in self.fi_allreduce_fusion_max_size_mb.items()
-        }
-        logger.debug_once(
-            f"flashinfer_max_size: {max_sizes.get(world_size)}", scope="global"
-        )
-
-        # return None if world size is not supported by flashinfer
-        return max_sizes.get(world_size)
+        max_size_mb = self.fi_allreduce_fusion_max_size_mb
+        if max_size_mb is None:
+            max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
+            logger.debug_once(
+                f"flashinfer_max_size: {int(max_size_mb * MiB)}", scope="global"
+            )
+            return int(max_size_mb * MiB)
+        return None
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
@@ -183,11 +182,6 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
                 )
-
-        self.fi_allreduce_fusion_max_size_mb = {
-            **PassConfig.default_fi_allreduce_fusion_max_size_mb(),
-            **self.fi_allreduce_fusion_max_size_mb,
-        }
 
 
 @config
