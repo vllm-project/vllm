@@ -5,16 +5,14 @@ The qkv_proj and o_proj in self_attention can be either quantized or excluded.
 Run `pytest tests/models/quantization/test_gpt_oss_attn_quantization.py`.
 """
 
-import importlib
-import importlib.metadata
 from dataclasses import dataclass
 
 import huggingface_hub
 import lm_eval
 import pytest
-from packaging import version
 
 MODEL_NAMES = ["amd/gpt-oss-20b-WFP8-AFP8-KVFP8"]
+
 
 def has_huggingface_access(repo):
     try:
