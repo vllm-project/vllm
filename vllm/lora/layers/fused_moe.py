@@ -13,6 +13,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.layers.base import BaseLayerWithLoRA
+from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
@@ -38,6 +39,64 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = base_layer.w2_weight.device
         self._inject_lora_into_fused_moe()
+
+    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
+        normalized_config = {}
+        for key, value in config.items():
+            if key.islower():
+                if key.startswith("block_"):
+                    normalized_key = "BLOCK_SIZE_" + key.split("_")[-1].upper()
+                else:
+                    normalized_key = key.upper()
+            else:
+                normalized_key = key
+            normalized_config[normalized_key] = value
+        return normalized_config
+
+    def _get_lora_moe_configs(
+        self,
+        op_prefix: str,
+        lora_a_stacked: torch.Tensor,
+        lora_b_stacked: torch.Tensor,
+        num_slices: int,
+        M: int,
+        layer: FusedMoE,
+        top_k: int,
+        config_dtype: str,
+    ):
+        if envs.VLLM_TUNED_CONFIG_FOLDER:
+            shrink_config = get_lora_op_configs(
+                op_type=f"fused_moe_lora_{op_prefix}_shrink",
+                max_loras=lora_a_stacked.shape[0],
+                batch=M,
+                hidden_size=lora_a_stacked.shape[-1],
+                rank=lora_a_stacked.shape[-2],
+                num_slices=num_slices,
+                moe_intermediate_size=lora_b_stacked.shape[-2],
+            )
+            expand_config = get_lora_op_configs(
+                op_type=f"fused_moe_lora_{op_prefix}_expand",
+                max_loras=lora_a_stacked.shape[0],
+                batch=M,
+                hidden_size=lora_a_stacked.shape[-1],
+                rank=lora_a_stacked.shape[-2],
+                num_slices=num_slices,
+                moe_intermediate_size=lora_b_stacked.shape[-2],
+            )
+        else:  # fall back to the default config
+            get_config_func = functools.partial(
+                try_get_optimal_moe_config,
+                layer.w13_weight.size(),
+                layer.w2_weight.size(),
+                top_k,
+                config_dtype,
+                block_shape=layer.quant_method.moe_quant_config.block_shape,
+            )
+            shrink_config = get_config_func(M)
+            expand_config = get_config_func(M)
+        shrink_config = self._normalize_keys(shrink_config)
+        expand_config = self._normalize_keys(expand_config)
+        return shrink_config, expand_config
 
     def _inject_lora_into_fused_moe(self):
         moe_state_dict = {}
@@ -90,17 +149,19 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
 
-                get_config_func = functools.partial(
-                    try_get_optimal_moe_config,
-                    layer.w13_weight.size(),
-                    layer.w2_weight.size(),
-                    top_k,
-                    config_dtype,
-                    block_shape=layer.quant_method.moe_quant_config.block_shape,
+                shrink_config, expand_config = self._get_lora_moe_configs(
+                    op_prefix="w13",
+                    lora_a_stacked=self.w1_lora_a_stacked,
+                    lora_b_stacked=self.w1_lora_b_stacked,
+                    num_slices=2,
+                    M=M,
+                    layer=layer,
+                    top_k=top_k,
+                    config_dtype=config_dtype,
                 )
 
+                # get the block size of m from customized config or default config
                 max_loras = self.w1_lora_a_stacked.shape[0]
-                config = get_config_func(M)
                 (
                     sorted_token_ids_lora,
                     expert_ids_lora,
@@ -108,7 +169,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 ) = self.punica_wrapper.moe_lora_align_block_size(
                     curr_topk_ids,
                     num_tokens,
-                    config["BLOCK_SIZE_M"],
+                    shrink_config["BLOCK_SIZE_M"],
                     self.base_layer.local_num_experts,
                     max_loras,
                     self.adapter_enabled,
@@ -138,7 +199,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     num_tokens_post_padded_lora,
                     max_lora_rank,
                     top_k,
-                    config,
+                    shrink_config,  ## pass the shrink config
+                    expand_config,  ## pass the expand config
                     self.adapter_enabled,
                 )
 
@@ -164,16 +226,16 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens = hidden_states.size(0)
                 M = min(num_tokens, CHUNK_SIZE)
 
-                get_config_func = functools.partial(
-                    try_get_optimal_moe_config,
-                    layer.w13_weight.size(),
-                    layer.w2_weight.size(),
-                    top_k,
-                    config_dtype,
-                    block_shape=layer.quant_method.moe_quant_config.block_shape,
+                shrink_config, expand_config = self._get_lora_moe_configs(
+                    op_prefix="w2",
+                    lora_a_stacked=self.w2_lora_a_stacked,
+                    lora_b_stacked=self.w2_lora_b_stacked,
+                    num_slices=1,
+                    M=M,
+                    layer=layer,
+                    top_k=top_k,
+                    config_dtype=config_dtype,
                 )
-
-                config = get_config_func(M)
 
                 sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"]
                 expert_ids_lora = moe_state_dict["expert_ids_lora"]
@@ -197,7 +259,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     num_tokens_post_padded_lora,
                     max_lora_rank,
                     top_k,
-                    config,
+                    shrink_config,  ## pass the shrink config
+                    expand_config,  ## pass the expand config
                     self.adapter_enabled,
                     True,
                 )
