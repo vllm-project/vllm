@@ -65,32 +65,8 @@ __device__ void compute_dynamic_per_token_scales(
                              weight[hidden_element_offset + i]);
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
-
-    using BlockReduce = cub::BlockReduce<float, 1024>;
-    __shared__ typename BlockReduce::TempStorage reduceStore;
-    block_absmax_val_maybe =
-        BlockReduce(reduceStore)
-            .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
-
-    __shared__ float s_token_scale;
-    if (threadIdx.x == 0) {
-      float scale = 0.0f;
-      if (scale_ub) {
-        scale = min(block_absmax_val_maybe, *scale_ub);
-      } else {
-        scale = block_absmax_val_maybe;
-      }
-      // token scale computation
-      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-      s_token_scale = scale;                 // Shared memory store
-      all_token_scales[blockIdx.x] = scale;  // Global output store
-    }
-    __syncthreads();
-
-    *token_scale = s_token_scale;
   } else {
     int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-    ;
 
     for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
       float x = static_cast<float>(input[token_offset + i]);
@@ -101,30 +77,30 @@ __device__ void compute_dynamic_per_token_scales(
       x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
-
-    using BlockReduce = cub::BlockReduce<float, 1024>;
-    __shared__ typename BlockReduce::TempStorage reduceStore;
-    block_absmax_val_maybe =
-        BlockReduce(reduceStore)
-            .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
-
-    __shared__ float s_token_scale;
-    if (threadIdx.x == 0) {
-      float scale = 0.0f;
-      if (scale_ub) {
-        scale = min(block_absmax_val_maybe, *scale_ub);
-      } else {
-        scale = block_absmax_val_maybe;
-      }
-      // token scale computation
-      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-      s_token_scale = scale;                 // Shared memory store
-      all_token_scales[blockIdx.x] = scale;  // Global output store
-    }
-    __syncthreads();
-
-    *token_scale = s_token_scale;
   }
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  block_absmax_val_maybe =
+      BlockReduce(reduceStore)
+          .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
+
+  __shared__ float s_token_scale;
+  if (threadIdx.x == 0) {
+    float scale = 0.0f;
+    if (scale_ub) {
+      scale = min(block_absmax_val_maybe, *scale_ub);
+    } else {
+      scale = block_absmax_val_maybe;
+    }
+    // token scale computation
+    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+    s_token_scale = scale;                 // Shared memory store
+    all_token_scales[blockIdx.x] = scale;  // Global output store
+  }
+  __syncthreads();
+
+  *token_scale = s_token_scale;
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,
@@ -137,7 +113,6 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
                                scalar_t* __restrict__ residual = nullptr,
                                int32_t const group_size = 0) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-  ;
 
   for (auto i = threadIdx.x; i < hidden_size; i += blockDim.x) {
     float x = static_cast<float>(input[token_offset + i]);
@@ -230,7 +205,6 @@ __device__ void compute_dynamic_per_token_scales(
     int32_t const hidden_size,
     scalar_t const* __restrict__ residual = nullptr) {
   int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-  ;
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
   vec4_t<scalar_t> const* vec_input =
