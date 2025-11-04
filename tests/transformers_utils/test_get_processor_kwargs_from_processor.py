@@ -16,9 +16,11 @@ class _FakeTextKwargs(TypedDict, total=False):
     truncation: bool
     max_length: int
 
+
 class _FakeImagesKwargs(TypedDict, total=False):
     do_convert_rgb: bool
     data_format: str
+
 
 class _FakeVideosKwargs(TypedDict, total=False):
     fps: float
@@ -26,9 +28,11 @@ class _FakeVideosKwargs(TypedDict, total=False):
     seconds_per_chunk: float
     position_id_per_seconds: float
 
+
 class _FakeAudioKwargs(TypedDict, total=False):
     sampling_rate: int
     return_attention_mask: bool
+
 
 class _FakeProcessingKwargs(TypedDict, total=False):
     text_kwargs: _FakeTextKwargs
@@ -51,8 +55,12 @@ def _assert_has_all_expected(keys: set[str]) -> None:
         assert k in keys
     for k in ("do_convert_rgb", "data_format"):
         assert k in keys
-    for k in ("fps", "use_audio_in_video", "seconds_per_chunk",
-              "position_id_per_seconds"):
+    for k in (
+        "fps",
+        "use_audio_in_video",
+        "seconds_per_chunk",
+        "position_id_per_seconds",
+    ):
         assert k in keys
     for k in ("sampling_rate", "return_attention_mask"):
         assert k in keys
@@ -76,6 +84,7 @@ def test_get_processor_kwargs_from_processor_unpack_path_returns_full_union():
 
 
 # ---- Path 2: No Unpack, fallback to scanning *ProcessingKwargs in module ----
+
 
 class MyTestProcessingKwargs(_FakeProcessingKwargs):
     pass
