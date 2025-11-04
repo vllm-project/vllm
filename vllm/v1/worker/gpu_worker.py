@@ -8,9 +8,11 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -19,8 +21,9 @@ import torch.nn as nn
 import zmq
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
+    cleanup_dist_env_and_memory,
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
@@ -64,11 +67,18 @@ if TYPE_CHECKING:
 
 
 class WorkerGuard:
-    def __init__(self, vllm_config: VllmConfig, pause_event: threading.Event):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        pause_event: threading.Event,
+        init_distributed_env_callback: Callable,
+    ):
+        self.vllm_config = vllm_config
         self.zmq_ctx = zmq.Context()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_rank = get_tp_group().rank_in_group
         self.pp_rank = get_pp_group().rank_in_group
+        self.init_distributed_env_callback = init_distributed_env_callback
         identity = f"{self.tp_rank}_{self.pp_rank}".encode()
         worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
@@ -114,8 +124,9 @@ class WorkerGuard:
                     success = run_method(self, method, args=(), kwargs=params)
                 except Exception as e:
                     self.logger(
-                        " Error executing method %s: %s",
+                        " Error executing method %s: %s %s",
                         method,
+                        type(e).__name__,
                         e,
                         level="error",
                     )
@@ -189,6 +200,7 @@ class WorkerGuard:
         self.communicator_aborted = True
         success = len(not_done) == 0
         if success:
+            cleanup_dist_env_and_memory()
             self.logger("Communicators are aborted.")
         else:
             self.logger("Communicators did not abort in time.", level="warning")
@@ -196,9 +208,9 @@ class WorkerGuard:
 
     def restart_worker(self):
         if self.communicator_aborted:
-            raise NotImplementedError(
-                "Retry with recreation of communicators, currently unimplemented"
-            )
+            with set_current_vllm_config(self.vllm_config):
+                self.init_distributed_env_callback()
+                self.communicator_aborted = False
         self.pause_event.clear()
         return True
 
@@ -345,12 +357,17 @@ class Worker(WorkerBase):
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
             # available memory
+            start = time.time()
             init_worker_distributed_environment(
                 self.vllm_config,
                 self.rank,
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+            )
+            elapsed = time.time() - start
+            logger.info_once(
+                "init distributed environment took %.2f seconds", elapsed, scope="local"
             )
 
             # Set random seed.
@@ -390,8 +407,18 @@ class Worker(WorkerBase):
             report_usage_stats(self.vllm_config)
 
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            with set_current_vllm_config(self.vllm_config):
+                init_distributed_env_callback = partial(
+                    init_worker_distributed_environment,
+                    self.vllm_config,
+                    self.rank,
+                    self.distributed_init_method,
+                    self.local_rank,
+                )
             self.worker_guard = WorkerGuard(
-                self.vllm_config, self.model_runner.pause_event
+                self.vllm_config,
+                self.model_runner.pause_event,
+                init_distributed_env_callback,
             )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
