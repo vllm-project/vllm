@@ -109,8 +109,6 @@ def test_config_interface():
     assumes(CacheConfig, "cache_dtype")
     assumes(CacheConfig, "block_size")
     assumes(CacheConfig, "gpu_memory_utilization")
-    assumes(CacheConfig, "swap_space")
-    assumes(CacheConfig, "enable_prefix_caching")
 
     # mla metadata minimal cases
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration.utils import (

@@ -746,10 +746,6 @@ class LMCacheConnectorV1Impl:
                 "gpu_memory_utilization": getattr(
                     vllm_config.cache_config, "gpu_memory_utilization", None
                 ),
-                "swap_space": getattr(vllm_config.cache_config, "swap_space", None),
-                "enable_prefix_caching": getattr(
-                    vllm_config.cache_config, "enable_prefix_caching", None
-                ),
             },
         }
 
