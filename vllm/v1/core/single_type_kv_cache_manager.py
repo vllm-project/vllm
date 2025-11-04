@@ -591,10 +591,34 @@ class MambaManager(SingleTypeKVCacheManager):
         return computed_blocks
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
-        # Here unused blocks may be freed up for running requests.
-        # TODO(@s3woz) Free up all blocks that aren't needed by Mamba2
-        #  (for which find_longest_cache_hit returns block_pool.null_block)
-        pass
+        # A running request needs the previous block for computing the 1st token
+        # of the subsequent block, and then the previous block can be freed.
+        # Example:
+        # block_size = 512
+        # blocks 0:[1,512] 1:[513,1024] 2:[1025, 1536] ...
+        # num_computed_tokens == 1023 -> keep from 1
+        # num_computed_tokens == 1024 -> keep from 1
+        # num_computed_tokens == 1025 -> keep from 2
+        last_useful_block = cdiv(num_computed_tokens, self.block_size) - 1
+        # No blocks to remove:
+        if last_useful_block <= 0:
+            return
+        blocks = self.req_to_blocks[request_id]
+        if blocks[last_useful_block - 1] == self._null_block:
+            # Early return if there are no blocks to remove
+            return
+        removed_blocks: list[KVCacheBlock] = []
+        for i in range(last_useful_block - 1, -1, -1):
+            if blocks[i] == self._null_block:
+                # If the block is already a null block, the blocks before it
+                # should also have been set to null blocks by the previous calls
+                # to this function.
+                break
+            removed_blocks.append(blocks[i])
+            blocks[i] = self._null_block
+        # The order matters - evict the earliest/oldest blocks first:
+        removed_blocks.reverse()  # .reverse() is cheaper than .insert(0,) above
+        self.block_pool.free_blocks(removed_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
