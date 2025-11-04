@@ -239,7 +239,7 @@ class AiterFlashAttentionMetadata:
     num_extend_tokens: int
 
     decode_metadata: AiterFlashAttentionDecodeMetadata | None
-    pure_prefill_metadata: AiterFlashAttentionPrefillMetadata | None
+    prefill_metadata: AiterFlashAttentionPrefillMetadata | None
     extend_metadata: AiterFlashAttentionChunkPrefillMetadata | None
 
     # For cascade attention.
@@ -309,10 +309,10 @@ class AiterFlashAttentionMetadataBuilder(
         (
             num_decodes,
             num_extends,
-            num_pure_prefills,
+            num_prefills,
             num_decode_tokens,
             num_extend_tokens,
-            num_pure_prefill_tokens,
+            num_prefill_tokens,
         ) = split_ret
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -330,27 +330,24 @@ class AiterFlashAttentionMetadataBuilder(
                 query_start_loc=common_attn_metadata.query_start_loc[: num_decodes + 1],
             )
 
-        pure_prefill_metadata = None
-        if num_pure_prefills > 0:
-            query_lens_for_pure_prefill = query_lens_cpu[num_decodes + num_extends :]
+        prefill_metadata = None
+        if num_prefills > 0:
+            query_lens_for_prefill = query_lens_cpu[num_decodes + num_extends :]
             query_start_loc_device = common_attn_metadata.query_start_loc[
                 num_decodes + num_extends :
             ]
-            pure_prefill_metadata = AiterFlashAttentionPrefillMetadata(
-                max_query_len=query_lens_for_pure_prefill.max().item(),
-                min_query_len=query_lens_for_pure_prefill.min().item(),
+            prefill_metadata = AiterFlashAttentionPrefillMetadata(
+                max_query_len=query_lens_for_prefill.max().item(),
+                min_query_len=query_lens_for_prefill.min().item(),
                 max_seq_len=seq_lens[num_decodes + num_extends :].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
             )
 
         extend_metadata = None
         if num_extends > 0:
-            query_lens_for_extend = query_lens_cpu[
-                num_decodes : num_decodes + num_extends
-            ]
-            seq_lens_for_extend = common_attn_metadata.seq_lens_cpu[
-                num_decodes : num_decodes + num_extends
-            ]
+            num_extends_slice = slice(num_decodes, num_decodes + num_extends)
+            query_lens_for_extend = query_lens_cpu[num_extends_slice]
+            seq_lens_for_extend = common_attn_metadata.seq_lens_cpu[num_extends_slice]
             computed_kv_lens = seq_lens_for_extend - query_lens_for_extend
 
             # allocate the equal amount of workspace for
@@ -400,9 +397,7 @@ class AiterFlashAttentionMetadataBuilder(
             query_start_loc_device = common_attn_metadata.query_start_loc[
                 num_decodes : num_decodes + num_extends + 1
             ]
-            seq_lens_device = common_attn_metadata.seq_lens[
-                num_decodes : num_decodes + num_extends
-            ]
+            seq_lens_device = common_attn_metadata.seq_lens[num_extends_slice]
             cu_seq_lens = torch.zeros(
                 num_extends + 1, dtype=torch.int32, device=seq_lens_device.device
             )
@@ -412,9 +407,7 @@ class AiterFlashAttentionMetadataBuilder(
             extend_metadata = AiterFlashAttentionChunkPrefillMetadata(
                 max_query_len=query_lens_for_extend.max().item(),
                 min_query_len=query_lens_for_extend.min().item(),
-                max_seq_len=seq_lens[num_decodes : num_decodes + num_extends]
-                .max()
-                .item(),
+                max_seq_len=seq_lens[num_extends_slice].max().item(),
                 query_start_loc=query_start_loc_device - query_start_loc_device[0],
                 chunk_context_metadata=chunk_context_metadata,
             )
@@ -434,12 +427,12 @@ class AiterFlashAttentionMetadataBuilder(
             slot_mapping=common_attn_metadata.slot_mapping,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
-            num_prefills=num_pure_prefills,
-            num_prefill_tokens=num_pure_prefill_tokens,
+            num_prefills=num_prefills,
+            num_prefill_tokens=num_prefill_tokens,
             num_extends=num_extends,
             num_extend_tokens=num_extend_tokens,
             decode_metadata=decode_metadata,
-            pure_prefill_metadata=pure_prefill_metadata,
+            prefill_metadata=prefill_metadata,
             extend_metadata=extend_metadata,
             use_cascade=use_cascade,
             common_prefix_len=common_prefix_len,
@@ -730,7 +723,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(current_platform.fp8_dtype())
             value_cache = value_cache.view(current_platform.fp8_dtype())
 
-        # decode:extend:pure_prefill
+        # decode:extend:prefill
         query = query[:num_actual_tokens]
         key = key[:num_actual_tokens]
         value = value[:num_actual_tokens]
@@ -738,15 +731,15 @@ class AiterFlashAttentionImpl(AttentionImpl):
         output_actual_tokens = output[:num_actual_tokens]
 
         num_decodes = attn_metadata.num_decodes
-        num_pure_prefills = attn_metadata.num_prefills
+        num_prefills = attn_metadata.num_prefills
         num_extends = attn_metadata.num_extends
 
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_extend_tokens = attn_metadata.num_extend_tokens
         if not attn_metadata.use_cascade:
             # calculate for pure prefills
-            if num_pure_prefills > 0:
-                assert attn_metadata.pure_prefill_metadata is not None
+            if num_prefills > 0:
+                assert attn_metadata.prefill_metadata is not None
 
                 prefill_query = query[num_decode_tokens + num_extend_tokens :]
                 prefill_key = key[num_decode_tokens + num_extend_tokens :]
@@ -756,11 +749,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     q=prefill_query,
                     k=prefill_key,
                     v=prefill_value,
-                    cu_seqlens_q=attn_metadata.pure_prefill_metadata.query_start_loc,
-                    cu_seqlens_k=attn_metadata.pure_prefill_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.pure_prefill_metadata.max_query_len,
-                    max_seqlen_k=attn_metadata.pure_prefill_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.pure_prefill_metadata.min_query_len,
+                    cu_seqlens_q=attn_metadata.prefill_metadata.query_start_loc,
+                    cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
+                    max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
+                    max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
+                    min_seqlen_q=attn_metadata.prefill_metadata.min_query_len,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
                     causal=True,
@@ -772,18 +765,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # calculate for chunk prefills
             if num_extends > 0:
                 assert attn_metadata.extend_metadata is not None
-                extend_querys = query[
-                    num_decode_tokens : num_decode_tokens + num_extend_tokens
-                ]
-                extend_keys = key[
-                    num_decode_tokens : num_decode_tokens + num_extend_tokens
-                ]
-                extend_values = value[
-                    num_decode_tokens : num_decode_tokens + num_extend_tokens
-                ]
-                extend_outputs = output[
-                    num_decode_tokens : num_decode_tokens + num_extend_tokens
-                ]
+                extend_tokens_slice = slice(
+                    num_decode_tokens, num_decode_tokens + num_extend_tokens
+                )
+                extend_querys = query[extend_tokens_slice]
+                extend_keys = key[extend_tokens_slice]
+                extend_values = value[extend_tokens_slice]
+                extend_outputs = output[extend_tokens_slice]
                 self.extend_forward(
                     attn_metadata=attn_metadata,
                     query=extend_querys,

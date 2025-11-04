@@ -759,32 +759,39 @@ def split_decodes_prefills_and_extends(
         return num_reqs, 0, 0, num_tokens, 0, 0
 
     query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    is_prefill = query_lens > decode_threshold
-    is_pure_prefill = (seq_lens == query_lens) & is_prefill
+    is_prefill_or_extend = query_lens > decode_threshold
+    is_prefill = (seq_lens == query_lens) & is_prefill_or_extend
+    first_extend = is_prefill_or_extend.int().argmax(dim=-1).item()
     first_prefill = is_prefill.int().argmax(dim=-1).item()
-    first_pure_prefill = is_pure_prefill.int().argmax(dim=-1).item()
-    num_decodes = first_prefill
-    num_decode_tokens = query_start_loc[first_prefill].item()
-    if not torch.any(is_prefill):
+    num_decodes = first_extend
+    num_decode_tokens = query_start_loc[first_extend].item()
+    if not torch.any(is_prefill_or_extend):
         return (num_decodes, 0, 0, num_decode_tokens, 0, 0)
 
-    num_prefills = num_reqs - num_decodes
-    num_prefill_tokens = num_tokens - num_decode_tokens
-    if not torch.any(is_pure_prefill):
-        return (num_decodes, num_prefills, 0, num_decode_tokens, num_prefill_tokens, 0)
+    num_prefills_or_extends = num_reqs - num_decodes
+    num_prefill_or_extend_tokens = num_tokens - num_decode_tokens
+    if not torch.any(is_prefill):
+        return (
+            num_decodes,
+            num_prefills_or_extends,
+            0,
+            num_decode_tokens,
+            num_prefill_or_extend_tokens,
+            0,
+        )
 
-    num_extends = first_pure_prefill - num_decodes
-    num_pure_prefills = num_reqs - first_pure_prefill
+    num_extends = first_prefill - num_decodes
+    num_prefills = num_reqs - first_prefill
 
-    num_pure_prefill_tokens = num_tokens - query_start_loc[first_pure_prefill]
-    num_extend_tokens = num_prefill_tokens - num_pure_prefill_tokens
+    num_prefill_tokens = num_tokens - query_start_loc[first_prefill]
+    num_extend_tokens = num_prefill_or_extend_tokens - num_prefill_tokens
     return (
         num_decodes,
         num_extends,
-        num_pure_prefills,
+        num_prefills,
         num_decode_tokens,
         num_extend_tokens,
-        num_pure_prefill_tokens,
+        num_prefill_tokens,
     )
 
 
