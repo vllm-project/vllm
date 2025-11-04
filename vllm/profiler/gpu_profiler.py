@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import torch.cuda.profiler as cuda_profiler
 
 from vllm.logger import init_logger
 
@@ -10,10 +9,14 @@ logger = init_logger(__name__)
 class CudaProfilerWrapper:
     def __init__(self) -> None:
         self._profiler_running = False
+        # Note: lazy import to avoid dependency issues if CUDA is not available.
+        import torch.cuda.profiler as cuda_profiler
+
+        self._cuda_profiler = cuda_profiler
 
     def start(self) -> None:
         try:
-            cuda_profiler.start()
+            self._cuda_profiler.start()
             self._profiler_running = True
             logger.info_once("Started CUDA profiler")
         except Exception as e:
@@ -22,7 +25,7 @@ class CudaProfilerWrapper:
     def stop(self) -> None:
         if self._profiler_running:
             try:
-                cuda_profiler.stop()
+                self._cuda_profiler.stop()
                 logger.info_once("Stopped CUDA profiler")
             except Exception as e:
                 logger.warning_once("Failed to stop CUDA profiler: %s", e)

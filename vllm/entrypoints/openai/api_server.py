@@ -1286,17 +1286,17 @@ async def invocations(raw_request: Request):
     return JSONResponse(content=res.model_dump(), status_code=res.error.code)
 
 
+if envs.VLLM_TORCH_PROFILER_DIR:
+    logger.warning_once(
+        "Torch Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!"
+    )
+elif envs.VLLM_TORCH_CUDA_PROFILE:
+    logger.warning_once(
+        "CUDA Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!"
+    )
 if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
-    if envs.VLLM_TORCH_PROFILER_DIR:
-        logger.warning(
-            "Torch Profiler is enabled in the API server. This should ONLY be "
-            "used for local development!"
-        )
-    else:
-        logger.warning(
-            "CUDA Profiler is enabled in the API server. This should ONLY be "
-            "used for local development!"
-        )
 
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
