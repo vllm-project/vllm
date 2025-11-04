@@ -1660,7 +1660,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             use_llama4_routing = (
                 custom_routing_function is Llama4MoE.custom_routing_function
             )
-            routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+            routing_method_type = flashinfer.RoutingMethodType.Renormalize
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
             routing_bias = e_score_correction_bias

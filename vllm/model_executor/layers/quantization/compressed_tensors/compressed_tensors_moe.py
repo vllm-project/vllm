@@ -6,6 +6,7 @@ from collections.abc import Callable
 from enum import Enum
 
 import torch
+from torch.nn import Parameter
 from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import ActivationOrdering, QuantizationStrategy
 
@@ -683,7 +684,7 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             use_llama4_routing = (
                 custom_routing_function is Llama4MoE.custom_routing_function
             )
-            routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+            routing_method_type = flashinfer.RoutingMethodType.Renormalize
             if use_llama4_routing:
                 routing_method_type = flashinfer.RoutingMethodType.Llama4
             routing_bias = e_score_correction_bias
@@ -716,8 +717,8 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
                 output2_scale_scalar=layer.g2_alphas.data,
                 num_experts=global_num_experts,
                 top_k=top_k,
-                n_group=num_expert_group if num_expert_group is not None else 1,
-                topk_group=topk_group if topk_group is not None else 1,
+                n_group=num_expert_group if num_expert_group is not None else 0,
+                topk_group=topk_group if topk_group is not None else 0,
                 intermediate_size=layer.intermediate_size_per_partition,
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
