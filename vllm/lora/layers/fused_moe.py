@@ -40,7 +40,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.device = base_layer.w2_weight.device
         self._inject_lora_into_fused_moe()
 
-    def _normalize_keys(self, config: dict[str, int]) -> dict[str, int]:
+    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
         normalized_config = {}
         for key, value in config.items():
             if key.islower():
@@ -48,6 +48,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     normalized_key = "BLOCK_SIZE_" + key.split("_")[-1].upper()
                 else:
                     normalized_key = key.upper()
+            else:
+                normalized_key = key
             normalized_config[normalized_key] = value
         return normalized_config
 
