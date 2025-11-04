@@ -35,6 +35,16 @@ BASIC_REASONING_ONLY = {
     "output": REASONING_SECTION_START + "This is reasoning" + "<|end|>",
     "is_reasoning_end": False,
 }
+BASIC_NO_REASONING_NO_ASSISTANT = {
+    "output": USER_MESSAGE_START + "This is a user message",
+    "is_reasoning_end": False,
+}
+
+# Edge-case where the model omits the assistant tag entirely.
+BASIC_NO_REASONING_ASSISTANT = {
+    "output": USER_MESSAGE_START + "This is a user message<|end|><|channel|>final",
+    "is_reasoning_end": True,
+}
 
 COMPLEX_CONTENT_INCOMPLETE_PREFIX_ONLY = {
     "output": REASONING_SECTION_START

@@ -71,7 +71,7 @@ class GptOssReasoningParser(ReasoningParser):
         # The model can output some special tokens between "final" and "<|message|>"
         # So we need to look for both sequences to determine the end of reasoning.
         self.reasoning_end_token_ids_prefix = self.model_tokenizer.encode(
-            "<|start|>assistant<|channel|>final"
+            "<|channel|>final"
         )
         self.reasoning_end_token_ids_suffix = self.model_tokenizer.encode("<|message|>")
         self.reasoning_max_num_between_tokens = 20
