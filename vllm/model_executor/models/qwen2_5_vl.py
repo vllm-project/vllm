@@ -43,7 +43,6 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.attention.backends.registry import _MHA_Backend
-from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_torch_sdpa_wrapper,
@@ -351,9 +350,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             disable_tp=use_data_parallel,
         )
         self.attn_backend = attn_backend
-        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
-            self.attn_backend,
-        )
 
         self.is_flash_attn_backend = self.attn_backend in {
             _MHA_Backend.FLASH_ATTN,
@@ -679,10 +675,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
-        )
-
-        self.flash_attn_varlen_func = maybe_get_vit_flash_attn_backend(
-            self.attn_backend,
         )
 
         if self.attn_backend not in {
