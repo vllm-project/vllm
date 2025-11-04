@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import AsyncGenerator
-from typing import Optional, Union
 
 from fastapi import Request
 
@@ -35,9 +34,10 @@ class OpenAIServingTranscription(OpenAISpeechToText):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -46,11 +46,12 @@ class OpenAIServingTranscription(OpenAISpeechToText):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
             log_error_stack=log_error_stack,
+            enable_force_include_usage=enable_force_include_usage,
         )
 
     async def create_transcription(
         self, audio_data: bytes, request: TranscriptionRequest, raw_request: Request
-    ) -> Union[TranscriptionResponse, AsyncGenerator[str, None], ErrorResponse]:
+    ) -> TranscriptionResponse | AsyncGenerator[str, None] | ErrorResponse:
         """Transcription API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranscription
@@ -94,9 +95,10 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
+        request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
+        enable_force_include_usage: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -105,11 +107,12 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="translate",
             log_error_stack=log_error_stack,
+            enable_force_include_usage=enable_force_include_usage,
         )
 
     async def create_translation(
         self, audio_data: bytes, request: TranslationRequest, raw_request: Request
-    ) -> Union[TranslationResponse, AsyncGenerator[str, None], ErrorResponse]:
+    ) -> TranslationResponse | AsyncGenerator[str, None] | ErrorResponse:
         """Translation API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/audio/createTranslation

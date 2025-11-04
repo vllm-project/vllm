@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -38,6 +38,12 @@ class SchedulerInterface(ABC):
             A SchedulerOutput object containing information about the scheduled
             requests.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_grammar_bitmask(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "GrammarOutput | None":
         raise NotImplementedError
 
     @abstractmethod
@@ -80,7 +86,7 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: Union[str, Iterable[str]],
+        request_ids: str | Iterable[str],
         finished_status: "RequestStatus",
     ) -> None:
         """Finish the requests in the scheduler's internal queue. If the request

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 from transformers import PretrainedConfig
 
@@ -19,7 +18,7 @@ class MLPSpeculatorConfig(PretrainedConfig):
         emb_dim: int = 4096,
         inner_dim: int = 0,
         n_predict: int = 3,
-        top_k_tokens_per_head: Optional[list[int]] = None,
+        top_k_tokens_per_head: list[int] | None = None,
         n_candidates: int = 5,
         tie_weights: bool = False,
         scale_input: bool = False,

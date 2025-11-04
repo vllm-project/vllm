@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Callable, Optional, Union
+from collections.abc import Callable
 
 import deep_ep
 import torch
@@ -12,10 +12,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
+    dbo_get_previous_event,
     dbo_switch_to_comm,
     dbo_switch_to_compute,
     dbo_switch_to_compute_sync,
@@ -77,18 +78,18 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return None
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
 
-    def _get_dispatch_config(self) -> Optional[deep_ep.Config]:
+    def _get_dispatch_config(self) -> deep_ep.Config | None:
         if self.num_dispatchers_ not in self.available_rank_configs:
             return None
         return deep_ep.Buffer.get_dispatch_config(self.num_dispatchers_)
 
-    def _get_combine_config(self) -> Optional[deep_ep.Config]:
+    def _get_combine_config(self) -> deep_ep.Config | None:
         if self.num_dispatchers_ not in self.available_rank_configs:
             return None
         return deep_ep.Buffer.get_combine_config(self.num_dispatchers_)
@@ -96,11 +97,11 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def _do_dispatch(
         self,
         tokens: torch.Tensor,
-        token_scales: Optional[torch.Tensor],
+        token_scales: torch.Tensor | None,
         rank_topk_ids: torch.Tensor,
         rank_topk_weights: torch.Tensor,
         num_experts: int,
-        a1_scale: Optional[torch.Tensor],
+        a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
     ) -> Callable:
         has_scales = token_scales is not None
@@ -109,6 +110,10 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # kernel will block the CPU so we want to queue up all the compute
         # for the other ubatch before the dispatch kernel starts.
         dbo_yield_and_switch_from_compute_to_comm()
+
+        # capture a DeepEP event and pass it as previous_event so
+        # DeepEP honors the dependency internally.
+        previous_event = dbo_get_previous_event(self.buffer.capture)
 
         (
             num_tokens_per_rank,
@@ -119,7 +124,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         ) = self.buffer.get_dispatch_layout(
             topk_idx=rank_topk_ids,
             num_experts=num_experts,
-            previous_event=None,
+            previous_event=previous_event,
             async_finish=False,
             allocate_on_comm_stream=False,
         )
@@ -148,7 +153,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # to this value.
             expert_alignment=1,
             config=self._get_dispatch_config(),
-            previous_event=None,
+            previous_event=previous_event,
             async_finish=self.async_prepare and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )
@@ -175,12 +180,12 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         self,
         event: deep_ep.EventOverlap,
         has_scales: bool,
-        token_data: Union[tuple[torch.Tensor, torch.Tensor], torch.Tensor],
-        expert_topk_ids: Optional[torch.Tensor],
+        token_data: tuple[torch.Tensor, torch.Tensor] | torch.Tensor,
+        expert_topk_ids: torch.Tensor | None,
         num_experts: int,
         expert_num_tokens_per_expert_list: list[int],
-        expert_topk_weights: Optional[torch.Tensor],
-        a1_scale: Optional[torch.Tensor],
+        expert_topk_weights: torch.Tensor | None,
+        a1_scale: torch.Tensor | None,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
         if event.event is not None:
@@ -249,7 +254,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.ReceiverType:
@@ -294,7 +299,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -318,7 +323,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> Optional[Callable]:
+    ) -> Callable | None:
         a2a_idx = dbo_current_ubatch_id()
         handle = self.handles[a2a_idx]
         assert handle is not None
@@ -336,12 +341,17 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         dbo_yield_and_switch_from_compute_to_comm()
+        assert fused_expert_output.dtype == torch.bfloat16, (
+            f"Expected fused_expert_output bfloat16, got {fused_expert_output.dtype}"
+        )
+        previous_event = dbo_get_previous_event(self.buffer.capture)
         combined_x, _, event = self.buffer.combine(
+            # HT combine only supports BF16
             x=fused_expert_output,
             handle=handle,
             topk_weights=None,
             config=self._get_combine_config(),
-            previous_event=None,
+            previous_event=previous_event,
             async_finish=do_async and not dbo_enabled(),
             allocate_on_comm_stream=False,
         )

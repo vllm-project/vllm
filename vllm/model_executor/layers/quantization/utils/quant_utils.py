@@ -5,7 +5,7 @@
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import ClassVar, NamedTuple, Optional
+from typing import ClassVar, NamedTuple
 
 import numpy
 import torch
@@ -91,7 +91,7 @@ class QuantKey:
 
     dtype: torch.dtype
     scale: ScaleDesc
-    scale2: Optional[ScaleDesc] = None
+    scale2: ScaleDesc | None = None
     symmetric: bool = True
 
     def __str__(self):
@@ -205,7 +205,7 @@ def scaled_quantize(
 def scaled_dequantize(
     x_q: torch.Tensor,
     x_s: torch.Tensor,
-    group_shape: Optional[GroupShape] = None,
+    group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if group_shape is not None:
@@ -285,7 +285,18 @@ def is_layer_skipped(
     prefix: str,
     ignored_layers: list[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    *,
+    skip_with_substr: bool = False,
 ) -> bool:
+    def prefix_full_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return prefix in ignored_layers
+
+    # For case like: ignored_layers = ["self_attn"]
+    def substr_match(prefix: str, ignored_layers: list[str]) -> bool:
+        return any(layer in prefix for layer in ignored_layers)
+
+    match_func = substr_match if skip_with_substr else prefix_full_match
+
     # prefix: model.layers.0.self_attn.q_proj
     # proj_name: q_proj
     proj_name = prefix.split(".")[-1]
@@ -302,7 +313,7 @@ def is_layer_skipped(
 
         is_skipped = None
         for shard_prefix in shard_prefixes:
-            is_shard_skipped = shard_prefix in ignored_layers
+            is_shard_skipped = match_func(shard_prefix, ignored_layers)
 
             if is_skipped is None:
                 is_skipped = is_shard_skipped
@@ -312,16 +323,16 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix:
+    elif "experts" in prefix and not skip_with_substr:
+        expert_ignore_layers = filter(
+            lambda layer_name: "experts" in layer_name, ignored_layers
+        )
         return any(
-            [
-                prefix in layer_name
-                for layer_name in ignored_layers
-                if "experts" in layer_name
-            ]
+            prefix in layer_name if not skip_with_substr else layer_name in prefix
+            for layer_name in expert_ignore_layers
         )
     else:
-        is_skipped = prefix in ignored_layers
+        is_skipped = match_func(prefix, ignored_layers)
 
     assert is_skipped is not None
     return is_skipped
@@ -336,7 +347,7 @@ def permute_rows(
     q_w: torch.Tensor,
     w_ref: torch.Tensor,
     group_size: int,
-    test_perm: Optional[torch.Tensor] = None,
+    test_perm: torch.Tensor | None = None,
 ):
     assert q_w.shape == w_ref.shape
 
@@ -365,7 +376,7 @@ def permute_rows(
 def quantize_weights(
     w: torch.Tensor,
     quant_type: ScalarType,
-    group_size: Optional[int],
+    group_size: int | None,
     zero_points: bool = False,
     ref_zero_points_after_scales: bool = False,
 ):
@@ -466,7 +477,7 @@ def gptq_quantize_weights(
     quant_type: ScalarType,
     group_size: int,
     act_order: bool,
-    test_perm: Optional[torch.Tensor] = None,
+    test_perm: torch.Tensor | None = None,
 ):
     size_k, _ = w.shape
 

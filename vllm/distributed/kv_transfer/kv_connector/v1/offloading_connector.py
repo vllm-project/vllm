@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from itertools import islice
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -21,6 +21,7 @@ from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
@@ -41,13 +42,18 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 
 
 class OffloadingConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        super().__init__(vllm_config, role)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: KVCacheConfig | None = None,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
 
         spec = OffloadingSpecFactory.create_spec(vllm_config)
 
-        self.connector_scheduler: Optional[OffloadingConnectorScheduler] = None
-        self.connector_worker: Optional[OffloadingConnectorWorker] = None
+        self.connector_scheduler: OffloadingConnectorScheduler | None = None
+        self.connector_worker: OffloadingConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = OffloadingConnectorScheduler(spec)
         elif role == KVConnectorRole.WORKER:
@@ -113,7 +119,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         self,
         request: "Request",
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
@@ -148,7 +154,7 @@ class OffloadingConnectorScheduler:
         self,
         req: Request,
         start_idx: int = 0,
-        end_idx: Optional[int] = None,
+        end_idx: int | None = None,
     ) -> Iterable[BlockHash]:
         return islice(
             req.block_hashes,
@@ -274,8 +280,8 @@ class OffloadingConnectorScheduler:
             if num_new_blocks <= 0:
                 continue
 
-            num_gpu_blocks = num_blocks * self.block_size_factor
-            assert len(req.block_hashes) >= num_gpu_blocks
+            # NOTE: In async scheduling, placeholders may temporarily make
+            # len(req.block_hashes) < num_blocks * self.block_size_factor.
 
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
@@ -354,7 +360,7 @@ class OffloadingConnectorScheduler:
         self,
         request: Request,
         block_ids: list[int],
-    ) -> tuple[bool, Optional[dict[str, Any]]]:
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Called when a request has finished, before its blocks are freed.
 
@@ -494,5 +500,5 @@ def yield_req_data(
     yield from zip(
         cached_reqs.req_ids,
         cached_reqs.new_block_ids,
-        cached_reqs.resumed_from_preemption,
+        (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
     )

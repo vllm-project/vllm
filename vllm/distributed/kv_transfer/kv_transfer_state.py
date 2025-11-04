@@ -12,8 +12,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
-_KV_CONNECTOR_AGENT: Optional[KVConnectorBaseType] = None
+_KV_CONNECTOR_AGENT: KVConnectorBaseType | None = None
 
 
 def get_kv_transfer_group() -> KVConnectorBaseType:
@@ -27,7 +28,7 @@ def has_kv_transfer_group() -> bool:
     return _KV_CONNECTOR_AGENT is not None
 
 
-def is_v1_kv_transfer_group(connector: Optional[KVConnectorBaseType] = None) -> bool:
+def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> bool:
     """Check if the KV connector is the v1 connector.
     If the argument is None, it will check the global KV connector
 
@@ -48,7 +49,9 @@ def is_v1_kv_transfer_group(connector: Optional[KVConnectorBaseType] = None) -> 
     return isinstance(connector, KVConnectorBase_V1)
 
 
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+def ensure_kv_transfer_initialized(
+    vllm_config: "VllmConfig", kv_cache_config: Optional["KVCacheConfig"] = None
+) -> None:
     """
     Initialize KV cache transfer parallel group.
     """
@@ -64,7 +67,9 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
     ):
         if envs.VLLM_USE_V1:
             _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
-                config=vllm_config, role=KVConnectorRole.WORKER
+                config=vllm_config,
+                role=KVConnectorRole.WORKER,
+                kv_cache_config=kv_cache_config,
             )
         else:
             raise ValueError("V0 is no longer supported")

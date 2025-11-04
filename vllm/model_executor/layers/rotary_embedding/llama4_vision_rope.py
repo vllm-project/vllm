@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional
 
 import torch
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 
 
-class Llama4VisionRotaryEmbedding(RotaryEmbedding):
+class Llama4VisionRotaryEmbedding(RotaryEmbeddingBase):
     def __init__(
         self,
         head_size: int,
@@ -56,8 +55,8 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
     def forward_native(  # type: ignore[override]
         self,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         assert key is not None
         # self.cos_sin_cache here is complex tensor so we cannot cast into
         # query's dtype directly with self._match_cos_sin_cache_dtype
@@ -76,6 +75,6 @@ class Llama4VisionRotaryEmbedding(RotaryEmbedding):
     def forward_cuda(  # type: ignore[override]
         self,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(query, key)
