@@ -672,8 +672,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         elif self.fused_experts is not None:
-            if self.moe.has_bias:
-                raise ValueError("FusedMoEModularKernel does not support bias.")
             result = self.fused_experts(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -1135,6 +1133,7 @@ class FusedMoE(CustomOp):
         )
 
         self.global_num_experts = num_experts + num_redundant_experts
+        self.logical_num_experts = num_experts
         self.zero_expert_num = zero_expert_num
         self.zero_expert_type = zero_expert_type
 
@@ -1998,13 +1997,12 @@ class FusedMoE(CustomOp):
 
         moe = self.moe_config
 
-        # Note here we use `num_experts` which is logical expert count
         if self.vllm_config.parallel_config.enable_dbo:
             states_shape = (2, moe.max_num_tokens, self.hidden_size)
-            logits_shape = (2, moe.max_num_tokens, moe.num_experts)
+            logits_shape = (2, moe.max_num_tokens, self.logical_num_experts)
         else:
             states_shape = (moe.max_num_tokens, self.hidden_size)
-            logits_shape = (moe.max_num_tokens, moe.num_experts)
+            logits_shape = (moe.max_num_tokens, self.logical_num_experts)
 
         self.batched_hidden_states = torch.zeros(
             states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
@@ -2068,7 +2066,7 @@ class FusedMoE(CustomOp):
             )
 
         # DeepSeekv2 uses grouped_top_k
-        if use_grouped_topk:
+        elif use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
             if is_rocm_aiter_moe_enabled():
