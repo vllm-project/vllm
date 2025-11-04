@@ -31,14 +31,15 @@ __device__ void rms_norm_dynamic_per_token_quant_vec(
 
   // RMS Norm + Quant
   if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
+    token_scale = 1.0f / token_scale;
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, true,
                                      has_residual>(
-        out, input, weight, rms, 1.0f / token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   } else {
     // FP8 - Do not invert token_scale for exact match with FBGemm
     vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t, false,
                                      has_residual>(
-        out, input, weight, rms, token_scale, hidden_size, residual);
+        out, input, weight, rms, &token_scale, hidden_size, residual);
   }
 }
 
@@ -96,8 +97,9 @@ __global__ void rms_norm_per_block_quant_kernel_1(
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // Compute RMS
-  vllm::compute_rms<scalar_t, has_residual>(rms + blockIdx.x, input,
-                                            hidden_size, var_epsilon, residual);
+  // Always able to vectorize due to constraints on hidden_size
+  vllm::vectorized::compute_rms<scalar_t, has_residual>(
+      rms + blockIdx.x, input, hidden_size, var_epsilon, residual);
 }
 
 // RMS norm + quant kernel
@@ -111,7 +113,9 @@ __global__ void rms_norm_per_block_quant_kernel_2(
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // Compute Scale
-  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+  // Always able to vectorize due to constraints on hidden_size
+  vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
+                                                     has_residual>(
       token_scale + blockIdx.x, scales, input, weight,
       rms[blockIdx.x / (hidden_size / group_size)], scale_ub, hidden_size,
       residual, group_size);
@@ -128,20 +132,17 @@ __global__ void rms_norm_per_block_quant_kernel_3(
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // RMS Norm + Quant
+  // Always able to vectorize due to constraints on hidden_size
   int token_idx = blockIdx.x * hidden_size / group_size;
-  if constexpr (std::is_same_v<scalar_out_t, int8_t>) {
-    // Don't invert token_scale here: do it inside the norm_and_quant kernel
-    // We do it because particular elements of token_scale can be shared
-    // between multiple threads, so this way, we avoid extra synchronization
-    // overhead.
-    vllm::norm_and_quant<scalar_t, scalar_out_t, true, has_residual>(
-        out, input, weight, rms[blockIdx.x], token_scale + token_idx,
-        hidden_size, residual, group_size);
-  } else {
-    vllm::norm_and_quant<scalar_t, scalar_out_t, false, has_residual>(
-        out, input, weight, rms[blockIdx.x], token_scale + token_idx,
-        hidden_size, residual, group_size);
-  }
+  // For int8, don't invert token_scale here: do it inside the norm_and_quant
+  // kernel. We do it because particular elements of token_scale can be shared
+  // between multiple threads, so this way, we avoid extra synchronization
+  // overhead.
+  vllm::vectorized::norm_and_quant<scalar_t, scalar_out_t,
+                                   std::is_same_v<scalar_out_t, int8_t>,
+                                   has_residual>(
+      out, input, weight, rms[blockIdx.x], token_scale + token_idx, hidden_size,
+      residual, group_size);
 }
 
 }  // namespace vllm
