@@ -2431,28 +2431,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                has_zero_tokens = not scheduler_output.total_num_scheduled_tokens
+                has_tokens = bool(scheduler_output.total_num_scheduled_tokens)
 
-                if has_zero_tokens and self.parallel_config.data_parallel_size > 1:
-                    # With spec decode + DP, participate in the coordinate call that
-                    # other ranks make in _prepare_inputs, even though this rank has
-                    # 0 tokens.
-                    _, num_tokens_across_dp = coordinate_batch_across_dp(
-                        num_tokens_unpadded=0,
-                        parallel_config=self.parallel_config,
-                        allow_microbatching=False,
-                        allow_dp_padding=False,
-                    )
-                    spec_decode_common_attn_metadata = None
-                elif has_zero_tokens:
-                    # Single DP rank with 0 tokens - return immediately
-                    if not has_kv_transfer_group():
-                        return EMPTY_MODEL_RUNNER_OUTPUT
-                    return self.kv_connector_no_forward(
-                        scheduler_output, self.vllm_config
-                    )
-
-                if not has_zero_tokens:
+                if has_tokens:
                     if self.cache_config.kv_sharing_fast_prefill:
                         assert not self.input_batch.num_prompt_logprobs, (
                             "--kv-sharing-fast-prefill produces incorrect "
@@ -2512,13 +2493,31 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             batch_descriptor, use_cascade_attn
                         )
                     )
-                else:
+                elif self.parallel_config.data_parallel_size > 1:
+                    # With spec decode + DP, participate in the coordinate call that
+                    # other ranks make in _prepare_inputs, even though this rank has
+                    # 0 tokens. We don't early return here, because we need to sync
+                    # should_run_drafter later.
+                    _, num_tokens_across_dp = coordinate_batch_across_dp(
+                        num_tokens_unpadded=0,
+                        parallel_config=self.parallel_config,
+                        allow_microbatching=False,
+                        allow_dp_padding=False,
+                    )
+                    spec_decode_common_attn_metadata = None
                     # Set dummy values for 0-token case
                     cudagraph_runtime_mode = CUDAGraphMode.NONE
                     batch_descriptor = None
+                else:
+                    # Single DP rank with 0 tokens - return immediately
+                    if not has_kv_transfer_group():
+                        return EMPTY_MODEL_RUNNER_OUTPUT
+                    return self.kv_connector_no_forward(
+                        scheduler_output, self.vllm_config
+                    )
 
-            # Synchronize should_run_drafter across all DP ranks AFTER preprocessing
-            # but BEFORE any drafter execution. This ensures all ranks sync at the
+            # Synchronize should_run_drafter across all DP ranks after preprocessing
+            # but before any drafter execution. This ensures all ranks sync at the
             # same execution point.
             should_run_drafter = False
             if (
@@ -2532,10 +2531,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 dp_rank = self.parallel_config.data_parallel_rank
 
                 # Compute local should_run_drafter value
-                if has_zero_tokens:
-                    # 0-token rank cannot run drafter
-                    local_should_run_drafter = False
-                else:
+                if has_tokens:
                     # Compute whether this rank wants to run the drafter
                     use_padded_batch_for_eagle = (
                         self.speculative_config.use_eagle()
@@ -2564,6 +2560,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     local_should_run_drafter = bool(
                         use_padded_batch_for_eagle and input_fits_in_drafter
                     )
+                else:
+                    # 0-token rank cannot run drafter
+                    local_should_run_drafter = False
 
                 # Synchronize across all DP ranks - all must agree
                 device = get_dp_group().device
@@ -2584,7 +2583,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._should_run_drafter_for_current_batch = should_run_drafter
 
             # 0-token rank can now return after participating in sync
-            if has_zero_tokens:
+            if not has_tokens:
                 if not has_kv_transfer_group():
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
