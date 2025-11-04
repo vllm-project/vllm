@@ -52,7 +52,7 @@ class AttentionConfig(VerifyAndUpdateConfig):
         else:
             new_block_size = lcm(cache_config.block_size, min_size)
 
-        if new_block_size != cache_config.block_size:
+        if cache_config.block_size is None or new_block_size != cache_config.block_size:
             cache_config.block_size = new_block_size
             logger.info(
                 "Setting attention block size to %d tokens "
