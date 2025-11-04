@@ -203,44 +203,20 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
       input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
         VLLM_DISPATCH_FP8_TYPES(
             out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
-              const int vec_size = std::gcd(16 / sizeof(scalar_t), hidden_size);
+              const int calculated_vec_size =
+                  std::gcd(16 / sizeof(scalar_t), hidden_size);
               const int block_size =
-                  std::min(hidden_size / vec_size, max_block_size);
+                  std::min(hidden_size / calculated_vec_size, max_block_size);
               dim3 block(block_size);
-              switch (vec_size) {
-                case 8:
-                  vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t, 8>
-                      <<<grid, block, 0, stream>>>(
-                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                          input_stride, weight.data_ptr<scalar_t>(),
-                          scale.data_ptr<float>(), epsilon, num_tokens,
-                          hidden_size);
-                  break;
-                case 4:
-                  vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t, 4>
-                      <<<grid, block, 0, stream>>>(
-                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                          input_stride, weight.data_ptr<scalar_t>(),
-                          scale.data_ptr<float>(), epsilon, num_tokens,
-                          hidden_size);
-                  break;
-                case 2:
-                  vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t, 2>
-                      <<<grid, block, 0, stream>>>(
-                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                          input_stride, weight.data_ptr<scalar_t>(),
-                          scale.data_ptr<float>(), epsilon, num_tokens,
-                          hidden_size);
-                  break;
-                default:
-                  vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t, 1>
-                      <<<grid, block, 0, stream>>>(
-                          out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                          input_stride, weight.data_ptr<scalar_t>(),
-                          scale.data_ptr<float>(), epsilon, num_tokens,
-                          hidden_size);
-                  break;
-              }
+              VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
+                vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t,
+                                                       vec_size>
+                    <<<grid, block, 0, stream>>>(
+                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
+                        input_stride, weight.data_ptr<scalar_t>(),
+                        scale.data_ptr<float>(), epsilon, num_tokens,
+                        hidden_size);
+              });
             });
       });
 }
