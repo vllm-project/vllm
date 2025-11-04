@@ -1187,15 +1187,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # decoder.
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
-        if self.parallel_config.data_parallel_size > 1:
-            dp_rank = self.parallel_config.data_parallel_rank
-            print(
-                f"[DP{dp_rank}] BEFORE coordinate_batch_across_dp: "
-                f"num_tokens_unpadded={num_tokens_unpadded}, "
-                f"num_tokens_padded={num_tokens_padded}, "
-                f"uniform_decode={uniform_decode}"
-            )
-
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.parallel_config,
@@ -1205,10 +1196,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             uniform_decode=uniform_decode,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
-
-        if self.parallel_config.data_parallel_size > 1:
-            dp_rank = self.parallel_config.data_parallel_rank
-            print(f"[DP{dp_rank}] AFTER coordinate_batch_across_dp")
 
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
@@ -2439,11 +2426,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        if self.parallel_config.data_parallel_size > 1:
-            dp_rank = self.parallel_config.data_parallel_rank
-            num_tokens = scheduler_output.total_num_scheduled_tokens
-            print(f"[DP{dp_rank}] execute_model ENTRY: num_tokens={num_tokens}")
-
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
@@ -2460,9 +2442,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     from vllm.distributed.parallel_state import get_dp_group
                     from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 
-                    dp_rank = self.parallel_config.data_parallel_rank
-                    print(f"[DP{dp_rank}] 0 tokens, participating in DP coordination")
-
                     # Participate in the coordinate call that other ranks
                     # make in _prepare_inputs
                     _, num_tokens_across_dp = coordinate_batch_across_dp(
@@ -2470,10 +2449,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         parallel_config=self.parallel_config,
                         allow_microbatching=False,
                         allow_dp_padding=False,
-                    )
-                    print(
-                        f"[DP{dp_rank}] Finished _prepare_inputs coordinate, "
-                        f"num_tokens_across_dp={num_tokens_across_dp}"
                     )
 
                     # Set empty metadata for 0-token case
@@ -2608,16 +2583,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     device=device,
                     dtype=torch.int32,
                 )
-                print(
-                    f"[DP{dp_rank}] ENTERING should_run_drafter sync, "
-                    f"local={local_should_run_drafter}"
-                )
                 dist.all_reduce(drafter_flag, op=dist.ReduceOp.MIN, group=group)
                 should_run_drafter = bool(drafter_flag.item())
-                print(
-                    f"[DP{dp_rank}] EXITED should_run_drafter sync, "
-                    f"result={should_run_drafter}"
-                )
 
             # Store the synchronized should_run_drafter value for later use
             self._should_run_drafter_for_current_batch = should_run_drafter
@@ -2774,23 +2741,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             should_run_drafter = use_padded_batch_for_eagle and input_fits_in_drafter
 
-        if self.parallel_config.data_parallel_size > 1:
-            dp_rank = self.parallel_config.data_parallel_rank
-            print(
-                f"[DP{dp_rank}] Using synchronized should_run_drafter="
-                f"{should_run_drafter}"
-            )
-
         if should_run_drafter:
-            if self.parallel_config.data_parallel_size > 1:
-                dp_rank = self.parallel_config.data_parallel_rank
-                print(f"[DP{dp_rank}] CALLING propose_draft_token_ids...")
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
-            if self.parallel_config.data_parallel_size > 1:
-                dp_rank = self.parallel_config.data_parallel_rank
-                print(f"[DP{dp_rank}] RETURNED from propose_draft_token_ids")
 
         with record_function_or_nullcontext("Bookkeep"):
             (
