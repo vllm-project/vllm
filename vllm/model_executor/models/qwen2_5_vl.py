@@ -43,12 +43,10 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 )
 
 from vllm.attention.backends.registry import _Backend
-from vllm.attention.layer import (
-    check_upstream_fa_availability,
-    maybe_get_vit_flash_attn_backend,
-)
+from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
+    vit_torch_sdpa_wrapper,
     vit_xformers_attn_wrapper,
 )
 from vllm.compilation.decorators import support_torch_compile
@@ -318,6 +316,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         use_data_parallel: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
         use_upstream_fa: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -358,8 +357,16 @@ class Qwen2_5_VisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
+        # On ROCm with FLASH_ATTN backend, upstream flash_attn is used
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm() and self.attn_backend == _Backend.FLASH_ATTN:
+            self.use_upstream_fa = True
+        if current_platform.is_xpu():
+            self.use_upstream_fa = False
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN,
             _Backend.ROCM_AITER_FA,
@@ -428,23 +435,20 @@ class Qwen2_5_VisionAttention(nn.Module):
             )
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
-            outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (
-                    einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-                )
-                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=1)
-            context_layer = einops.rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
+            from vllm.platforms import current_platform
+
+            # Never remove the next contiguous logic
+            # Without it, hallucinations occur with the backend
+            if current_platform.is_rocm():
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
+            context_layer = vit_torch_sdpa_wrapper(
+                q,
+                k,
+                v,
+                cu_seqlens,
+            )
         elif self.attn_backend == _Backend.XFORMERS:
             context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
@@ -474,6 +478,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         use_data_parallel: bool = False,
         attn_backend: _Backend = _Backend.TORCH_SDPA,
         use_upstream_fa: bool = False,
+        attn_backend_override: _Backend | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -489,6 +494,7 @@ class Qwen2_5_VisionBlock(nn.Module):
             use_data_parallel=use_data_parallel,
             attn_backend=attn_backend,
             use_upstream_fa=use_upstream_fa,
+            attn_backend_override=attn_backend_override,
         )
         self.mlp = Qwen2_5_VisionMLP(
             dim,
@@ -688,13 +694,14 @@ class Qwen2_5_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
             attn_backend_override=attn_backend_override,
         )
-        if (
-            self.attn_backend != _Backend.FLASH_ATTN
-            and self.attn_backend != _Backend.ROCM_AITER_FA
-            and check_upstream_fa_availability(torch.get_default_dtype())
-        ):
-            self.attn_backend = _Backend.FLASH_ATTN
-            use_upstream_fa = True
+
+        self.attn_backend, self.flash_attn_varlen_func = (
+            maybe_get_vit_flash_attn_backend(
+                self.attn_backend,
+                use_upstream_fa,
+                attn_backend_override=attn_backend_override,
+            )
+        )
 
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
@@ -720,6 +727,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                         use_data_parallel=use_data_parallel,
                         attn_backend=self.attn_backend,
                         use_upstream_fa=use_upstream_fa,
+                        attn_backend_override=attn_backend_override,
                     )
                     for layer_idx in range(depth)
                 ]
@@ -836,14 +844,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self,
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        max_seqlen, seqlens = (
-            torch.zeros(1, device=cu_seqlens.device),
-            torch.zeros(1, device=cu_seqlens.device),
-        )
-        if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
-        ):
+        max_seqlen = torch.zeros([], device=cu_seqlens.device)
+        seqlens = torch.zeros(1, device=cu_seqlens.device)
+        if self.attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = cu_seqlens[1:] - cu_seqlens[:-1]

@@ -25,7 +25,12 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
-from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
+from vllm.v1.core.sched.output import (
+    CachedRequestData,
+    GrammarOutput,
+    NewRequestData,
+    SchedulerOutput,
+)
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
@@ -67,6 +72,7 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids_dict: dict[int, set[str]] | None = (
             defaultdict(set) if include_finished_set else None
         )
+        self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -172,7 +178,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_caching=bool(self.cache_config.enable_prefix_caching),
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
@@ -223,10 +229,14 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
-            # Make sure the input position does not exceed the max model len.
-            # This is necessary when using spec decoding.
+            # Make sure the input position does not exceed the max model len or
+            # request's max_tokens.
+            # This is necessary when using spec decoding and/or async scheduling.
+            max_total_tokens = min(
+                request.num_prompt_tokens + request.max_tokens, self.max_model_len
+            )
             num_new_tokens = min(
-                num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
+                num_new_tokens, max_total_tokens - 1 - request.num_computed_tokens
             )
 
             # Schedule encoder inputs.
@@ -406,13 +416,13 @@ class Scheduler(SchedulerInterface):
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
-                        num_external_computed_tokens, load_kv_async = (
+                        ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
                             )
                         )
 
-                        if num_external_computed_tokens is None:
+                        if ext_tokens is None:
                             # The request cannot be scheduled because
                             # the KVConnector couldn't determine
                             # the number of matched tokens.
@@ -450,14 +460,9 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
-                    if (
-                        0
-                        < self.scheduler_config.long_prefill_token_threshold
-                        < num_new_tokens
-                    ):
-                        num_new_tokens = (
-                            self.scheduler_config.long_prefill_token_threshold
-                        )
+                    threshold = self.scheduler_config.long_prefill_token_threshold
+                    if 0 < threshold < num_new_tokens:
+                        num_new_tokens = threshold
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -640,8 +645,6 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            structured_output_request_ids=structured_output_request_ids,
-            grammar_bitmask=grammar_bitmask,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -749,7 +752,7 @@ class Scheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=req_ids,
-            resumed_from_preemption=resumed_from_preemption,
+            resumed_req_ids=resumed_req_ids,
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
@@ -924,7 +927,7 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
-        kv_connector_stats = (
+        kv_connector_stats: KVConnectorStats | None = (
             kv_connector_output.kv_connector_stats if kv_connector_output else None
         )
 

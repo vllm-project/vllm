@@ -10,7 +10,10 @@ from typing import Any, TypeAlias
 import prometheus_client
 
 from vllm.config import SupportsMetricsInfo, VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorLogging
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorLogging,
+    KVConnectorPrometheus,
+)
 from vllm.logger import init_logger
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
@@ -50,6 +53,9 @@ class StatLoggerBase(ABC):
     def log_engine_initialized(self): ...
 
     def log(self):  # noqa
+        pass
+
+    def record_sleep_state(self, is_awake: int, level: int):  # noqa
         pass
 
 
@@ -165,6 +171,7 @@ class PrometheusStatLogger(StatLoggerBase):
     _counter_cls = prometheus_client.Counter
     _histogram_cls = prometheus_client.Histogram
     _spec_decoding_cls = SpecDecodingProm
+    _kv_connector_cls = KVConnectorPrometheus
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -183,12 +190,15 @@ class PrometheusStatLogger(StatLoggerBase):
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
-        spec_decode_labelvalues: dict[int, list[str]] = {
+        per_engine_labelvalues: dict[int, list[str]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
         }
 
         self.spec_decoding_prom = self._spec_decoding_cls(
-            vllm_config.speculative_config, labelnames, spec_decode_labelvalues
+            vllm_config.speculative_config, labelnames, per_engine_labelvalues
+        )
+        self.kv_connector_prom = self._kv_connector_cls(
+            vllm_config, labelnames, per_engine_labelvalues
         )
 
         #
@@ -214,7 +224,32 @@ class PrometheusStatLogger(StatLoggerBase):
             gauge_scheduler_waiting, engine_indexes, model_name
         )
 
-        #
+        gauge_engine_sleep_state = self._gauge_cls(
+            name="vllm:engine_sleep_state",
+            documentation=(
+                "Engine sleep state; awake = 0 means engine is sleeping; "
+                "awake = 1 means engine is awake; "
+                "weights_offloaded = 1 means sleep level 1; "
+                "discard_all = 1 means sleep level 2."
+            ),
+            labelnames=labelnames + ["sleep_state"],
+            multiprocess_mode="mostrecent",
+        )
+
+        self.gauge_engine_sleep_state = {}
+        sleep_state = ["awake", "weights_offloaded", "discard_all"]
+
+        for s in sleep_state:
+            self.gauge_engine_sleep_state[s] = {
+                idx: gauge_engine_sleep_state.labels(
+                    engine=idx, model_name=model_name, sleep_state=s
+                )
+                for idx in engine_indexes
+            }
+
+        # Setting default values
+        self.record_sleep_state()
+
         # GPU cache
         #
         # Deprecated in 0.9.2 - Renamed as vllm:kv_cache_usage_perc
@@ -792,6 +827,11 @@ class PrometheusStatLogger(StatLoggerBase):
                     scheduler_stats.spec_decoding_stats, engine_idx
                 )
 
+            if scheduler_stats.kv_connector_stats is not None:
+                self.kv_connector_prom.observe(
+                    scheduler_stats.kv_connector_stats, engine_idx
+                )
+
         if mm_cache_stats is not None:
             self.counter_mm_cache_queries[engine_idx].inc(mm_cache_stats.queries)
             self.counter_mm_cache_hits[engine_idx].inc(mm_cache_stats.hits)
@@ -868,6 +908,25 @@ class PrometheusStatLogger(StatLoggerBase):
                 self.labelname_max_lora: self.max_lora,
             }
             self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
+
+    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+        awake = 1
+        discard_all = 0
+        weights_offloaded = 0
+
+        if sleep == 1:
+            awake = 0
+            if level == 1:
+                weights_offloaded = 1
+            elif level == 2:
+                discard_all = 1
+
+        for engine_idx in self.engine_indexes:
+            self.gauge_engine_sleep_state["discard_all"][engine_idx].set(discard_all)
+            self.gauge_engine_sleep_state["weights_offloaded"][engine_idx].set(
+                weights_offloaded
+            )
+            self.gauge_engine_sleep_state["awake"][engine_idx].set(awake)
 
     def log_engine_initialized(self):
         self.log_metrics_info("cache_config", self.vllm_config.cache_config)
@@ -985,6 +1044,10 @@ class StatLoggerManager:
             engine_idx,
             mm_cache_stats=mm_cache_stats,
         )
+
+    def record_sleep_state(self, sleep: int = 0, level: int = 0):
+        for logger in self.stat_loggers:
+            logger.record_sleep_state(sleep, level)
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
