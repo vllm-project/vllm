@@ -43,7 +43,8 @@ sed -i '/vllm==/d' pyproject.toml
 
 # Sync Prime-RL dependencies
 echo "Installing Prime-RL dependencies..."
-uv sync --inexact && uv sync --inexact --all-extras
+# Need --prerelease=allow to preserve apache-tvm-ffi==0.1.0b15 (required by flashinfer)
+uv sync --inexact --prerelease=allow && uv sync --inexact --all-extras --prerelease=allow
 
 # Verify installation
 echo "Verifying installations..."
