@@ -37,6 +37,12 @@ class _FakeProcessingKwargs(TypedDict, total=False):
     audio_kwargs: _FakeAudioKwargs
 
 
+_FakeProcessingKwargs.__annotations__.update(_FakeTextKwargs.__annotations__)
+_FakeProcessingKwargs.__annotations__.update(_FakeImagesKwargs.__annotations__)
+_FakeProcessingKwargs.__annotations__.update(_FakeVideosKwargs.__annotations__)
+_FakeProcessingKwargs.__annotations__.update(_FakeAudioKwargs.__annotations__)
+
+
 def _assert_has_all_expected(keys: set[str]) -> None:
     for wrapper in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         assert wrapper in keys
@@ -45,7 +51,8 @@ def _assert_has_all_expected(keys: set[str]) -> None:
         assert k in keys
     for k in ("do_convert_rgb", "data_format"):
         assert k in keys
-    for k in ("fps", "use_audio_in_video", "seconds_per_chunk", "position_id_per_seconds"):
+    for k in ("fps", "use_audio_in_video", "seconds_per_chunk",
+              "position_id_per_seconds"):
         assert k in keys
     for k in ("sampling_rate", "return_attention_mask"):
         assert k in keys
