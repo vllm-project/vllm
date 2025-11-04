@@ -1236,7 +1236,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     if e_score_correction_bias is not None
                     else None
                 )
-                routing_method_type = getattr(layer, "routing_method_type", 2)
+                routing_method_type = layer.routing_method_type
                 return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
                     routing_logits=router_logits.to(torch.float32)
                     if routing_method_type == RoutingMethodType.DeepSeekV3
