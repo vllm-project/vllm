@@ -1047,7 +1047,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 None,
                 1 if renormalize else 0,  # routing_method_type, renormalize
                 True,  # do finalize
-                tune_max_num_tokens=self.max_capture_size,
+                tune_max_num_tokens=max(self.max_capture_size, 1),
             )[0]
             return trtllm_gen_output
         elif (
@@ -1122,7 +1122,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 tp_rank=self.moe.tp_rank,
                 ep_size=self.moe.ep_size,
                 ep_rank=self.moe.ep_rank,
-                tune_max_num_tokens=self.max_capture_size,
+                tune_max_num_tokens=max(self.max_capture_size, 1),
                 **extra_kwargs,
             )
 
