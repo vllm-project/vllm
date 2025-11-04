@@ -251,7 +251,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 "Sinks must have the same number of heads as the number of "
                 "heads in the layer"
             )
-        print("........", self.sliding_window)
 
     def forward(
         self,
