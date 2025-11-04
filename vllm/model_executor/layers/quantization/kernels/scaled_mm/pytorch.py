@@ -230,9 +230,6 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
 
 class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 94
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
