@@ -76,6 +76,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
@@ -93,10 +94,8 @@ from .utils import (
     maybe_prefix,
 )
 
-if current_platform.is_cuda_alike():
-    from vllm import _custom_ops as ops
-elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
+    pass
 
 logger = init_logger(__name__)
 
@@ -600,6 +599,187 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         return DeepseekV32IndexerBackend
 
 
+@triton.jit
+def _indexer_k_quant_and_cache_kernel(
+    k_ptr,  # [num_tokens, head_dim]
+    kv_cache_ptr,  # [n_blks, blk_size//tile_block, head_dim // 16B, tile_block, 16B]
+    kv_cache_scale_ptr,  # [n_blks, blk_size]
+    slot_mapping_ptr,  # [num_tokens]
+    kv_cache_scale_stride,
+    kv_cache_value_stride,
+    block_size,
+    num_tokens,
+    head_dim: tl.constexpr,
+    BLOCK_TILE_SIZE: tl.constexpr,
+    HEAD_TILE_SIZE: tl.constexpr,
+    IS_FNUZ: tl.constexpr,
+    USE_UE8M0: tl.constexpr,
+):
+    tid = tl.program_id(0)
+    offset = tl.arange(0, head_dim)
+    tile_offset = (
+        offset // HEAD_TILE_SIZE * BLOCK_TILE_SIZE * HEAD_TILE_SIZE
+        + offset % HEAD_TILE_SIZE
+    )
+    tile_store_offset = tile_offset
+    # for idx in tl.range(tid, num_tokens, n_program):
+    src_ptr = k_ptr + tid * head_dim
+    slot_id = tl.load(slot_mapping_ptr + tid)
+    if slot_id < 0:
+        return
+    block_id = slot_id // block_size
+    block_offset = slot_id % block_size
+    tile_block_id = block_offset // BLOCK_TILE_SIZE
+    tile_block_offset = block_offset % BLOCK_TILE_SIZE
+    val = tl.load(src_ptr + offset)
+    amax = tl.max(val.abs(), axis=-1).to(tl.float32)
+    if IS_FNUZ:
+        scale = tl.maximum(1e-4, amax) / 224.0
+    else:
+        scale = tl.maximum(1e-4, amax) / 448.0
+
+    if USE_UE8M0:
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
+
+    fp8_val = (val.to(tl.float32) / scale).to(kv_cache_ptr.type.element_ty)
+    dst_ptr = (
+        kv_cache_ptr
+        + block_id * kv_cache_value_stride
+        + tile_block_id * BLOCK_TILE_SIZE * head_dim
+        + tile_block_offset * HEAD_TILE_SIZE
+    )
+    tl.store(dst_ptr + tile_store_offset, fp8_val)
+    dst_scale_ptr = kv_cache_scale_ptr + block_id * kv_cache_scale_stride + block_offset
+    tl.store(dst_scale_ptr, scale)
+
+
+def indexer_k_quant_and_cache_triton(
+    k: torch.Tensor,
+    kv_cache: torch.Tensor,  # [num_blocks, block_size, head_dim + 4]
+    slot_mapping: torch.Tensor,
+    scale_fmt,
+    block_tile_size=16,
+    head_tile_size=16,
+):
+    num_blocks = kv_cache.shape[0]
+    head_dim = k.shape[-1]
+    num_tokens = slot_mapping.shape[0]
+    block_size = kv_cache.shape[1]
+    # In real layout, we store the first portion as kv cache value
+    # and second portion as kv cache scale
+    kv_cache = kv_cache.view(num_blocks, -1)
+    kv_cache_value = kv_cache[:, : block_size * head_dim]
+    kv_cache_scale = kv_cache[:, block_size * head_dim :].view(torch.float32)
+    head_tile_size = head_tile_size // kv_cache.element_size()
+    grid = (num_tokens,)
+    _indexer_k_quant_and_cache_kernel[grid](
+        k,
+        kv_cache_value,
+        kv_cache_scale,
+        slot_mapping,
+        kv_cache_scale.stride(0),
+        kv_cache_value.stride(0),
+        block_size,
+        num_tokens,
+        head_dim,
+        block_tile_size,
+        head_tile_size,
+        IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
+        USE_UE8M0=scale_fmt == "ue8m0",
+    )
+
+
+@triton.jit
+def _cp_gather_indexer_quant_cache_kernel(
+    kv_cache_ptr,  # [n_blks,blk_size//tile_blk,head_dim//16B,tile_blk,16B]
+    kv_cache_scale_ptr,  # [n_blks, blk_size]
+    k_fp8_ptr,  # [num_tokens, head_dim]
+    k_scale_ptr,  # [num_tokens]
+    block_table_ptr,  # [batch_size, block_table_stride]
+    cu_seqlen_ptr,  # [batch_size + 1]
+    token_to_seq_ptr,  # [num_tokens]
+    block_size,
+    block_table_stride,
+    kv_cache_stride,
+    kv_cache_scale_stride,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_TILE_SIZE: tl.constexpr,
+    HEAD_TILE_SIZE: tl.constexpr,
+):
+    tid = tl.program_id(0)
+    offset = tl.arange(0, HEAD_DIM)
+    batch_id = tl.load(token_to_seq_ptr + tid)
+    batch_start = tl.load(cu_seqlen_ptr + batch_id)
+    batch_end = tl.load(cu_seqlen_ptr + batch_id + 1)
+    batch_offset = tid - batch_start
+    if tid >= batch_end:
+        return
+    block_table_id = batch_offset // block_size
+    block_offset = batch_offset % block_size
+    block_table_offset = batch_id * block_table_stride + block_table_id
+    block_id = tl.load(block_table_ptr + block_table_offset)
+    tiled_block_id = block_offset // BLOCK_TILE_SIZE
+    tiled_block_offset = block_offset % BLOCK_TILE_SIZE
+    src_cache_offset = (
+        block_id * kv_cache_stride
+        + tiled_block_id * HEAD_DIM * BLOCK_TILE_SIZE
+        + tiled_block_offset * HEAD_TILE_SIZE
+    )
+    src_scale_offset = block_id * kv_cache_scale_stride + block_offset
+    dst_offset = tid * HEAD_DIM
+    src_scale_ptr = kv_cache_scale_ptr + src_scale_offset
+    src_cache_ptr = kv_cache_ptr + src_cache_offset
+    dst_k_ptr = k_fp8_ptr + dst_offset
+    scale_val = tl.load(src_scale_ptr)
+    tl.store(k_scale_ptr + tid, scale_val)
+    tiled_src_offset = (
+        offset // HEAD_TILE_SIZE * HEAD_TILE_SIZE * BLOCK_TILE_SIZE
+        + offset % HEAD_TILE_SIZE
+    )
+    val = tl.load(src_cache_ptr + tiled_src_offset)
+    tl.store(dst_k_ptr + offset, val)
+
+
+def cp_gather_indexer_k_quant_cache_triton(
+    k_cache: torch.Tensor,  # [num_blocks, block_size, head_dim + 4]
+    k_fp8: torch.Tensor,
+    k_fp8_scale: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seqlen: torch.Tensor,
+    token_to_seq: torch.Tensor,
+    block_tile_size: int = 16,
+    head_tile_size: int = 16,
+):
+    num_tokens = k_fp8.size(0)
+    block_size = k_cache.size(1)
+    block_table_stride = block_table.stride(0)
+    head_dim = k_fp8.shape[-1]
+    num_blocks = k_cache.shape[0]
+    # we assume the kv cache already been split to 2 portion
+    k_cache = k_cache.view(num_blocks, -1)
+    fp8_dtype = current_platform.fp8_dtype()
+    k_cache_value = k_cache[:, : block_size * head_dim].view(fp8_dtype)
+    k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
+    grid = (num_tokens,)
+    k_fp8_scale = k_fp8_scale.view(torch.float32)
+    _cp_gather_indexer_quant_cache_kernel[grid](
+        k_cache_value,
+        k_cache_scale,
+        k_fp8,
+        k_fp8_scale,
+        block_table,
+        cu_seqlen,
+        token_to_seq,
+        block_size,
+        block_table_stride,
+        k_cache_value.stride(0),
+        k_cache_scale.stride(0),
+        head_dim,
+        block_tile_size,
+        head_tile_size,
+    )
+
+
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
     k_cache_prefix: str,
@@ -642,13 +822,26 @@ def sparse_attn_indexer(
     has_prefill = attn_metadata.num_prefills > 0
     num_decode_tokens = attn_metadata.num_decode_tokens
 
-    ops.indexer_k_quant_and_cache(
-        k,
-        kv_cache,
-        slot_mapping,
-        quant_block_size,
-        scale_fmt,
-    )
+    # ops.indexer_k_quant_and_cache(
+    #     k,
+    #     kv_cache,
+    #     slot_mapping,
+    #     quant_block_size,
+    #     scale_fmt,
+    # )
+    # print("indexer and quant", flush=True)
+    # import torch.distributed as dist
+    # rid = dist.get_rank()
+    # print("k shape: ", k.shape, flush=True)
+    # torch.save(k, f"k_{rid}.pt")
+    # torch.save(kv_cache, f"kv_cache_{rid}.pt")
+    # torch.save(slot_mapping, f"slot_mapping_{rid}.pt")
+    # torch.cuda.synchronize()
+
+    indexer_k_quant_and_cache_triton(k, kv_cache, slot_mapping, scale_fmt)
+
+    # torch.cuda.synchronize()
+    # print("end of indexer and quant", flush=True)
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
     if has_prefill:
@@ -664,13 +857,37 @@ def sparse_attn_indexer(
                 device=k.device,
                 dtype=torch.uint8,
             )
-            ops.cp_gather_indexer_k_quant_cache(
+            # ops.cp_gather_indexer_k_quant_cache(
+            #     kv_cache,
+            #     k_fp8,
+            #     k_scale,
+            #     chunk.block_table,
+            #     chunk.cu_seq_lens,
+            # )
+            # print("cp gather indexer quant", flush=True)
+            # import torch.distributed as dist
+            # rid = dist.get_rank()
+            # print("kv_cache shape: ", kv_cache.shape, kv_cache.dtype, flush=True)
+            # print("k_fp8_shape: ",  k_fp8.shape, flush=True)
+            # print("block_table shape: ", chunk.block_table, flush=True)
+            # torch.save(kv_cache, f"kv_cache_{rid}.pt")
+            # torch.save(k_fp8, f"k_fp8_{rid}.pt")
+            # torch.save(k_scale, f"k_scale_{rid}.pt")
+            # torch.save(chunk.block_table, f"block_table_{rid}.pt")
+            # torch.save(chunk.cu_seq_lens, f"cu_seq_lens_{rid}.pt")
+            # torch.save(chunk.token_to_seq, f"token_to_seq_{rid}.pt")
+            # torch.cuda.synchronize()
+            # print("done saving", flush=True)
+            cp_gather_indexer_k_quant_cache_triton(
                 kv_cache,
                 k_fp8,
                 k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
+                chunk.token_to_seq,
             )
+            # torch.cuda.synchronize()
+            # print("end of cp gather indexer quant", flush=True)
             fp8_mqa_logits_func = fp8_mqa_logits
             if current_platform.is_rocm():
                 from vllm.attention.ops.rocm_aiter_mla_sparse import rocm_fp8_mqa_logits
@@ -683,6 +900,8 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ks,
                 chunk.cu_seqlen_ke,
             )
+            # torch.cuda.synchronize()
+            # print("end of mqa logits: ", flush=True)
             num_rows = logits.shape[0]
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
@@ -697,6 +916,8 @@ def sparse_attn_indexer(
                 logits.stride(1),
                 topk_tokens,
             )
+            # torch.cuda.synchronize()
+            # print("end of topk: ", flush=True)
 
     if has_decode:
         decode_metadata = attn_metadata.decode
@@ -728,6 +949,8 @@ def sparse_attn_indexer(
             )
 
             fp8_paged_mqa_logits_func = rocm_fp8_paged_mqa_logits
+        # print("start fp8_mqa pa", flush=True)
+
         logits = fp8_paged_mqa_logits_func(
             padded_q_fp8_decode_tokens,
             kv_cache,
@@ -737,9 +960,24 @@ def sparse_attn_indexer(
             decode_metadata.schedule_metadata,
             max_model_len=max_model_len,
         )
+
+        # torch.cuda.synchronize()
+        # print("end of fp8_mqa pa", flush=True)
+        # _, _, heads, _ = padded_q_fp8_decode_tokens.shape
+        # logits = torch.empty(
+        #     (batch_size * next_n, max_model_len),
+        #     device="cuda",
+        #     dtype=torch.float32,
+        # )
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-
+        # print("start topk per row decode", flush=True)
+        # print("next n: ", next_n, flush=True)
+        # print("seq_lens: ", decode_metadata.seq_lens, flush=True)
+        # print("num rows: ", num_rows, flush=True)
+        # torch.save(logits, "logits.pt")
+        # torch.save(topk_indices, "topk_indices.pt")
+        # torch.cuda.synchronize()
         torch.ops._C.top_k_per_row_decode(
             logits,
             next_n,
@@ -750,6 +988,8 @@ def sparse_attn_indexer(
             logits.stride(1),
             topk_tokens,
         )
+        # torch.cuda.synchronize()
+        # print("end of fp8_mqa pa topk", flush=True)
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
             # the topk indices removing padded tokens
@@ -760,6 +1000,8 @@ def sparse_attn_indexer(
             topk_indices_buffer[:num_decode_tokens, : topk_indices.shape[-1]] = (
                 topk_indices
             )
+            # torch.cuda.synchronize()
+            # print("end of unpack", flush=True)
 
     return topk_indices_buffer
 
