@@ -68,7 +68,6 @@ from vllm.entrypoints.openai.protocol import (
     ErrorInfo,
     ErrorResponse,
     IOProcessorResponse,
-    LoadLoRAAdapterRequest,
     PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
@@ -85,7 +84,6 @@ from vllm.entrypoints.openai.protocol import (
     TranscriptionResponse,
     TranslationRequest,
     TranslationResponse,
-    UnloadLoRAAdapterRequest,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import ServingClassification
@@ -388,13 +386,6 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
-
-
-@router.get("/ping", response_class=Response)
-@router.post("/ping", response_class=Response)
-async def ping(raw_request: Request) -> Response:
-    """Ping check. Endpoint required for SageMaker"""
-    return await health(raw_request)
 
 
 @router.post(
@@ -1239,49 +1230,6 @@ INVOCATION_VALIDATORS = [
 ]
 
 
-@router.post(
-    "/invocations",
-    dependencies=[Depends(validate_json_request)],
-    responses={
-        HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {"model": ErrorResponse},
-        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
-    },
-)
-@sagemaker_standards.stateful_session_manager()
-@sagemaker_standards.inject_adapter_id(adapter_path="model")
-async def invocations(raw_request: Request):
-    """For SageMaker, routes requests based on the request type."""
-    try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
-        raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value, detail=f"JSON decode error: {e}"
-        ) from e
-
-    valid_endpoints = [
-        (validator, endpoint)
-        for validator, (get_handler, endpoint) in INVOCATION_VALIDATORS
-        if get_handler(raw_request) is not None
-    ]
-
-    for request_validator, endpoint in valid_endpoints:
-        try:
-            request = request_validator.validate_python(body)
-        except pydantic.ValidationError:
-            continue
-
-        return await endpoint(request, raw_request)
-
-    type_names = [
-        t.__name__ if isinstance(t := validator._type, type) else str(t)
-        for validator, _ in valid_endpoints
-    ]
-    msg = f"Cannot find suitable handler for request. Expected one of: {type_names}"
-    res = base(raw_request).create_error_response(message=msg)
-    return JSONResponse(content=res.model_dump(), status_code=res.error.code)
-
-
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
@@ -1301,50 +1249,6 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         await engine_client(raw_request).stop_profile()
         logger.info("Profiler stopped.")
         return Response(status_code=200)
-
-
-if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-    logger.warning(
-        "LoRA dynamic loading & unloading is enabled in the API server. "
-        "This should ONLY be used for local development!"
-    )
-
-    @sagemaker_standards.register_load_adapter_handler(
-        request_shape={
-            "lora_name": "body.name",
-            "lora_path": "body.src",
-        },
-    )
-    @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
-        handler = models(raw_request)
-        response = await handler.load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.error.code
-            )
-
-        return Response(status_code=200, content=response)
-
-    @sagemaker_standards.register_unload_adapter_handler(
-        request_shape={
-            "lora_name": "path_params.adapter_name",
-        }
-    )
-    @router.post(
-        "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
-    )
-    async def unload_lora_adapter(
-        request: UnloadLoRAAdapterRequest, raw_request: Request
-    ):
-        handler = models(raw_request)
-        response = await handler.unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.error.code
-            )
-
-        return Response(status_code=200, content=response)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
@@ -1616,6 +1520,20 @@ def build_app(args: Namespace) -> FastAPI:
         )
     else:
         app = FastAPI(lifespan=lifespan)
+
+    if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        logger.warning(
+            "LoRA dynamic loading & unloading is enabled in the API server. "
+            "This should ONLY be used for local development!"
+        )
+        from vllm.entrypoints.dynamic_lora import register_dynamic_lora_routes
+
+        register_dynamic_lora_routes(router)
+
+    from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
+
+    register_sagemaker_routes(router)
+
     app.include_router(router)
     app.root_path = args.root_path
 
