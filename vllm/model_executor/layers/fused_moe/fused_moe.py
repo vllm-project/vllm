@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -1248,6 +1249,7 @@ def eplb_map_to_physical_and_record(
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
     indices_type: torch.dtype | None = None,
+    fused_experts_method: Callable | None = None,
 ) -> torch.Tensor:
     """
     Map the logical expert ids to physical expert ids
@@ -1305,12 +1307,23 @@ def eplb_map_to_physical_and_record(
     # `expert_load_view`: (num_physical_experts,)
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
-    topk_ids_flatten = topk_ids.flatten()
-    expert_load_view.scatter_add_(
-        dim=0,
-        index=topk_ids_flatten.long(),
-        src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+    skip_expert_load_scatter_add = (
+        (fused_experts_method is not None)
+        and isinstance(fused_experts_method, FusedMoEModularKernel)
+        and fused_experts_method.prepare_finalize.have_expert_num_tokens()
     )
+
+    if not skip_expert_load_scatter_add:
+        logger.debug("expert_load_view update from topk_ids.")
+        topk_ids_flatten = topk_ids.flatten()
+        expert_load_view.scatter_add_(
+            dim=0,
+            index=topk_ids_flatten.long(),
+            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+        )
+
+    else:
+        logger.debug("expert_load_view update in modular_kernel.")
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)
