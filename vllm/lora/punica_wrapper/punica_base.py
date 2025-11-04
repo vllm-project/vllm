@@ -479,7 +479,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         num_tokens_post_padded: torch.Tensor,
         max_lora_rank: int,
         top_k_num: int,
-        config,
+        shrink_config,
+        expand_config,
         adapter_enabled: torch.Tensor,
         mul_routed_weight=False,
     ):
