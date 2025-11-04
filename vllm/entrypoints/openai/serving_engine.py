@@ -1321,12 +1321,7 @@ class OpenAIServing:
         content: str | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
-        if request.tool_choice is None:
-            # No tool calls.
-            return None, content
-        elif request.tool_choice and isinstance(
-            request.tool_choice, ToolChoiceFunction
-        ):
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
             assert content is not None
             # Forced Function Call
             function_calls.append(
@@ -1355,8 +1350,11 @@ class OpenAIServing:
                 ]
             )
             content = None  # Clear content since tool is called.
-        elif request.tool_choice == "auto" or request.tool_choice == "none":
-            assert tool_parser_cls is not None
+        elif (
+            tool_parser_cls
+            and enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ):
             # Automatic Tool Call Parsing
             try:
                 tool_parser = tool_parser_cls(tokenizer)
@@ -1380,8 +1378,7 @@ class OpenAIServing:
             else:
                 # No tool calls.
                 return None, content
-        else:
-            raise ValueError(f"Invalid tool_choice: {request.tool_choice}")
+
         return function_calls, content
 
     @staticmethod
