@@ -37,6 +37,7 @@ from vllm.transformers_utils.config import (
     uses_custom_attention_masks,
     uses_mrope,
 )
+from vllm.transformers_utils.gguf_utils import detect_gguf_multimodal_gemma3
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
@@ -164,6 +165,63 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
 
     logger.info("Extracted vision config from mmproj.gguf metadata")
     return config
+
+
+def patch_hf_config_from_gguf(
+    model: str,
+    hf_config: PretrainedConfig,
+    architectures: list[str],
+) -> list[str]:
+    """Patch HF config for GGUF multimodal Gemma3 models.
+
+    If model has mmproj.gguf, patches the config:
+    - Forces Gemma3ForConditionalGeneration architecture
+    - Extracts and sets vision_config from mmproj.gguf
+    - Sets multimodal token indices
+
+    Args:
+        model: Model path string
+        hf_config: HuggingFace config to patch in-place
+        architectures: Original architecture list
+
+    Returns:
+        Updated architecture list (unchanged if not Gemma3 GGUF multimodal)
+    """
+    mmproj_path = detect_gguf_multimodal_gemma3(model)
+    if mmproj_path is not None:
+        is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
+        if is_gemma3:
+            architectures = ["Gemma3ForConditionalGeneration"]
+            hf_config.architectures = architectures
+            logger.info(
+                "Detected Gemma3 GGUF with mmproj.gguf, "
+                "forcing Gemma3ForConditionalGeneration"
+            )
+
+            # Initialize vision_config if not present
+            if (
+                not hasattr(hf_config, "vision_config")
+                or hf_config.vision_config is None
+            ):
+                vision_config = extract_vision_config_from_gguf(str(mmproj_path))
+
+                # Fail fast if extraction fails - indicates
+                # corrupted/incomplete GGUF
+                if vision_config is None:
+                    raise ValueError(
+                        "Failed to extract vision config from mmproj.gguf. "
+                        "This may indicate a corrupted or incomplete GGUF "
+                        "file. Please verify your mmproj.gguf file is valid."
+                    )
+
+                hf_config.vision_config = vision_config
+                hf_config.mm_tokens_per_image = 256
+                hf_config.image_token_index = 262144
+                # DO NOT set boi_token_index - let
+                # gemma3_mm.py fall back to 262143
+                hf_config.eoi_token_index = 256000
+
+    return architectures
 
 
 RunnerOption = Literal["auto", RunnerType]
@@ -627,40 +685,9 @@ class ModelConfig:
 
         # GGUF multimodal: Force Gemma3ForConditionalGeneration architecture
         # when mmproj file is present, before model resolution
-        mmproj_path = _detect_gguf_multimodal_gemma3(self.model)
-        if mmproj_path is not None:
-            is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
-            if is_gemma3:
-                architectures = ["Gemma3ForConditionalGeneration"]
-                self.hf_config.architectures = architectures
-                logger.info(
-                    "Detected Gemma3 GGUF with mmproj.gguf, "
-                    "forcing Gemma3ForConditionalGeneration"
-                )
-
-                # Initialize vision_config if not present
-                if (
-                    not hasattr(self.hf_config, "vision_config")
-                    or self.hf_config.vision_config is None
-                ):
-                    # Use local function instead of importing from utils
-                    vision_config = extract_vision_config_from_gguf(str(mmproj_path))
-
-                    # Fail fast if extraction fails - indicates
-                    # corrupted/incomplete GGUF
-                    if vision_config is None:
-                        raise ValueError(
-                            "Failed to extract vision config from mmproj.gguf. "
-                            "This may indicate a corrupted or incomplete GGUF "
-                            "file. Please verify your mmproj.gguf file is valid."
-                        )
-
-                    self.hf_config.vision_config = vision_config
-                    self.hf_config.mm_tokens_per_image = 256
-                    self.hf_config.image_token_index = 262144
-                    # DO NOT set boi_token_index - let
-                    # gemma3_mm.py fall back to 262143
-                    self.hf_config.eoi_token_index = 256000
+        architectures = patch_hf_config_from_gguf(
+            self.model, self.hf_config, architectures
+        )
 
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
