@@ -572,7 +572,7 @@ class WorkerProc:
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
-                logger.info("RAISING SYSTEM EXIT")
+                logger.debug("Raising SystemExit() while handling signal %d", signum)
                 raise SystemExit()
 
         # Either SIGTERM or SIGINT will terminate the worker
@@ -653,20 +653,18 @@ class WorkerProc:
             shutdown_requested = True
         except SystemExit as e:
             # If proper shutdown does not succeed, the worker processes are sent
-            # a SIGTERM and finally a SIGKILL, each of which should raise a
+            # a SIGTERM and finally a SIGKILL, which should raise a
             # SystemExit() exception
-            logger.warning("WorkerProc failed to shut down properly and was terminated")
+            logger.warning("WorkerProc was terminated")
+            # SystemExit must never be ignored
             raise e
         finally:
             if ready_writer is not None:
-                logger.info("CLOSING WRITER")
                 ready_writer.close()
             if death_pipe is not None:
-                logger.info("CLOSING DEATH PIPE")
                 death_pipe.close()
             # Clean up once worker exits busy loop
             if worker is not None:
-                logger.info("SHUTTING DOWN WORKER")
                 worker.shutdown()
 
     class ResponseStatus(Enum):
