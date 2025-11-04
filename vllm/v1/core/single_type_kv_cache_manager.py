@@ -424,16 +424,18 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         For sliding window, this corresponds to the tokens that are prior to
         the current sliding window.
 
-        For example, if sliding_window is 4 and num_computed_tokens is 7
-        (i.e., tokens 0~6 have been computed):
+        Example:
+        sliding_window=4, num_computed_tokens=7
 
-            Tokens:   [ 0  1  2 | 3  4  5  6 ]
-                        ^^^^^   ^^^^^^^^^^^^
-                      skipped    sliding window
+            Tokens:   [ 0  1  2  3  4  5  6  7 ]
+                      | ---- computed -----|
+                                             ^ next token to be computed
+                                    |-----------| sliding window for next token
+                      |--skipped--|
 
-        The current window contains tokens 3~6. Tokens 0~2 will be skipped for
+        The current window contains tokens 4~7. Tokens 0~3 will be skipped for
         attention computation since they are outside the sliding window.
-        Thus, get_num_skipped_tokens(7) == 3.
+        Thus, get_num_skipped_tokens(7) == 4.
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
