@@ -66,8 +66,7 @@ __global__ void rms_norm_kernel(
 #pragma unroll
     for (int j = 0; j < VEC_SIZE; j++) {
       float x = static_cast<float>(src1.val[j]);
-      float w = static_cast<float>(src2.val[j]);
-      dst.val[j] = static_cast<scalar_t>(x * s_variance * w);
+      dst.val[j] = ((scalar_t)(x * s_variance)) * src2.val[j];
     }
     v_out[i] = dst;
   }
