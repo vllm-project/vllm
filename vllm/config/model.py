@@ -20,9 +20,6 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -32,7 +29,6 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_interleaved,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_safetensors_metadata,
@@ -437,20 +433,13 @@ class ModelConfig:
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
-        # Enable batch invariance settings if requested
-        if vllm_is_batch_invariant():
-            self.enforce_eager = True
-
         # Set the default seed to 0 in V1.
-        # NOTE(woosuk): In V0, we set the default seed to None because the
-        # driver worker shares the same process as the user process, and thus
-        # setting a seed affects the user process as well.
-        # In V1, we use separate processes for workers (unless
+        # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
         # doesn't affect the user process. However, without a consistent seed,
         # different tensor parallel workers would sample different tokens,
         # leading to inconsistent results.
-        if envs.VLLM_USE_V1 and self.seed is None:
+        if self.seed is None:
             self.seed = 0
             if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
                 logger.warning(
@@ -702,23 +691,6 @@ class ModelConfig:
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
         )
-
-        # Interleaved attention is not supported by some backends in V0
-        if (
-            not self.disable_sliding_window
-            and is_interleaved(self.hf_text_config)
-            and not envs.VLLM_USE_V1
-            and (backend := envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER")
-        ):
-            logger.warning_once(
-                "%s has interleaved attention, which is currently not "
-                "supported by the %s backend. Disabling sliding window and "
-                "capping the max length to the sliding window size (%d).",
-                self.hf_text_config.model_type,
-                backend,
-                self.hf_text_config.sliding_window,
-            )
-            self.disable_sliding_window = True
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
@@ -1257,7 +1229,10 @@ class ModelConfig:
             "deepseek_v32",
             "deepseek_mtp",
             "kimi_k2",
+            "kimi_linear",
             "longcat_flash",
+            "pangu_ultra_moe",
+            "pangu_ultra_moe_mtp",
         ):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == "eagle":
@@ -1406,6 +1381,7 @@ class ModelConfig:
             or self.hf_config.model_type == "glm4_moe_mtp"
             or self.hf_config.model_type == "ernie_mtp"
             or self.hf_config.model_type == "qwen3_next_mtp"
+            or self.hf_config.model_type == "pangu_ultra_moe_mtp"
         ):
             total_num_hidden_layers = getattr(
                 self.hf_text_config, "num_nextn_predict_layers", 0
@@ -1510,6 +1486,12 @@ class ModelConfig:
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
+
+        # Since Mamba1 does not have a chunk notion
+        # we use a default chunk size of 1024.
+        if chunk_size is None:
+            chunk_size = 2048
+
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
