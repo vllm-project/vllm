@@ -108,7 +108,6 @@ class PostGradPassManager(CustomGraphPass):
                 self.passes += [ActivationQuantFusionPass(config)]
 
             if self.pass_config.enable_attn_fusion:
-                logger.debug("Enabling AttnFusionPass")
                 self.passes += [AttnFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:

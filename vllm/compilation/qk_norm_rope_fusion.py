@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Pattern-based fusion pass for Q/K RMSNorm + RoPE -> fused_qk_norm_rope."""
 
 from collections.abc import Callable
 
@@ -14,7 +13,6 @@ from vllm.attention import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.platforms import current_platform
 
 from .fusion import empty_bf16, empty_fp32, empty_i64
 from .inductor_pass import enable_fake_mode
@@ -24,8 +22,6 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 logger = init_logger(__name__)
 
 FUSED_QK_ROPE_OP = torch.ops._C.fused_qk_norm_rope.default
-SPLIT_SIZES_OP = torch.ops.aten.split_with_sizes.default
-RESHAPE_OP = torch.ops.aten.reshape.default
 
 
 class QkNormRopePattern:
@@ -76,6 +72,25 @@ class QkNormRopePattern:
             use_flashinfer=self.rope_flashinfer,
         )
 
+    def get_inputs(self):
+        # Sample inputs to help pattern tracing
+        T = 5
+        qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
+        positions = empty_i64(T)
+        q_weight = empty_bf16(1, self.head_dim)
+        k_weight = empty_bf16(1, self.head_dim)
+        if self.rope_flashinfer:
+            cos_sin_cache = empty_fp32(4096, self.head_dim)
+        else:
+            cos_sin_cache = empty_bf16(4096, self.head_dim)
+        return [
+            qkv,
+            positions,
+            q_weight,
+            k_weight,
+            cos_sin_cache,
+        ]
+
     @staticmethod
     def wrap_trace_fn(trace_fn, *process_fx_fns: Callable[[fx.GraphModule], None]):
         def wrapped(*args, **kwargs):
@@ -105,18 +120,18 @@ class QkNormRopePattern:
             q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
             # Q path: view -> RMS -> view back to q.shape
-            q_by_head = RESHAPE_OP(
-                q, [*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim]
+            q_by_head = q.view(
+                *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
             )
             q_normed_by_head = self.rmsnorm_matcher(q_by_head, q_weight)
-            q_flat = RESHAPE_OP(q_normed_by_head, q.shape)
+            q_flat = q_normed_by_head.view(q.shape)
 
             # K path: view -> RMS -> view back to k.shape
-            k_by_head = RESHAPE_OP(
-                k, [*k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim]
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
             )
             k_normed_by_head = self.rmsnorm_matcher(k_by_head, k_weight)
-            k_flat = RESHAPE_OP(k_normed_by_head, k.shape)
+            k_flat = k_normed_by_head.view(k.shape)
 
             # RoPE: apply to flattened q/k
             q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
@@ -149,30 +164,12 @@ class QkNormRopePattern:
             # Split back to q,k,v and return
             return result_qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # Sample inputs to help pattern tracing
-        T = 5
-        qkv = empty_bf16(T, self.q_size + 2 * self.kv_size)
-        positions = empty_i64(T)
-        q_weight = empty_bf16(1, self.head_dim)
-        k_weight = empty_bf16(1, self.head_dim)
-        if self.rope_flashinfer:
-            cos_sin_cache = empty_fp32(4096, self.head_dim)
-        else:
-            cos_sin_cache = empty_bf16(4096, self.head_dim)
-        inputs = [
-            qkv,
-            positions,
-            q_weight,
-            k_weight,
-            cos_sin_cache,
-        ]
-
         # NOTE: use fx_view_to_reshape to unify view/reshape to simplify
         # pattern and increase matching opportunities
         pm.register_replacement(
             pattern,
             replacement,
-            inputs,
+            self.get_inputs(),
             QkNormRopePattern.wrap_trace_fn(
                 pm.fwd_only,
                 QkNormRopePattern.fx_view_to_reshape,
@@ -191,10 +188,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             pass_name="qk_norm_rope_fusion_pass"
         )
 
-        if not current_platform.is_cuda_alike():
-            logger.warning_once("QK Norm+RoPE fusion not enabled: unsupported platform")
-            return
-
         dtype = config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
             logger.warning_once(
@@ -211,7 +204,7 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
                 "QK Norm+RoPE fusion enabled, but no Attention layers were discovered."
             )
             return
-        _, layer = next(iter(attn_layers.items()))
+        layer = next(iter(attn_layers.values()))
 
         for epsilon in [1e-5, 1e-6]:
             for neox in [True, False]:
@@ -238,8 +231,6 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
-        if not current_platform.is_cuda_alike():
-            return
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Fused QK Norm+RoPE on %s sites", self.matched_count)
 
