@@ -578,6 +578,7 @@ class CompilationConfig:
 
         if self.pass_config.enable_qk_norm_rope_fusion:
             # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
 
         if (
