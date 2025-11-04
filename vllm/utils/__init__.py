@@ -16,6 +16,13 @@ _DEPRECATED_MAPPINGS = {
     "cprofile_context": "profiling",
     # Used by lm-eval
     "get_open_port": "network_utils",
+    # Attention backend constants
+    "STR_BACKEND_ENV_VAR": "attention.constants",
+    "STR_FLASHINFER_ATTN_VAL": "attention.constants",
+    "STR_TORCH_SDPA_ATTN_VAL": "attention.constants",
+    "STR_XFORMERS_ATTN_VAL": "attention.constants",
+    "STR_FLASH_ATTN_VAL": "attention.constants",
+    "STR_INVALID_VAL": "attention.constants",
 }
 
 
@@ -47,20 +54,7 @@ DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
 POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
 MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 
-# Constants related to forcing the attention backend selection
-
-# String name of register which may be set in order to
-# force auto-selection of attention backend by Attention
-# wrapper
-STR_BACKEND_ENV_VAR: str = "VLLM_ATTENTION_BACKEND"
-
-# Possible string values of STR_BACKEND_ENV_VAR
-# register, corresponding to possible backends
-STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
-STR_TORCH_SDPA_ATTN_VAL: str = "TORCH_SDPA"
-STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
-STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
-STR_INVALID_VAL: str = "INVALID"
+# Attention backend constants moved to vllm.attention.constants
 
 
 T = TypeVar("T")
