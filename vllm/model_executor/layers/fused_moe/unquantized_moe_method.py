@@ -558,7 +558,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             or logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for TPU.")
-
         return fused_moe_pallas(
             hidden_states=x,
             w1=layer.w13_weight,
