@@ -110,15 +110,17 @@ class DeepseekAttention(nn.Module):
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
+        config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         num_heads: int,
-        num_kv_heads: int | None = None,
         rope_theta: float = 10000,
         rope_scaling: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        **kwargs,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -126,7 +128,7 @@ class DeepseekAttention(nn.Module):
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
-        self.total_num_kv_heads = num_kv_heads
+        self.total_num_kv_heads = config.num_key_value_heads
         if self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -1089,9 +1091,8 @@ class DeepseekV2DecoderLayer(nn.Module):
         qk_rope_head_dim = getattr(config, "qk_rope_head_dim", 0)
         v_head_dim = getattr(config, "v_head_dim", 0)
         kv_lora_rank = getattr(config, "kv_lora_rank", 0)
-        use_mha = all(
-            dim == 0
-            for dim in (qk_nope_head_dim, qk_rope_head_dim, v_head_dim, kv_lora_rank)
+        use_mha = config.model_type == "deepseek" or all(
+            dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
         )
 
         if use_mha:
@@ -1413,8 +1414,13 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
+            # MLA
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
+            # MHA
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
         ]
 
         # Params for weights, fp8 weight scales, fp8 activation scales
