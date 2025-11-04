@@ -9,7 +9,6 @@ from typing import TypeAlias
 
 from prometheus_client import Counter, Gauge, Histogram
 
-import vllm.envs as envs
 from vllm.config import SupportsMetricsInfo, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorLogging,
@@ -395,32 +394,32 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.gauge_scheduler_waiting = make_per_engine(
             gauge_scheduler_waiting, engine_indexes, model_name
         )
-        if envs.VLLM_SERVER_DEV_MODE:
-            gauge_engine_sleep_state = self._gauge_cls(
-                name="vllm:engine_sleep_state",
-                documentation=(
-                    "Engine sleep state; awake = 0 means engine is sleeping; "
-                    "awake = 1 means engine is awake; "
-                    "weights_offloaded = 1 means sleep level 1; "
-                    "discard_all = 1 means sleep level 2."
-                ),
-                labelnames=labelnames + ["sleep_state"],
-                multiprocess_mode="mostrecent",
-            )
 
-            self.gauge_engine_sleep_state = {}
-            sleep_state = ["awake", "weights_offloaded", "discard_all"]
+        gauge_engine_sleep_state = self._gauge_cls(
+            name="vllm:engine_sleep_state",
+            documentation=(
+                "Engine sleep state; awake = 0 means engine is sleeping; "
+                "awake = 1 means engine is awake; "
+                "weights_offloaded = 1 means sleep level 1; "
+                "discard_all = 1 means sleep level 2."
+            ),
+            labelnames=labelnames + ["sleep_state"],
+            multiprocess_mode="mostrecent",
+        )
 
-            for s in sleep_state:
-                self.gauge_engine_sleep_state[s] = {
-                    idx: gauge_engine_sleep_state.labels(
-                        engine=idx, model_name=model_name, sleep_state=s
-                    )
-                    for idx in engine_indexes
-                }
+        self.gauge_engine_sleep_state = {}
+        sleep_state = ["awake", "weights_offloaded", "discard_all"]
 
-            # Setting default values
-            self.record_sleep_state()
+        for s in sleep_state:
+            self.gauge_engine_sleep_state[s] = {
+                idx: gauge_engine_sleep_state.labels(
+                    engine=idx, model_name=model_name, sleep_state=s
+                )
+                for idx in engine_indexes
+            }
+
+        # Setting default values
+        self.record_sleep_state()
 
         # GPU cache
         #
@@ -1052,9 +1051,6 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_lora_info.labels(**lora_info_labels).set_to_current_time()
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
-        if not envs.VLLM_SERVER_DEV_MODE:
-            return
-
         awake = 1
         discard_all = 0
         weights_offloaded = 0

@@ -18,14 +18,12 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("phi4_mini_json")
 class Phi4MiniJsonToolParser(ToolParser):
     """
     Tool call parser for phi-4-mini models intended for use with the
