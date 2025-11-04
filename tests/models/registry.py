@@ -296,6 +296,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
             "random": "ai21labs/Jamba-tiny-random",
         },
     ),
+    "KimiLinearForCausalLM": _HfExamplesInfo(
+        "moonshotai/Kimi-Linear-48B-A3B-Instruct", trust_remote_code=True
+    ),
     "Lfm2ForCausalLM": _HfExamplesInfo("LiquidAI/LFM2-1.2B"),
     "Lfm2MoeForCausalLM": _HfExamplesInfo(
         "LiquidAI/LFM2-8B-A1B", min_transformers_version="4.58"
@@ -366,6 +369,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OrionForCausalLM": _HfExamplesInfo(
         "OrionStarAI/Orion-14B-Chat", trust_remote_code=True
     ),
+    "OuroForCausalLM": _HfExamplesInfo("ByteDance/Ouro-1.4B", trust_remote_code=True),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
@@ -708,6 +712,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
+        "PaddlePaddle/PaddleOCR-VL",
+        trust_remote_code=True,
+    ),
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo(
         "google/paligemma-3b-mix-224",
         extras={"v2": "google/paligemma2-3b-ft-docci-448"},
@@ -878,27 +886,27 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersEmbeddingModel": _HfExamplesInfo(
-        "BAAI/bge-base-en-v1.5", min_transformers_version="4.57.0.dev0"
+        "BAAI/bge-base-en-v1.5", min_transformers_version="5.0.0"
     ),
     "TransformersForSequenceClassification": _HfExamplesInfo(
         "papluca/xlm-roberta-base-language-detection",
-        min_transformers_version="4.57.0.dev0",
+        min_transformers_version="5.0.0",
     ),
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
-        "allenai/OLMoE-1B-7B-0924", min_transformers_version="4.57.0.dev0"
+        "allenai/OLMoE-1B-7B-0924", min_transformers_version="5.0.0"
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="4.57.0.dev0"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="5.0.0"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
-        "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
-        "Qwen/Qwen3-30B-A3B", min_transformers_version="4.57.0.dev0"
+        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
     ),
     "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
     "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
