@@ -62,6 +62,16 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
+    health_check_enabled: bool = True
+    """Enable per-expert health monitoring based on latency."""
+
+    health_latency_threshold: float = 3.0
+    """Latency threshold multiplier. Expert is unhealthy if current latency
+    exceeds threshold * historical_mean_latency within a window for that expert."""
+
+    health_penalty_factor: float = 10.0
+    """Weight multiplier for unhealthy experts during rebalancing."""
+
 
 @config
 @dataclass

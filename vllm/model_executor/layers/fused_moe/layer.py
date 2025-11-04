@@ -1289,6 +1289,16 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map: torch.Tensor | None = None
         self.logical_replica_count: torch.Tensor | None = None
 
+        # Health monitoring: Shared latency view (layers write directly to this)
+        self.expert_latency_view: torch.Tensor | None = None
+        self.layer_idx: int = 0  # MoE layer index (set in set_eplb_state)
+        self.cuda_start_event: torch.cuda.Event | None = None
+        self.cuda_end_event: torch.cuda.Event | None = None
+        if enable_eplb and vllm_config.parallel_config.eplb_config.health_check_enabled:
+            # CUDA events measure layer execution time
+            self.cuda_start_event = torch.cuda.Event(enable_timing=True)
+            self.cuda_end_event = torch.cuda.Event(enable_timing=True)
+
         # ROCm aiter shared experts fusion
         self.num_fused_shared_experts = (
             n_shared_experts
@@ -2105,6 +2115,7 @@ class FusedMoE(CustomOp):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        expert_latency_view: torch.Tensor | None = None,
     ) -> None:
         """
         Register the EPLB state in this layer.
@@ -2112,9 +2123,14 @@ class FusedMoE(CustomOp):
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
         """
+        self.layer_idx = moe_layer_idx
         self.expert_load_view = expert_load_view[moe_layer_idx]
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
+
+        # Health monitoring
+        if expert_latency_view is not None:
+            self.expert_latency_view = expert_latency_view[moe_layer_idx]
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
@@ -2600,6 +2616,10 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
 
+            # Health monitoring: Record start time
+            if self.cuda_start_event is not None:
+                self.cuda_start_event.record()
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -2625,6 +2645,25 @@ class FusedMoE(CustomOp):
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
             )
+
+            # Health monitoring: Record latency for active experts
+            if self.cuda_end_event is not None and self.expert_latency_view is not None:
+                self.cuda_end_event.record()
+                self.cuda_end_event.synchronize()
+
+                # Calculate layer latency in milliseconds
+                layer_latency_ms = self.cuda_start_event.elapsed_time(
+                    self.cuda_end_event
+                )
+
+                # Determine which experts were active from router logits
+                # router_logits shape: (num_tokens, num_experts)
+                _, selected_experts = torch.topk(router_logits, self.top_k, dim=-1)
+                active_experts = selected_experts.unique()
+
+                # Write to latency view: 0 for inactive, latency for active
+                self.expert_latency_view.zero_()  # Reset all to 0
+                self.expert_latency_view[active_experts] = layer_latency_ms
 
             if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
@@ -2706,6 +2745,17 @@ class FusedMoE(CustomOp):
                 ("w3", ckpt_up_proj_name),
             ]
         ]
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """
+        Get this layer's slice of the expert latency tensor.
+
+        Returns:
+            Tensor of shape (num_physical_experts,) containing latency in
+            milliseconds (0 if expert was inactive), or None if latency
+            tracking is not enabled.
+        """
+        return self.expert_latency_view
 
     def extra_repr(self) -> str:
         s = (
