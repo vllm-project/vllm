@@ -579,6 +579,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 self.logits_soft_cap,
                 layer._k_scale,
                 layer._v_scale,
+                self.sliding_window[0]+1,
                 None,
                 _PARTITION_SIZE_ROCM,
             )
