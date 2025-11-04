@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
+from typing import Any
 
 import lm_eval
 import openai
 
 BASE_URL = "http://localhost:8192/v1"
 NUM_CONCURRENT = int(os.environ.get("NUM_CONCURRENT", "100"))
+LIMIT = int(os.environ.get("LIMIT", "0"))  # 0 means no limit
 TASK = "gsm8k"
 FILTER = "exact_match,strict-match"
 RTOL = 0.03
@@ -48,11 +50,16 @@ def test_accuracy():
         f"num_concurrent={NUM_CONCURRENT},tokenized_requests=False"
     )
 
-    results = lm_eval.simple_evaluate(
-        model="local-completions",
-        model_args=model_args,
-        tasks=TASK,
-    )
+    eval_args: dict[str, Any] = {
+        "model": "local-completions",
+        "model_args": model_args,
+        "tasks": TASK,
+    }
+
+    if LIMIT > 0:
+        eval_args["limit"] = LIMIT
+
+    results = lm_eval.simple_evaluate(**eval_args)
 
     measured_value = results["results"][TASK][FILTER]
     expected_value = EXPECTED_VALUES.get(MODEL_NAME)
