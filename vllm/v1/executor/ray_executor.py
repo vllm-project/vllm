@@ -435,7 +435,7 @@ class RayDistributedExecutor(Executor):
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
-            return FutureWrapper(refs)
+            return FutureWrapper(refs[0])
 
         # Get output from all workers when connector is present
         assert self.kv_output_aggregator is not None
