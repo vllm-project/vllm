@@ -11,6 +11,7 @@ import pprint
 import time
 from collections.abc import Callable, Sequence
 from contextlib import contextmanager
+from functools import partial
 from typing import Any
 
 import torch
@@ -24,6 +25,7 @@ from vllm.compilation.partition_rules import (
     resolve_defined_ops,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.utils import hash_factors
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.logging_utils import lazy
@@ -578,10 +580,9 @@ class VllmBackend:
 
         vllm_config = self.vllm_config
         # Minimal hashing here with existing utilities, reused below.
-        from vllm.config.utils import hash_factors as _hash_factors
 
         env_factors = envs.compile_factors()
-        env_hash = _hash_factors(env_factors)
+        env_hash = hash_factors(env_factors)
         # Compute config/compiler/code hashes once and reuse
         config_hash = vllm_config.compute_hash()
         compiler_hash = self.compiler_manager.compute_hash(vllm_config)
@@ -661,7 +662,7 @@ class VllmBackend:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                    pprint.pformat(env_factors, width=120),
+                    lazy(partial(pprint.pformat, env_factors, width=120)),
                     config_hash,
                 )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
@@ -683,7 +684,8 @@ class VllmBackend:
             logger.warning(
                 (
                     "Could not write compile cache metadata at %s; continuing without "
-                    "metadata. Compiled cache remains valid; diagnostics may be limited."
+                    "metadata. Compiled cache remains valid; diagnostics may be "
+                    "limited."
                 ),
                 local_cache_dir,
                 exc_info=True,

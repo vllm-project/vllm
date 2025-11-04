@@ -15,6 +15,7 @@ from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar
 
 import regex as re
+import torch
 from pydantic.fields import FieldInfo
 from typing_extensions import runtime_checkable
 
@@ -218,11 +219,7 @@ def normalize_value(x):
 
     # Torch dtype: stringify (torch.float64 -> "torch.float64").
     # Collisions with same literal ok; tag as ("torch.dtype", str(x)).
-    t = type(x)
-    if (
-        getattr(t, "__module__", "") == "torch"
-        and getattr(t, "__name__", "") == "dtype"
-    ):
+    if isinstance(x, torch.dtype):
         return str(x)
 
     # Bytes
@@ -266,7 +263,7 @@ def normalize_value(x):
 def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
-    - Skips non-normalizable values.
+    - Errors on non-normalizable values.
     """
     factors: dict[str, object] = {}
     for dc_field in fields(config):

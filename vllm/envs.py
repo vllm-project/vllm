@@ -1520,7 +1520,7 @@ def set_vllm_use_v1(use_v1: bool):
 
 def compile_factors() -> dict[str, object]:
     """
-    Return environment variables used to compute the compile cache key. 
+    Return environment variables used to compute the compile cache key.
     This includes all known vLLM environment variables.
     This then excludes variables that cannot affect graph structure, codegen, or kernel
       selection (see ignored_factors)
@@ -1548,8 +1548,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_STREAM", "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOG_STATS_INTERVAL",         
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
-        "VLLM_TUNED_CONFIG_FOLDER",        
-        "VLLM_ENGINE_ITERATION_TIMEOUT_S", 
+        "VLLM_TUNED_CONFIG_FOLDER",
+        "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",
         "VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS",
         "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 
@@ -1558,7 +1558,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_AUDIO_FETCH_TIMEOUT", "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
-        "VLLM_VIDEO_LOADER_BACKEND", 
+        "VLLM_VIDEO_LOADER_BACKEND",
     }
 
     from vllm.config.utils import normalize_value
@@ -1571,8 +1571,6 @@ def compile_factors() -> dict[str, object]:
         raw = getter()
 
         factors[factor] = normalize_value(raw)
-
-    return factors
 
     ray_noset_env_vars = [
         # Refer to
@@ -1595,8 +1593,8 @@ def compile_factors() -> dict[str, object]:
         "RAY_EXPERIMENTAL_NOSET_ONEAPI_DEVICE_SELECTOR",
         "RAY_EXPERIMENTAL_NOSET_RBLN_RT_VISIBLE_DEVICES",
     ]
-    factors.extend([os.getenv(var) for var in ray_noset_env_vars])
 
-    hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+    for var in ray_noset_env_vars:
+        factors[var] = normalize_value(os.getenv(var))
 
-    return hash_str
+    return factors
