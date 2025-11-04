@@ -789,9 +789,7 @@ def get_num_blocks(
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
     """
-
     num_blocks = int(available_memory // page_size // num_layers)
-
     num_blocks = max(num_blocks, 0)
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
     return num_blocks
