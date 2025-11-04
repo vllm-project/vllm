@@ -340,6 +340,15 @@ steps:
   commands:
     - pytest -v -s v1/attention
 
+- label: V1 Test attention (B200) # 10min
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
     - vllm/
@@ -417,7 +426,7 @@ steps:
       --ignore=lora/test_llm_with_multi_loras.py \
       --ignore=lora/test_olmoe_tp.py \
       --ignore=lora/test_deepseekv2_tp.py \
-      --ignore=lora/test_gptoss.py \
+      --ignore=lora/test_gptoss_tp.py \
       --ignore=lora/test_qwen3moe_tp.py
 
   parallelism: 4
@@ -1119,6 +1128,7 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
+    - pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
@@ -1212,6 +1222,7 @@ steps:
     - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - pytest -v -s tests/v1/distributed/test_dbo.py  
 
 ##### B200 test #####
 - label: Distributed Tests (B200) # optional
@@ -1222,6 +1233,7 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+    - pytest -v -s tests/v1/distributed/test_dbo.py
 
 ##### RL Integration Tests #####
 - label: Prime-RL Integration Test # 15min
