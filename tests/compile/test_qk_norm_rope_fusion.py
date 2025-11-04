@@ -114,7 +114,7 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
-    reason="Only test on CUDA and ROCm",
+    reason="Only test on cuda_alike platforms",
 )
 def test_qk_norm_rope_fusion(
     eps, is_neox, enable_rms_norm_custom_op, enable_rope_custom_op, dtype
