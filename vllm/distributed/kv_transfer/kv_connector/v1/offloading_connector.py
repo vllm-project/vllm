@@ -17,7 +17,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -250,6 +255,18 @@ class OffloadingConnector(KVConnectorBase_V1):
             OffloadingConnectorStats(data=data)
             if data is not None
             else OffloadingConnectorStats()
+        )
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[str]],
+    ) -> KVConnectorPromMetrics:
+        return OffloadPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
         )
 
 
@@ -640,3 +657,69 @@ def yield_req_data(
         cached_reqs.new_block_ids,
         (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
     )
+
+
+class OffloadPromMetrics(KVConnectorPromMetrics):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[str]],
+    ):
+        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+
+        counter_offload_block_queries = self._counter_cls(
+            name="vllm:offload_connector_block_queries",
+            documentation="Number of blocks queried by Offloading KV Connector.",
+            labelnames=labelnames,
+        )
+        self.counter_offload_block_queries = self.make_per_engine(
+            counter_offload_block_queries
+        )
+        counter_offload_block_hits = self._counter_cls(
+            name="vllm:offload_connector_block_hits",
+            documentation="Number of blocks queried and hit by Offloading"
+            " KV Connector.",
+            labelnames=labelnames,
+        )
+        self.counter_offload_block_hits = self.make_per_engine(
+            counter_offload_block_hits
+        )
+
+        gauge_kv_load_time_avg = self._gauge_cls(
+            name="vllm:offload_connector_kv_load_time",
+            documentation="Average time it takes to load a token from "
+            "offloaded KV memory",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+
+        self.gauge_kv_load_time_avg = self.make_per_engine(gauge_kv_load_time_avg)
+
+        gauge_kv_store_time_avg = self._gauge_cls(
+            name="vllm:offload_connector_kv_store_time",
+            documentation="Average time it takes to store a token to "
+            "offloaded KV memory",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+
+        self.gauge_kv_store_time_avg = self.make_per_engine(gauge_kv_store_time_avg)
+
+    def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
+        for counter_obj, counter_item_key in zip(
+            [
+                self.counter_offload_block_queries,
+                self.counter_offload_block_hits,
+            ],
+            ["total_queries", "total_hits"],
+        ):
+            list_item = transfer_stats_data[counter_item_key]
+            counter_obj[engine_idx].inc(list_item)
+        for gauge_obj, gauge_item_key in zip(
+            [self.gauge_kv_load_time_avg, self.gauge_kv_store_time_avg],
+            ["avg_load_time", "avg_store_time"],
+        ):
+            list_item = transfer_stats_data[gauge_item_key]
+            gauge_obj[engine_idx].set(list_item)
