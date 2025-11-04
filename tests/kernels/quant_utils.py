@@ -6,7 +6,7 @@ import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import group_broadcast
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 # Using the default value (240.0) from pytorch will cause accuracy
 # issue on dynamic quantization models. Here use 224.0 for rocm.
@@ -103,7 +103,7 @@ def ref_dynamic_per_tensor_fp8_quant(
         .clamp(fp8_traits_min, fp8_traits_max)
         .to(FP8_DTYPE)
     )
-    return ref_out, ref_scale.view((1,))
+    return ref_out, ref_scale.view((1, 1))
 
 
 def native_w8a8_block_matmul(

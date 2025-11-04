@@ -14,34 +14,49 @@ else:
 
 
 class LogprobsLists(NamedTuple):
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: list[list[int]]
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: list[list[float]]
-    # [num_reqs]
+    # [num_reqs x num_generated_tokens]
     sampled_token_ranks: list[int]
+    # [num_reqs]
+    # Used for slicing the logprobs in cases like speculative
+    # decoding where the number of generated tokens may be
+    # different for each request.
+    cu_num_generated_tokens: list[int] | None = None
 
-    def slice(self, start: int, end: int):
+    def slice(self, start_req_idx: int, end_req_idx: int):
+        if self.cu_num_generated_tokens:
+            start = self.cu_num_generated_tokens[start_req_idx]
+            end = self.cu_num_generated_tokens[end_req_idx]
+        else:
+            start = start_req_idx
+            end = end_req_idx
         return LogprobsLists(
             self.logprob_token_ids[start:end],
             self.logprobs[start:end],
             self.sampled_token_ranks[start:end],
+            self.cu_num_generated_tokens[start_req_idx:end_req_idx]
+            if self.cu_num_generated_tokens
+            else None,
         )
 
 
 class LogprobsTensors(NamedTuple):
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprob_token_ids: torch.Tensor
-    # [num_reqs, max_num_logprobs + 1]
+    # [num_reqs x num_generated_tokens, max_num_logprobs + 1]
     logprobs: torch.Tensor
-    # [num_reqs]
+    # [num_reqs x num_generated_tokens]
     selected_token_ranks: torch.Tensor
 
-    def tolists(self):
+    def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
             self.logprob_token_ids.tolist(),
             self.logprobs.tolist(),
             self.selected_token_ranks.tolist(),
+            cu_num_generated_tokens,
         )
 
     @staticmethod
@@ -86,8 +101,14 @@ class KVConnectorOutput:
     finished_recving: set[str] | None = None
     kv_connector_stats: KVConnectorStats | None = None
     # IDs of externally computed KV blocks that failed to load.
-    # Requests referencing these blocks should be rescheduled to recompute them.
+    # Requests referencing these blocks should be rescheduled to recompute them
     invalid_block_ids: set[int] = field(default_factory=set)
+    # Configuration describing how many finished sending/receiving
+    # notifications should be expected for each request. This allows
+    # handshake-based connectors like Nixl to update the KVOutputAggregator.
+    # It captures a static setup info and should almost always remain constant
+    # for a given connector after discovery. Default value entails no change.
+    expected_finished_count: int = 0
 
     def is_empty(self):
         return (

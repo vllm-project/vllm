@@ -25,12 +25,8 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils import (
-    get_open_port,
-    get_open_zmq_ipc_path,
-    get_tcp_uri,
-    kill_process_tree,
-)
+from vllm.utils import kill_process_tree
+from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
 
 if TYPE_CHECKING:
     import numpy as np
@@ -345,13 +341,17 @@ def report_usage_stats(
 
     parallel_config = vllm_config.parallel_config
 
+    # Prepare KV connector string if applicable
+    kv_connector = None
+    if vllm_config.kv_transfer_config is not None:
+        kv_connector = vllm_config.kv_transfer_config.kv_connector
+
     usage_message.report_usage(
         get_architecture_class_name(vllm_config.model_config),
         usage_context,
         extra_kvs={
             # Common configuration
             "dtype": str(vllm_config.model_config.dtype),
-            "tensor_parallel_size": parallel_config.tensor_parallel_size,
             "block_size": vllm_config.cache_config.block_size,
             "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
@@ -363,6 +363,15 @@ def report_usage_stats(
             "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
             "enforce_eager": vllm_config.model_config.enforce_eager,
             "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
+            # Distributed parallelism settings
+            "tensor_parallel_size": parallel_config.tensor_parallel_size,
+            "data_parallel_size": parallel_config.data_parallel_size,
+            "pipeline_parallel_size": parallel_config.pipeline_parallel_size,
+            "enable_expert_parallel": parallel_config.enable_expert_parallel,
+            # All2All backend for MoE expert parallel
+            "all2all_backend": parallel_config.all2all_backend,
+            # KV connector used
+            "kv_connector": kv_connector,
         },
     )
 
@@ -387,3 +396,16 @@ def record_function_or_nullcontext(name: str) -> AbstractContextManager:
 
     _PROFILER_FUNC = func
     return func(name)
+
+
+def tensor_data(tensor: torch.Tensor) -> memoryview:
+    """Get the raw data of a tensor as a uint8 memoryview, useful for
+    serializing and hashing.
+
+    Args:
+        tensor: The input tensor.
+
+    Returns:
+        A memoryview of the tensor data as uint8.
+    """
+    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
