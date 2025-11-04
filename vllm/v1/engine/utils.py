@@ -1343,8 +1343,29 @@ class FaultHandler:
         self.engine_identity_to_index: dict[bytes, int] = {
             identity: i for i, identity in enumerate(client_cmd_registry)
         }
+        # ensure handle_fault is executed sequentially
+        self._task_queue: asyncio.Queue = asyncio.Queue()
+        self._loop = asyncio.get_event_loop()
+        self._dispatcher_task = self._loop.create_task(self._dispatcher())
 
-    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
+    async def _dispatcher(self):
+        while True:
+            # each elements in the queue contains:
+            # (instruction, timeout, kwargs, future)
+            instruction, timeout, kwargs, fut = await self._task_queue.get()
+            try:
+                result = await self._handle_fault_internal(
+                    instruction, timeout, **kwargs
+                )
+                if fut:
+                    fut.set_result(result)
+            except Exception as e:
+                if fut:
+                    fut.set_exception(e)
+
+    async def _handle_fault_internal(
+        self, instruction: str, timeout: int, **kwargs
+    ) -> bool:
         if instruction == "retry" and "Dead" in self.engine_status_dict.values():
             logger.info(
                 "engine_core dead unexpectedly, retry is impossible,"
@@ -1353,16 +1374,16 @@ class FaultHandler:
             return False
 
         if instruction == "pause":
-            fault_engine_indices = {
+            dead_engine_indices = {
                 index
                 for index, status in self.engine_status_dict.items()
-                if status != "Healthy"
+                if status == "Dead"
             }
 
             target_engines = {
                 identity
                 for identity, index in self.engine_identity_to_index.items()
-                if index not in fault_engine_indices
+                if index not in dead_engine_indices
             }
         else:
             target_engines = set(self.engine_identity_to_index.keys())
@@ -1409,3 +1430,25 @@ class FaultHandler:
                 self.engine_status_dict[engine_id] = "Healthy"
             # todo: should we also clear the engine_exception_q here?
         return all_success
+
+    async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
+        """
+        Async interface for run_method, returns a Future that can be awaited.
+        This method **must be called from the event loop thread** where this
+        FaultHandler was created.
+        """
+        fut = self._loop.create_future()
+        await self._task_queue.put((instruction, timeout, kwargs, fut))
+        return await fut
+
+    def submit_fault(self, instruction: str, timeout: int, **kwargs) -> None:
+        """
+        hread-safe fire-and-forget submission of a fault handling task.
+        This method can be called from **any thread**
+        """
+
+        def _enqueue():
+            fut = self._loop.create_future()
+            self._task_queue.put_nowait((instruction, timeout, kwargs, fut))
+
+        self._loop.call_soon_threadsafe(_enqueue)

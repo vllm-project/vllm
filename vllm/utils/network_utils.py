@@ -345,39 +345,31 @@ def recv_router_dealer_message(
         - identity is only set for ROUTER sockets
         - success=False on timeout or error
     """
-    try:
-        sock_type = socket.getsockopt(zmq.TYPE)
+    sock_type = socket.getsockopt(zmq.TYPE)
 
-        # optional non-blocking receive
-        if use_poller:
-            poller = zmq.Poller()
-            poller.register(socket, zmq.POLLIN)
-            socks = dict(poller.poll(poll_timeout))
-            if socket not in socks:
-                return (False, None, None)
+    # optional non-blocking receive
+    if use_poller:
+        poller = zmq.Poller()
+        poller.register(socket, zmq.POLLIN)
+        socks = dict(poller.poll(poll_timeout))
+        if socket not in socks:
+            return (False, None, None)
 
-        parts = socket.recv_multipart()
+    parts = socket.recv_multipart()
 
-        if sock_type == zmq.ROUTER:
-            # ROUTER message: [identity, empty, message]
-            assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
-            identity_bytes, empty_frame, message_bytes = parts
-            identity = identity_bytes.decode("utf-8")
-        elif sock_type == zmq.DEALER:
-            # DEALER message: [empty, message]
-            assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
-            empty_frame, message_bytes = parts
-            identity = None
-        else:
-            raise ValueError(f"Unsupported socket type: {sock_type}")
+    if sock_type == zmq.ROUTER:
+        # ROUTER message: [identity, empty, message]
+        assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
+        identity_bytes, empty_frame, message_bytes = parts
+        identity = identity_bytes.decode("utf-8")
+    elif sock_type == zmq.DEALER:
+        # DEALER message: [empty, message]
+        assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
+        empty_frame, message_bytes = parts
+        identity = None
+    else:
+        raise ValueError(f"Unsupported socket type: {sock_type}")
 
-        assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
-        message = message_bytes.decode("utf-8")
-        return (True, identity, message)
-
-    except (zmq.ZMQError, UnicodeDecodeError) as e:
-        logger.error("ZMQ receive error: %s", e)
-        return (False, None, None)
-    except Exception as e:
-        logger.error("Unexpected receive error: %s", e)
-        return (False, None, None)
+    assert empty_frame == b"", f"empty frame invalid: {empty_frame}"
+    message = message_bytes.decode("utf-8")
+    return (True, identity, message)

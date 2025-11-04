@@ -157,8 +157,8 @@ class EngineCoreGuard(threading.Thread):  # changed
                         type(engine_exception).__name__,
                         engine_exception,
                     )
-                    self.engine_running = False
                     self._report_client_exception(engine_exception)
+                self.engine_running = False
             except queue.Empty:
                 pass
 
@@ -221,8 +221,9 @@ class EngineCoreGuard(threading.Thread):  # changed
 
         except Exception as e:
             logger.error(
-                "[EngineCoreGuard] Error executing method %s: %s",
+                "[EngineCoreGuard] Error executing method %s: %s %s",
                 method,
+                type(e).__name__,
                 e,
             )
             success = False
@@ -257,6 +258,9 @@ class EngineCoreGuard(threading.Thread):  # changed
         else:
             # already paused
             success = True
+            if not soft_pause:
+                # abort the communicators
+                self._stop_worker_execution(soft_pause=False)
         return success
 
     def retry(self, timeout: int = 1):
