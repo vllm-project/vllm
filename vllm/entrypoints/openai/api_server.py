@@ -817,7 +817,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
         return JSONResponse(
             content=generator.model_dump(), status_code=generator.error.code
         )
-    elif isinstance(generator, PoolingResponse | IOProcessorResponse):
+    elif isinstance(generator, (PoolingResponse, IOProcessorResponse)):
         return JSONResponse(content=generator.model_dump())
     elif isinstance(generator, PoolingBytesResponse):
         return StreamingResponse(
@@ -1150,7 +1150,7 @@ if envs.VLLM_SERVER_DEV_MODE:
             return Response(status_code=200)
         response: list[Any] = []
         for result in results:
-            if result is None or isinstance(result, dict | list):
+            if result is None or isinstance(result, (dict, list)):
                 response.append(result)
             else:
                 response.append(str(result))
