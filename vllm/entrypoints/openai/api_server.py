@@ -419,11 +419,7 @@ async def pause_generation(
     engine = engine_client(raw_request)
     if not hasattr(engine, "pause_generation"):
         return JSONResponse(
-            content={
-                "error": (
-                    "Pause/resume not supported by current engine."
-                )
-            },
+            content={"error": ("Pause/resume not supported by current engine.")},
             status_code=HTTPStatus.NOT_IMPLEMENTED.value,
         )
 
@@ -454,11 +450,7 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
     engine = engine_client(raw_request)
     if not hasattr(engine, "resume_generation"):
         return JSONResponse(
-            content={
-                "error": (
-                    "Pause/resume not supported by current engine."
-                )
-            },
+            content={"error": ("Pause/resume not supported by current engine.")},
             status_code=HTTPStatus.NOT_IMPLEMENTED.value,
         )
 
@@ -484,9 +476,7 @@ async def pause_status(raw_request: Request) -> JSONResponse:
             content={
                 "is_paused": False,
                 "num_unfinished_requests": 0,
-                "error": (
-                    "Pause/resume not supported by current engine."
-                ),
+                "error": ("Pause/resume not supported by current engine."),
             }
         )
 

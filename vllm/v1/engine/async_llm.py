@@ -594,7 +594,7 @@ class AsyncLLM(EngineClient):
                     if request_ids:
                         await self.abort(request_ids)
 
-                # Wait for all requests to drain
+                # Wait for all requests to drain before clearing cache
                 while (
                     self.output_processor.has_unfinished_requests()
                     or self.engine_core.dp_engines_running()
@@ -647,8 +647,10 @@ class AsyncLLM(EngineClient):
 
     async def get_pause_status(self) -> dict[str, Any]:
         """Return the current pause status."""
+
         return {
             "is_paused": self._is_paused,
+            "num_unfinished_requests": self.output_processor.num_unfinished_requests(),
         }
 
     async def encode(
