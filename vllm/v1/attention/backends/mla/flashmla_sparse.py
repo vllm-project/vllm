@@ -11,6 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
     AttentionMetadata,
+    MultipleOf,
 )
 from vllm.attention.backends.utils import get_mla_dims
 from vllm.attention.ops.flashmla import (
@@ -91,6 +92,10 @@ class FlashMLASparseBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
+
+    @staticmethod
+    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
+        return [64]
 
 
 @dataclass
