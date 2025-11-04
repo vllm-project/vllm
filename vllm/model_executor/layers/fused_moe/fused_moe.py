@@ -1173,7 +1173,6 @@ def grouped_topk(
         and current_platform.is_cuda()
         and num_expert_group <= 32
         and topk <= 32
-        and e_score_correction_bias is not None
     ):
         return fused_grouped_topk(
             hidden_states=hidden_states,
@@ -1337,7 +1336,10 @@ def fused_grouped_topk(
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
+    if e_score_correction_bias is not None:
+        scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
+    else:
+        scores_with_bias = scores
     topk_values, topk_indices = ops.grouped_topk(
         scores,
         scores_with_bias.to(scores.dtype),
