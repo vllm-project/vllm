@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import inspect
 import json
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
@@ -1515,6 +1516,24 @@ def _resolve_chat_template_kwargs(
 _cached_resolve_chat_template_kwargs = lru_cache(_resolve_chat_template_kwargs)
 
 
+@lru_cache
+def _get_hf_base_chat_template_params() -> frozenset[str]:
+    # Get standard parameters from HuggingFace's base tokenizer class.
+    # This dynamically extracts parameters from PreTrainedTokenizer's
+    # apply_chat_template method, ensuring compatibility with tokenizers
+    # that use **kwargs to receive standard parameters.
+
+    # Read signature from HF's base class - the single source of truth
+    base_sig = inspect.signature(PreTrainedTokenizer.apply_chat_template)
+    # Exclude VAR_KEYWORD (**kwargs) and VAR_POSITIONAL (*args) placeholders
+    return frozenset(
+        p.name
+        for p in base_sig.parameters.values()
+        if p.kind
+        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    )
+
+
 def resolve_chat_template_kwargs(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
     chat_template: str,
@@ -1538,7 +1557,11 @@ def resolve_chat_template_kwargs(
         if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
     template_vars = _cached_resolve_chat_template_kwargs(chat_template)
-    accept_vars = (fn_kw | template_vars) - unexpected_vars
+
+    # Allow standard HF parameters even if tokenizer uses **kwargs to receive them
+    hf_base_params = _get_hf_base_chat_template_params()
+
+    accept_vars = (fn_kw | template_vars | hf_base_params) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 

@@ -48,6 +48,7 @@ from openai.types.responses.response_output_text import Logprob, LogprobTopLogpr
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm import envs
@@ -63,6 +64,7 @@ from vllm.entrypoints.context import (
     StreamingHarmonyContext,
 )
 from vllm.entrypoints.harmony_utils import (
+    construct_harmony_previous_input_messages,
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
@@ -103,6 +105,23 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+def extract_tool_types(tools: list[Tool]) -> set[str]:
+    """
+    Extracts the tool types from the given tools.
+    """
+    tool_types: set[str] = set()
+    for tool in tools:
+        if tool.type == "mcp":
+            # Allow the MCP Tool type to enable built in tools if the
+            # server_label is allowlisted in
+            # envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS
+            if tool.server_label in envs.VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
+                tool_types.add(tool.server_label)
+        else:
+            tool_types.add(tool.type)
+    return tool_types
 
 
 class OpenAIServingResponses(OpenAIServing):
@@ -246,6 +265,13 @@ class OpenAIServingResponses(OpenAIServing):
                     "`VLLM_ENABLE_RESPONSES_API_STORE=1` when launching "
                     "the vLLM server."
                 ),
+                status_code=HTTPStatus.BAD_REQUEST,
+            )
+        if request.previous_input_messages and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `previous_input_messages` and "
+                "`previous_response_id` can be set.",
                 status_code=HTTPStatus.BAD_REQUEST,
             )
         return None
@@ -871,7 +897,7 @@ class OpenAIServingResponses(OpenAIServing):
         return messages
 
     def _construct_harmony_system_input_message(
-        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: list[str]
+        self, request: ResponsesRequest, with_custom_tools: bool, tool_types: set[str]
     ) -> OpenAIHarmonyMessage:
         reasoning_effort = request.reasoning.effort if request.reasoning else None
         enable_browser = (
@@ -919,17 +945,7 @@ class OpenAIServingResponses(OpenAIServing):
         messages: list[OpenAIHarmonyMessage] = []
         if prev_response is None:
             # New conversation.
-            tool_types = [tool.type for tool in request.tools]
-            # Allow the MCP Tool type to enable built in tools if the
-            # server_label is allowlisted in
-            # envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-            if envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS:
-                for tool in request.tools:
-                    if (
-                        tool.type == "mcp"
-                        and tool.server_label in envs.GPT_OSS_SYSTEM_TOOL_MCP_LABELS
-                    ):
-                        tool_types.append(tool.server_label)
+            tool_types = extract_tool_types(request.tools)
             with_custom_tools = has_custom_tools(tool_types)
 
             sys_msg = self._construct_harmony_system_input_message(
@@ -941,6 +957,8 @@ class OpenAIServingResponses(OpenAIServing):
                     instructions=request.instructions, tools=request.tools
                 )
                 messages.append(dev_msg)
+            messages += construct_harmony_previous_input_messages(request)
+
         else:
             # Continue the previous conversation.
             # FIXME(woosuk): Currently, request params like reasoning and

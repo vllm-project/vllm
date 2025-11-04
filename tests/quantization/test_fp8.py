@@ -49,7 +49,18 @@ def test_model_load_and_run(
 
 KV_CACHE_MODELS = [
     # AutoFP8 format using separate .k_scale and .v_scale
-    "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+    # The original checkpoint below was removed from the Hub. To unblock CI and
+    # until a small replacement with split K/V scales is found, skip this case.
+    # See PR #27717 for context.
+    pytest.param(
+        "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+        marks=pytest.mark.skip(
+            reason=(
+                "Checkpoint removed from HF; temporarily disabling this "
+                "AutoFP8 split K/V case (PR #27717)."
+            )
+        ),
+    ),
 ]
 
 
