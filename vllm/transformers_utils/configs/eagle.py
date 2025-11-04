@@ -3,9 +3,7 @@
 
 import os
 
-from transformers import AutoConfig, PretrainedConfig
-
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
+from transformers import AutoConfig, DeepseekV2Config, PretrainedConfig
 
 
 class EAGLEConfig(PretrainedConfig):
