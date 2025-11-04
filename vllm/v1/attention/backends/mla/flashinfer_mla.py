@@ -11,7 +11,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
-from vllm.config.cache import BlockSize, CacheDType
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
@@ -53,10 +53,6 @@ class FlashInferMLABackend(MLACommonBackend):
     @staticmethod
     def get_builder_cls() -> type["FlashInferMLAMetadataBuilder"]:
         return FlashInferMLAMetadataBuilder
-
-    @classmethod
-    def get_default_block_size(cls) -> BlockSize:
-        return 64
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:

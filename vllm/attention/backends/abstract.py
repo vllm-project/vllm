@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, ClassVar, Generic, Protocol, TypeVar, get_args
 
 import torch
 
@@ -10,7 +10,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 if TYPE_CHECKING:
-    from vllm.config.cache import BlockSize, CacheDType
+    from vllm.config.cache import CacheDType
     from vllm.platforms.interface import DeviceCapability
     from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
@@ -138,29 +138,6 @@ class AttentionBackend(ABC):
             if is_multiple_of or is_int_equal:
                 return True
         return False
-
-    @classmethod
-    def get_default_block_size(cls) -> "BlockSize":
-        from vllm.config.cache import BlockSize
-
-        if not cls.supported_kernel_block_sizes:
-            raise ValueError(
-                f"Fallback failed, no explicitly supported block sizes for "
-                f"backend {cls.get_name()}"
-            )
-
-        block_size = cls.supported_kernel_block_sizes[0]
-        if isinstance(block_size, MultipleOf):
-            block_size = block_size.base
-
-        valid_sizes = get_args(BlockSize)
-        if block_size not in valid_sizes:
-            raise ValueError(
-                f"Default block size {block_size} for backend {cls.get_name()} is not "
-                f"a valid BlockSize."
-            )
-
-        return cast(BlockSize, block_size)
 
     @classmethod
     def is_mla(cls) -> bool:
