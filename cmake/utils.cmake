@@ -538,3 +538,36 @@ function (define_gpu_extension_target GPU_MOD_NAME)
 
   install(TARGETS ${GPU_MOD_NAME} LIBRARY DESTINATION ${GPU_DESTINATION} COMPONENT ${GPU_MOD_NAME})
 endfunction()
+
+function (define_cpu_extension_target CPU_MOD_NAME)
+  cmake_parse_arguments(PARSE_ARGV 1
+    CPU
+    "WITH_SOABI"
+    "DESTINATION;LANGUAGE;USE_SABI"
+    "SOURCES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
+
+  if (CPU_WITH_SOABI)
+    set(CPU_WITH_SOABI WITH_SOABI)
+  else()
+    set(CPU_WITH_SOABI)
+  endif()
+
+  if (CPU_USE_SABI)
+    Python_add_library(${CPU_MOD_NAME} MODULE USE_SABI ${CPU_USE_SABI} ${CPU_WITH_SOABI} "${CPU_SOURCES}")
+  else()
+    Python_add_library(${CPU_MOD_NAME} MODULE ${CPU_WITH_SOABI} "${CPU_SOURCES}")
+  endif()
+
+  target_include_directories(${CPU_MOD_NAME} PRIVATE csrc
+    ${CPU_INCLUDE_DIRECTORIES})
+
+  target_compile_options(${CPU_MOD_NAME} PRIVATE
+    $<$<COMPILE_LANGUAGE:${CPU_LANGUAGE}>:${CPU_COMPILE_FLAGS}>)
+
+  target_compile_definitions(${CPU_MOD_NAME} PRIVATE
+    "-DTORCH_EXTENSION_NAME=${CPU_MOD_NAME}")
+
+  target_link_libraries(${CPU_MOD_NAME} PRIVATE torch ${CPU_LIBRARIES})
+
+  install(TARGETS ${CPU_MOD_NAME} LIBRARY DESTINATION ${CPU_DESTINATION} COMPONENT ${CPU_MOD_NAME})
+endfunction()
