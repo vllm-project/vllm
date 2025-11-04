@@ -225,7 +225,7 @@ run_tests_for_model() {
       UCX_FAULT_STRATEGY=random \
       UCX_FAULT_PROBABILITY=$FAULT_RATE \
       UCX_FAULT_STATS_LOG_INTERVAL=1024 \
-      UCX_FAULT_HOOKS=check_status \ 
+      UCX_FAULT_HOOKS=check_status \
       RUST_LOG=info \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
       VLLM_ENABLE_V1_MULTIPROCESSING=0 \
