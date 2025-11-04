@@ -267,35 +267,30 @@ class RocmPlatform(Platform):
                 f"is not MLA type while requested for MLA backend."
             )
 
-        if envs.VLLM_USE_V1:
-            if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
-                logger.info("Using FlexAttention backend.")
-                return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
-            if (
-                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
-            ) or selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
-                logger.info("Using Aiter Flash Attention backend.")
-                return AttentionBackendEnum.ROCM_AITER_FA.get_path()
-            if (
-                envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
-            ) or selected_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-                logger.info("Using Aiter Unified Attention backend.")
-                return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
-            if (
-                envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
-                or selected_backend == AttentionBackendEnum.ROCM_ATTN
-            ):
-                # rocm specific backend, with aiter and/or
-                #   triton prefix-prefill
-                logger.info("Using Rocm Attention backend.")
-                return AttentionBackendEnum.ROCM_ATTN.get_path()
-            # default case, using triton unified attention
-            logger.info("Using Triton Attention backend.")
-            return AttentionBackendEnum.TRITON_ATTN.get_path()
-        raise RuntimeError(
-            "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-            "to select a supported backend."
-        )
+        if selected_backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info("Using FlexAttention backend.")
+            return "vllm.v1.attention.backends.flex_attention.FlexAttentionBackend"
+        if (
+            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9()
+        ) or selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
+            logger.info("Using Aiter Flash Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_FA.get_path()
+        if (
+            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION
+        ) or selected_backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            logger.info("Using Aiter Unified Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
+        if (
+            envs.VLLM_V1_USE_PREFILL_DECODE_ATTENTION
+            or selected_backend == AttentionBackendEnum.ROCM_ATTN
+        ):
+            # rocm specific backend, with aiter and/or
+            #   triton prefix-prefill
+            logger.info("Using Rocm Attention backend.")
+            return AttentionBackendEnum.ROCM_ATTN.get_path()
+        # default case, using triton unified attention
+        logger.info("Using Triton Attention backend.")
+        return AttentionBackendEnum.TRITON_ATTN.get_path()
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
