@@ -11,7 +11,8 @@ import traceback
 import weakref
 from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cached_property, partial
@@ -66,15 +67,17 @@ class FutureWrapper(Future):
         # Drain any futures ahead of us in the queue.
         while not self.done():
             future, get_response = self.futures_queue.pop()
-            future.update_with_response(get_response)
+            future.wait_for_response(get_response)
         return super().result()
 
-    def update_with_response(self, get_response: Callable):
+    def wait_for_response(self, get_response: Callable):
         try:
             response = get_response()
-            self.set_result(response)
+            with suppress(InvalidStateError):
+                self.set_result(response)
         except Exception as e:
-            self.set_exception(e)
+            with suppress(InvalidStateError):
+                self.set_exception(e)
 
 
 class MultiprocExecutor(Executor):
@@ -306,7 +309,7 @@ class MultiprocExecutor(Executor):
         # First drain any pending futures in the queue.
         while self.futures_queue:
             future, get_fut_response = self.futures_queue.pop()
-            future.update_with_response(get_fut_response)
+            future.wait_for_response(get_fut_response)
 
         return get_response()
 
