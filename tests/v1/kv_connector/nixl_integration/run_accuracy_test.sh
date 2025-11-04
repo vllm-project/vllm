@@ -5,23 +5,23 @@ set -xe
 # optionally enable ucx fault injection with --enable-fault-injection flag
 
 # Parse command line arguments
-KV_BUFFER_DEVICE="cuda"  # Default to cuda
+KV_BUFFER_DEVICE="cuda" # Default to cuda
 ENABLE_FAULT_INJECTION=false
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --kv_buffer_device)
-      KV_BUFFER_DEVICE="$2"
-      shift 2
-      ;;
-    --enable-fault-injection)
-      ENABLE_FAULT_INJECTION=true
-      shift
-      ;;
-    *)
-      echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--enable-fault-injection]"
-      exit 1
-      ;;
+  --kv_buffer_device)
+    KV_BUFFER_DEVICE="$2"
+    shift 2
+    ;;
+  --enable-fault-injection)
+    ENABLE_FAULT_INJECTION=true
+    shift
+    ;;
+  *)
+    echo "Unknown option $1"
+    echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--enable-fault-injection]"
+    exit 1
+    ;;
   esac
 done
 
@@ -51,7 +51,7 @@ if [[ -n "$MODEL_NAMES" ]]; then
   MODELS=("$MODEL_NAMES")
 else
   MODELS=(
-      "Qwen/Qwen3-0.6B"
+    "Qwen/Qwen3-0.6B"
   )
 fi
 
@@ -61,7 +61,7 @@ NUM_DECODE_INSTANCES=${NUM_DECODE_INSTANCES:-1}   # Default to 1
 PREFILLER_TP_SIZE=${PREFILLER_TP_SIZE:-1}
 DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 0.8; else echo 0.2; fi)}
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 2048; fi)}  # limit sequence length for fault injection tests
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-$(if [[ "$ENABLE_FAULT_INJECTION" == true ]]; then echo 2048; fi)} # limit sequence length for fault injection tests
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
@@ -141,12 +141,12 @@ run_tests_for_model() {
   DECODE_PORTS=()
 
   # Start prefill instances
-  for i in $(seq 0 $((NUM_PREFILL_INSTANCES-1))); do
+  for i in $(seq 0 $((NUM_PREFILL_INSTANCES - 1))); do
     # Calculate GPU ID - we'll distribute across available GPUs
     GPU_ID=$((i % $(get_num_gpus)))
     NEXT_GPU=${GPU_ID}
     # If PREFILLER_TP_SIZE is more than 1
-    for (( j=1; j < PREFILLER_TP_SIZE; j++ )); do
+    for ((j = 1; j < PREFILLER_TP_SIZE; j++)); do
       NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
@@ -181,9 +181,9 @@ run_tests_for_model() {
     fi
 
     if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
+      FULL_CMD="$BASE_CMD $model_args"
     else
-    FULL_CMD="$BASE_CMD"
+      FULL_CMD="$BASE_CMD"
     fi
 
     eval "$FULL_CMD &"
@@ -194,11 +194,11 @@ run_tests_for_model() {
   done
 
   # Start decode instances
-  for i in $(seq 0 $((NUM_DECODE_INSTANCES-1))); do
+  for i in $(seq 0 $((NUM_DECODE_INSTANCES - 1))); do
     # Calculate GPU ID - we'll distribute across available GPUs, starting from after prefill GPUs
     GPU_ID=$(((i + NEXT_GPU + 1) % $(get_num_gpus)))
     # If DECODER_TP_SIZE is more than 1
-    for (( j=1; j < DECODER_TP_SIZE; j++ )); do
+    for ((j = 1; j < DECODER_TP_SIZE; j++)); do
       NEXT_GPU=$(((GPU_ID + j) % $(get_num_gpus)))
       GPU_ID="${GPU_ID},${NEXT_GPU}"
     done
@@ -225,6 +225,7 @@ run_tests_for_model() {
       UCX_FAULT_STRATEGY=random \
       UCX_FAULT_PROBABILITY=$FAULT_RATE \
       UCX_FAULT_STATS_LOG_INTERVAL=1024 \
+      UCX_FAULT_HOOKS=check_status \ 
       RUST_LOG=info \
       VLLM_WORKER_MULTIPROC_METHOD=spawn \
       VLLM_ENABLE_V1_MULTIPROCESSING=0 \
@@ -247,14 +248,14 @@ run_tests_for_model() {
       --disable-hybrid-kv-cache-manager \
       --kv-transfer-config '$KV_CONFIG'"
     fi
-  # DP-EP attention mode
-  if [[ -z "$DP_EP" ]]; then
-    BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
-  else
-    echo "DP-EP Attention enabled, deploying with dp=DECODER_TP_SIZE and tp=1"
-    BASE_CMD="${BASE_CMD} --data-parallel-size $DECODER_TP_SIZE \
+    # DP-EP attention mode
+    if [[ -z "$DP_EP" ]]; then
+      BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
+    else
+      echo "DP-EP Attention enabled, deploying with dp=DECODER_TP_SIZE and tp=1"
+      BASE_CMD="${BASE_CMD} --data-parallel-size $DECODER_TP_SIZE \
     --tensor-parallel-size 1 --enable-expert-parallel"
-  fi
+    fi
 
     # Add max model len if set
     if [[ -n "$MAX_MODEL_LEN" ]]; then
@@ -262,9 +263,9 @@ run_tests_for_model() {
     fi
 
     if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
+      FULL_CMD="$BASE_CMD $model_args"
     else
-    FULL_CMD="$BASE_CMD"
+      FULL_CMD="$BASE_CMD"
     fi
 
     eval "$FULL_CMD &"
