@@ -648,9 +648,10 @@ class AsyncLLM(EngineClient):
     async def get_pause_status(self) -> dict[str, Any]:
         """Return the current pause status."""
 
+        num_unfinished = self.output_processor.get_num_unfinished_requests()
         return {
             "is_paused": self._is_paused,
-            "num_unfinished_requests": self.output_processor.get_num_unfinished_requests(),
+            "num_unfinished_requests": num_unfinished,
         }
 
     async def encode(
