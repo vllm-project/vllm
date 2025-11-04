@@ -185,9 +185,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Optimized top-k per row operation
   ops.def(
       "top_k_per_row(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
-      "Tensor! indices, Tensor! values, int numRows, int stride0, "
+      "Tensor! indices, int numRows, int stride0, "
       "int stride1) -> ()");
   ops.impl("top_k_per_row", torch::kCUDA, &top_k_per_row);
+
+  ops.def(
+      "top_k_per_row_decode(Tensor logits, int next_n, "
+      "Tensor seq_lens, Tensor! indices, int numRows, "
+      "int stride0, int stride1) -> ()");
+  ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -551,7 +557,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // to prevent the meta function registry.
   ops.def(
       "gptq_gemm(Tensor a, Tensor b_q_weight, Tensor b_gptq_qzeros, "
-      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, int bit) "
+      "Tensor b_gptq_scales, Tensor b_g_idx, bool use_exllama, bool "
+      "use_v2_format, int bit) "
       "-> Tensor",
       {stride_tag});
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
@@ -604,7 +611,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
       "Tensor! ssm_states,"
-      "int pad_slot_id) -> ()");
+      "int pad_slot_id,"
+      "int block_size,"
+      "Tensor? block_idx_first_scheduled_token,"
+      "Tensor? block_idx_last_scheduled_token,"
+      "Tensor? initial_state_idx) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   // Hadamard transforms

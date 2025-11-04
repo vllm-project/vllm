@@ -93,7 +93,6 @@ from vllm.model_executor.parameter import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import has_deep_gemm
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
@@ -102,6 +101,7 @@ from vllm.utils.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.flashinfer import has_flashinfer_moe
+from vllm.utils.import_utils import has_deep_gemm
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -363,6 +363,7 @@ class Fp8LinearMethod(LinearMethodBase):
             self.use_marlin = False
 
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
         self.block_quant = self.weight_block_size is not None
@@ -545,8 +546,10 @@ class Fp8LinearMethod(LinearMethodBase):
         # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
         # we will use BF16 dequant when DeepGEMM is not supported.
         if vllm_is_batch_invariant():
+            # Call is_deep_gemm_supported() ahead of time for torch.compile
+            # dynamo has trouble tracing through
             if self.block_quant and should_use_deepgemm_for_fp8_linear(
-                torch.bfloat16, layer.weight, None
+                torch.bfloat16, layer.weight, self.use_deep_gemm
             ):
                 # use group quant consistent with block size across K
                 assert self.act_q_group_shape is not None
