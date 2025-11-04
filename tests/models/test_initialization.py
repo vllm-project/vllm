@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from contextlib import ExitStack
 from functools import partial
 from unittest.mock import patch
 
@@ -94,29 +93,21 @@ def can_initialize(
             "pickle error when loading `transformers.models.auto.CONFIG_MAPPING`"
         )
 
-    with ExitStack() as stack:
-        if model_arch == "DeepseekV32ForCausalLM":
-            # FLASHMLA_SPARSE backend requires Hopper (9.0+) or Blackwell (10.0+)
-            # Mock device capability support for initialization testing on L40 for CI
-            from vllm.v1.attention.backends.mla import flashmla_sparse
+    if model_arch == "DeepseekV32ForCausalLM":
+        from vllm.platforms import current_platform
 
-            def mock_supports_compute_capability(cls, capability):  # noqa: ARG001
-                return True
-
-            stack.enter_context(
-                patch.object(
-                    flashmla_sparse.FlashMLASparseBackend,
-                    "supports_compute_capability",
-                    classmethod(mock_supports_compute_capability),
-                )
+        capability = current_platform.get_device_capability()
+        if capability and capability.major < 9:
+            pytest.skip(
+                f"DeepseekV32 requires Hopper (9.0+) or Blackwell (10.0+) "
+                f"for FLASHMLA_SPARSE backend. Current device has compute "
+                f"capability {capability.major}.{capability.minor}"
             )
 
-        stack.enter_context(
-            patch.object(
-                V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1
-            )
-        )
-        m = stack.enter_context(monkeypatch.context())
+    with (
+        patch.object(V1EngineCore, "_initialize_kv_caches", _initialize_kv_caches_v1),
+        monkeypatch.context() as m,
+    ):
         if model_arch == "GptOssForCausalLM":
             # FIXME: A hack to bypass FA3 assertion because our CI's L4 GPU
             # has cc==8.9 which hasn't supported FA3 yet. Remove this hack when
