@@ -170,7 +170,7 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
-        if not self.use_dp and quant_config.quant_dtype != torch.float8_e4m3fn:
+        if not self.use_dp and quant_config.quant_dtype == "nvfp4":
             return a1, None, None, topk_ids, topk_weights
 
         a1q, a1q_scale = moe_kernel_quantize_input(
