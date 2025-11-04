@@ -23,8 +23,6 @@ M = TypeVar("M")
 
 @dataclass
 class BaseMambaAttentionMetadata:
-    """Base metadata fields common to both Mamba1 and Mamba2."""
-
     num_prefills: int
     num_prefill_tokens: int
     num_decodes: int
@@ -146,7 +144,6 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ) -> BaseMambaAttentionMetadata:
         """
         Compute metadata common to both Mamba1 and Mamba2.
-        Returns a BaseMambaAttentionMetadata object with all common fields.
         """
         num_reqs = common_attn_metadata.num_reqs
 
