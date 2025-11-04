@@ -1309,7 +1309,7 @@ def eplb_map_to_physical_and_record(
         and isinstance(fused_experts_method, FusedMoEModularKernel)
         and fused_experts_method.prepare_finalize.have_expert_num_tokens()
     )
-    
+
     if not skip_expert_load_scatter_add:
         logger.debug("expert_load_view update from topk_ids.")
         topk_ids_flatten = topk_ids.flatten()
@@ -1318,7 +1318,7 @@ def eplb_map_to_physical_and_record(
             index=topk_ids_flatten.long(),
             src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
         )
-    
+
     else:
         logger.debug("expert_load_view update in modular_kernel.")
 

@@ -69,7 +69,7 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
       
     def have_expert_num_tokens(self) -> bool:
         return True
-    
+
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
 
