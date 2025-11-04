@@ -440,8 +440,6 @@ class EngineArgs:
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
-    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
-    rope_theta: float | None = ModelConfig.rope_theta
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
@@ -620,8 +618,6 @@ class EngineArgs:
         )
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
-        model_group.add_argument("--rope-scaling", **model_kwargs["rope_scaling"])
-        model_group.add_argument("--rope-theta", **model_kwargs["rope_theta"])
         model_group.add_argument(
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
@@ -1190,8 +1186,6 @@ class EngineArgs:
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
-            rope_scaling=self.rope_scaling,
-            rope_theta=self.rope_theta,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
