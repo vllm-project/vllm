@@ -2530,15 +2530,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
-            compilation_config = getattr(self.vllm_config, "compilation_config", None)
-            if compilation_config is not None:
-                static_forward_context = getattr(
-                    compilation_config, "static_forward_context", None
-                )
-                if static_forward_context is not None:
-                    for layer in static_forward_context.values():
-                        if hasattr(layer, "calculate_kv_scales"):
-                            layer.calculate_kv_scales = False
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
