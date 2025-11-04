@@ -30,10 +30,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    ScaledMMLinearQuantStrategy,
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 
@@ -101,6 +100,8 @@ class TestModel(torch.nn.Module):
 
 
 class TestQuantModel(torch.nn.Module):
+    quant_key = kFp8StaticTensorSym
+
     def __init__(self, hidden_size=16, intermediate_size=32):
         super().__init__()
         self.hidden_size = hidden_size
@@ -114,9 +115,8 @@ class TestQuantModel(torch.nn.Module):
         torch.nn.init.normal_(self.gate_proj, std=0.02)
 
         self.fp8_linear = init_fp8_linear_kernel(
-            act_q_static=True,
-            act_q_group_shape=GroupShape.PER_TENSOR,
-            weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
             out_dtype=torch.get_default_dtype(),
             module_name=self.__class__.__name__,
         )

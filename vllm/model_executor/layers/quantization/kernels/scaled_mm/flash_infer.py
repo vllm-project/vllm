@@ -9,7 +9,6 @@ from vllm.utils.flashinfer import flashinfer_scaled_fp8_mm, has_flashinfer
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
-    ScaledMMLinearQuantStrategy,
 )
 from .utils import apply_weights_fp8
 
@@ -39,10 +38,10 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
-        per_tensor_weight_scales = (
-            c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR
+        per_tensor_activation_scales = (
+            c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
+        per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
         if not current_platform.is_cuda():
             return (

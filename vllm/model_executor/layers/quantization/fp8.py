@@ -45,10 +45,6 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa E501
-    FP8ScaledMMLinearLayerConfig,
-    ScaledMMLinearQuantStrategy,
-)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -82,6 +78,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
+    kFp8DynamicTensorSym,
+    kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d,
@@ -380,8 +379,10 @@ class Fp8LinearMethod(LinearMethodBase):
             # Use per-token quantization for better perf if dynamic and cutlass
             if not self.act_q_static and cutlass_fp8_supported():
                 self.act_q_group_shape = GroupShape.PER_TOKEN
+                self.activation_quant_key = kFp8StaticTokenSym
             else:
                 self.act_q_group_shape = GroupShape.PER_TENSOR
+                self.activation_quant_key = kFp8DynamicTensorSym
 
         if self.block_quant:
             assert not self.act_q_static
@@ -393,11 +394,10 @@ class Fp8LinearMethod(LinearMethodBase):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            self.fp8_linear_kernel = init_fp8_linear_kernel(
-                act_q_static=self.act_q_static,
-                act_q_group_shape=self.act_q_group_shape,
-                weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
-                out_dtype=self.out_dtype,
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=kFp8StaticTensorSym,
+                out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )
 
@@ -684,7 +684,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 bias=bias,
             )
 
-        return self.fp8_linear_kernel.apply_weights(layer, x, bias)
+        return self.fp8_linear.apply_weights(layer, x, bias)
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):

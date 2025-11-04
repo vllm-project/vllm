@@ -27,11 +27,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    ScaledMMLinearQuantStrategy,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
@@ -52,6 +48,8 @@ def is_nvfp4_supported():
 
 
 class TestSiluMulFp8QuantModel(torch.nn.Module):
+    quant_key = kFp8StaticTensorSym
+
     def __init__(self, hidden_size: int, cuda_force_torch: bool, **kwargs):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
@@ -62,13 +60,11 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
             self.fp8_linear = init_fp8_linear_kernel(
-                act_q_static=True,
-                act_q_group_shape=GroupShape.PER_TENSOR,
-                weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+                activation_quant_key=self.quant_key,
+                weight_quant_key=self.quant_key,
                 out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )
-
         self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
         self.enable_quant_fp8_custom_op = self.fp8_linear.quant_fp8.enabled()
 

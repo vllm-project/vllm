@@ -31,9 +31,6 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    ScaledMMLinearQuantStrategy,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -177,18 +174,13 @@ class TestAttentionFp8StaticQuantPatternModel(AttentionQuantPatternModel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        if self.quant_key.scale.group_shape.is_per_tensor():
-            weight_quant_strategy = ScaledMMLinearQuantStrategy.TENSOR
-        else:
-            weight_quant_strategy = ScaledMMLinearQuantStrategy.CHANNEL
-
         self.fp8_linear = init_fp8_linear_kernel(
-            act_q_static=self.quant_key.scale.static,
-            act_q_group_shape=self.quant_key.scale.group_shape,
-            weight_quant_strategy=weight_quant_strategy,
+            activation_quant_key=self.quant_key,
+            weight_quant_key=self.quant_key,
             out_dtype=torch.get_default_dtype(),
             module_name=self.__class__.__name__,
         )
+
         hidden_size = self.num_qo_heads * self.head_size
         self.w = kwargs.get(
             "w",

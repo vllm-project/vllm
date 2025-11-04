@@ -21,9 +21,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    ScaledMMLinearQuantStrategy,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -59,10 +56,16 @@ class TestModel(torch.nn.Module):
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
         self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         group_shape = GroupShape.PER_TENSOR if static else GroupShape.PER_TOKEN
-        weight_quant_strategy = ScaledMMLinearQuantStrategy.TENSOR
 
-        quant_scale = ScaleDesc(torch.float32, static, group_shape)
-        self.quant_key = QuantKey(dtype=FP8_DTYPE, scale=quant_scale, symmetric=True)
+        act_quant_scale = ScaleDesc(torch.float32, static, group_shape)
+        w_quant_scale = ScaleDesc(torch.float32, True, group_shape)
+        self.activation_quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=act_quant_scale, symmetric=True
+        )
+        self.weight_quant_key = QuantKey(
+            dtype=FP8_DTYPE, scale=w_quant_scale, symmetric=True
+        )
+
         if static:
             self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(3)]
         else:
@@ -74,9 +77,8 @@ class TestModel(torch.nn.Module):
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
             self.fp8_linear = init_fp8_linear_kernel(
-                act_q_static=static,
-                act_q_group_shape=group_shape,
-                weight_quant_strategy=weight_quant_strategy,
+                activation_quant_key=self.activation_quant_key,
+                weight_quant_key=self.weight_quant_key,
                 out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )
@@ -110,13 +112,13 @@ class TestModel(torch.nn.Module):
 
     def ops_in_model_after(self):
         return [
-            FUSED_OPS[FusedRMSQuantKey(self.quant_key, True)],
-            FUSED_OPS[FusedRMSQuantKey(self.quant_key, False)],
+            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, True)],
+            FUSED_OPS[FusedRMSQuantKey(self.activation_quant_key, False)],
         ]
 
     def ops_in_model_before(self):
         return (
-            [QUANT_OPS[self.quant_key]]
+            [QUANT_OPS[self.activation_quant_key]]
             if self.enable_quant_fp8_custom_op
             else [torch.ops.aten.reciprocal]
         )

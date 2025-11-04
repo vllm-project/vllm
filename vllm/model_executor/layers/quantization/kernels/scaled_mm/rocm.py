@@ -11,7 +11,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
-    ScaledMMLinearQuantStrategy,
 )
 from .utils import apply_weights_fp8
 
@@ -72,18 +71,18 @@ def rocm_per_tensor_float_w8a8_scaled_mm(
     bias: torch.Tensor,
     output_shape: list[int],
 ) -> torch.Tensor:
-    output = torch.ops.vllm.rocm_per_tensor_w8a8_scaled_mm_impl(
+    output = torch.ops.vllm.rocm_per_tensor_float_w8a8_scaled_mm_impl(
         A, B, out_dtype, As, Bs, bias
     )
     return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)
 
 
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_per_tensor_float_w8a8_scaled_mm_impl",
-        op_func=rocm_per_tensor_float_w8a8_scaled_mm_impl,
-        fake_impl=rocm_per_tensor_float_w8a8_scaled_mm_fake,
-    )
+# if current_platform.is_rocm():
+direct_register_custom_op(
+    op_name="rocm_per_tensor_float_w8a8_scaled_mm_impl",
+    op_func=rocm_per_tensor_float_w8a8_scaled_mm_impl,
+    fake_impl=rocm_per_tensor_float_w8a8_scaled_mm_fake,
+)
 
 
 class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
@@ -95,10 +94,10 @@ class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         # TODO: check if this causes an issue on non-ROCM platforms
         from vllm.platforms.rocm import on_mi3xx
 
-        per_tensor_activation_scales = c.activation_group_shape.is_per_tensor()
-        per_tensor_weight_scales = (
-            c.weight_quant_strategy == ScaledMMLinearQuantStrategy.TENSOR
+        per_tensor_activation_scales = (
+            c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
+        per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
 
         if not current_platform.is_rocm():
             return (

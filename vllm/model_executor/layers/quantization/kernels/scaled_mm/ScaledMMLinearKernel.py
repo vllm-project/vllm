@@ -4,43 +4,32 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
-from enum import Enum
 from typing import Generic, TypeVar
 
 import torch
-from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
-
-
-class ScaledMMLinearQuantStrategy(Enum):
-    TENSOR = "tensor"
-    CHANNEL = "channel"
-    BLOCK = "block"
-
-
-QUANT_STRATEGY_MAP = {
-    QuantizationStrategy.TENSOR: ScaledMMLinearQuantStrategy.TENSOR,
-    QuantizationStrategy.CHANNEL: ScaledMMLinearQuantStrategy.CHANNEL,
-}
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
 
 
 @dataclass
 class ScaledMMLinearLayerConfig:
-    is_static_input_scheme: bool
+    pass
 
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+    is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
 
 
 @dataclass
 class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
-    weight_quant_strategy: ScaledMMLinearQuantStrategy
-    activation_group_shape: GroupShape
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey
     out_dtype: torch.dtype | None
 
 
@@ -103,9 +92,10 @@ class FP8ScaledMMLinearKernel(
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
+        act_scale_descriptor = c.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
-            static=c.is_static_input_scheme,
-            group_shape=c.activation_group_shape,
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_ouput_padding(),
         )
         super().__init__(c, layer_param_names)

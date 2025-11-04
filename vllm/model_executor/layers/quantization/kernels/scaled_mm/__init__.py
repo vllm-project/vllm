@@ -32,7 +32,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
     ScaledMMLinearLayerConfig,
-    ScaledMMLinearQuantStrategy,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonScaledMMLinearKernel,
@@ -40,7 +39,7 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.xla import (
     XLAScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
@@ -137,16 +136,14 @@ def choose_scaled_mm_linear_kernel(
 
 
 def init_fp8_linear_kernel(
-    act_q_static: bool,
-    act_q_group_shape: GroupShape,
-    weight_quant_strategy: ScaledMMLinearQuantStrategy,
+    activation_quant_key: QuantKey,
+    weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
     module_name: str,
 ) -> FP8ScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
-        is_static_input_scheme=act_q_static,
-        weight_quant_strategy=weight_quant_strategy,
-        activation_group_shape=act_q_group_shape,
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
         out_dtype=out_dtype,
     )
 

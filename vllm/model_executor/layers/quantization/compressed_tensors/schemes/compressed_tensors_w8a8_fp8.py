@@ -14,9 +14,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    QUANT_STRATEGY_MAP,
-)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
     check_aiter_fp8_linear_support,
@@ -29,7 +26,11 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
     maybe_create_device_identity,
@@ -48,6 +49,12 @@ strategy_to_parameter_type = {
     QuantizationStrategy.TENSOR: PerTensorScaleParameter,
 }
 
+STATIC_QUANT = True
+DYNAMIC_QUANT = False
+quant_keys = {
+    STATIC_QUANT: (kFp8StaticTensorSym, kFp8StaticTensorSym),
+    DYNAMIC_QUANT: (kFp8DynamicTokenSym, kFp8StaticTensorSym),
+}
 logger = init_logger(__name__)
 
 
@@ -57,22 +64,13 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.strategy = weight_quant.strategy
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
-
         self.weight_block_size = self.weight_quant.block_structure
-        if self.weight_block_size is not None:
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-        else:
-            self.act_q_group_shape = (
-                GroupShape.PER_TENSOR
-                if is_static_input_scheme
-                else GroupShape.PER_TOKEN
-            )
-
         self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
         self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
 
         if self.weight_block_size is not None:
             assert not self.is_static_input_scheme
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
                 weight_group_shape=GroupShape(*self.weight_block_size),
                 act_quant_group_shape=self.act_q_group_shape,
@@ -80,12 +78,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 use_aiter_and_is_supported=self.use_aiter_and_is_supported,
             )
         else:
-            weight_quant_strategy = QUANT_STRATEGY_MAP[self.strategy]
-            self.fp8_linear_kernel = init_fp8_linear_kernel(
-                act_q_static=self.is_static_input_scheme,
-                act_q_group_shape=self.act_q_group_shape,
-                weight_quant_strategy=weight_quant_strategy,
-                out_dtype=self.out_dtype,
+            activation_quant_key, weight_quant_key = quant_keys[is_static_input_scheme]
+            self.fp8_linear = init_fp8_linear_kernel(
+                activation_quant_key=activation_quant_key,
+                weight_quant_key=weight_quant_key,
+                out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )
 
@@ -204,4 +201,4 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 bias=bias,
             )
 
-        return self.fp8_linear_kernel.apply_weights(layer, x, bias)
+        return self.fp8_linear.apply_weights(layer, x, bias)

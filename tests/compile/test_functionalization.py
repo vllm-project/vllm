@@ -23,10 +23,9 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    ScaledMMLinearQuantStrategy,
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 
@@ -37,6 +36,8 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 
 class TestSiluMul(torch.nn.Module):
+    quant_key = kFp8StaticTensorSym
+
     def __init__(self, hidden_size: int = 128):
         super().__init__()
         self.silu_and_mul = SiluAndMul()
@@ -46,9 +47,8 @@ class TestSiluMul(torch.nn.Module):
         if TEST_FP8:
             self.weight = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             self.fp8_linear = init_fp8_linear_kernel(
-                act_q_static=True,
-                act_q_group_shape=GroupShape.PER_TENSOR,
-                weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+                activation_quant_key=self.quant_key,
+                weight_quant_key=self.quant_key,
                 out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )
@@ -74,6 +74,8 @@ class TestSiluMul(torch.nn.Module):
 
 
 class TestFusedAddRMSNorm(torch.nn.Module):
+    quant_key = kFp8StaticTensorSym
+
     def __init__(self, hidden_size=16, intermediate_size=32):
         super().__init__()
         self.hidden_size = hidden_size
@@ -89,9 +91,8 @@ class TestFusedAddRMSNorm(torch.nn.Module):
 
         if TEST_FP8:
             self.fp8_linear = init_fp8_linear_kernel(
-                act_q_static=True,
-                act_q_group_shape=GroupShape.PER_TENSOR,
-                weight_quant_strategy=ScaledMMLinearQuantStrategy.TENSOR,
+                activation_quant_key=self.quant_key,
+                weight_quant_key=self.quant_key,
                 out_dtype=torch.get_default_dtype(),
                 module_name=self.__class__.__name__,
             )
