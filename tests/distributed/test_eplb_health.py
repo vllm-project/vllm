@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
 from vllm.config import EPLBConfig
@@ -15,8 +16,8 @@ def create_mock_eplb_state(
     """Create a mock EPLB state for testing."""
 
     # Create minimal required tensors
-    physical_to_logical_map = torch.arange(num_experts).unsqueeze(0).expand(
-        num_layers, -1
+    physical_to_logical_map = (
+        torch.arange(num_experts).unsqueeze(0).expand(num_layers, -1)
     )
     logical_to_physical_map = (
         torch.arange(num_experts).unsqueeze(1).unsqueeze(0).expand(num_layers, -1, -1)
@@ -83,9 +84,9 @@ def test_basic_health_detection():
     state._update_health_mask(current_latency, log_stats=False)
 
     # All experts should be healthy
-    assert (
-        state.expert_health_mask.all()
-    ), "All experts should be healthy with normal latency"
+    assert state.expert_health_mask.all(), (
+        "All experts should be healthy with normal latency"
+    )
 
     # Inject failure: Expert 3 in layer 0 suddenly slow (100ms)
     current_latency = torch.full((num_layers, num_experts), 10.0)
@@ -144,9 +145,9 @@ def test_sparse_activation():
     state._update_health_mask(current_latency, log_stats=False)
 
     # Expert 2 should be unhealthy (50 > 3 * 10, and has 20 activations)
-    assert (
-        not state.expert_health_mask[0, 2]
-    ), "Expert 2 should be unhealthy after spike"
+    assert not state.expert_health_mask[0, 2], (
+        "Expert 2 should be unhealthy after spike"
+    )
 
     # Write to window
     state.expert_latency_window[20, 0, 0] = 10.0
@@ -202,7 +203,7 @@ def test_expert_recovery():
         state.expert_latency_window[step, 0, :] = 10.0
 
     state.expert_load_window_step = 30
-    
+
     current_latency = torch.full((num_layers, num_experts), 10.0)
     state._update_health_mask(current_latency, log_stats=False)
     assert state.expert_health_mask.all(), "All healthy initially"
@@ -319,9 +320,9 @@ def test_historical_mean_calculation():
     current_latency[0, 0] = 30.9
     state._update_health_mask(current_latency, log_stats=False)
 
-    assert (
-        not state.expert_health_mask[0, 0]
-    ), "Expert should be unhealthy (30.9 > 30.8)"
+    assert not state.expert_health_mask[0, 0], (
+        "Expert should be unhealthy (30.9 > 30.8)"
+    )
 
     # Now write the 30.9 to window and test next step
     state.expert_latency_window[10 % window_size, 0, 0] = 30.9
@@ -345,3 +346,172 @@ def test_historical_mean_calculation():
     assert not state.expert_health_mask[0, 0], "Expert should be unhealthy (35 > 34.98)"
 
 
+# =============================================================================
+# Tests for deferred latency measurement
+# =============================================================================
+
+
+def test_fusedmoe_has_measure_method():
+    """Test that FusedMoE layer has the measure_and_update_latency method."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    # Create minimal VllmConfig with health monitoring enabled
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.enable_eplb = True
+    vllm_config.parallel_config.eplb_config.health_check_enabled = True
+
+    with set_current_vllm_config(vllm_config):
+        # Create a minimal FusedMoE layer
+        # Provide tp_size, ep_size, dp_size to avoid distributed initialization
+        layer = FusedMoE(
+            num_experts=8,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=256,
+            tp_size=1,
+            ep_size=1,
+            dp_size=1,
+            enable_eplb=True,  # Enable EPLB to trigger health monitoring
+        )
+
+        # Verify the method exists
+        assert hasattr(layer, "measure_and_update_latency"), (
+            "FusedMoE should have measure_and_update_latency method"
+        )
+
+        # Verify it's callable
+        assert callable(layer.measure_and_update_latency), (
+            "measure_and_update_latency should be callable"
+        )
+
+        # Verify deferred measurement attributes exist
+        assert hasattr(layer, "_pending_active_experts"), (
+            "FusedMoE should have _pending_active_experts attribute"
+        )
+        assert hasattr(layer, "_has_pending_measurement"), (
+            "FusedMoE should have _has_pending_measurement attribute"
+        )
+
+        # Verify CUDA events are created when health monitoring is enabled
+        assert layer.cuda_start_event is not None, (
+            "cuda_start_event should be created when health monitoring enabled"
+        )
+        assert layer.cuda_end_event is not None, (
+            "cuda_end_event should be created when health monitoring enabled"
+        )
+
+        # Test that measure_and_update_latency doesn't crash when called
+        # (even with no pending measurement)
+        layer.measure_and_update_latency()  # Should not raise
+
+        # Verify pending state is initially False
+        assert not layer._has_pending_measurement, (
+            "Should not have pending measurement initially"
+        )
+
+
+def test_fusedmoe_health_monitoring_disabled():
+    """Test that FusedMoE doesn't create events when health monitoring is disabled."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    # Create VllmConfig with health monitoring DISABLED
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.enable_eplb = True
+    vllm_config.parallel_config.eplb_config.health_check_enabled = False
+
+    with set_current_vllm_config(vllm_config):
+        layer = FusedMoE(
+            num_experts=8,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=256,
+            tp_size=1,
+            ep_size=1,
+            dp_size=1,
+            enable_eplb=True,  # Enable EPLB but health monitoring is disabled in config
+        )
+
+        # When health monitoring is disabled, events should be None
+        assert layer.cuda_start_event is None, (
+            "cuda_start_event should be None when health monitoring disabled"
+        )
+        assert layer.cuda_end_event is None, (
+            "cuda_end_event should be None when health monitoring disabled"
+        )
+
+        # Method should still exist but be a no-op
+        layer.measure_and_update_latency()  # Should not crash
+
+
+@torch.inference_mode()
+def test_fusedmoe_deferred_measurement_state_management():
+    """Test that FusedMoE properly manages deferred measurement state."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    device = torch.device("cuda")
+    num_experts = 8
+
+    # Create VllmConfig with health monitoring enabled
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.enable_eplb = True
+    vllm_config.parallel_config.eplb_config.health_check_enabled = True
+
+    with set_current_vllm_config(vllm_config):
+        layer = FusedMoE(
+            num_experts=num_experts,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=256,
+            tp_size=1,
+            ep_size=1,
+            dp_size=1,
+            enable_eplb=True,  # Enable EPLB to trigger health monitoring
+        )
+
+        # Move layer to CUDA
+        layer = layer.to(device)
+
+    # Create latency view tensor
+    expert_latency_pass = torch.zeros(1, num_experts, device=device)
+    layer.expert_latency_view = expert_latency_pass[0]
+
+    # Simulate setting pending measurement (as forward_impl would)
+    layer._pending_active_experts = torch.tensor([0, 2, 5], dtype=torch.long).cpu()
+    layer._has_pending_measurement = True
+
+    # Record fake CUDA events
+    layer.cuda_start_event.record()
+    # Do some work
+    dummy = torch.randn(100, 100, device=device)
+    for _ in range(5):
+        dummy = dummy @ dummy.T
+    layer.cuda_end_event.record()
+
+    # Verify pending state is set
+    assert layer._has_pending_measurement, "Should have pending measurement"
+    assert layer._pending_active_experts is not None
+
+    # Call measure_and_update_latency
+    layer.measure_and_update_latency()
+
+    # Verify pending state is cleared
+    assert not layer._has_pending_measurement, "Pending flag should be cleared"
+    assert layer._pending_active_experts is None, "Pending data should be cleared"
+
+    # Verify latency was recorded for active experts
+    assert expert_latency_pass[0, 0] > 0, "Expert 0 should have latency"
+    assert expert_latency_pass[0, 2] > 0, "Expert 2 should have latency"
+    assert expert_latency_pass[0, 5] > 0, "Expert 5 should have latency"
+
+    # Verify inactive experts have zero latency
+    assert expert_latency_pass[0, 1] == 0, "Expert 1 should have zero latency"
+    assert expert_latency_pass[0, 3] == 0, "Expert 3 should have zero latency"
+
+    # Test that calling measure again with no pending measurement is a no-op
+    layer.measure_and_update_latency()  # Should not crash

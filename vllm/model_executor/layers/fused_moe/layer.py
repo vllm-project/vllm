@@ -1299,6 +1299,10 @@ class FusedMoE(CustomOp):
             self.cuda_start_event = torch.cuda.Event(enable_timing=True)
             self.cuda_end_event = torch.cuda.Event(enable_timing=True)
 
+        # Deferred latency measurement: store data from forward pass
+        self._pending_active_experts: torch.Tensor | None = None
+        self._has_pending_measurement: bool = False
+
         # ROCm aiter shared experts fusion
         self.num_fused_shared_experts = (
             n_shared_experts
@@ -2646,24 +2650,19 @@ class FusedMoE(CustomOp):
                 logical_replica_count=self.logical_replica_count,
             )
 
-            # Health monitoring: Record latency for active experts
+            # Health monitoring: Record end event and store active experts
+            # Synchronization is deferred until measure_and_update_latency() is called
             if self.cuda_end_event is not None and self.expert_latency_view is not None:
                 self.cuda_end_event.record()
-                self.cuda_end_event.synchronize()
-
-                # Calculate layer latency in milliseconds
-                layer_latency_ms = self.cuda_start_event.elapsed_time(
-                    self.cuda_end_event
-                )
 
                 # Determine which experts were active from router logits
                 # router_logits shape: (num_tokens, num_experts)
                 _, selected_experts = torch.topk(router_logits, self.top_k, dim=-1)
                 active_experts = selected_experts.unique()
 
-                # Write to latency view: 0 for inactive, latency for active
-                self.expert_latency_view.zero_()  # Reset all to 0
-                self.expert_latency_view[active_experts] = layer_latency_ms
+                # Store for deferred measurement (move to CPU to free GPU memory)
+                self._pending_active_experts = active_experts.cpu()
+                self._has_pending_measurement = True
 
             if has_separate_shared_experts:
                 assert not isinstance(final_hidden_states, tuple)
@@ -2756,6 +2755,45 @@ class FusedMoE(CustomOp):
             tracking is not enabled.
         """
         return self.expert_latency_view
+
+    def measure_and_update_latency(self) -> None:
+        """
+        Synchronize CUDA events and update expert latency view.
+
+        This method performs the deferred synchronization and measurement
+        that was initiated during forward_impl(). It should be called
+        AFTER the forward pass is complete, typically by EplbState.step().
+
+        The synchronization is moved out of the forward pass to avoid
+        stalling the GPU pipeline during model execution.
+        """
+        if not self._has_pending_measurement:
+            return
+
+        if (
+            self.cuda_end_event is None
+            or self.expert_latency_view is None
+            or self._pending_active_experts is None
+        ):
+            return
+
+        # NOW we synchronize (outside the forward pass)
+        self.cuda_end_event.synchronize()
+
+        # Calculate layer latency in milliseconds
+        layer_latency_ms = self.cuda_start_event.elapsed_time(self.cuda_end_event)
+
+        # Update latency view
+        self.expert_latency_view.zero_()  # Reset all to 0
+        # Move active experts back to GPU device for indexing
+        active_experts_gpu = self._pending_active_experts.to(
+            self.expert_latency_view.device
+        )
+        self.expert_latency_view[active_experts_gpu] = layer_latency_ms
+
+        # Clear pending state
+        self._has_pending_measurement = False
+        self._pending_active_experts = None
 
     def extra_repr(self) -> str:
         s = (

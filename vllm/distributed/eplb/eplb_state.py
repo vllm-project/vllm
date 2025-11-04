@@ -28,7 +28,7 @@ physical experts.
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -180,6 +180,13 @@ class EplbState:
 
     health_penalty_factor: float = 10.0
     """Weight penalty factor from EPLBConfig."""
+
+    moe_layer_instances: list = field(default_factory=list)
+    """
+    Direct references to MoE layer instances for calling measure_and_update_latency().
+    This avoids requiring each model to implement measure_and_update_all_latencies().
+    Populated from model.moe_layers during build().
+    """
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -385,6 +392,11 @@ class EplbState:
             )
             expert_rearrangement_step = 0
 
+        # Collect MoE layer references for deferred latency measurement
+        moe_layer_instances = []
+        if eplb_config.health_check_enabled and hasattr(model, "moe_layers"):
+            moe_layer_instances = list(model.moe_layers)
+
         return cls(
             physical_to_logical_map,
             logical_to_physical_map,
@@ -398,6 +410,7 @@ class EplbState:
             expert_health_mask=expert_health_mask,
             health_latency_threshold=eplb_config.health_latency_threshold,
             health_penalty_factor=eplb_config.health_penalty_factor,
+            moe_layer_instances=moe_layer_instances,
         )
 
     def step(
@@ -474,8 +487,15 @@ class EplbState:
                     balancedness,
                 )
 
-        # Record expert latencies (layers write directly to expert_latency_pass)
+        # Record expert latencies
         if self.expert_latency_window is not None and not is_dummy:
+            # FIRST: Trigger deferred measurement
+            # (synchronizes and updates latency views)
+            for layer in self.moe_layer_instances:
+                if hasattr(layer, "measure_and_update_latency"):
+                    layer.measure_and_update_latency()
+
+            # THEN: Read the measured values
             expert_latency_pass = model.get_expert_latencies()
             if expert_latency_pass is not None:
                 # Update health mask BEFORE overwriting window
