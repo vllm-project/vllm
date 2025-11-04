@@ -309,4 +309,4 @@ USER 2000
 WORKDIR /home/vllm
 
 # Set the default entrypoint
-ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["vllm", "serve"]
