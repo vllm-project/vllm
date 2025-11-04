@@ -441,7 +441,7 @@ steps:
       --ignore=lora/test_llm_with_multi_loras.py \
       --ignore=lora/test_olmoe_tp.py \
       --ignore=lora/test_deepseekv2_tp.py \
-      --ignore=lora/test_gptoss.py \
+      --ignore=lora/test_gptoss_tp.py \
       --ignore=lora/test_qwen3moe_tp.py
   parallelism: 4
 
@@ -629,15 +629,16 @@ steps:
 
 - label: OpenAI API correctness # 22min
   timeout_in_minutes: 30
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
   - vllm/model_executor/models/whisper.py
-  commands: # LMEval+Transcription WER check
-  - pytest -s entrypoints/openai/correctness/
+  commands: # LMEval
+  # Transcription WER check is skipped because encoder-decoder models are not supported on ROCm, see https://github.com/vllm-project/vllm/issues/27442
+  - pytest -s entrypoints/openai/correctness/  --ignore entrypoints/openai/correctness/test_transcription_api_correctness.py
 
 - label: OpenAI-Compatible Tool Use # 23 min
   timeout_in_minutes: 35
@@ -1217,6 +1218,8 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
+    - pytest -v -s -x lora/test_gptoss_tp.py
+
 
 - label: Weight Loading Multiple GPU Test  # 33min
   timeout_in_minutes: 45

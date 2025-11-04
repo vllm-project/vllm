@@ -7,11 +7,12 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import TypeAdapter, field_validator
 from pydantic.dataclasses import dataclass
 
+import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -206,6 +207,15 @@ class CompilationConfig:
     """The directory to store the compiled graph, to accelerate Inductor
     compilation. By default, it will use model-related information to generate
     a cache directory."""
+    compile_cache_save_format: Literal["binary", "unpacked"] = field(
+        default_factory=lambda: envs.VLLM_COMPILE_CACHE_SAVE_FORMAT
+    )
+    """Format for saving torch compile cache:\n
+    - "binary": saves as binary file (multiprocess safe)\n
+    - "unpacked": saves as directory structure for inspection/debugging
+    (NOT multiprocess safe)\n
+    Defaults to `VLLM_COMPILE_CACHE_SAVE_FORMAT` if not specified.
+    """
     backend: str = ""
     """The backend for compilation. It needs to be a string:
 
@@ -429,7 +439,7 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention",
+        "vllm::gdn_attention_core",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
     ]
@@ -456,6 +466,7 @@ class CompilationConfig:
         factors.append(self.inductor_compile_config)
         factors.append(self.inductor_passes)
         factors.append(self.pass_config.uuid())
+        factors.append(self.compile_cache_save_format)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __repr__(self) -> str:
@@ -501,6 +512,16 @@ class CompilationConfig:
         """Enable parsing of the `pass_config` field from a dictionary."""
         if isinstance(value, dict):
             return PassConfig(**value)
+        return value
+
+    @field_validator("compile_cache_save_format")
+    @classmethod
+    def validate_compile_cache_save_format(cls, value: str) -> str:
+        if value not in ("binary", "unpacked"):
+            raise ValueError(
+                f"compile_cache_save_format must be 'binary' or 'unpacked', "
+                f"got: {value}"
+            )
         return value
 
     def __post_init__(self) -> None:
