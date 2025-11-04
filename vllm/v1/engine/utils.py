@@ -1347,7 +1347,7 @@ class FaultHandler:
         self.cmd_socket = cmd_socket
         self.engine_exception_q = engine_exception_q
         self.engine_exception_q_lock = engine_exception_q_lock
-        self.engine_status_dict: [int, str] = engine_status_dict
+        self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
         self.engine_identity_to_index: dict[bytes, int] = {
             identity: i for i, identity in enumerate(client_cmd_registry)
         }
