@@ -331,7 +331,6 @@ class MirageBackend:
                 
                 self.compiled = True
                 
-            logger.info(f"[Mirage] Calling the compiled result...")
             result_hidden_states = self.mpk()
             
             return (result_hidden_states,)
