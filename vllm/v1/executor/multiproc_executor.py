@@ -327,8 +327,6 @@ class MultiprocExecutor(Executor):
         if not getattr(self, "shutting_down", False):
             self.shutting_down = True
 
-            logger.info("INITIATE SHUTDOWN")
-
             # Make sure all the worker processes are terminated first.
             if workers := getattr(self, "workers", None):
                 for w in workers:
@@ -338,9 +336,6 @@ class MultiprocExecutor(Executor):
                         w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
-
-            logger.info("SOMETHING SOMETHING SHUTDOWN")
-            # TODO: no message queues to shut down here, right? (broadcast only)
 
             if self.io_thread_pool is not None:
                 self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
@@ -592,9 +587,6 @@ class WorkerProc:
                     # This will block until parent process exits (pipe closes)
                     death_pipe.recv()
                 except EOFError:
-                    # logger.info("sleepin for a bit...")
-                    # time.sleep(1)
-
                     # Parent process has exited, terminate this worker
                     logger.info("Parent process exited, terminating worker")
                     nonlocal shutdown
