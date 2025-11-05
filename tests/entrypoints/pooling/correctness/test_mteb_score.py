@@ -28,6 +28,7 @@ def server():
         yield remote_server
 
 
+@pytest.mark.encoder_decoder
 def test_mteb_score(server):
     url = server.url_for("score")
     encoder = ScoreClientMtebEncoder(MODEL_NAME, url)
@@ -42,6 +43,7 @@ def test_mteb_score(server):
     assert st_main_score - vllm_main_score < MTEB_RERANK_TOL
 
 
+@pytest.mark.encoder_decoder
 def test_mteb_rerank(server):
     url = server.url_for("rerank")
     encoder = RerankClientMtebEncoder(MODEL_NAME, url)

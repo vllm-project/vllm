@@ -36,14 +36,24 @@ from ...utils import check_embeddings_close
                 pytest.mark.core_model,
                 pytest.mark.cpu_model,
                 pytest.mark.slow_test,
+                pytest.mark.encoder_decoder,
             ],
         ),
-        pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
+        pytest.param(
+            "sentence-transformers/all-MiniLM-L12-v2",
+            marks=[pytest.mark.encoder_decoder],
+        ),
+        pytest.param(
+            "intfloat/multilingual-e5-small", marks=[pytest.mark.encoder_decoder]
+        ),
         # [Cross-Encoder]
         pytest.param(
             "sentence-transformers/stsb-roberta-base-v2",
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.cpu_model,
+                pytest.mark.encoder_decoder,
+            ],
         ),
     ],
 )

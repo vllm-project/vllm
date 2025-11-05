@@ -17,6 +17,8 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import EmbeddingResponse
 
+pytestmark = pytest.mark.encoder_decoder
+
 
 def _generate_random_text(word_count: int) -> str:
     """Generate random text with approximately the specified word count."""

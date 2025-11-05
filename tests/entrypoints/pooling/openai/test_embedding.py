@@ -28,6 +28,8 @@ from vllm.utils.serial_utils import (
     decode_pooling_output,
 )
 
+pytestmark = pytest.mark.encoder_decoder
+
 MODEL_NAME = "intfloat/multilingual-e5-small"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 DTYPE = "bfloat16"

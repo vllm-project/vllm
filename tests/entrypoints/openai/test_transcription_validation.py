@@ -39,6 +39,7 @@ async def client(server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 @pytest.mark.parametrize(
     "model_name", ["openai/whisper-large-v3-turbo", "mistralai/Voxtral-Mini-3B-2507"]
 )
@@ -66,6 +67,7 @@ async def test_basic_audio(mary_had_lamb, model_name):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_basic_audio_with_lora(mary_had_lamb):
     """Ensure STT (transcribe) requests can pass LoRA through to generate."""
     model_name = "ibm-granite/granite-speech-3.3-2b"
@@ -137,6 +139,7 @@ async def test_non_asr_model(winning_call):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_bad_requests(mary_had_lamb, client):
     # invalid language
     with pytest.raises(openai.BadRequestError):
@@ -146,6 +149,7 @@ async def test_bad_requests(mary_had_lamb, client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_long_audio_request(mary_had_lamb, client):
     mary_had_lamb.seek(0)
     audio, sr = librosa.load(mary_had_lamb)
@@ -172,6 +176,7 @@ async def test_long_audio_request(mary_had_lamb, client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_completion_endpoints(client):
     # text to text model
     res = await client.chat.completions.create(
@@ -189,6 +194,7 @@ async def test_completion_endpoints(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_streaming_response(winning_call, client):
     transcription = ""
     res_no_stream = await client.audio.transcriptions.create(
@@ -215,6 +221,7 @@ async def test_streaming_response(winning_call, client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_stream_options(winning_call, client):
     res = await client.audio.transcriptions.create(
         model=MODEL_NAME,
@@ -237,6 +244,7 @@ async def test_stream_options(winning_call, client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_sampling_params(mary_had_lamb, client):
     """
     Compare sampling with params and greedy sampling to assert results
@@ -270,6 +278,7 @@ async def test_sampling_params(mary_had_lamb, client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_audio_prompt(mary_had_lamb, client):
     prompt = "This is a speech, recorded in a phonograph."
     # Prompts should not omit the part of original prompt while transcribing.
