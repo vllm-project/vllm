@@ -1,0 +1,1812 @@
+{
+  "model": "gpt-oss-120b",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an expert AI programming assistant, working with a user in the VS Code editor.\nWhen asked for your name, you must respond with \"GitHub Copilot\".\nFollow the user's requirements carefully & to the letter.\nFollow Microsoft content policies.\nAvoid content that violates copyrights.\nIf you are asked to generate content that is harmful, hateful, racist, sexist, lewd, or violent, only respond with \"Sorry, I can't assist with that.\"\nKeep your answers short and impersonal.\n<instructions>\nYou are a highly sophisticated automated coding agent with expert-level knowledge across many different programming languages and frameworks.\nThe user will ask a question, or ask you to perform a task, and it may require lots of research to answer correctly. There is a selection of tools that let you perform actions or retrieve helpful context to answer the user's question.\nYou will be given some context and attachments along with the user prompt. You can use them if they are relevant to the task, and ignore them if not. Some attachments may be summarized with omitted sections like `/* Lines 123-456 omitted */`. You can use the read_file tool to read more context if needed. Never pass this omitted line marker to an edit tool.\nIf you can infer the project type (languages, frameworks, and libraries) from the user's query or the context that you have, make sure to keep them in mind when making changes.\nIf the user wants you to implement a feature and they have not specified the files to edit, first break down the user's request into smaller concepts and think about the kinds of files you need to grasp each concept.\nIf you aren't sure which tool is relevant, you can call multiple tools. You can call tools repeatedly to take actions or gather as much context as needed until you have completed the task fully. Don't give up unless you are sure the request cannot be fulfilled with the tools you have. It's YOUR RESPONSIBILITY to make sure that you have done all you can to collect necessary context.\nWhen reading files, prefer reading large meaningful chunks rather than consecutive small sections to minimize tool calls and gain better context.\nDon't make assumptions about the situation- gather context first, then perform the task or answer the question.\nThink creatively and explore the workspace in order to make a complete fix.\nDon't repeat yourself after a tool call, pick up where you left off.\nNEVER print out a codeblock with file changes unless the user asked for it. Use the appropriate edit tool instead.\nNEVER print out a codeblock with a terminal command to run unless the user asked for it. Use the run_in_terminal tool instead.\nYou don't need to read a file if it's already provided in context.\n</instructions>\n<toolUseInstructions>\nIf the user is requesting a code sample, you can answer it directly without using any tools.\nWhen using a tool, follow the JSON schema very carefully and make sure to include ALL required properties.\nNo need to ask permission before using a tool.\nNEVER say the name of a tool to a user. For example, instead of saying that you'll use the run_in_terminal tool, say \"I'll run the command in a terminal\".\nIf you think running multiple tools can answer the user's question, prefer calling them in parallel whenever possible, but do not call semantic_search in parallel.\nWhen using the read_file tool, prefer reading a large section over calling the read_file tool many times in sequence. You can also think of all the pieces you may be interested in and read them in parallel. Read large enough context to ensure you get what you need.\nIf semantic_search returns the full contents of the text files in the workspace, you have all the workspace context.\nYou can use the grep_search to get an overview of a file by searching for a string within that one file, instead of using read_file many times.\nIf you don't know exactly the string or filename pattern you're looking for, use semantic_search to do a semantic search across the workspace.\nDon't call the run_in_terminal tool multiple times in parallel. Instead, run one command and wait for the output before running the next command.\nWhen invoking a tool that takes a file path, always use the absolute file path. If the file has a scheme like untitled: or vscode-userdata:, then use a URI with the scheme.\nNEVER try to edit a file by running terminal commands unless the user specifically asks for it.\nTools can be disabled by the user. You may see tools used previously in the conversation that are not currently available. Be careful to only use the tools that are currently available to you.\n</toolUseInstructions>\n<applyPatchInstructions>\nTo edit files in the workspace, use the apply_patch tool. If you have issues with it, you should first try to fix your patch and continue using apply_patch. \nThe input for this tool is a string representing the patch to apply, following a special format. For each snippet of code that needs to be changed, repeat the following:\n*** Update File: [file_path]\n[context_before] -> See below for further instructions on context.\n-[old_code] -> Precede each line in the old code with a minus sign.\n+[new_code] -> Precede each line in the new, replacement code with a plus sign.\n[context_after] -> See below for further instructions on context.\n\nFor instructions on [context_before] and [context_after]:\n- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change's [context_after] lines in the second change's [context_before] lines.\n- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs.\n- If a code block is repeated so many times in a class or function such that even a single @@ statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context.\nYou must use the same indentation style as the original code. If the original code uses tabs, you must use tabs. If the original code uses spaces, you must use spaces. Be sure to use a proper UNESCAPED tab character.\n\nSee below for an example of the patch format. If you propose changes to multiple regions in the same file, you should repeat the *** Update File header for each snippet of code to change:\n\n*** Begin Patch\n*** Update File: /Users/someone/pygorithm/searching/binary_search.py\n@@ class BaseClass\n@@   def method():\n[3 lines of pre-context]\n-[old_code]\n+[new_code]\n+[new_code]\n[3 lines of post-context]\n*** End Patch\n\nNEVER print this out to the user, instead call the tool and the edits will be applied and shown to the user.\nFollow best practices when editing files. If a popular external library exists to solve a problem, use it and properly install the package e.g. with \"npm install\" or creating a \"requirements.txt\".\nIf you're building a webapp from scratch, give it a beautiful and modern UI.\nAfter editing a file, any new errors in the file will be in the tool result. Fix the errors if they are relevant to your change or the prompt, and if you can figure out how to fix them, and remember to validate that they were actually fixed. Do not loop more than 3 times attempting to fix errors in the same file. If the third try fails, you should stop and ask the user what to do next.\n\n</applyPatchInstructions>\n<notebookInstructions>\nTo edit notebook files in the workspace, you can use the edit_notebook_file tool.\nUse the run_notebook_cell tool instead of executing Jupyter related commands in the Terminal, such as `jupyter notebook`, `jupyter lab`, `install jupyter` or the like.\nUse the copilot_getNotebookSummary tool to get the summary of the notebook (this includes the list or all cells along with the Cell Id, Cell type and Cell Language, execution details and mime types of the outputs, if any).\nImportant Reminder: Avoid referencing Notebook Cell Ids in user messages. Use cell number instead.\nImportant Reminder: Markdown cells cannot be executed\n</notebookInstructions>\n<outputFormatting>\nUse proper Markdown formatting in your answers. When referring to a filename or symbol in the user's workspace, wrap it in backticks.\n<example>\nThe class `Person` is in `src/models/person.ts`.\nThe function `calculateTotal` is defined in `lib/utils/math.ts`.\nYou can find the configuration in `config/app.config.json`.\n</example>\nUse KaTeX for math equations in your answers.\nWrap inline math equations in $.\nWrap more complex blocks of math equations in $$.\n\n</outputFormatting>\n"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-b9f00159c9a04e8b87f05b7c6acbc665",
+          "type": "function",
+          "function": {
+            "name": "read_file",
+            "arguments": "{\"filePath\":\"/Users/john/investment-strategy/plot_nasdaq.py\",\"offset\":0,\"limit\":400}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-b9f00159c9a04e8b87f05b7c6acbc665",
+      "content": "```python\n#!/usr/bin/env python3\n\"\"\"\nPlot NASDAQ index for the past 10 years using yfinance\n\"\"\"\n\nimport matplotlib.pyplot as plt\nimport numpy as np\nimport os\nfrom nasdaq_data import load_nasdaq_data\n\ndef plot_nasdaq_10yr():\n    \"\"\"\n    Plot NASDAQ index for the past 10 years with linear regression on log-scaled data\n    \"\"\"\n    try:\n        # Load NASDAQ data\n        data = load_nasdaq_data()\n\n        if data.empty:\n            print(\"No data retrieved for NASDAQ index\")\n            return\n\n        # Prepare data for linear regression on log-scaled data\n        # We'll use the log of closing prices for linear regression\n        close_prices = data['Close'].dropna()\n        dates = close_prices.index.to_pydatetime()\n        log_prices = np.log(close_prices)\n\n        # Create time axis in years for proper annualization\n        # Convert dates to fractional years (e.g., 2023.5)\n        years = np.array([d.toordinal() for d in dates]) / 365.25\n\n        # Perform linear regression on log-prices\n        # y = mx + b where y = log(price), x = time in years\n        coefficients = np.polyfit(years, log_prices, 1)  # degree 1 polynomial (linear)\n        slope_annual = coefficients[0]\n        intercept = coefficients[1]\n\n        # Calculate the correct annualized percentage return\n        # The slope from log-price regression is the continuously compounded annual rate\n        # Annualized rate = exp(annual_slope) - 1\n        annualized_return = (np.exp(slope_annual) - 1) * 100\n\n        # Generate trend line values\n        trend_line = np.exp(slope_annual * years + intercept)\n\n        # Distance from regression trend (residuals and z-score)\n        # resid is log-price distance from fitted log trend; compute as numpy array\n        resid = np.log(close_prices).values - (slope_annual * years + intercept)\n        zscore = (resid - np.nanmean(resid)) / np.nanstd(resid)\n\n        # Calculate 50-day and 200-day Moving Averages\n        sma50 = close_prices.rolling(50).mean()\n        sma200 = close_prices.rolling(200).mean()\n\n        # Determine regime: Bull (50>200), Neutral (flat), Bear (50<200)\n        regime = np.where(sma50 > sma200, 'Bull', np.where(sma50 < sma200, 'Bear', 'Neutral'))\n\n        # Identify golden/death crosses\n        cross_up = (sma50.shift(1) <= sma200.shift(1)) & (sma50 > sma200)    # golden cross\n        cross_dn = (sma50.shift(1) >= sma200.shift(1)) & (sma50 < sma200)    # death cross\n\n        # Calculate 20-day realized volatility (VIX-lite)\n        logret = np.log(close_prices).diff().dropna()\n        realized_vol_20 = (logret.rolling(20).std() * np.sqrt(252)) * 100.0  # %\n\n        # Create the plot with three subplots (price, volatility, drawdown)\n        # Reduced figure size to fit typical screens while preserving layout\n        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 9), sharex=True,\n                                           gridspec_kw={'height_ratios': [3, 1, 0.5]})\n\n        # Top panel: price and moving averages\n        ax1.plot(dates, close_prices, linewidth=1, color='blue', label='NASDAQ Close')\n        ax1.plot(dates, sma50, linewidth=1, color='orange', linestyle='-', label='50-Day MA')\n        ax1.plot(dates, sma200, linewidth=1, color='green', linestyle='-', label='200-Day MA')\n        ax1.plot(dates, trend_line, linewidth=2, color='red', linestyle='--',\n                 label=f'Linear Regression (annualized: {annualized_return:.2f}% / year)')\n\n        # Mark golden and death crosses with vertical lines\n        cross_up_dates = dates[cross_up]\n        cross_dn_dates = dates[cross_dn]\n        for date in cross_up_dates:\n            ax1.axvline(x=date, color='green', linestyle=':', linewidth=1, alpha=0.7)\n        for date in cross_dn_dates:\n            ax1.axvline(x=date, color='red', linestyle=':', linewidth=1, alpha=0.7)\n\n        ax1.set_title('NASDAQ Index - Past 10 Years with 50/200-Day MA Regime and Cross Events')\n        ax1.set_ylabel('NASDAQ Level')\n        ax1.set_yscale('log')  # Logarithmic scale for price\n        ax1.grid(True, alpha=0.3)\n        ax1.legend()\n\n    # Middle panel: realized volatility\n    aligned_dates = dates[len(dates) - len(realized_vol_20):]\n    ax2.plot(aligned_dates, realized_vol_20, linewidth=1, color='purple',\n         label='20-Day Realized Volatility (VIX-lite)')\n    ax2.set_ylabel('Volatility (%)')\n    ax2.grid(True, alpha=0.3)\n    ax2.legend(loc='upper left')\n\n        # Bottom panel: drawdown curve\n        roll_max = close_prices.cummax()\n        drawdown = close_prices / roll_max - 1.0\n    ax3.plot(dates, drawdown * 100, color='darkred', alpha=0.7, label='Drawdown (%)')\n    ax3.fill_between(dates, drawdown * 100, 0, color='darkred', alpha=0.2)\n    ax3.set_ylabel('Drawdown (%)')\n    ax3.set_xlabel('Date')\n    ax3.grid(True, alpha=0.3)\n    # Plot z-score on a secondary y-axis of the drawdown panel\n    ax4 = ax3.twinx()\n    ax4.plot(dates, zscore, color='teal', label='Z-Score vs Trend', linewidth=1)\n    ax4.axhline(0, color='gray', lw=1)\n    ax4.axhline(2, color='red', ls='--', lw=1)\n    ax4.axhline(-2, color='green', ls='--', lw=1)\n    ax4.set_ylabel('Z-Score')\n    # Combine legends from drawdown and z-score\n    lns3, labs3 = ax3.get_legend_handles_labels()\n    lns4, labs4 = ax4.get_legend_handles_labels()\n    ax3.legend(lns3 + lns4, labs3 + labs4, loc='upper left')\n\n        plt.tight_layout()\n\n        # Save plot to file\n        os.makedirs('app/static/images/gen', exist_ok=True)\n        plt.savefig('app/static/images/gen/nasdaq_10yr_with_regression.png')\n        print(\"Plot saved as 'nasdaq_10yr_with_regression.png'\")\n        print(f\"Annualized return: {annualized_return:.2f}% per year\")\n\n        # Show plot\n        plt.show()\n\n    except Exception as e:\n        print(f\"Error plotting NASDAQ data: {e}\")\n        raise\n\nif __name__ == \"__main__\":\n    plot_nasdaq_10yr()\n\n```"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-ecd44ad6095b4861b5aa6cf29791067b",
+          "type": "function",
+          "function": {
+            "name": "apply_patch",
+            "arguments": "{\"input\":\"*** Begin Patch\\n*** Update File: /Users/john/investment-strategy/plot_nasdaq.py\\n@@\\n-    try:\\n-        # Load NASDAQ data\\n-        data = load_nasdaq_data()\\n-\\n-        if data.empty:\\n-            print(\\\"No data retrieved for NASDAQ index\\\")\\n-            return\\n-\\n-        # Prepare data for linear regression on log-scaled data\\n-        # We'll use the log of closing prices for linear regression\\n-        close_prices = data['Close'].dropna()\\n-        dates = close_prices.index.to_pydatetime()\\n-        log_prices = np.log(close_prices)\\n-\\n-        # Create time axis in years for proper annualization\\n-        # Convert dates to fractional years (e.g., 2023.5)\\n-        years = np.array([d.toordinal() for d in dates]) / 365.25\\n-\\n-        # Perform linear regression on log-prices\\n-        # y = mx + b where y = log(price), x = time in years\\n-        coefficients = np.polyfit(years, log_prices, 1)  # degree 1 polynomial (linear)\\n-        slope_annual = coefficients[0]\\n-        intercept = coefficients[1]\\n-\\n-        # Calculate the correct annualized percentage return\\n-        # The slope from log-price regression is the continuously compounded annual rate\\n-        # Annualized rate = exp(annual_slope) - 1\\n-        annualized_return = (np.exp(slope_annual) - 1) * 100\\n-\\n-        # Generate trend line values\\n-        trend_line = np.exp(slope_annual * years + intercept)\\n-\\n-        # Distance from regression trend (residuals and z-score)\\n-        # resid is log-price distance from fitted log trend; compute as numpy array\\n-        resid = np.log(close_prices).values - (slope_annual * years + intercept)\\n-        zscore = (resid - np.nanmean(resid)) / np.nanstd(resid)\\n-\\n-        # Calculate 50-day and 200-day Moving Averages\\n-        sma50 = close_prices.rolling(50).mean()\\n-        sma200 = close_prices.rolling(200).mean()\\n-\\n-        # Determine regime: Bull (50>200), Neutral (flat), Bear (50<200)\\n-        regime = np.where(sma50 > sma200, 'Bull', np.where(sma50 < sma200, 'Bear', 'Neutral'))\\n-\\n-        # Identify golden/death crosses\\n-        cross_up = (sma50.shift(1) <= sma200.shift(1)) & (sma50 > sma200)    # golden cross\\n-        cross_dn = (sma50.shift(1) >= sma200.shift(1)) & (sma50 < sma200)    # death cross\\n-\\n-        # Calculate 20-day realized volatility (VIX-lite)\\n-        logret = np.log(close_prices).diff().dropna()\\n-        realized_vol_20 = (logret.rolling(20).std() * np.sqrt(252)) * 100.0  # %\\n-\\n-        # Create the plot with three subplots (price, volatility, drawdown)\\n-        # Reduced figure size to fit typical screens while preserving layout\\n-        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=(10, 9), sharex=True,\\n-                                           gridspec_kw={'height_ratios': [3, 1, 0.5]})\\n-\\n-        # Top panel: price and moving averages\\n-        ax1.plot(dates, close_prices, linewidth=1, color='blue', label='NASDAQ Close')\\n-        ax1.plot(dates, sma50, linewidth=1, color='orange', linestyle='-', label='50-Day MA')\\n-        ax1.plot(dates, sma200, linewidth=1, color='green', linestyle='-', label='200-Day MA')\\n-        ax1.plot(dates, trend_line, linewidth=2, color='red', linestyle='--',\\n-                 label=f'Linear Regression (annualized: {annualized_return:.2f}% / year)')\\n-\\n-        # Mark golden and death crosses with vertical lines\\n-        cross_up_dates = dates[cross_up]\\n-        cross_dn_dates = dates[cross_dn]\\n-        for date in cross_up_dates:\\n-            ax1.axvline(x=date, color='green', linestyle=':', linewidth=1, alpha=0.7)\\n-        for date in cross_dn_dates:\\n-            ax1.axvline(x=date, color='red', linestyle=':', linewidth=1, alpha=0.7)\\n-\\n-        ax1.set_title('NASDAQ Index - Past 10 Years with 50/200-Day MA Regime and Cross Events')\\n-        ax1.set_ylabel('NASDAQ Level')\\n-        ax1.set_yscale('log')  # Logarithmic scale for price\\n-        ax1.grid(True, alpha=0.3)\\n-        ax1.legend()\\n-\\n-    # Middle panel: realized volatility\\n-    aligned_dates = dates[len(dates) - len(realized_vol_20):]\\n-    ax2.plot(aligned_dates, realized_vol_20, linewidth=1, color='purple',\\n-         label='20-Day Realized Volatility (VIX-lite)')\\n-    ax2.set_ylabel('Volatility (%)')\\n-    ax2.grid(True, alpha=0.3)\\n-    ax2.legend(loc='upper left')\\n-\\n-        # Bottom panel: drawdown curve\\n-        roll_max = close_prices.cummax()\\n-        drawdown = close_prices / roll_max - 1.0\\n-    ax3.plot(dates, drawdown * 100, color='darkred', alpha=0.7, label='Drawdown (%)')\\n-    ax3.fill_between(dates, drawdown * 100, 0, color='darkred', alpha=0.2)\\n-    ax3.set_ylabel('Drawdown (%)')\\n-    ax3.set_xlabel('Date')\\n-    ax3.grid(True, alpha=0.3)\\n-    # Plot z-score on a secondary y-axis of the drawdown panel\\n-    ax4 = ax3.twinx()\\n-    ax4.plot(dates, zscore, color='teal', label='Z-Score vs Trend', linewidth=1)\\n-    ax4.axhline(0, color='gray', lw=1)\\n-    ax4.axhline(2, color='red', ls='--', lw=1)\\n-    ax4.axhline(-2, color='green', ls='--', lw=1)\\n-    ax4.set_ylabel('Z-Score')\\n-    # Combine legends from drawdown and z-score\\n-    lns3, labs3 = ax3.get_legend_handles_labels()\\n-    lns4, labs4 = ax4.get_legend_handles_labels()\\n-    ax3.legend(lns3 + lns4, labs3 + labs4, loc='upper left')\\n-\\n-        plt.tight_layout()\\n-\\n-        # Save plot to file\\n-        os.makedirs('app/static/images/gen', exist_ok=True)\\n-        plt.savefig('app/static/images/gen/nasdaq_10yr_with_regression.png')\\n-        print(\\\"Plot saved as 'nasdaq_10yr_with_regression.png'\\\")\\n-        print(f\\\"Annualized return: {annualized_return:.2f}% per year\\\")\\n-\\n-        # Show plot\\n-        plt.show()\\n-\\n-    except Exception as e:\\n-        print(f\\\"Error plotting NASDAQ data: {e}\\\")\\n-        raise\\n+    try:\\n+        # Load NASDAQ data\\n+        data = load_nasdaq_data()\\n+\\n+        if data.empty:\\n+            print(\\\"No data retrieved for NASDAQ index\\\")\\n+            return\\n+\\n+        # Prepare data for linear regression on log-scaled data\\n+        # We'll use the log of closing prices for linear regression\\n+        close_prices = data['Close'].dropna()\\n+        dates = close_prices.index.to_pydatetime()\\n+        log_prices = np.log(close_prices)\\n+\\n+        # Create time axis in years for proper annualization\\n+        # Convert dates to fractional years (e.g., 2023.5)\\n+        years = np.array([d.toordinal() for d in dates]) / 365.25\\n+\\n+        # Perform linear regression on log-prices\\n+        # y = mx + b where y = log(price), x = time in years\\n+        coefficients = np.polyfit(years, log_prices, 1)  # degree 1 polynomial (linear)\\n+        slope_annual = coefficients[0]\\n+        intercept = coefficients[1]\\n+\\n+        # Calculate the correct annualized percentage return\\n+        # The slope from log-price regression is the continuously compounded annual rate\\n+        # Annualized rate = exp(annual_slope) - 1\\n+        annualized_return = (np.exp(slope_annual) - 1) * 100\\n+\\n+        # Generate trend line values\\n+        trend_line = np.exp(slope_annual * years + intercept)\\n+\\n+        # Distance from regression trend (residuals and z-score)\\n+        # resid is log-price distance from fitted log trend; compute as numpy array\\n+        resid = np.log(close_prices).values - (slope_annual * years + intercept)\\n+        zscore = (resid - np.nanmean(resid)) / np.nanstd(resid)\\n+\\n+        # Calculate 50-day and 200-day Moving Averages\\n+        sma50 = close_prices.rolling(50).mean()\\n+        sma200 = close_prices.rolling(200).mean()\\n+\\n+        # Determine regime: Bull (50>200), Neutral (flat), Bear (50<200)\\n+        regime = np.where(sma50 > sma200, 'Bull', np.where(sma50 < sma200, 'Bear', 'Neutral'))\\n+\\n+        # Identify golden/death crosses\\n+        cross_up = (sma50.shift(1) <= sma200.shift(1)) & (sma50 > sma200)    # golden cross\\n+        cross_dn = (sma50.shift(1) >= sma200.shift(1)) & (sma50 < sma200)    # death cross\\n+\\n+        # Calculate 20-day realized volatility (VIX-lite)\\n+        logret = np.log(close_prices).diff().dropna()\\n+        realized_vol_20 = (logret.rolling(20).std() * np.sqrt(252)) * 100.0  # %\\n+\\n+        # Create the plot with three subplots (price, volatility, drawdown)\\n+        # Reduced figure size to fit typical screens while preserving layout\\n+        fig, (ax1, ax2, ax3) = plt.subplots(\\n+            3,\\n+            1,\\n+            figsize=(10, 9),\\n+            sharex=True,\\n+            gridspec_kw={'height_ratios': [3, 1, 0.5]},\\n+        )\\n+\\n+        # Top panel: price and moving averages\\n+        ax1.plot(dates, close_prices, linewidth=1, color='blue', label='NASDAQ Close')\\n+        ax1.plot(dates, sma50, linewidth=1, color='orange', linestyle='-', label='50-Day MA')\\n+        ax1.plot(dates, sma200, linewidth=1, color='green', linestyle='-', label='200-Day MA')\\n+        ax1.plot(\\n+            dates,\\n+            trend_line,\\n+            linewidth=2,\\n+            color='red',\\n+            linestyle='--',\\n+            label=f'Linear Regression (annualized: {annualized_return:.2f}% / year)',\\n+        )\\n+\\n+        # Mark golden and death crosses with vertical lines\\n+        cross_up_dates = dates[cross_up]\\n+        cross_dn_dates = dates[cross_dn]\\n+        for date in cross_up_dates:\\n+            ax1.axvline(x=date, color='green', linestyle=':', linewidth=1, alpha=0.7)\\n+        for date in cross_dn_dates:\\n+            ax1.axvline(x=date, color='red', linestyle=':', linewidth=1, alpha=0.7)\\n+\\n+        ax1.set_title(\\n+            'NASDAQ Index - Past 10 Years with 50/200-Day MA Regime and Cross Events'\\n+        )\\n+        ax1.set_ylabel('NASDAQ Level')\\n+        ax1.set_yscale('log')  # Logarithmic scale for price\\n+        ax1.grid(True, alpha=0.3)\\n+        ax1.legend()\\n+\\n+        # Middle panel: realized volatility\\n+        aligned_dates = dates[len(dates) - len(realized_vol_20) :]\\n+        ax2.plot(\\n+            aligned_dates,\\n+            realized_vol_20,\\n+            linewidth=1,\\n+            color='purple',\\n+            label='20-Day Realized Volatility (VIX-lite)',\\n+        )\\n+        ax2.set_ylabel('Volatility (%)')\\n+        ax2.grid(True, alpha=0.3)\\n+        ax2.legend(loc='upper left')\\n+\\n+        # Bottom panel: drawdown curve\\n+        roll_max = close_prices.cummax()\\n+        drawdown = close_prices / roll_max - 1.0\\n+        ax3.plot(dates, drawdown * 100, color='darkred', alpha=0.7, label='Drawdown (%)')\\n+        ax3.fill_between(dates, drawdown * 100, 0, color='darkred', alpha=0.2)\\n+        ax3.set_ylabel('Drawdown (%)')\\n+        ax3.set_xlabel('Date')\\n+        ax3.grid(True, alpha=0.3)\\n+        # Plot z-score on a secondary y-axis of the drawdown panel\\n+        ax4 = ax3.twinx()\\n+        ax4.plot(dates, zscore, color='teal', label='Z-Score vs Trend', linewidth=1)\\n+        ax4.axhline(0, color='gray', lw=1)\\n+        ax4.axhline(2, color='red', ls='--', lw=1)\\n+        ax4.axhline(-2, color='green', ls='--', lw=1)\\n+        ax4.set_ylabel('Z-Score')\\n+        # Combine legends from drawdown and z-score\\n+        lns3, labs3 = ax3.get_legend_handles_labels()\\n+        lns4, labs4 = ax4.get_legend_handles_labels()\\n+        ax3.legend(lns3 + lns4, labs3 + labs4, loc='upper left')\\n+\\n+        plt.tight_layout()\\n+\\n+        # Save plot to file\\n+        os.makedirs('app/static/images/gen', exist_ok=True)\\n+        plt.savefig('app/static/images/gen/nasdaq_10yr_with_regression.png')\\n+        print(\\\"Plot saved as 'nasdaq_10yr_with_regression.png'\\\")\\n+        print(f\\\"Annualized return: {annualized_return:.2f}% per year\\\")\\n+\\n+        # Show plot\\n+        plt.show()\\n+\\n+    except Exception as e:\\n+        print(f\\\"Error plotting NASDAQ data: {e}\\\")\\n+        raise\\n*** End Patch\",\"explanation\":\"Fix indentation errors caused by previous patch. Ensure all code inside try block is properly indented and except aligns with try.\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-ecd44ad6095b4861b5aa6cf29791067b",
+      "content": "The following files were successfully edited:\n/Users/john/investment-strategy/plot_nasdaq.py\n"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-ae07873458c54a13807122016c6b75c9",
+          "type": "function",
+          "function": {
+            "name": "run_in_terminal",
+            "arguments": "{\"command\":\"python3 plot_nasdaq.py\",\"explanation\":\"Run the script to ensure it executes without errors after fixing indentation\",\"isBackground\":false}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-ae07873458c54a13807122016c6b75c9",
+      "content": "Loaded data from cache\nPlot saved as 'nasdaq_10yr_with_regression.png'\nAnnualized return: 15.72% per year\n2025-11-03 08:51:37.763 Python[52038:16286731] +[IMKClient subclass]: chose IMKClient_Modern\n2025-11-03 08:51:37.763 Python[52038:16286731] +[IMKInputSession subclass]: chose IMKInputSession_Modern\n"
+    },
+    {
+      "role": "assistant",
+      "content": "The indentation issue has been fixed, and the script now runs without errors:\n\n* The NASDAQ data loads successfully.\n* The plot is generated and saved as **`app/static/images/gen/nasdaq_10yr_with_regression.png`**.\n* The annualized return is printed (`15.72% per year`).\n\nAll requested features—including the 50/200‑day SMAs, regime labeling, golden/death crosses, 20‑day realized volatility, drawdown chart, and the z‑score plotted on the drawdown panel—are now correctly displayed. Let me know if you’d like any further adjustments."
+    },
+    {
+      "role": "user",
+      "content": "<context>\nThe current date is 3 November 2025.\nTerminals:\nTerminal: Python\nTerminal: Python Debug Console\nTerminal: zsh\nTerminal: zsh\nTerminal: zsh\nLast Command: commit -f\nCwd: /Users/john/investment-strategy\nExit Code: 0\nTerminal: zsh\nTerminal: zsh\nTerminal: zsh\n\n</context>\n<repoContext>\nBelow is the information about the current repository. You can use this information when you need to calculate diffs or compare changes with the default branch.\nRepository name: investment-strategy\nOwner: reb00t-io\nCurrent branch: main\n\n</repoContext>\n<reminderInstructions>\n\n</reminderInstructions>\n<userRequest>\nAnalyze this codebase to generate or update `.github/copilot-instructions.md` for guiding AI coding agents.\n\nFocus on discovering the essential knowledge that would help an AI agents be immediately productive in this codebase. Consider aspects like:\n- The \"big picture\" architecture that requires reading multiple files to understand - major components, service boundaries, data flows, and the \"why\" behind structural decisions\n- Critical developer workflows (builds, tests, debugging) especially commands that aren't obvious from file inspection alone\n- Project-specific conventions and patterns that differ from common practices\n- Integration points, external dependencies, and cross-component communication patterns\n\nSource existing AI conventions from `**/{.github/copilot-instructions.md,AGENT.md,AGENTS.md,CLAUDE.md,.cursorrules,.windsurfrules,.clinerules,.cursor/rules/**,.windsurf/rules/**,.clinerules/**,README.md}` (do one glob search).\n\nGuidelines (read more at https://aka.ms/vscode-instructions-docs):\n- If `.github/copilot-instructions.md` exists, merge intelligently - preserve valuable content while updating outdated sections\n- Write concise, actionable instructions (~20-50 lines) using markdown structure\n- Include specific examples from the codebase when describing patterns\n- Avoid generic advice (\"write tests\", \"handle errors\") - focus on THIS project's specific approaches\n- Document only discoverable patterns, not aspirational practices\n- Reference key files/directories that exemplify important patterns\n\nUpdate `.github/copilot-instructions.md` for the user, then ask for feedback on any unclear or incomplete sections to iterate.\n</userRequest>\n"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-1f3a2c2c6d1043c09bb271b900faccfe",
+          "type": "function",
+          "function": {
+            "name": "file_search",
+            "arguments": "{\"query\":\"**/.github/copilot-instructions.md\",\"maxResults\":20}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-1f3a2c2c6d1043c09bb271b900faccfe",
+      "content": "No files found"
+    },
+    {
+      "role": "user",
+      "content": "<context>\nThe current date is 3 November 2025.\nTerminals:\nTerminal: Python\nTerminal: Python Debug Console\nTerminal: zsh\nTerminal: zsh\nTerminal: zsh\nLast Command: commit -f\nCwd: /Users/john/investment-strategy\nExit Code: 0\nTerminal: zsh\nTerminal: zsh\nTerminal: zsh\n\n</context>\n<repoContext>\nBelow is the information about the current repository. You can use this information when you need to calculate diffs or compare changes with the default branch.\nRepository name: investment-strategy\nOwner: reb00t-io\nCurrent branch: main\n\n</repoContext>\n<reminderInstructions>\n\n</reminderInstructions>\n<userRequest>\ntry again\n</userRequest>\n"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-5aecf9b6baa4428dae60bee339de470b",
+          "type": "function",
+          "function": {
+            "name": "list_dir",
+            "arguments": "{\"path\":\"/Users/john/investment-strategy\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-5aecf9b6baa4428dae60bee339de470b",
+      "content": ".cache/\n.git/\n.github/\n.gitignore\n.log/\n.venv/\n.vscode/\n__pycache__/\napp/\napp.py\ndata/\ninvest/\ninvestment_strategy.egg-info/\nnasdaq_data.py\nplot_nasdaq.py\npyproject.toml\nscripts/"
+    },
+    {
+      "role": "user",
+      "content": "<context>\nThe current date is 3 November 2025.\nTerminals:\nTerminal: Python\nTerminal: Python Debug Console\nTerminal: zsh\nTerminal: zsh\nTerminal: zsh\nLast Command: l .github\nCwd: /Users/john/investment-strategy\nExit Code: 0\nTerminal: zsh\nTerminal: zsh\nTerminal: zsh\n\n</context>\n<repoContext>\nBelow is the information about the current repository. You can use this information when you need to calculate diffs or compare changes with the default branch.\nRepository name: investment-strategy\nOwner: reb00t-io\nCurrent branch: main\n\n</repoContext>\n<reminderInstructions>\n\n</reminderInstructions>\n<userRequest>\ntry again\n</userRequest>\n"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-f7b656c08f8046cdb61c6a2a68381189",
+          "type": "function",
+          "function": {
+            "name": "file_search",
+            "arguments": "{\"query\":\"**/.github/*\",\"maxResults\":20}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-f7b656c08f8046cdb61c6a2a68381189",
+      "content": "1 total result\n/Users/john/investment-strategy/.github/workflows/ci.yml"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-fb7a5cd8d8af4561a5d3db640447a329",
+          "type": "function",
+          "function": {
+            "name": "file_search",
+            "arguments": "{\"query\":\"**/README.md\",\"maxResults\":20}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-fb7a5cd8d8af4561a5d3db640447a329",
+      "content": "No files found"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-661e60916b9345af9d6f47bce05682b7",
+          "type": "function",
+          "function": {
+            "name": "list_dir",
+            "arguments": "{\"path\":\"/Users/john/investment-strategy/app\"}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-661e60916b9345af9d6f47bce05682b7",
+      "content": "__init__.py\n__pycache__/\nroutes.py\nstatic/\ntemplates/{\"$mid\":24,\"mimeType\":\"cache_control\",\"data\":{\"type\":\"Buffer\",\"data\":[101,112,104,101,109,101,114,97,108]}}"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-6e3f7df445984bd197f2905509e5bd91",
+          "type": "function",
+          "function": {
+            "name": "file_search",
+            "arguments": "{\"query\":\"**/AGENT.md\",\"maxResults\":20}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-6e3f7df445984bd197f2905509e5bd91",
+      "content": "No files found{\"$mid\":24,\"mimeType\":\"cache_control\",\"data\":{\"type\":\"Buffer\",\"data\":[101,112,104,101,109,101,114,97,108]}}"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-67888b199c2a487a846f8649d2ce4eb6",
+          "type": "function",
+          "function": {
+            "name": "file_search",
+            "arguments": "{\"query\":\"**/.cursorrules\",\"maxResults\":20}"
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-67888b199c2a487a846f8649d2ce4eb6",
+      "content": "No files found{\"$mid\":24,\"mimeType\":\"cache_control\",\"data\":{\"type\":\"Buffer\",\"data\":[101,112,104,101,109,101,114,97,108]}}"
+    }
+  ],
+  "stream": true,
+  "max_tokens": 4096,
+  "temperature": 0.7,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "apply_patch",
+        "description": "Edit text files. Do not use this tool to edit Jupyter notebooks. `apply_patch` allows you to execute a diff/patch against a text file, but the format of the diff specification is unique to this task, so pay careful attention to these instructions. To use the `apply_patch` command, you should pass a message of the following structure as \"input\":\n\n*** Begin Patch\n[YOUR_PATCH]\n*** End Patch\n\nWhere [YOUR_PATCH] is the actual content of your patch, specified in the following V4A diff format.\n\n*** [ACTION] File: [/absolute/path/to/file] -> ACTION can be one of Add, Update, or Delete.\nAn example of a message that you might pass as \"input\" to this function, in order to apply a patch, is shown below.\n\n*** Begin Patch\n*** Update File: /Users/someone/pygorithm/searching/binary_search.py\n@@class BaseClass\n@@    def search():\n-        pass\n+        raise NotImplementedError()\n\n@@class Subclass\n@@    def search():\n-        pass\n+        raise NotImplementedError()\n\n*** End Patch\nDo not use line numbers in this diff format.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "input": {
+              "type": "string",
+              "description": "The edit patch to apply."
+            },
+            "explanation": {
+              "type": "string",
+              "description": "A short description of what the tool call is aiming to achieve."
+            }
+          },
+          "required": [
+            "input",
+            "explanation"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_directory",
+        "description": "Create a new directory structure in the workspace. Will recursively create all directories in the path, like mkdir -p. You do not need to use this tool before using create_file, that tool will automatically create the needed directories.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "dirPath": {
+              "type": "string",
+              "description": "The absolute path to the directory to create."
+            }
+          },
+          "required": [
+            "dirPath"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_file",
+        "description": "This is a tool for creating a new file in the workspace. The file will be created with the specified content. The directory will be created if it does not already exist. Never use this tool to edit a file that already exists.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "The absolute path to the file to create."
+            },
+            "content": {
+              "type": "string",
+              "description": "The content to write to the file."
+            }
+          },
+          "required": [
+            "filePath",
+            "content"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_new_jupyter_notebook",
+        "description": "Generates a new Jupyter Notebook (.ipynb) in VS Code. Jupyter Notebooks are interactive documents commonly used for data exploration, analysis, visualization, and combining code with narrative text. Prefer creating plain Python files or similar unless a user explicitly requests creating a new Jupyter Notebook or already has a Jupyter Notebook opened or exists in the workspace.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The query to use to generate the jupyter notebook. This should be a clear and concise description of the notebook the user wants to create."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_new_workspace",
+        "description": "Get comprehensive setup steps to help the user create complete project structures in a VS Code workspace. This tool is designed for full project initialization and scaffolding, not for creating individual files.\n\nWhen to use this tool:\n- User wants to create a new complete project from scratch\n- Setting up entire project frameworks (TypeScript projects, React apps, Node.js servers, etc.)\n- Initializing Model Context Protocol (MCP) servers with full structure\n- Creating VS Code extensions with proper scaffolding\n- Setting up Next.js, Vite, or other framework-based projects\n- User asks for \"new project\", \"create a workspace\", \"set up a [framework] project\"\n- Need to establish complete development environment with dependencies, config files, and folder structure\n\nWhen NOT to use this tool:\n- Creating single files or small code snippets\n- Adding individual files to existing projects\n- Making modifications to existing codebases\n- User asks to \"create a file\" or \"add a component\"\n- Simple code examples or demonstrations\n- Debugging or fixing existing code\n\nThis tool provides complete project setup including:\n- Folder structure creation\n- Package.json and dependency management\n- Configuration files (tsconfig, eslint, etc.)\n- Initial boilerplate code\n- Development environment setup\n- Build and run instructions\n\nUse other file creation tools for individual files within existing projects.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The query to use to generate the new workspace. This should be a clear and concise description of the workspace the user wants to create."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "edit_notebook_file",
+        "description": "This is a tool for editing an existing Notebook file in the workspace. Generate the \"explanation\" property first.\nThe system is very smart and can understand how to apply your edits to the notebooks.\nWhen updating the content of an existing cell, ensure newCode preserves whitespace and indentation exactly and does NOT include any code markers such as (...existing code...).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "An absolute path to the notebook file to edit, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1."
+            },
+            "cellId": {
+              "type": "string",
+              "description": "Id of the cell that needs to be deleted or edited. Use the value `TOP`, `BOTTOM` when inserting a cell at the top or bottom of the notebook, else provide the id of the cell after which a new cell is to be inserted. Remember, if a cellId is provided and editType=insert, then a cell will be inserted after the cell with the provided cellId."
+            },
+            "newCode": {
+              "type": "string",
+              "description": "The code for the new or existing cell to be edited. Code should not be wrapped within <VSCode.Cell> tags. Do NOT include code markers such as (...existing code...) to indicate existing code."
+            },
+            "language": {
+              "type": "string",
+              "description": "The language of the cell. `markdown`, `python`, `javascript`, `julia`, etc."
+            },
+            "editType": {
+              "type": "string",
+              "enum": [
+                "insert",
+                "delete",
+                "edit"
+              ],
+              "description": "The operation peformed on the cell, whether `insert`, `delete` or `edit`.\nUse the `editType` field to specify the operation: `insert` to add a new cell, `edit` to modify an existing cell's content, and `delete` to remove a cell."
+            }
+          },
+          "required": [
+            "filePath",
+            "editType",
+            "cellId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "fetch_webpage",
+        "description": "Fetches the main content from a web page. This tool is useful for summarizing or analyzing the content of a webpage. You should use this tool when you think the user is looking for information from a specific webpage.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "urls": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "An array of URLs to fetch content from."
+            },
+            "query": {
+              "type": "string",
+              "description": "The query to search for in the web page's content. This should be a clear and concise description of the content you want to find."
+            }
+          },
+          "required": [
+            "urls",
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "file_search",
+        "description": "Search for files in the workspace by glob pattern. This only returns the paths of matching files. Use this tool when you know the exact filename pattern of the files you're searching for. Glob patterns match from the root of the workspace folder. Examples:\n- **/*.{js,ts} to match all js/ts files in the workspace.\n- src/** to match all files under the top-level src folder.\n- **/foo/**/*.js to match all js files under any foo folder in the workspace.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Search for files with names or paths matching this glob pattern."
+            },
+            "maxResults": {
+              "type": "integer",
+              "description": "The maximum number of results to return. Do not use this unless necessary, it can slow things down. By default, only some matches are returned. If you use this and don't see what you're looking for, you can try again with a more specific query or a larger maxResults."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "grep_search",
+        "description": "Do a fast text search in the workspace. Use this tool when you want to search with an exact string or regex. If you are not sure what words will appear in the workspace, prefer using regex patterns with alternation (|) or character classes to search for multiple potential words at once instead of making separate searches. For example, use 'function|method|procedure' to look for all of those words at once. Use includePattern to search within files matching a specific pattern, or in a specific file, using a relative path. Use this tool when you want to see an overview of a particular file, instead of using read_file many times to look for code within a file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The pattern to search for in files in the workspace. Use regex with alternation (e.g., 'word1|word2|word3') or character classes to find multiple potential words in a single search. Be sure to set the isRegexp property properly to declare whether it's a regex or plain text pattern. Is case-insensitive."
+            },
+            "isRegexp": {
+              "type": "boolean",
+              "description": "Whether the pattern is a regex."
+            },
+            "includePattern": {
+              "type": "string",
+              "description": "Search files matching this glob pattern. Will be applied to the relative path of files within the workspace. To search recursively inside a folder, use a proper glob pattern like \"src/folder/**\". Do not use | in includePattern."
+            },
+            "maxResults": {
+              "type": "integer",
+              "description": "The maximum number of results to return. Do not use this unless necessary, it can slow things down. By default, only some matches are returned. If you use this and don't see what you're looking for, you can try again with a more specific query or a larger maxResults."
+            }
+          },
+          "required": [
+            "query",
+            "isRegexp"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_changed_files",
+        "description": "Get git diffs of current file changes in a git repository. Don't forget that you can use run_in_terminal to run git commands in a terminal as well.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "repositoryPath": {
+              "type": "string",
+              "description": "The absolute path to the git repository to look for changes in. If not provided, the active git repository will be used."
+            },
+            "sourceControlState": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "staged",
+                  "unstaged",
+                  "merge-conflicts"
+                ]
+              },
+              "description": "The kinds of git state to filter by. Allowed values are: 'staged', 'unstaged', and 'merge-conflicts'. If not provided, all states will be included."
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_errors",
+        "description": "Get any compile or lint errors in a specific file or across all files. If the user mentions errors or problems in a file, they may be referring to these. Use the tool to see the same errors that the user is seeing. If the user asks you to analyze all errors, or does not specify a file, use this tool to gather errors for all files. Also use this tool after editing a file to validate the change.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePaths": {
+              "description": "The absolute paths to the files to check for errors. Omit 'filePaths' when retrieving all errors.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "copilot_getNotebookSummary",
+        "description": "This is a tool returns the list of the Notebook cells along with the id, cell types, line ranges, language, execution information and output mime types for each cell. This is useful to get Cell Ids when executing a notebook or determine what cells have been executed and what order, or what cells have outputs. If required to read contents of a cell use this to determine the line range of a cells, and then use read_file tool to read a specific line range. Requery this tool if the contents of the notebook change.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "An absolute path to the notebook file with the cell to run, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1.ipynb"
+            }
+          },
+          "required": [
+            "filePath"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_project_setup_info",
+        "description": "Do not call this tool without first calling the tool to create a workspace. This tool provides a project setup information for a Visual Studio Code workspace based on a project type and programming language.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "projectType": {
+              "type": "string",
+              "description": "The type of project to create. Supported values are: 'python-script', 'python-project', 'mcp-server', 'model-context-protocol-server', 'vscode-extension', 'next-js', 'vite' and 'other'"
+            }
+          },
+          "required": [
+            "projectType"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_search_view_results",
+        "description": "The results from the search view",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_vscode_api",
+        "description": "Get comprehensive VS Code API documentation and references for extension development. This tool provides authoritative documentation for VS Code's extensive API surface, including proposed APIs, contribution points, and best practices. Use this tool for understanding complex VS Code API interactions.\n\nWhen to use this tool:\n- User asks about specific VS Code APIs, interfaces, or extension capabilities\n- Need documentation for VS Code extension contribution points (commands, views, settings, etc.)\n- Questions about proposed APIs and their usage patterns\n- Understanding VS Code extension lifecycle, activation events, and packaging\n- Best practices for VS Code extension development architecture\n- API examples and code patterns for extension features\n- Troubleshooting extension-specific issues or API limitations\n\nWhen NOT to use this tool:\n- Creating simple standalone files or scripts unrelated to VS Code extensions\n- General programming questions not specific to VS Code extension development\n- Questions about using VS Code as an editor (user-facing features)\n- Non-extension related development tasks\n- File creation or editing that doesn't involve VS Code extension APIs\n\nCRITICAL usage guidelines:\n1. Always include specific API names, interfaces, or concepts in your query\n2. Mention the extension feature you're trying to implement\n3. Include context about proposed vs stable APIs when relevant\n4. Reference specific contribution points when asking about extension manifest\n5. Be specific about the VS Code version or API version when known\n\nScope: This tool is for EXTENSION DEVELOPMENT ONLY - building tools that extend VS Code itself, not for general file creation or non-extension programming tasks.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The query to search vscode documentation for. Should contain all relevant context."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "github_repo",
+        "description": "Searches a GitHub repository for relevant source code snippets. Only use this tool if the user is very clearly asking for code snippets from a specific GitHub repository. Do not use this tool for Github repos that the user has open in their workspace.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string",
+              "description": "The name of the Github repository to search for code in. Should must be formatted as '<owner>/<repo>'."
+            },
+            "query": {
+              "type": "string",
+              "description": "The query to search for repo. Should contain all relevant context."
+            }
+          },
+          "required": [
+            "repo",
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "install_extension",
+        "description": "Install an extension in VS Code. Use this tool to install an extension in Visual Studio Code as part of a new workspace creation process only.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The ID of the extension to install. This should be in the format <publisher>.<extension>."
+            },
+            "name": {
+              "type": "string",
+              "description": "The name of the extension to install. This should be a clear and concise description of the extension."
+            }
+          },
+          "required": [
+            "id",
+            "name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_code_usages",
+        "description": "Request to list all usages (references, definitions, implementations etc) of a function, class, method, variable etc. Use this tool when \n1. Looking for a sample implementation of an interface or class\n2. Checking how a function is used throughout the codebase.\n3. Including and updating all usages when changing a function, method, or constructor",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "symbolName": {
+              "type": "string",
+              "description": "The name of the symbol, such as a function name, class name, method name, variable name, etc."
+            },
+            "filePaths": {
+              "type": "array",
+              "description": "One or more file paths which likely contain the definition of the symbol. For instance the file which declares a class or function. This is optional but will speed up the invocation of this tool and improve the quality of its output.",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "symbolName"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "list_dir",
+        "description": "List the contents of a directory. Result will have the name of the child. If the name ends in /, it's a folder, otherwise a file",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "The absolute path to the directory to list."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "open_simple_browser",
+        "description": "Preview a website or open a URL in the editor's Simple Browser. Useful for quickly viewing locally hosted websites, demos, or resources without leaving the coding environment.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "The website URL to preview or open in the Simple Browser inside the editor. Must be either an http or https URL"
+            }
+          },
+          "required": [
+            "url"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read the contents of a file. Line numbers are 1-indexed. This tool will truncate its output at 2000 lines and may be called repeatedly with offset and limit parameters to read larger files in chunks.",
+        "parameters": {
+          "type": "object",
+          "required": [
+            "filePath"
+          ],
+          "properties": {
+            "filePath": {
+              "description": "The absolute path of the file to read.",
+              "type": "string"
+            },
+            "offset": {
+              "description": "Optional: the 1-based line number to start reading from. Only use this if the file is too large to read at once. If not specified, the file will be read from the beginning.",
+              "type": "integer"
+            },
+            "limit": {
+              "description": "Optional: the maximum number of lines to read. Only use this together with `offset` if the file is too large to read at once.",
+              "type": "integer"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_notebook_cell",
+        "description": "This is a tool for running a code cell in a notebook file directly in the notebook editor. The output from the execution will be returned. Code cells should be run as they are added or edited when working through a problem to bring the kernel state up to date and ensure the code executes successfully. Code cells are ready to run and don't require any pre-processing. If asked to run the first cell in a notebook, you should run the first code cell since markdown cells cannot be executed. NOTE: Avoid executing Markdown cells or providing Markdown cell IDs, as Markdown cells cannot be  executed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "filePath": {
+              "type": "string",
+              "description": "An absolute path to the notebook file with the cell to run, or the URI of a untitled, not yet named, file, such as `untitled:Untitled-1.ipynb"
+            },
+            "reason": {
+              "type": "string",
+              "description": "An optional explanation of why the cell is being run. This will be shown to the user before the tool is run and is not necessary if it's self-explanatory."
+            },
+            "cellId": {
+              "type": "string",
+              "description": "The ID for the code cell to execute. Avoid providing markdown cell IDs as nothing will be executed."
+            },
+            "continueOnError": {
+              "type": "boolean",
+              "description": "Whether or not execution should continue for remaining cells if an error is encountered. Default to false unless instructed otherwise."
+            }
+          },
+          "required": [
+            "filePath",
+            "cellId"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_vscode_command",
+        "description": "Run a command in VS Code. Use this tool to run a command in Visual Studio Code as part of a new workspace creation process only.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "commandId": {
+              "type": "string",
+              "description": "The ID of the command to execute. This should be in the format <command>."
+            },
+            "name": {
+              "type": "string",
+              "description": "The name of the command to execute. This should be a clear and concise description of the command."
+            },
+            "args": {
+              "type": "array",
+              "description": "The arguments to pass to the command. This should be an array of strings.",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "commandId",
+            "name"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "semantic_search",
+        "description": "Run a natural language search for relevant code or documentation comments from the user's current workspace. Returns relevant code snippets from the user's current workspace if it is large, or the full contents of the workspace if it is small.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The query to search the codebase for. Should contain all relevant context. Should ideally be text that might appear in the codebase, such as function names, variable names, or comments."
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "test_failure",
+        "description": "Includes test failure information in the prompt.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "vscode_searchExtensions_internal",
+        "description": "This is a tool for browsing Visual Studio Code Extensions Marketplace. It allows the model to search for extensions and retrieve detailed information about them. The model should use this tool whenever it needs to discover extensions or resolve information about known ones. To use the tool, the model has to provide the category of the extensions, relevant search keywords, or known extension IDs. Note that search results may include false positives, so reviewing and filtering is recommended.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "category": {
+              "type": "string",
+              "description": "The category of extensions to search for",
+              "enum": [
+                "AI",
+                "Azure",
+                "Chat",
+                "Data Science",
+                "Debuggers",
+                "Extension Packs",
+                "Education",
+                "Formatters",
+                "Keymaps",
+                "Language Packs",
+                "Linters",
+                "Machine Learning",
+                "Notebooks",
+                "Programming Languages",
+                "SCM Providers",
+                "Snippets",
+                "Testing",
+                "Themes",
+                "Visualization",
+                "Other"
+              ]
+            },
+            "keywords": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The keywords to search for"
+            },
+            "ids": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "The ids of the extensions to search for"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "create_and_run_task",
+        "description": "Creates and runs a build, run, or custom task for the workspace by generating or adding to a tasks.json file based on the project structure (such as package.json or README.md). If the user asks to build, run, launch and they have no tasks.json file, use this tool. If they ask to create or add a task, use this tool.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceFolder": {
+              "type": "string",
+              "description": "The absolute path of the workspace folder where the tasks.json file will be created."
+            },
+            "task": {
+              "type": "object",
+              "description": "The task to add to the new tasks.json file.",
+              "properties": {
+                "label": {
+                  "type": "string",
+                  "description": "The label of the task."
+                },
+                "type": {
+                  "type": "string",
+                  "description": "The type of the task. The only supported value is 'shell'.",
+                  "enum": [
+                    "shell"
+                  ]
+                },
+                "command": {
+                  "type": "string",
+                  "description": "The shell command to run for the task. Use this to specify commands for building or running the application."
+                },
+                "args": {
+                  "type": "array",
+                  "description": "The arguments to pass to the command.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "isBackground": {
+                  "type": "boolean",
+                  "description": "Whether the task runs in the background without blocking the UI or other tasks. Set to true for long-running processes like watch tasks or servers that should continue executing without requiring user attention. When false, the task will block the terminal until completion."
+                },
+                "problemMatcher": {
+                  "type": "array",
+                  "description": "The problem matcher to use to parse task output for errors and warnings. Can be a predefined matcher like '$tsc' (TypeScript), '$eslint - stylish', '$gcc', etc., or a custom pattern defined in tasks.json. This helps VS Code display errors in the Problems panel and enables quick navigation to error locations.",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "group": {
+                  "type": "string",
+                  "description": "The group to which the task belongs."
+                }
+              },
+              "required": [
+                "label",
+                "type",
+                "command"
+              ]
+            }
+          },
+          "required": [
+            "task",
+            "workspaceFolder"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_terminal_output",
+        "description": "Get the output of a terminal command previously started with run_in_terminal",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "description": "The ID of the terminal to check."
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "manage_todo_list",
+        "description": "Manage a structured todo list to track progress and plan tasks throughout your coding session. Use this tool VERY frequently to ensure task visibility and proper planning.\n\nWhen to use this tool:\n- Complex multi-step work requiring planning and tracking\n- When user provides multiple tasks or requests (numbered/comma-separated)\n- After receiving new instructions that require multiple steps\n- BEFORE starting work on any todo (mark as in-progress)\n- IMMEDIATELY after completing each todo (mark completed individually)\n- When breaking down larger tasks into smaller actionable steps\n- To give users visibility into your progress and planning\n\nWhen NOT to use:\n- Single, trivial tasks that can be completed in one step\n- Purely conversational/informational requests\n- When just reading files or performing simple searches\n\nCRITICAL workflow:\n1. Plan tasks by writing todo list with specific, actionable items\n2. Mark ONE todo as in-progress before starting work\n3. Complete the work for that specific todo\n4. Mark that todo as completed IMMEDIATELY\n5. Move to next todo and repeat\n\nTodo states:\n- not-started: Todo not yet begun\n- in-progress: Currently working (limit ONE at a time)\n- completed: Finished successfully\n\nIMPORTANT: Mark todos completed as soon as they are done. Do not batch completions.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "todoList": {
+              "type": "array",
+              "description": "Complete array of all todo items (required for write operation, ignored for read). Must include ALL items - both existing and new.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "integer",
+                    "description": "Unique identifier for the todo. Use sequential numbers starting from 1."
+                  },
+                  "title": {
+                    "type": "string",
+                    "description": "Concise action-oriented todo label (3-7 words). Displayed in UI."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Detailed context, requirements, or implementation notes. Include file paths, specific methods, or acceptance criteria."
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "not-started",
+                      "in-progress",
+                      "completed"
+                    ],
+                    "description": "not-started: Not begun | in-progress: Currently working (max 1) | completed: Fully finished with no blockers"
+                  }
+                },
+                "required": [
+                  "id",
+                  "title",
+                  "description",
+                  "status"
+                ]
+              }
+            },
+            "operation": {
+              "type": "string",
+              "enum": [
+                "write",
+                "read"
+              ],
+              "description": "write: Replace entire todo list with new content. read: Retrieve current todo list. ALWAYS provide complete list when writing - partial updates not supported."
+            }
+          },
+          "required": [
+            "operation"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "run_in_terminal",
+        "description": "This tool allows you to execute shell commands in a persistent terminal session, preserving environment variables, working directory, and other context across multiple commands.\n\nCommand Execution:\n- Does NOT support multi-line commands\n\nDirectory Management:\n- Must use absolute paths to avoid navigation issues.\n\nProgram Execution:\n- Supports Python, Node.js, and other executables.\n- Install dependencies via pip, npm, etc.\n\nBackground Processes:\n- For long-running tasks (e.g., servers), set isBackground=true.\n- Returns a terminal ID for checking status and runtime later.\n\nOutput Management:\n- Output is automatically truncated if longer than 60KB to prevent context overflow\n- Use filters like 'head', 'tail', 'grep' to limit output size\n- For pager commands, disable paging: use 'git --no-pager' or add '| cat'\n\nBest Practices:\n- Be specific with commands to avoid excessive output\n- Use targeted queries instead of broad scans\n- Consider using 'wc -l' to count before listing many items",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "The command to run in the terminal."
+            },
+            "explanation": {
+              "type": "string",
+              "description": "A one-sentence description of what the command does. This will be shown to the user before the command is run."
+            },
+            "isBackground": {
+              "type": "boolean",
+              "description": "Whether the command starts a background process. If true, the command will run in the background and you will not see the output. If false, the tool call will block on the command finishing, and then you will get the output. Examples of background processes: building in watch mode, starting a server. You can check the output of a background process later on by using get_terminal_output."
+            }
+          },
+          "required": [
+            "command",
+            "explanation",
+            "isBackground"
+          ]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "runTests",
+        "description": "Runs unit tests in files. Use this tool if the user asks to run tests or when you want to validate changes using unit tests, and prefer using this tool instead of the terminal tool. When possible, always try to provide `files` paths containing the relevant unit tests in order to avoid unnecessarily long test runs. This tool outputs detailed information about the results of the test run. Set mode=\"coverage\" to also collect coverage and optionally provide coverageFiles for focused reporting.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "files": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Absolute paths to the test files to run. If not provided, all test files will be run."
+            },
+            "testNames": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "An array of test names to run. Depending on the context, test names defined in code may be strings or the names of functions or classes containing the test cases. If not provided, all tests in the files will be run."
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "run",
+                "coverage"
+              ],
+              "description": "Execution mode: \"run\" (default) runs tests normally, \"coverage\" collects coverage."
+            },
+            "coverageFiles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "When mode=\"coverage\": absolute file paths to include detailed coverage info for. Only the first matching file will be summarized."
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "terminal_last_command",
+        "description": "Get the last command run in the active terminal.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "terminal_selection",
+        "description": "Get the current selection in the active terminal.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_python_environment_tools",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThis set of tools is designed to manage and configure Python environments effectively. The first tool, 'configure_python_environment', is essential for setting up the user's desired Python environment in the workspace. It must be called before any other Python-related tools or commands are executed, ensuring that subsequent operations are performed in the correct context.\n\nOnce the environment is configured, the 'get_python_environment_details' tool can be utilized to retrieve comprehensive information about the Python environment. This includes the type of environment (such as conda or venv), the version of Python in use, and a list of all installed packages along with their respective versions. This tool is crucial for understanding the current setup before proceeding with any development tasks.\n\nTo execute Python commands effectively, the 'get_python_executable_details' tool should be employed. This tool provides the necessary details to construct the fully qualified path and command for running Python in the terminal. It replaces the need for manual commands like 'python --version' by generating the appropriate command based on the configured environment, ensuring that users can run Python scripts accurately.\n\nFor installing new packages, the 'install_python_packages' tool is available. This tool allows users to add Python packages to their configured environment seamlessly. Like the other tools, it requires the environment to be set up first using 'configure_python_environment', ensuring that installations occur in the correct context.\n\nIn summary, these tools work in a sequential manner to facilitate the management of Python environments, from configuration to package installation, ensuring a smooth and efficient workflow for Python development.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_git_tools_basic_operations",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThis category includes essential Git operations that are fundamental for managing changes in a repository. The 'Add or Commit' tool allows users to stage changes or commit them with a message, making it crucial for version control. The 'Status' tool provides a quick overview of the current state of the working directory, helping users understand what changes are staged, unstaged, or untracked. The 'Push' tool is used to upload local repository changes to a remote repository, ensuring that the latest updates are shared with collaborators. The 'Stash' tool is useful for temporarily saving changes that are not ready to be committed, allowing users to switch contexts without losing work. Lastly, the 'Checkout' tool enables users to switch between branches or restore files, facilitating effective branch management.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_git_tools_branch_management",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThis category focuses on tools for managing branches and worktrees in Git. The 'Branch' tool allows users to list existing branches or create new ones, which is essential for organizing work and collaborating on features or fixes. The 'Worktree' tool enables users to manage multiple working directories associated with a single repository, allowing for parallel development on different branches without the need for multiple clones of the repository. Together, these tools enhance the flexibility and efficiency of branch management in Git.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_git_tools_history_inspection",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThis category contains tools for inspecting the history of a Git repository. The 'Log or Diff' tool allows users to view commit logs or differences between commits, which is vital for understanding the evolution of the codebase and tracking changes over time. The 'Blame' tool shows which revision and author last modified each line of a file, providing insights into the history of specific lines of code. These tools are essential for code review, debugging, and understanding the context of changes.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_git_tools_issue_management",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThis category includes tools for managing issues within a project. The 'Add Comment' tool allows users to provide feedback or updates on specific issues, facilitating communication among team members. The 'Assigned to Me' tool fetches issues that are currently assigned to the user, helping them prioritize their work. The 'Get Detail' tool retrieves detailed information about a specific issue, including its status and history. Together, these tools streamline issue tracking and enhance collaboration in project management.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_git_tools_pull_request_management",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThis category encompasses tools for managing pull requests, which are critical for collaborative development. The 'Assigned to Me' tool helps users find pull requests where they are involved, whether as assignees, authors, or reviewers. The 'Create' tool allows users to initiate new pull requests, facilitating the process of merging changes from one branch to another. The 'Create Review' tool enables users to provide feedback on pull requests, ensuring code quality and adherence to project standards. The 'Get Comments' tool retrieves all comments on a pull request, while the 'Get Detail' tool provides specific information about a pull request. These tools collectively enhance the pull request workflow and improve collaboration among team members.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_gitkraken_repository_get_file_content",
+        "description": "Get file content from a repository",
+        "parameters": {
+          "properties": {
+            "azure_project": {
+              "description": "Optionally set the Azure DevOps project name of the pull request. Required for Azure DevOps",
+              "type": "string"
+            },
+            "file_path": {
+              "description": "File path to retrieve from the repository",
+              "type": "string"
+            },
+            "provider": {
+              "description": "Specify the git provider",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket",
+                "azure"
+              ],
+              "type": "string"
+            },
+            "ref": {
+              "description": "Set the branch, tag, or commit SHA to retrieve the file from",
+              "type": "string"
+            },
+            "repository_name": {
+              "description": "Set the repository name of the pull request. Required for Azure DevOps and Bitbucket",
+              "type": "string"
+            },
+            "repository_organization": {
+              "description": "Set the organization name of the pull request. Required for Azure DevOps and Bitbucket",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository_name",
+            "repository_organization",
+            "ref",
+            "file_path",
+            "provider"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_gitkraken2_repository_get_file_content",
+        "description": "Get file content from a repository",
+        "parameters": {
+          "properties": {
+            "azure_project": {
+              "description": "Optionally set the Azure DevOps project name of the pull request. Required for Azure DevOps",
+              "type": "string"
+            },
+            "file_path": {
+              "description": "File path to retrieve from the repository",
+              "type": "string"
+            },
+            "provider": {
+              "description": "Specify the git provider",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket",
+                "azure"
+              ],
+              "type": "string"
+            },
+            "ref": {
+              "description": "Set the branch, tag, or commit SHA to retrieve the file from",
+              "type": "string"
+            },
+            "repository_name": {
+              "description": "Set the repository name of the pull request. Required for Azure DevOps and Bitbucket",
+              "type": "string"
+            },
+            "repository_organization": {
+              "description": "Set the organization name of the pull request. Required for Azure DevOps and Bitbucket",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository_name",
+            "repository_organization",
+            "ref",
+            "file_path",
+            "provider"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_gitkraken3_repository_get_file_content",
+        "description": "Get file content from a repository",
+        "parameters": {
+          "properties": {
+            "azure_project": {
+              "description": "Optionally set the Azure DevOps project name of the pull request. Required for Azure DevOps",
+              "type": "string"
+            },
+            "file_path": {
+              "description": "File path to retrieve from the repository",
+              "type": "string"
+            },
+            "provider": {
+              "description": "Specify the git provider",
+              "enum": [
+                "github",
+                "gitlab",
+                "bitbucket",
+                "azure"
+              ],
+              "type": "string"
+            },
+            "ref": {
+              "description": "Set the branch, tag, or commit SHA to retrieve the file from",
+              "type": "string"
+            },
+            "repository_name": {
+              "description": "Set the repository name of the pull request. Required for Azure DevOps and Bitbucket",
+              "type": "string"
+            },
+            "repository_organization": {
+              "description": "Set the organization name of the pull request. Required for Azure DevOps and Bitbucket",
+              "type": "string"
+            }
+          },
+          "required": [
+            "repository_name",
+            "repository_organization",
+            "ref",
+            "file_path",
+            "provider"
+          ],
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_gitkraken_gitkraken_workspace_list",
+        "description": " Lists all Gitkraken workspaces",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_gitkraken2_gitkraken_workspace_list",
+        "description": " Lists all Gitkraken workspaces",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_gitkraken3_gitkraken_workspace_list",
+        "description": " Lists all Gitkraken workspaces",
+        "parameters": {
+          "properties": {},
+          "type": "object"
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s_pylanceDocuments",
+        "description": "Search Pylance documentation for Python language server help, configuration guidance, feature explanations, and troubleshooting. Returns comprehensive answers about Pylance settings, capabilities, and usage. Use when users ask: How to configure Pylance? What features are available? How to fix Pylance issues?",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "search": {
+              "type": "string",
+              "description": "Detailed question in natural language. Think of it as a prompt for an LLM. Do not use keyword search terms."
+            }
+          },
+          "required": [
+            "search"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s2_pylanceDocuments",
+        "description": "Search Pylance documentation for Python language server help, configuration guidance, feature explanations, and troubleshooting. Returns comprehensive answers about Pylance settings, capabilities, and usage. Use when users ask: How to configure Pylance? What features are available? How to fix Pylance issues?",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "search": {
+              "type": "string",
+              "description": "Detailed question in natural language. Think of it as a prompt for an LLM. Do not use keyword search terms."
+            }
+          },
+          "required": [
+            "search"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s3_pylanceDocuments",
+        "description": "Search Pylance documentation for Python language server help, configuration guidance, feature explanations, and troubleshooting. Returns comprehensive answers about Pylance settings, capabilities, and usage. Use when users ask: How to configure Pylance? What features are available? How to fix Pylance issues?",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "search": {
+              "type": "string",
+              "description": "Detailed question in natural language. Think of it as a prompt for an LLM. Do not use keyword search terms."
+            }
+          },
+          "required": [
+            "search"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_pylance_syntax_validation_tools",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThese tools are designed to validate Python code for syntax errors. They can check both files and snippets, returning detailed error lists with line numbers and descriptions. Use these tools when users report syntax problems, need to validate code before execution, or want to check user-generated code snippets for errors.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s_pylanceImports",
+        "description": "Analyze imports across workspace user files. Returns all top-level module names imported, including resolved and unresolved imports. Use for: finding missing dependencies, understanding project dependencies, analyzing import patterns.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s2_pylanceImports",
+        "description": "Analyze imports across workspace user files. Returns all top-level module names imported, including resolved and unresolved imports. Use for: finding missing dependencies, understanding project dependencies, analyzing import patterns.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s3_pylanceImports",
+        "description": "Analyze imports across workspace user files. Returns all top-level module names imported, including resolved and unresolved imports. Use for: finding missing dependencies, understanding project dependencies, analyzing import patterns.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_pylance_environment_management_tools",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThese tools provide information about Python environments in the workspace, including the current active environment and all available environments. They also allow users to switch between different Python installations or virtual environments. Use these tools for resolving environment issues, changing Python versions, or understanding the Python setup in the workspace.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s_pylanceRunCodeSnippet",
+        "description": "Execute Python code snippets directly in the workspace environment. PREFERRED over terminal commands for running Python code. This tool automatically uses the correct Python interpreter configured for the workspace, eliminates shell escaping/quoting problems that plague terminal execution, and provides clean, properly formatted output with stdout/stderr correctly interleaved. Use this instead of `python -c \"code\"` or terminal commands when running Python snippets. Ideal for: testing code, running quick scripts, validating Python expressions, checking imports, and any Python execution within the workspace context. No temporary files needed - code runs directly in memory.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            },
+            "codeSnippet": {
+              "type": "string",
+              "description": "The code snippet to run."
+            },
+            "workingDirectory": {
+              "type": "string",
+              "description": "The working directory to use for the code snippet. If the code snippet is pulled from a file, this should be the directory for the file. Especially if the snippet has imports."
+            },
+            "timeout": {
+              "type": "number",
+              "minimum": 0,
+              "description": "The timeout for the code snippet execution."
+            }
+          },
+          "required": [
+            "workspaceRoot",
+            "codeSnippet"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s2_pylanceRunCodeSnippet",
+        "description": "Execute Python code snippets directly in the workspace environment. PREFERRED over terminal commands for running Python code. This tool automatically uses the correct Python interpreter configured for the workspace, eliminates shell escaping/quoting problems that plague terminal execution, and provides clean, properly formatted output with stdout/stderr correctly interleaved. Use this instead of `python -c \"code\"` or terminal commands when running Python snippets. Ideal for: testing code, running quick scripts, validating Python expressions, checking imports, and any Python execution within the workspace context. No temporary files needed - code runs directly in memory.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            },
+            "codeSnippet": {
+              "type": "string",
+              "description": "The code snippet to run."
+            },
+            "workingDirectory": {
+              "type": "string",
+              "description": "The working directory to use for the code snippet. If the code snippet is pulled from a file, this should be the directory for the file. Especially if the snippet has imports."
+            },
+            "timeout": {
+              "type": "number",
+              "minimum": 0,
+              "description": "The timeout for the code snippet execution."
+            }
+          },
+          "required": [
+            "workspaceRoot",
+            "codeSnippet"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s3_pylanceRunCodeSnippet",
+        "description": "Execute Python code snippets directly in the workspace environment. PREFERRED over terminal commands for running Python code. This tool automatically uses the correct Python interpreter configured for the workspace, eliminates shell escaping/quoting problems that plague terminal execution, and provides clean, properly formatted output with stdout/stderr correctly interleaved. Use this instead of `python -c \"code\"` or terminal commands when running Python snippets. Ideal for: testing code, running quick scripts, validating Python expressions, checking imports, and any Python execution within the workspace context. No temporary files needed - code runs directly in memory.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            },
+            "codeSnippet": {
+              "type": "string",
+              "description": "The code snippet to run."
+            },
+            "workingDirectory": {
+              "type": "string",
+              "description": "The working directory to use for the code snippet. If the code snippet is pulled from a file, this should be the directory for the file. Especially if the snippet has imports."
+            },
+            "timeout": {
+              "type": "number",
+              "minimum": 0,
+              "description": "The timeout for the code snippet execution."
+            }
+          },
+          "required": [
+            "workspaceRoot",
+            "codeSnippet"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s_pylanceInvokeRefactoring",
+        "description": "Apply automated code refactoring to Python files. Returns refactored content (does not modify original file) unless mode is \"update\". Use for: extracting functions, organizing imports, improving code structure, applying refactoring patterns.  Optional \"mode\" parameter: \"update\" updates the file, \"edits\" returns a WorkspaceEdit, \"string\" returns updated content as string. If mode is not specified, \"update\" will be used as the default. The \"edits\" mode is helpful for determining if a file needs changes (for example, to remove unused imports or fix import formatting) without making any modifications; if no changes are needed, the result will be either an empty WorkspaceEdit or a message indicating that no text edits were found. Available refactorings: source.unusedImports: - Removes all unused import statements from a Python file. Use when imports are imported but never referenced in the code. Requires fileUri parameter pointing to a Python file with unused imports.\nsource.convertImportFormat: - Converts import statements between absolute and relative formats according to python.analysis.importFormat setting. Use when import format consistency is needed. Requires fileUri parameter pointing to a Python file with imports to convert.\nsource.fixAll.pylance: - Applies all available automatic code fixes from python.analysis.fixAll setting. Use when multiple code issues need to be addressed simultaneously. Requires fileUri parameter pointing to a Python file with fixable issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fileUri": {
+              "type": "string",
+              "description": "The uri of the file to invoke the refactoring."
+            },
+            "name": {
+              "type": "string",
+              "description": "The name of the refactoring to invoke. This must be one of these [source.unusedImports, source.convertImportFormat, source.fixAll.pylance]"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "update",
+                "edits",
+                "string"
+              ],
+              "description": "Determines the output mode: \"update\" updates the file directly, \"edits\" returns a WorkspaceEdit, \"string\" returns the updated content as a string. If omitted, \"update\" will be used as the default. The \"edits\" mode is especially useful for checking if any changes are needed (such as unused imports or import formatting issues) without modifying the file, as it will return a WorkspaceEdit only if edits are required."
+            }
+          },
+          "required": [
+            "fileUri",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s2_pylanceInvokeRefactoring",
+        "description": "Apply automated code refactoring to Python files. Returns refactored content (does not modify original file) unless mode is \"update\". Use for: extracting functions, organizing imports, improving code structure, applying refactoring patterns.  Optional \"mode\" parameter: \"update\" updates the file, \"edits\" returns a WorkspaceEdit, \"string\" returns updated content as string. If mode is not specified, \"update\" will be used as the default. The \"edits\" mode is helpful for determining if a file needs changes (for example, to remove unused imports or fix import formatting) without making any modifications; if no changes are needed, the result will be either an empty WorkspaceEdit or a message indicating that no text edits were found. Available refactorings: source.unusedImports: - Removes all unused import statements from a Python file. Use when imports are imported but never referenced in the code. Requires fileUri parameter pointing to a Python file with unused imports.\nsource.convertImportFormat: - Converts import statements between absolute and relative formats according to python.analysis.importFormat setting. Use when import format consistency is needed. Requires fileUri parameter pointing to a Python file with imports to convert.\nsource.fixAll.pylance: - Applies all available automatic code fixes from python.analysis.fixAll setting. Use when multiple code issues need to be addressed simultaneously. Requires fileUri parameter pointing to a Python file with fixable issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fileUri": {
+              "type": "string",
+              "description": "The uri of the file to invoke the refactoring."
+            },
+            "name": {
+              "type": "string",
+              "description": "The name of the refactoring to invoke. This must be one of these [source.unusedImports, source.convertImportFormat, source.fixAll.pylance]"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "update",
+                "edits",
+                "string"
+              ],
+              "description": "Determines the output mode: \"update\" updates the file directly, \"edits\" returns a WorkspaceEdit, \"string\" returns the updated content as a string. If omitted, \"update\" will be used as the default. The \"edits\" mode is especially useful for checking if any changes are needed (such as unused imports or import formatting issues) without modifying the file, as it will return a WorkspaceEdit only if edits are required."
+            }
+          },
+          "required": [
+            "fileUri",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s3_pylanceInvokeRefactoring",
+        "description": "Apply automated code refactoring to Python files. Returns refactored content (does not modify original file) unless mode is \"update\". Use for: extracting functions, organizing imports, improving code structure, applying refactoring patterns.  Optional \"mode\" parameter: \"update\" updates the file, \"edits\" returns a WorkspaceEdit, \"string\" returns updated content as string. If mode is not specified, \"update\" will be used as the default. The \"edits\" mode is helpful for determining if a file needs changes (for example, to remove unused imports or fix import formatting) without making any modifications; if no changes are needed, the result will be either an empty WorkspaceEdit or a message indicating that no text edits were found. Available refactorings: source.unusedImports: - Removes all unused import statements from a Python file. Use when imports are imported but never referenced in the code. Requires fileUri parameter pointing to a Python file with unused imports.\nsource.convertImportFormat: - Converts import statements between absolute and relative formats according to python.analysis.importFormat setting. Use when import format consistency is needed. Requires fileUri parameter pointing to a Python file with imports to convert.\nsource.fixAll.pylance: - Applies all available automatic code fixes from python.analysis.fixAll setting. Use when multiple code issues need to be addressed simultaneously. Requires fileUri parameter pointing to a Python file with fixable issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "fileUri": {
+              "type": "string",
+              "description": "The uri of the file to invoke the refactoring."
+            },
+            "name": {
+              "type": "string",
+              "description": "The name of the refactoring to invoke. This must be one of these [source.unusedImports, source.convertImportFormat, source.fixAll.pylance]"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "update",
+                "edits",
+                "string"
+              ],
+              "description": "Determines the output mode: \"update\" updates the file directly, \"edits\" returns a WorkspaceEdit, \"string\" returns the updated content as a string. If omitted, \"update\" will be used as the default. The \"edits\" mode is especially useful for checking if any changes are needed (such as unused imports or import formatting issues) without modifying the file, as it will return a WorkspaceEdit only if edits are required."
+            }
+          },
+          "required": [
+            "fileUri",
+            "name"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "activate_pylance_workspace_management_tools",
+        "description": "Call this tool when you need access to a new category of tools. The category of tools is described as follows:\n\nThese tools help manage and understand the workspace structure. They provide information about workspace root directories and list all user Python files, excluding library or dependency files. Use these tools for analyzing user code, searching project files, and obtaining paths for other operations within the workspace.\n\nBe sure to call this tool if you need a capability related to the above.",
+        "parameters": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s_pylanceSettings",
+        "description": "Get current Python analysis settings and configuration for a workspace. Returns all \"python.analysis.*\" settings with default vs user-configured indicators. Use for: troubleshooting configuration, checking current settings, diagnosing analysis issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s2_pylanceSettings",
+        "description": "Get current Python analysis settings and configuration for a workspace. Returns all \"python.analysis.*\" settings with default vs user-configured indicators. Use for: troubleshooting configuration, checking current settings, diagnosing analysis issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s3_pylanceSettings",
+        "description": "Get current Python analysis settings and configuration for a workspace. Returns all \"python.analysis.*\" settings with default vs user-configured indicators. Use for: troubleshooting configuration, checking current settings, diagnosing analysis issues.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s_pylanceInstalledTopLevelModules",
+        "description": "Get available top-level modules from installed Python packages in environment. Shows what can be imported. Use for: checking if packages are installed, verifying import availability, helping users understand available modules.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            },
+            "pythonEnvironment": {
+              "type": "string",
+              "description": "The Python environment to use. Must be a value returned by the pylancePythonEnvironments tool. If pythonEnvironment is missing, the python environment of the workspace will be used."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s2_pylanceInstalledTopLevelModules",
+        "description": "Get available top-level modules from installed Python packages in environment. Shows what can be imported. Use for: checking if packages are installed, verifying import availability, helping users understand available modules.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            },
+            "pythonEnvironment": {
+              "type": "string",
+              "description": "The Python environment to use. Must be a value returned by the pylancePythonEnvironments tool. If pythonEnvironment is missing, the python environment of the workspace will be used."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "mcp_pylance_mcp_s3_pylanceInstalledTopLevelModules",
+        "description": "Get available top-level modules from installed Python packages in environment. Shows what can be imported. Use for: checking if packages are installed, verifying import availability, helping users understand available modules.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "workspaceRoot": {
+              "type": "string",
+              "description": "The root directory uri of the workspace."
+            },
+            "pythonEnvironment": {
+              "type": "string",
+              "description": "The Python environment to use. Must be a value returned by the pylancePythonEnvironments tool. If pythonEnvironment is missing, the python environment of the workspace will be used."
+            }
+          },
+          "required": [
+            "workspaceRoot"
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "tool_choice": "auto"
+}
