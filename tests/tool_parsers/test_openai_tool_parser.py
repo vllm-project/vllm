@@ -9,6 +9,7 @@ from openai_harmony import (
     DeveloperContent,
     HarmonyEncodingName,
     Message,
+    RenderConversationConfig,
     Role,
     SystemContent,
     load_harmony_encoding,
@@ -261,3 +262,91 @@ def test_extract_tool_calls_with_content(
     ]
     assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
     assert extracted_info.content == final_content
+
+
+def test_extract_partial_response_no_tools(openai_tool_parser, harmony_encoding):
+    """Test partial response without tool calls where final_content is cut off."""
+    final_content = "This is a partial response."
+    convo = Conversation.from_messages(
+        [
+            Message.from_role_and_content(
+                Role.USER, "What is the weather in Tokyo based on where I'm at?"
+            ),
+            Message.from_role_and_content(
+                Role.ASSISTANT,
+                'User asks: "What is the weather in Tokyo?" based on their location. We need to use get_current_weather tool and get_user_location tool.',  #  noqa: E501
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, final_content).with_channel(
+                "final"
+            ),
+        ]
+    )
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT, config=RenderConversationConfig(auto_drop_analysis=False)
+    )
+    token_ids = token_ids[:-5]  # Simulate cut-off by removing last 5 tokens
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
+    assert not extracted_info.tools_called
+    assert extracted_info.tool_calls == []
+    assert extracted_info.content
+    assert len(extracted_info.content) > 0
+
+    print(extracted_info.content)
+    assert len(extracted_info.content) < len(final_content)
+    assert extracted_info.content == final_content[: len(extracted_info.content)]
+
+
+def test_extract_partial_response_with_tool_call(
+    openai_tool_parser,
+    harmony_encoding,
+):
+    """Test partial response with tool call where final_content is cut off."""
+    final_content = "Let me check the weather."
+    convo = Conversation.from_messages(
+        [
+            Message.from_role_and_content(
+                Role.USER, "What is the weather in Tokyo based on where I'm at?"
+            ),
+            Message.from_role_and_content(
+                Role.ASSISTANT,
+                'User asks: "What is the weather in Tokyo?" based on their location. We need to use get_current_weather tool and get_user_location tool.',  #  noqa: E501
+            ).with_channel("analysis"),
+            Message.from_role_and_content(Role.ASSISTANT, '{"location": "Tokyo"}')
+            .with_channel("commentary")
+            .with_recipient("functions.get_current_weather")
+            .with_content_type("json"),
+            Message.from_role_and_content(Role.ASSISTANT, final_content).with_channel(
+                "final"
+            ),
+        ]
+    )
+    token_ids = harmony_encoding.render_conversation_for_completion(
+        convo, Role.ASSISTANT, config=RenderConversationConfig(auto_drop_analysis=False)
+    )
+    token_ids = token_ids[:-5]  # Simulate cut-off by removing last 5 tokens
+
+    extracted_info = openai_tool_parser.extract_tool_calls(
+        "",
+        request=None,
+        token_ids=token_ids,
+    )
+    assert extracted_info.tools_called
+    expected_tool_calls = [
+        ToolCall(
+            function=FunctionCall(
+                name="get_current_weather",
+                arguments=json.dumps({"location": "Tokyo"}),
+            )
+        ),
+    ]
+    assert_tool_calls(extracted_info.tool_calls, expected_tool_calls)
+    assert extracted_info.content
+    assert len(extracted_info.content) > 0
+
+    print(extracted_info.content)
+    assert len(extracted_info.content) < len(final_content)
+    assert extracted_info.content == final_content[: len(extracted_info.content)]
