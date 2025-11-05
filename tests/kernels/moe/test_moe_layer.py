@@ -16,11 +16,11 @@ from tests.kernels.moe.utils import (TestMLP, make_test_weights,
                                      moe_quantize_weights)
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config, get_current_vllm_config
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_experts, FusedMoE, SharedFusedMoE)
+from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.shared_fused_moe import SharedFusedMoE
 from vllm.platforms import current_platform
 from vllm.utils import cdiv, has_deep_ep, has_pplx
 
@@ -276,7 +276,7 @@ def make_fused_moe_layer(
             assert final_shared_states is not None
             final_hidden_states += final_shared_states
 
-        if layer.tp_size > 1:
+        if layer.tp_size > 1 or layer.ep_size > 1:
             final_hidden_states = layer.maybe_all_reduce_tensor_model_parallel(
                 final_hidden_states)
 
@@ -327,11 +327,17 @@ def make_fake_moe_layer(
     else:
         shared_experts = None
 
+    quant_config = FusedMoEQuantConfig.make(
+        quant_dtype,
+        w1_scale=w1_s,
+        w2_scale=w2_s,
+    )
+
     def _moe(
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        topk_weights, topk_ids = FusedMoE.select_experts(
+        topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -360,8 +366,7 @@ def make_fake_moe_layer(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
-            w1_scale=w1_s,
-            w2_scale=w2_s,
+            quant_config=quant_config,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=True,
@@ -432,6 +437,8 @@ def _test_loop(
         #router_logits = chunk_by_rank(router_logits, tp_rank, tp_size, dim=1, device=device)
         w1 = chunk_by_rank(w1, tp_rank, tp_size, dim=1, device=device)
         w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
+        #w1 = w1.to(device)
+        #w2 = w2.to(device)
         n = n // tp_size
 
     print(f"AFTER W1 {w1.shape}")
@@ -494,7 +501,7 @@ def _test_loop(
         vllm_config.compilation_config.static_forward_context[
             "test_layer"] = moe_layer
 
-        print(f"ORIG RANK HIDDEN_STATES {hidden_states}")
+        #print(f"ORIG RANK HIDDEN_STATES {hidden_states}")
 
         with set_forward_context(
                 None,
@@ -512,7 +519,7 @@ def _test_loop(
         atol = 3.5e-2
         rtol = 3.5e-2
 
-    print(f"OUTPUT {output}")
+    #print(f"OUTPUT {output}")
 
     torch.testing.assert_close(baseline_output, output, atol=atol, rtol=rtol)
 
@@ -522,6 +529,7 @@ def _test_loop(
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("top_k", TOP_KS)
 @pytest.mark.parametrize("quantization", QUANT_METHODS)
+# 2-1-X broken
 @pytest.mark.parametrize("dp_size, tp_size, use_ep", PARALLEL_COMBOS)
 @pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("use_shared_experts", [False, True])
@@ -602,14 +610,14 @@ def test_moe_layer(
                                 device="cuda",
                                 dtype=in_dtype)
 
-    print(f"ORIG HIDDEN_STATES {hidden_states}")
+    #print(f"ORIG HIDDEN_STATES {hidden_states}")
 
     hidden_states_clone = hidden_states.clone().detach()
     router_logits_clone = router_logits.clone().detach()
 
     baseline_output = baseline_layer(hidden_states, router_logits)
 
-    print(f"BASE {baseline_output}")
+    #print(f"BASE {baseline_output}")
 
     parallel_launch_with_config(
         world_size,
