@@ -28,7 +28,7 @@ physical experts.
 
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -159,6 +159,35 @@ class EplbState:
     This is a constant and is taken from the config.
     """
 
+    expert_latency_window: torch.Tensor | None = None
+    """
+    Sliding window of per-expert latency (in milliseconds).
+    Shape: (window_size, num_moe_layers, num_physical_experts)
+    Value: latency if expert was active, 0.0 if inactive.
+    Only allocated if health_check_enabled=True.
+    """
+
+    expert_health_mask: torch.Tensor | None = None
+    """
+    Boolean mask indicating which experts are healthy.
+    Shape: (num_moe_layers, num_physical_experts)
+    True = healthy, False = unhealthy.
+    Only allocated if health_check_enabled=True.
+    """
+
+    health_latency_threshold: float = 3.0
+    """Threshold multiplier from EPLBConfig."""
+
+    health_penalty_factor: float = 10.0
+    """Weight penalty factor from EPLBConfig."""
+
+    moe_layer_instances: list = field(default_factory=list)
+    """
+    Direct references to MoE layer instances for calling measure_and_update_latency().
+    This avoids requiring each model to implement measure_and_update_all_latencies().
+    Populated from model.moe_layers during build().
+    """
+
     @staticmethod
     def build_initial_global_physical_to_logical_map(
         num_routed_experts: int,
@@ -264,8 +293,41 @@ class EplbState:
             device=device,
         )
 
+        # Initialize health monitoring if enabled
+        eplb_config = parallel_config.eplb_config
+        expert_latency_window = None
+        expert_health_mask = None
+
+        # Create shared latency view for layers to write to (like expert_load_pass)
+        expert_latency_pass = None
+        if eplb_config.health_check_enabled:
+            expert_latency_window = torch.zeros(
+                (
+                    expert_load_window_size,
+                    model.num_moe_layers,
+                    model.num_physical_experts,
+                ),
+                dtype=torch.float32,  # Latency in milliseconds
+                device=device,
+            )
+            expert_health_mask = torch.ones(
+                (model.num_moe_layers, model.num_physical_experts),
+                dtype=torch.bool,
+                device=device,
+            )
+            expert_latency_pass = torch.zeros(
+                (model.num_moe_layers, model.num_physical_experts),
+                dtype=torch.float32,
+                device=device,
+            )
+            logger.info(
+                "EPLB health monitoring enabled: threshold=%.1fx, penalty=%.1fx",
+                eplb_config.health_latency_threshold,
+                eplb_config.health_penalty_factor,
+            )
+
         # Set the initial progress of rearrangement to 3/4
-        eplb_step_interval = parallel_config.eplb_config.step_interval
+        eplb_step_interval = eplb_config.step_interval
         expert_rearrangement_step = max(0, eplb_step_interval - eplb_step_interval // 4)
 
         if global_expert_load is not None:
@@ -317,6 +379,7 @@ class EplbState:
             expert_load_pass,
             logical_to_physical_map,
             logical_replica_count,
+            expert_latency_pass,
         )
         if global_expert_load is not None:
             rearrange_expert_weights_inplace(
@@ -329,6 +392,11 @@ class EplbState:
             )
             expert_rearrangement_step = 0
 
+        # Collect MoE layer references for deferred latency measurement
+        moe_layer_instances = []
+        if eplb_config.health_check_enabled and hasattr(model, "moe_layers"):
+            moe_layer_instances = list(model.moe_layers)
+
         return cls(
             physical_to_logical_map,
             logical_to_physical_map,
@@ -338,6 +406,11 @@ class EplbState:
             expert_load_window_size=expert_load_window_size,
             expert_rearrangement_step=expert_rearrangement_step,
             expert_rearrangement_step_interval=eplb_step_interval,
+            expert_latency_window=expert_latency_window,
+            expert_health_mask=expert_health_mask,
+            health_latency_threshold=eplb_config.health_latency_threshold,
+            health_penalty_factor=eplb_config.health_penalty_factor,
+            moe_layer_instances=moe_layer_instances,
         )
 
     def step(
@@ -414,6 +487,25 @@ class EplbState:
                     balancedness,
                 )
 
+        # Record expert latencies
+        if self.expert_latency_window is not None and not is_dummy:
+            # FIRST: Trigger deferred measurement
+            # (synchronizes and updates latency views)
+            for layer in self.moe_layer_instances:
+                if hasattr(layer, "measure_and_update_latency"):
+                    layer.measure_and_update_latency()
+
+            # THEN: Read the measured values
+            expert_latency_pass = model.get_expert_latencies()
+            if expert_latency_pass is not None:
+                # Update health mask BEFORE overwriting window
+                self._update_health_mask(expert_latency_pass, log_stats)
+                self.expert_latency_window[self.expert_load_window_step] = (
+                    expert_latency_pass.clone()
+                )
+                # Reset for next pass
+                expert_latency_pass.zero_()
+
         # Update the expert load sliding window
         if not is_dummy:
             self.expert_load_window[self.expert_load_window_step] = (
@@ -432,6 +524,88 @@ class EplbState:
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             self.expert_rearrangement_step = 0
             self.rearrange(model)
+
+    def _update_health_mask(
+        self, current_latency: torch.Tensor, log_stats: bool = False
+    ) -> None:
+        """
+        Update expert health mask based on per-expert historical latency.
+
+        Strategy: Compare current latency to threshold * historical mean.
+        0 latency means expert was inactive (ignored in mean calculation).
+        Threshold is configurable via health_latency_threshold (default 3.0).
+
+        Args:
+            current_latency: Current per-expert latency (before adding to window).
+                Shape: (num_moe_layers, num_physical_experts)
+            log_stats: Whether to log health status changes.
+        """
+        if self.expert_latency_window is None or self.expert_health_mask is None:
+            return
+
+        # Calculate historical mean from existing window (excluding current)
+        # Count active passes in history
+        # Shape: (num_moe_layers, num_physical_experts)
+        active_count = (self.expert_latency_window > 0).sum(dim=0)
+
+        # Sum of historical latencies
+        latency_sum = self.expert_latency_window.sum(dim=0)
+
+        # Historical mean (only for experts with sufficient history)
+        # Require at least min(10, window_size * 0.5) active passes
+        min_active_count = min(10, int(self.expert_load_window_size * 0.5))
+
+        # To prevent division by zero when active_count is 0.
+        # Although the logic works due to NaN propagation, being explicit is safer.
+        safe_active_count = torch.where(
+            active_count > 0, active_count, torch.ones_like(active_count)
+        )
+        mean = latency_sum / safe_active_count
+        historical_mean = torch.where(
+            active_count >= min_active_count, mean, torch.zeros_like(latency_sum)
+        )
+
+        threshold = self.health_latency_threshold * historical_mean
+
+        # Expert is unhealthy if:
+        # 1. Currently active (current_latency > 0)
+        # 2. Exceeds threshold (already 0 if insufficient history)
+        is_unhealthy = (
+            (current_latency > 0)
+            & (current_latency > threshold)
+            & (historical_mean > 0)
+        )
+
+        new_health_mask = ~is_unhealthy
+
+        if log_stats:
+            newly_unhealthy = is_unhealthy & self.expert_health_mask
+            if newly_unhealthy.any():
+                unhealthy_coords = newly_unhealthy.nonzero(as_tuple=False)
+                for layer_idx, expert_idx in unhealthy_coords:
+                    current_lat = current_latency[layer_idx, expert_idx].item()
+                    baseline = historical_mean[layer_idx, expert_idx].item()
+                    logger.warning(
+                        "Expert [layer=%d, expert=%d] unhealthy: "
+                        "current=%.3fms > %.1fx * baseline=%.3fms",
+                        layer_idx,
+                        expert_idx,
+                        current_lat,
+                        self.health_latency_threshold,
+                        baseline,
+                    )
+
+            total_unhealthy = (~new_health_mask).sum().item()
+            total_experts = new_health_mask.numel()
+            if total_unhealthy > 0:
+                logger.info(
+                    "EPLB health summary: %d/%d experts unhealthy (%.1f%%)",
+                    total_unhealthy,
+                    total_experts,
+                    100.0 * total_unhealthy / total_experts,
+                )
+
+        self.expert_health_mask = new_health_mask
 
     def rearrange(
         self,
