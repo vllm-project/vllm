@@ -17,6 +17,10 @@ Expert parallelism load balancer (EPLB) metrics and states.
   different devices, and each of these sets is a physical expert.
 - **Local Physical Expert**: A physical expert that is instantiated on the
   current device.
+- **Health Monitoring**: A timeout-based system that tracks per-expert latency
+  and immediately masks out experts that exceed the timeout threshold, without
+  waiting for the next rearrangement interval. Experts are automatically
+  re-enabled when their latency returns below the threshold.
 
 For example: DeepSeek-R1 has 256 logical experts, so each MoE layer
 has 256 sets of linear layer weights in the model parameters. If we add 32
@@ -175,11 +179,8 @@ class EplbState:
     Only allocated if health_check_enabled=True.
     """
 
-    health_latency_threshold: float = 3.0
-    """Threshold multiplier from EPLBConfig."""
-
-    health_penalty_factor: float = 10.0
-    """Weight penalty factor from EPLBConfig."""
+    health_timeout_threshold: float = 100.0
+    """Absolute timeout threshold in milliseconds from EPLBConfig."""
 
     moe_layer_instances: list = field(default_factory=list)
     """
@@ -321,9 +322,8 @@ class EplbState:
                 device=device,
             )
             logger.info(
-                "EPLB health monitoring enabled: threshold=%.1fx, penalty=%.1fx",
-                eplb_config.health_latency_threshold,
-                eplb_config.health_penalty_factor,
+                "EPLB health monitoring enabled: timeout_threshold=%.1fms",
+                eplb_config.health_timeout_threshold,
             )
 
         # Set the initial progress of rearrangement to 3/4
@@ -408,8 +408,7 @@ class EplbState:
             expert_rearrangement_step_interval=eplb_step_interval,
             expert_latency_window=expert_latency_window,
             expert_health_mask=expert_health_mask,
-            health_latency_threshold=eplb_config.health_latency_threshold,
-            health_penalty_factor=eplb_config.health_penalty_factor,
+            health_timeout_threshold=eplb_config.health_timeout_threshold,
             moe_layer_instances=moe_layer_instances,
         )
 
@@ -529,11 +528,11 @@ class EplbState:
         self, current_latency: torch.Tensor, log_stats: bool = False
     ) -> None:
         """
-        Update expert health mask based on per-expert historical latency.
+        Update expert health mask based on absolute timeout threshold.
 
-        Strategy: Compare current latency to threshold * historical mean.
-        0 latency means expert was inactive (ignored in mean calculation).
-        Threshold is configurable via health_latency_threshold (default 3.0).
+        Strategy: Check if current latency exceeds the absolute timeout threshold.
+        If an expert exceeds the timeout, it is immediately masked out.
+        0 latency means expert was inactive.
 
         Args:
             current_latency: Current per-expert latency (before adding to window).
@@ -543,37 +542,11 @@ class EplbState:
         if self.expert_latency_window is None or self.expert_health_mask is None:
             return
 
-        # Calculate historical mean from existing window (excluding current)
-        # Count active passes in history
-        # Shape: (num_moe_layers, num_physical_experts)
-        active_count = (self.expert_latency_window > 0).sum(dim=0)
-
-        # Sum of historical latencies
-        latency_sum = self.expert_latency_window.sum(dim=0)
-
-        # Historical mean (only for experts with sufficient history)
-        # Require at least min(10, window_size * 0.5) active passes
-        min_active_count = min(10, int(self.expert_load_window_size * 0.5))
-
-        # To prevent division by zero when active_count is 0.
-        # Although the logic works due to NaN propagation, being explicit is safer.
-        safe_active_count = torch.where(
-            active_count > 0, active_count, torch.ones_like(active_count)
-        )
-        mean = latency_sum / safe_active_count
-        historical_mean = torch.where(
-            active_count >= min_active_count, mean, torch.zeros_like(latency_sum)
-        )
-
-        threshold = self.health_latency_threshold * historical_mean
-
         # Expert is unhealthy if:
         # 1. Currently active (current_latency > 0)
-        # 2. Exceeds threshold (already 0 if insufficient history)
-        is_unhealthy = (
-            (current_latency > 0)
-            & (current_latency > threshold)
-            & (historical_mean > 0)
+        # 2. Exceeds absolute timeout threshold
+        is_unhealthy = (current_latency > 0) & (
+            current_latency > self.health_timeout_threshold
         )
 
         new_health_mask = ~is_unhealthy
@@ -584,15 +557,13 @@ class EplbState:
                 unhealthy_coords = newly_unhealthy.nonzero(as_tuple=False)
                 for layer_idx, expert_idx in unhealthy_coords:
                     current_lat = current_latency[layer_idx, expert_idx].item()
-                    baseline = historical_mean[layer_idx, expert_idx].item()
                     logger.warning(
                         "Expert [layer=%d, expert=%d] unhealthy: "
-                        "current=%.3fms > %.1fx * baseline=%.3fms",
+                        "current=%.3fms > timeout_threshold=%.1fms",
                         layer_idx,
                         expert_idx,
                         current_lat,
-                        self.health_latency_threshold,
-                        baseline,
+                        self.health_timeout_threshold,
                     )
 
             total_unhealthy = (~new_health_mask).sum().item()
@@ -605,7 +576,51 @@ class EplbState:
                     100.0 * total_unhealthy / total_experts,
                 )
 
+        # Immediately mask out unhealthy experts
+        self._mask_unhealthy_experts(new_health_mask)
+
         self.expert_health_mask = new_health_mask
+
+    def _mask_unhealthy_experts(self, health_mask: torch.Tensor) -> None:
+        """
+        Immediately mask out unhealthy experts from the logical_to_physical_map
+        and update logical_replica_count.
+
+        This ensures that unhealthy experts are not routed to, without waiting
+        for the next rearrangement interval.
+
+        Args:
+            health_mask: Boolean tensor indicating which experts are healthy.
+                Shape: (num_moe_layers, num_physical_experts)
+        """
+        # For each logical expert, remove unhealthy physical experts from the mapping
+        num_layers, num_physical_experts = health_mask.shape
+        num_logical_experts = self.logical_to_physical_map.shape[1]
+
+        for layer_idx in range(num_layers):
+            for logical_idx in range(num_logical_experts):
+                # Get all physical experts mapped to this logical expert
+                physical_experts = self.logical_to_physical_map[layer_idx, logical_idx]
+                max_slots = self.logical_to_physical_map.shape[2]
+
+                # Filter healthy experts and pad with -1
+                healthy_experts = [
+                    p
+                    for p in physical_experts.tolist()
+                    if p >= 0 and health_mask[layer_idx, p]
+                ]
+                new_mapping = healthy_experts + [-1] * (
+                    max_slots - len(healthy_experts)
+                )
+
+                self.logical_to_physical_map[layer_idx, logical_idx] = torch.tensor(
+                    new_mapping,
+                    dtype=self.logical_to_physical_map.dtype,
+                    device=self.logical_to_physical_map.device,
+                )
+                self.logical_replica_count[layer_idx, logical_idx] = len(
+                    healthy_experts
+                )
 
     def rearrange(
         self,

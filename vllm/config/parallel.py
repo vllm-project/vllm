@@ -63,14 +63,11 @@ class EPLBConfig:
     """
 
     health_check_enabled: bool = True
-    """Enable per-expert health monitoring based on latency."""
+    """Enable per-expert health monitoring based on timeout."""
 
-    health_latency_threshold: float = 3.0
-    """Latency threshold multiplier. Expert is unhealthy if current latency
-    exceeds threshold * historical_mean_latency within a window for that expert."""
-
-    health_penalty_factor: float = 10.0
-    """Weight multiplier for unhealthy experts during rebalancing."""
+    health_timeout_threshold: float = 100.0
+    """Absolute timeout threshold in milliseconds. Expert is unhealthy and will be
+    immediately masked out if current latency exceeds this threshold."""
 
 
 @config

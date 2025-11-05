@@ -46,24 +46,23 @@ def create_mock_eplb_state(
         expert_rearrangement_step_interval=config.step_interval,
         expert_latency_window=expert_latency_window,
         expert_health_mask=expert_health_mask,
-        health_latency_threshold=config.health_latency_threshold,
-        health_penalty_factor=config.health_penalty_factor,
+        health_timeout_threshold=config.health_timeout_threshold,
     )
 
 
 def test_basic_health_detection():
-    """Test that unhealthy experts are detected when latency exceeds threshold."""
+    """Test that unhealthy experts are detected when exceeding timeout."""
 
     # Setup
     num_layers = 2
     num_experts = 8
     window_size = 100
-    threshold = 3.0
+    timeout_threshold = 50.0  # 50ms absolute timeout
 
     eplb_config = EPLBConfig(
         window_size=window_size,
         health_check_enabled=True,
-        health_latency_threshold=threshold,
+        health_timeout_threshold=timeout_threshold,
     )
 
     state = create_mock_eplb_state(
@@ -72,14 +71,7 @@ def test_basic_health_detection():
         config=eplb_config,
     )
 
-    # Simulate normal operation (all experts healthy)
-    for step in range(50):
-        # All experts active with similar latency (10ms)
-        state.expert_latency_window[step, :, :] = 10.0
-
-    state.expert_load_window_step = 50
-
-    # Test with normal latency
+    # Test with normal latency (10ms < 50ms timeout)
     current_latency = torch.full((num_layers, num_experts), 10.0)
     state._update_health_mask(current_latency, log_stats=False)
 
@@ -88,12 +80,12 @@ def test_basic_health_detection():
         "All experts should be healthy with normal latency"
     )
 
-    # Inject failure: Expert 3 in layer 0 suddenly slow (100ms)
+    # Inject failure: Expert 3 in layer 0 exceeds timeout (100ms > 50ms)
     current_latency = torch.full((num_layers, num_experts), 10.0)
     current_latency[0, 3] = 100.0
     state._update_health_mask(current_latency, log_stats=False)
 
-    # Expert 3 should be unhealthy (100 > 3.0 * 10)
+    # Expert 3 should be unhealthy (100ms > 50ms timeout)
     assert not state.expert_health_mask[0, 3], "Expert 3 layer 0 should be unhealthy"
     # Other experts should remain healthy
     assert state.expert_health_mask[0, :3].all(), "Other experts should remain healthy"
@@ -108,11 +100,12 @@ def test_sparse_activation():
     num_layers = 1
     num_experts = 8
     window_size = 30
+    timeout_threshold = 40.0  # 40ms absolute timeout
 
     eplb_config = EPLBConfig(
         window_size=window_size,
         health_check_enabled=True,
-        health_latency_threshold=3.0,
+        health_timeout_threshold=timeout_threshold,
     )
 
     state = create_mock_eplb_state(
@@ -121,61 +114,36 @@ def test_sparse_activation():
         config=eplb_config,
     )
 
-    # Simulate sparse activation pattern
-    # Expert 0: Active in 15/20 passes with 10ms
-    # Expert 1: Active in 5/20 passes with 12ms
-    # Expert 2: Active in 15/20 passes with 10ms, then becomes inactive
-
-    for step in range(15):
-        state.expert_latency_window[step, 0, 0] = 10.0  # Expert 0 active
-        state.expert_latency_window[step, 0, 1] = 0.0  # Expert 1 inactive
-        state.expert_latency_window[step, 0, 2] = 10.0  # Expert 2 active
-
-    for step in range(15, 20):
-        state.expert_latency_window[step, 0, 0] = 0.0  # Expert 0 inactive
-        state.expert_latency_window[step, 0, 1] = 12.0  # Expert 1 active
-        state.expert_latency_window[step, 0, 2] = 10.0  # Expert 2 active
-
-    state.expert_load_window_step = 20
-
-    # Test with Expert 2 slow (50ms)
+    # Test with Expert 2 exceeding timeout (50ms > 40ms)
     current_latency = torch.zeros(num_layers, num_experts)
     current_latency[0, 0] = 10.0
     current_latency[0, 2] = 50.0  # Expert 2 slow!
     state._update_health_mask(current_latency, log_stats=False)
 
-    # Expert 2 should be unhealthy (50 > 3 * 10, and has 20 activations)
+    # Expert 2 should be unhealthy (50ms > 40ms timeout)
     assert not state.expert_health_mask[0, 2], (
-        "Expert 2 should be unhealthy after spike"
+        "Expert 2 should be unhealthy after exceeding timeout"
     )
 
-    # Write to window
-    state.expert_latency_window[20, 0, 0] = 10.0
-    state.expert_latency_window[20, 0, 2] = 50.0
-
-    # Step 20: Expert 2 becomes inactive (0 latency)
+    # Expert 2 becomes inactive (0 latency)
     current_latency = torch.zeros(num_layers, num_experts)
     current_latency[0, 0] = 10.0  # Expert 0 active
     current_latency[0, 2] = 0.0  # Expert 2 NOW INACTIVE (key test!)
 
-    state.expert_load_window_step = 21
     state._update_health_mask(current_latency, log_stats=False)
 
     # Expert 2 should become healthy again (current_latency = 0 means not active)
-    # The check is: (current_latency > 0) & (current_latency > threshold)
+    # The check is: (current_latency > 0) & (current_latency > timeout_threshold)
     # Since current_latency = 0, first condition is False → not unhealthy
     assert state.expert_health_mask[0, 2], (
-        "Expert 2 should be healthy when inactive (current=0), "
-        "even though it has >10 activations and was unhealthy before"
+        "Expert 2 should be healthy when inactive (current=0)"
     )
 
-    # Expert 0: mean = 10ms, active 16 times (>10), current = 10ms → healthy
+    # Expert 0 with 10ms < 40ms timeout → healthy
     assert state.expert_health_mask[0, 0], "Expert 0 should be healthy"
 
-    # Expert 1: active only 5 times (<10), insufficient history → healthy
-    assert state.expert_health_mask[0, 1], (
-        "Expert 1 should be healthy (insufficient history)"
-    )
+    # Expert 1 inactive (0 latency) → healthy
+    assert state.expert_health_mask[0, 1], "Expert 1 should be healthy (inactive)"
 
 
 def test_expert_recovery():
@@ -185,11 +153,12 @@ def test_expert_recovery():
     num_layers = 1
     num_experts = 4
     window_size = 50
+    timeout_threshold = 40.0  # 40ms absolute timeout
 
     eplb_config = EPLBConfig(
         window_size=window_size,
         health_check_enabled=True,
-        health_latency_threshold=3.0,
+        health_timeout_threshold=timeout_threshold,
     )
 
     state = create_mock_eplb_state(
@@ -198,39 +167,24 @@ def test_expert_recovery():
         config=eplb_config,
     )
 
-    # Phase 1: Normal operation (10ms baseline)
-    for step in range(30):
-        state.expert_latency_window[step, 0, :] = 10.0
-
-    state.expert_load_window_step = 30
-
+    # Phase 1: Normal operation (10ms < 40ms timeout)
     current_latency = torch.full((num_layers, num_experts), 10.0)
     state._update_health_mask(current_latency, log_stats=False)
     assert state.expert_health_mask.all(), "All healthy initially"
 
-    # Write to window
-    state.expert_latency_window[30, 0, :] = 10.0
-
-    # Phase 2: Expert 1 becomes slow (50ms)
+    # Phase 2: Expert 1 exceeds timeout (50ms > 40ms)
     current_latency = torch.full((num_layers, num_experts), 10.0)
     current_latency[0, 1] = 50.0
-    state.expert_load_window_step = 31
     state._update_health_mask(current_latency, log_stats=False)
 
     assert not state.expert_health_mask[0, 1], "Expert 1 should be unhealthy"
 
-    # Write to window
-    state.expert_latency_window[31, 0, :] = 10.0
-    state.expert_latency_window[31, 0, 1] = 50.0
-
-    # Phase 3: Expert 1 recovers immediately (back to 10ms in next step)
+    # Phase 3: Expert 1 recovers immediately (back to 10ms < 40ms in next step)
     current_latency = torch.full((num_layers, num_experts), 10.0)
-    state.expert_load_window_step = 32
     state._update_health_mask(current_latency, log_stats=False)
 
     # Expert 1 should recover immediately
-    # historical_mean now includes the 50ms spike in window
-    # current = 10ms should be < threshold → healthy
+    # current = 10ms < 40ms timeout → healthy
     assert state.expert_health_mask[0, 1], "Expert 1 should recover to healthy"
 
 
@@ -240,11 +194,12 @@ def test_multi_layer_health():
     num_layers = 3
     num_experts = 8
     window_size = 20
+    timeout_threshold = 40.0  # 40ms absolute timeout
 
     eplb_config = EPLBConfig(
         window_size=window_size,
         health_check_enabled=True,
-        health_latency_threshold=3.0,
+        health_timeout_threshold=timeout_threshold,
     )
 
     state = create_mock_eplb_state(
@@ -253,17 +208,11 @@ def test_multi_layer_health():
         config=eplb_config,
     )
 
-    # Setup baseline (10ms for all)
-    for step in range(15):
-        state.expert_latency_window[step, :, :] = 10.0
-
-    state.expert_load_window_step = 15
-
     # Inject failures in different layers
     current_latency = torch.full((num_layers, num_experts), 10.0)
-    current_latency[0, 2] = 50.0  # Layer 0, Expert 2: slow
-    current_latency[1, 5] = 60.0  # Layer 1, Expert 5: slow
-    # Layer 2: all healthy (10.0)
+    current_latency[0, 2] = 50.0  # Layer 0, Expert 2: exceeds timeout (50ms > 40ms)
+    current_latency[1, 5] = 60.0  # Layer 1, Expert 5: exceeds timeout (60ms > 40ms)
+    # Layer 2: all healthy (10ms < 40ms)
 
     state._update_health_mask(current_latency, log_stats=False)
 
@@ -281,17 +230,18 @@ def test_multi_layer_health():
     assert state.expert_health_mask[2, :].all(), "Layer 2 all experts should be healthy"
 
 
-def test_historical_mean_calculation():
-    """Test that historical mean is calculated correctly with sparse activations."""
+def test_timeout_threshold_boundary():
+    """Test timeout threshold boundary conditions."""
 
     num_layers = 1
     num_experts = 4
     window_size = 10
+    timeout_threshold = 30.0  # 30ms absolute timeout
 
     eplb_config = EPLBConfig(
         window_size=window_size,
         health_check_enabled=True,
-        health_latency_threshold=2.0,
+        health_timeout_threshold=timeout_threshold,
     )
 
     state = create_mock_eplb_state(
@@ -300,66 +250,107 @@ def test_historical_mean_calculation():
         config=eplb_config,
     )
 
-    # Expert 0 active pattern: Need min(10, 20*0.5) = 10 active passes
-    # Pattern: [10, 10, 10, 15, 15, 20, 20, 20, 12, 12, ...]
-    # Mean should be (10*3 + 15*2 + 20*3 + 12*2) / 10 = 154 / 10 = 15.4ms
-
-    active_steps = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
-    latencies = [10.0, 10.0, 10.0, 15.0, 15.0, 20.0, 20.0, 20.0, 12.0, 12.0]
-
-    for i, step in enumerate(active_steps):
-        state.expert_latency_window[step, 0, 0] = latencies[i]
-
-    # Expert 3: Never active (all zeros) - tests active_count = 0 edge case
-    # This ensures safe division by zero handling in historical_mean calculation
-    # state.expert_latency_window[:, 0, 3] remains all zeros (initialized to 0)
-
-    state.expert_load_window_step = 10
-
-    # Test current latency 30.9ms against historical (steps 0-9)
-    # Historical mean = (10*3 + 15*2 + 20*3 + 12*2) / 10 = 154/10 = 15.4ms
-    # threshold = 2 * 15.4 = 30.8ms
-    # current = 30.9ms > 30.8ms → unhealthy
+    # Test latency just below threshold (29.9ms < 30ms)
     current_latency = torch.zeros(1, num_experts, dtype=torch.float32)
-    current_latency[0, 0] = 30.9
+    current_latency[0, 0] = 29.9
+    state._update_health_mask(current_latency, log_stats=False)
+
+    assert state.expert_health_mask[0, 0], (
+        "Expert should be healthy (29.9ms < 30ms threshold)"
+    )
+
+    # Test latency at threshold (30ms = 30ms) - should be healthy (not greater than)
+    current_latency[0, 0] = 30.0
+    state._update_health_mask(current_latency, log_stats=False)
+
+    assert state.expert_health_mask[0, 0], (
+        "Expert should be healthy (30ms = 30ms threshold, not exceeding)"
+    )
+
+    # Test latency just above threshold (30.1ms > 30ms)
+    current_latency[0, 0] = 30.1
     state._update_health_mask(current_latency, log_stats=False)
 
     assert not state.expert_health_mask[0, 0], (
-        "Expert should be unhealthy (30.9 > 30.8)"
+        "Expert should be unhealthy (30.1ms > 30ms threshold)"
     )
 
-    # Now write the 30.9 to window and test next step
-    state.expert_latency_window[10 % window_size, 0, 0] = 30.9
-    state.expert_load_window_step = 11
-
-    # Test current latency 31ms against historical
-    # (now includes 30.9 at step 0)
-    # Historical = steps 1-9 + step 0(30.9)
-    # = (10*2 + 15*2 + 20*3 + 12*2 + 30.9) / 10 = 174.9/10 = 17.49ms
-    # threshold = 2 * 17.49 = 34.98ms
-    # current = 31ms < 34.98ms → healthy
-    current_latency[0, 0] = 31.0
+    # Test latency well above threshold (100ms > 30ms)
+    current_latency[0, 0] = 100.0
     state._update_health_mask(current_latency, log_stats=False)
 
-    assert state.expert_health_mask[0, 0], "Expert should be healthy (31 < 34.98)"
-
-    # Test current latency 35ms against historical
-    current_latency[0, 0] = 35.0
-    state._update_health_mask(current_latency, log_stats=False)
-
-    assert not state.expert_health_mask[0, 0], "Expert should be unhealthy (35 > 34.98)"
-
-    # Test active_count = 0 case: Expert 3 has never been active before current step.
-    # This verifies that division by zero is handled correctly
-    # Expert 3 should remain healthy due to insufficient history (active_count = 0
-    # < min_active_count)
-    current_latency[0, 3] = 100.0  # Set high current latency for Expert 3
-    state._update_health_mask(current_latency, log_stats=False)
-
-    assert state.expert_health_mask[0, 3], (
-        "Expert 3 should be healthy (active_count=0, insufficient history). "
-        "This test verifies that division by zero is handled correctly."
+    assert not state.expert_health_mask[0, 0], (
+        "Expert should be unhealthy (100ms > 30ms threshold)"
     )
+
+    # Test inactive expert (0ms) even if it was previously unhealthy
+    current_latency[0, 0] = 0.0
+    state._update_health_mask(current_latency, log_stats=False)
+
+    assert state.expert_health_mask[0, 0], (
+        "Inactive expert should be considered healthy"
+    )
+
+
+def test_immediate_masking():
+    """Test that unhealthy experts are immediately masked out."""
+
+    num_layers = 1
+    num_experts = 4
+    window_size = 10
+    timeout_threshold = 50.0  # 50ms absolute timeout
+
+    eplb_config = EPLBConfig(
+        window_size=window_size,
+        health_check_enabled=True,
+        health_timeout_threshold=timeout_threshold,
+    )
+
+    state = create_mock_eplb_state(
+        num_layers=num_layers,
+        num_experts=num_experts,
+        config=eplb_config,
+    )
+
+    # Initial state: all experts are healthy and mapped
+    # logical_to_physical_map has 1:1 mapping (no redundancy in mock state)
+    assert state.logical_replica_count[0, 0] == 1, "Expert 0 should have 1 replica"
+    assert state.logical_to_physical_map[0, 0, 0] == 0, (
+        "Expert 0 should map to physical 0"
+    )
+
+    # Expert 1 exceeds timeout (100ms > 50ms)
+    current_latency = torch.zeros(num_layers, num_experts)
+    current_latency[0, 1] = 100.0
+    state._update_health_mask(current_latency, log_stats=False)
+
+    # Expert 1 should be immediately masked out
+    assert not state.expert_health_mask[0, 1], "Expert 1 should be unhealthy"
+    assert state.logical_replica_count[0, 1] == 0, (
+        "Expert 1 should have 0 replicas (masked)"
+    )
+    # The physical expert should be removed from the mapping (set to -1)
+    assert state.logical_to_physical_map[0, 1, 0] == -1, (
+        "Expert 1 should be masked from mapping"
+    )
+
+    # Other experts should remain unaffected
+    assert state.expert_health_mask[0, 0], "Expert 0 should be healthy"
+    assert state.logical_replica_count[0, 0] == 1, (
+        "Expert 0 should still have 1 replica"
+    )
+    assert state.logical_to_physical_map[0, 0, 0] == 0, "Expert 0 mapping unchanged"
+
+    # Expert 1 recovers (latency drops below threshold)
+    current_latency[0, 1] = 10.0
+    state._update_health_mask(current_latency, log_stats=False)
+
+    # Expert 1 should be immediately unmasked
+    assert state.expert_health_mask[0, 1], "Expert 1 should be healthy again"
+    assert state.logical_replica_count[0, 1] == 1, (
+        "Expert 1 should have 1 replica again"
+    )
+    assert state.logical_to_physical_map[0, 1, 0] == 1, "Expert 1 should be remapped"
 
 
 # =============================================================================
