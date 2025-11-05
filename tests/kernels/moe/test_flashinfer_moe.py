@@ -48,9 +48,10 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("e", [40, 64, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("activation", ["silu_and_mul", "relu2"])
 @torch.inference_mode()
 def test_flashinfer_fp4_moe_no_graph(
-    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype
+    m: int, n: int, k: int, e: int, topk: int, dtype: torch.dtype, activation: str
 ):
     current_platform.seed_everything(7)
     with set_current_vllm_config(
@@ -59,6 +60,7 @@ def test_flashinfer_fp4_moe_no_graph(
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
 
         quant_blocksize = 16
+        is_gated_act = activation == "silu_and_mul"
 
         w1_q, w2_q, quant_config = make_test_quant_config(
             e,
@@ -68,6 +70,7 @@ def test_flashinfer_fp4_moe_no_graph(
             quant_dtype="nvfp4",
             block_shape=None,
             per_act_token_quant=False,
+            make_gate=is_gated_act,
         )
 
         score = torch.randn((m, e), device="cuda", dtype=dtype)
@@ -80,12 +83,15 @@ def test_flashinfer_fp4_moe_no_graph(
             FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
         )
 
+        fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]
+
         flashinfer_output = flashinfer_experts(
             hidden_states=a,
             w1=w1_q,
             w2=w2_q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            activation=fi_activation,
         )
 
         # Reference check:
@@ -103,7 +109,9 @@ def test_flashinfer_fp4_moe_no_graph(
             block_size=quant_blocksize,
         )
 
-        w1_d = torch.empty((e, 2 * n, k), device="cuda", dtype=dtype)
+        w1_d = torch.empty(
+            (e, (2 if is_gated_act else 1) * n, k), device="cuda", dtype=dtype
+        )
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
 
         for idx in range(0, e):
@@ -124,7 +132,9 @@ def test_flashinfer_fp4_moe_no_graph(
                 block_size=quant_blocksize,
             )
 
-        torch_output = torch_moe(a_in_dtype, w1_d, w2_d, score, topk)
+        torch_output = torch_moe(
+            a_in_dtype, w1_d, w2_d, score, topk, activation=activation
+        )
 
         torch.testing.assert_close(
             torch_output, flashinfer_output, atol=1e-1, rtol=1e-1
