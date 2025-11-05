@@ -581,7 +581,7 @@ class Worker(WorkerBase):
             sort_key = "self_cuda_time_total"
             table = self.profiler.key_averages().table(sort_by=sort_key)
             with open(profiler_output_file, "w") as f:
-                f.write(table)
+                print(table, file=f)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
