@@ -361,7 +361,7 @@ def recv_router_dealer_message(
         # ROUTER message: [identity, empty, message]
         assert len(parts) == 3, f"expected 3 parts, got {len(parts)}"
         identity_bytes, empty_frame, message_bytes = parts
-        identity = identity_bytes.decode("utf-8")
+        identity = identity_bytes
     elif sock_type == zmq.DEALER:
         # DEALER message: [empty, message]
         assert len(parts) == 2, f"expected 2 parts, got {len(parts)}"
