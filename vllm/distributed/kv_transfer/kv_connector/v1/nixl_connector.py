@@ -662,6 +662,8 @@ class NixlConnectorWorker:
         remote_tp_size: dict[EngineId, int]
         is_mla: bool
         total_num_kv_heads: int
+        block_size: int
+        remote_block_size: dict[EngineId, int]
 
         def tp_ratio(
             self,
@@ -679,12 +681,35 @@ class NixlConnectorWorker:
             )
             return self.tp_size // remote_tp_size
 
+        def block_size_ratio(
+            self,
+            remote_block_size: int,
+        ) -> float:
+            """
+            Calculate the block size ratio between local and remote TP.
+            """
+            assert (
+                self.block_size % remote_block_size == 0
+                or remote_block_size % self.block_size == 0
+            ), (
+                f"Local block size {self.block_size} is not divisible "
+                f"by remote block size {remote_block_size} or vice versa."
+            )
+            return remote_block_size / self.block_size
+
         def tp_ratio_from_engine_id(
             self,
             remote_engine_id: EngineId,
         ) -> int:
             remote_tp_size = self.remote_tp_size[remote_engine_id]
             return self.tp_ratio(remote_tp_size)
+
+        def block_size_ratio_from_engine_id(
+            self,
+            remote_engine_id: EngineId,
+        ) -> float:
+            remote_block_size = self.remote_block_size[remote_engine_id]
+            return self.block_size_ratio(remote_block_size)
 
         def is_kv_replicated(self, engine_id: EngineId) -> bool:
             """
@@ -823,7 +848,6 @@ class NixlConnectorWorker:
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
         self.dst_num_blocks: dict[EngineId, int] = {}
-        self.dst_block_size_ratio: dict[EngineId, float] = {}
         self._registered_descs: list[Any] = []
 
         # In progress transfers.
@@ -880,6 +904,7 @@ class NixlConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
+        self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
@@ -891,6 +916,8 @@ class NixlConnectorWorker:
             remote_tp_size=self._tp_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            block_size=self.block_size,
+            remote_block_size=self._block_size,
         )
 
     def _nixl_handshake(
@@ -939,11 +966,11 @@ class NixlConnectorWorker:
                 )
 
             # Register Remote agent.
-            remote_agent_name = self.add_remote_agent(
-                metadata, p_remote_rank, remote_tp_size
-            )
             assert metadata.block_size <= self.block_size, (
                 "nP > nD is not supported yet."
+            )
+            remote_agent_name = self.add_remote_agent(
+                metadata, p_remote_rank, remote_tp_size
             )
             if metadata.block_size < self.block_size:
                 # when prefill with small block_size, we need to init a
@@ -1302,6 +1329,8 @@ class NixlConnectorWorker:
         ### Register remote agent metadata
         if engine_id not in self._tp_size:
             self._tp_size[engine_id] = remote_tp_size
+        if engine_id not in self._block_size:
+            self._block_size[engine_id] = nixl_agent_meta.block_size
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -1319,9 +1348,7 @@ class NixlConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
-        remote_block_size = nixl_agent_meta.block_size
-        block_size_ratio = remote_block_size / self.block_size
-        self.dst_block_size_ratio[engine_id] = block_size_ratio
+        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(engine_id)
 
         # when block_size_ratio > 1, one prefill block is n decode_block
         # loop n times of decode block_len to match to prefill
@@ -1410,6 +1437,9 @@ class NixlConnectorWorker:
         assert nixl_agent_meta.attn_backend_name == self.backend_name
 
         tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
+        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
+            remote_engine_id
+        )
         assert tp_ratio > 0, "Decode TP cannot be smaller than prefill TP"
         assert not self._use_pallas or tp_ratio == 1, (
             "TPU (pallas_v1) DOES NOT support heterogeneous TP yet."
@@ -1438,7 +1468,6 @@ class NixlConnectorWorker:
 
         # Block len can only vary across layers when using MLA.
         remote_block_len = nixl_agent_meta.block_lens[0]
-        block_size_ratio = nixl_agent_meta.block_size / self.block_size
         if self.use_mla or self.kv_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
             for i in range(len(self.block_len_per_layer)):
@@ -1573,7 +1602,6 @@ class NixlConnectorWorker:
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
             if len(block_ids_list) == 0:
                 continue
-            assert block_size_ratio < 1, "nP > nD is not supported yet."
             if block_size_ratio < 1:
                 fn = _process_local_gt_remote
                 block_ids_list = [
@@ -1632,7 +1660,9 @@ class NixlConnectorWorker:
                 block_ids_to_permute += meta.local_block_ids
 
             # post processing for heteroblocksize
-            block_size_ratio = self.dst_block_size_ratio[meta.remote_engine_id]
+            block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
+                meta.remote_engine_id
+            )
             if block_size_ratio not in block_ids_for_blocksize_post_process:
                 block_ids_for_blocksize_post_process[block_size_ratio] = []
             if block_size_ratio != 1 and self.kv_cache_layout == "HND":
@@ -1808,7 +1838,7 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
-        block_size_ratio = self.dst_block_size_ratio[dst_engine_id]
+        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         block_size_ratio_inv = None
         if block_size_ratio < 1:
             block_size_ratio_inv = int(1 / block_size_ratio)
