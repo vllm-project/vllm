@@ -168,12 +168,6 @@ class ModelConfig:
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    rope_scaling: dict[str, Any] = field(default_factory=dict)
-    """RoPE scaling configuration. For example,
-    `{"rope_type":"dynamic","factor":2.0}`."""
-    rope_theta: float | None = None
-    """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
-    theta improves the performance of the scaled model."""
     tokenizer_revision: str | None = None
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
@@ -338,8 +332,6 @@ class ModelConfig:
         factors.append(self.generation_config)
         factors.append(self.model_impl)
         factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
         factors.append(self.enable_prompt_embeds)
 
@@ -480,25 +472,6 @@ class ModelConfig:
                 else:
                     hf_overrides_kw[key] = value
             hf_overrides_fn = None
-
-        if self.rope_scaling:
-            hf_override: dict[str, Any] = {"rope_scaling": self.rope_scaling}
-            hf_overrides_kw.update(hf_override)
-            hf_overrides_str = json.dumps(hf_overrides_kw)
-            msg = (
-                "`--rope-scaling` will be removed in a future release. "
-                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`"
-            )
-            warnings.warn(DeprecationWarning(msg), stacklevel=2)
-        if self.rope_theta is not None:
-            hf_override = {"rope_theta": self.rope_theta}
-            hf_overrides_kw.update(hf_override)
-            hf_overrides_str = json.dumps(hf_overrides_kw)
-            msg = (
-                "`--rope-theta` will be removed in a future release. "
-                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`"
-            )
-            warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
