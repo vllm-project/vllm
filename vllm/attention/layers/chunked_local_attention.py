@@ -5,7 +5,6 @@ from typing import ClassVar
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import AttentionBackend, AttentionMetadata
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
@@ -78,17 +77,12 @@ class ChunkedLocalAttention(Attention):
             kv_cache_dtype = "auto"
             block_size = 16
 
-        if envs.VLLM_USE_V1:
-            underlying_attn_backend = get_attn_backend(
-                head_size, dtype, kv_cache_dtype, block_size
-            )
-
-            attn_backend = create_chunked_local_attention_backend(
-                underlying_attn_backend, attention_chunk_size, block_size
-            )
-        else:
-            # in v0 the local attention is handled inside the backends
-            attn_backend = None
+        underlying_attn_backend = get_attn_backend(
+            head_size, dtype, kv_cache_dtype, block_size
+        )
+        attn_backend = create_chunked_local_attention_backend(
+            underlying_attn_backend, attention_chunk_size, block_size
+        )
 
         super().__init__(
             num_heads=num_heads,

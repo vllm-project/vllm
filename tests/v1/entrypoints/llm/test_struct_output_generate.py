@@ -868,11 +868,8 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
 
 @pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
 def test_structured_output_with_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
 ):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
         guided_decoding_backend=guided_decoding_backend,
