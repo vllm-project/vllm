@@ -4,11 +4,9 @@
 from collections.abc import Sequence
 
 from vllm.entrypoints.openai.protocol import DeltaMessage
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
-@ReasoningParserManager.register_module("deepseek_r1")
 class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for DeepSeek R1 model.

@@ -9,7 +9,7 @@ from vllm.entrypoints.harmony_utils import parse_chat_output
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -57,7 +57,6 @@ def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) 
     return new_tag
 
 
-@ReasoningParserManager.register_module("openai_gptoss")
 class GptOssReasoningParser(ReasoningParser):
     """
     Reasoning parser for GptOss model.

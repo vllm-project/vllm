@@ -711,7 +711,7 @@ class EngineArgs:
         structured_outputs_group.add_argument(
             "--reasoning-parser",
             # This choice is a special case because it's not static
-            choices=list(ReasoningParserManager.reasoning_parsers),
+            choices=list(ReasoningParserManager.list_registered()),
             **structured_outputs_kwargs["reasoning_parser"],
         )
         # Deprecated guided decoding arguments

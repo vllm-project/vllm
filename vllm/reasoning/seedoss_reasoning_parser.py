@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
+
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
-@ReasoningParserManager.register_module("seed_oss")
 class SeedOSSReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for SeedOSS model.

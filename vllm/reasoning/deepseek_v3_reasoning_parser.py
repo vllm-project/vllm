@@ -10,7 +10,6 @@ from vllm.logger import init_logger
 from vllm.reasoning import (
     DeepSeekR1ReasoningParser,
     ReasoningParser,
-    ReasoningParserManager,
 )
 
 from .identity_reasoning_parser import IdentityReasoningParser
@@ -18,7 +17,6 @@ from .identity_reasoning_parser import IdentityReasoningParser
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("deepseek_v3")
 class DeepSeekV3ReasoningParser(ReasoningParser):
     """
     V3 parser that delegates to either DeepSeekR1ReasoningParser or
