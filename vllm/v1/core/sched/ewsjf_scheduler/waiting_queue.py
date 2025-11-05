@@ -130,12 +130,6 @@ class WaitingQueue:
         if next_queue is not None:
             upper = min(next_queue.low_boundary - 1, upper)
 
-        # Ensure minimum range
-        if upper - lower < prev_range:
-            half_range = prev_range // 2
-            lower = max(0, length - half_range)
-            upper = lower + prev_range
-
         return self._create_queue((lower, upper))
 
     def _create_queue(self, boundaries: Tuple[int, int], removable: bool = True) -> QueueInfo:
