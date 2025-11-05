@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 
 import torch
+from tqdm import tqdm
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -510,6 +511,7 @@ def main(args):
         step_interval=args.eplb_step_interval,
         num_redundant_experts=args.num_redundant_experts,
         log_balancedness=True,
+        log_stats_interval=32,
     )
     # Create LLM
     logger.info("\nInitializing LLM with EPLB...")
@@ -520,7 +522,7 @@ def main(args):
         enable_eplb=True,
         trust_remote_code=True,
         max_model_len=args.max_len,
-        gpu_memory_utilization=0.88,
+        gpu_memory_utilization=0.93,
         enforce_eager=True,
         eplb_config=eplb_config,
     )
@@ -591,13 +593,13 @@ def main(args):
     batch_size = args.batch_size
     num_batches = (len(prompts) + batch_size - 1) // batch_size
 
-    for batch_idx in range(num_batches):
+    for batch_idx in tqdm(range(num_batches)):
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(prompts))
         batch_prompts = prompts[start_idx:end_idx]
 
         # Generate
-        llm.generate(batch_prompts, sampling_params)
+        llm.generate(batch_prompts, sampling_params, use_tqdm=False)
 
         # Check current step
         current_stats = get_eplb_stats(llm)
