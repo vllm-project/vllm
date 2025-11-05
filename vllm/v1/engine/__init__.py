@@ -124,6 +124,9 @@ class EngineCoreOutput(
 
     # Additional outputs from EngineCore that can be propagated back to client.
     additional_outputs: dict[str, Any] | None = None
+    # The number of NaNs in logits.
+    # A value greater than 0 indicates that the output is corrupted.
+    num_nans_in_logits: int = 0
 
     @property
     def finished(self) -> bool:
