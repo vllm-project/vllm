@@ -79,7 +79,6 @@ from pydantic import (
     model_validator,
 )
 
-from vllm import envs
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
 from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
 from vllm.logger import init_logger
@@ -475,16 +474,12 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
     @model_validator(mode="before")
@@ -946,10 +941,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
                 raise ValueError("`prompt_logprobs` must be a positive value or -1.")
-            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
-                )
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0 and top_logprobs != -1:
                 raise ValueError("`top_logprobs` must be a positive value or -1.")
@@ -1083,16 +1074,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
 
@@ -1449,10 +1436,6 @@ class CompletionRequest(OpenAIBaseModel):
 
             if prompt_logprobs < 0 and prompt_logprobs != -1:
                 raise ValueError("`prompt_logprobs` must be a positive value or -1.")
-            if prompt_logprobs == -1 and not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "`prompt_logprobs=-1` is only supported with vLLM engine V1."
-                )
         if (logprobs := data.get("logprobs")) is not None and logprobs < 0:
             raise ValueError("`logprobs` must be a positive value.")
 
@@ -1487,16 +1470,12 @@ class CompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_cache_salt_support(cls, data):
-        if data.get("cache_salt") is not None:
-            if not envs.VLLM_USE_V1:
-                raise ValueError(
-                    "Parameter 'cache_salt' is not supported with "
-                    "this instance of vLLM, which uses engine V0."
-                )
-            if not isinstance(data["cache_salt"], str) or not data["cache_salt"]:
-                raise ValueError(
-                    "Parameter 'cache_salt' must be a non-empty string if provided."
-                )
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise ValueError(
+                "Parameter 'cache_salt' must be a non-empty string if provided."
+            )
         return data
 
 
