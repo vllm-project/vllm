@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import AutoConfig, BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor, Qwen2VLProcessor
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig,
@@ -462,6 +462,12 @@ class Qwen2VisionAttention(nn.Module):
             ).contiguous()
         elif self.attn_backend == _Backend.TORCH_SDPA:
             # Execute attention entry by entry for speed & less VRAM.
+            from vllm.platforms import current_platform
+
+            if current_platform.is_rocm():
+                q = q.contiguous()
+                k = k.contiguous()
+                v = v.contiguous()
             outputs = []
             for i in range(1, len(cu_seqlens)):
                 start_idx = cu_seqlens[i - 1]
@@ -783,10 +789,7 @@ class Qwen2VisionTransformer(nn.Module):
         self, cu_seqlens: torch.Tensor
     ) -> tuple[int | None, list[int] | None]:
         max_seqlen, seqlens = None, None
-        if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         elif self.attn_backend == _Backend.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
@@ -1207,6 +1210,8 @@ class Qwen2VLMultiModalProcessor(BaseMultiModalProcessor[Qwen2VLProcessingInfo])
 class Qwen2VLForConditionalGeneration(
     nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, SupportsMRoPE
 ):
+    merge_by_field_config = True
+
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -1400,24 +1405,6 @@ class Qwen2VLForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-    def _validate_and_reshape_mm_tensor(
-        self, mm_input: object, name: str
-    ) -> torch.Tensor:
-        if not isinstance(mm_input, (torch.Tensor, list)):
-            raise ValueError(f"Incorrect type of {name}. Got type: {type(mm_input)}")
-        if isinstance(mm_input, torch.Tensor):
-            if mm_input.ndim == 2:
-                return mm_input
-            if mm_input.ndim != 3:
-                raise ValueError(
-                    f"{name} should be 2D or batched 3D tensor. "
-                    f"Got ndim: {mm_input.ndim} "
-                    f"(shape={mm_input.shape})"
-                )
-            return mm_input.reshape(-1, mm_input.shape[-1])
-        else:
-            return torch.concat(mm_input)
-
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Qwen2VLImageInputs | None:
@@ -1429,13 +1416,6 @@ class Qwen2VLForConditionalGeneration(
             return None
 
         if pixel_values is not None:
-            pixel_values = self._validate_and_reshape_mm_tensor(
-                pixel_values, "image pixel values"
-            )
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw"
-            )
-
             return Qwen2VLImagePixelInputs(
                 type="pixel_values",
                 pixel_values=pixel_values,
@@ -1443,13 +1423,6 @@ class Qwen2VLForConditionalGeneration(
             )
 
         if image_embeds is not None:
-            image_embeds = self._validate_and_reshape_mm_tensor(
-                image_embeds, "image embeds"
-            )
-            image_grid_thw = self._validate_and_reshape_mm_tensor(
-                image_grid_thw, "image grid_thw"
-            )
-
             return Qwen2VLImageEmbeddingInputs(
                 type="image_embeds",
                 image_embeds=image_embeds,
@@ -1467,13 +1440,6 @@ class Qwen2VLForConditionalGeneration(
             return None
 
         if pixel_values_videos is not None:
-            pixel_values_videos = self._validate_and_reshape_mm_tensor(
-                pixel_values_videos, "video pixel values"
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw"
-            )
-
             return Qwen2VLVideoPixelInputs(
                 type="pixel_values_videos",
                 pixel_values_videos=pixel_values_videos,
@@ -1481,13 +1447,6 @@ class Qwen2VLForConditionalGeneration(
             )
 
         if video_embeds is not None:
-            video_embeds = self._validate_and_reshape_mm_tensor(
-                video_embeds, "video embeds"
-            )
-            video_grid_thw = self._validate_and_reshape_mm_tensor(
-                video_grid_thw, "video grid_thw"
-            )
-
             return Qwen2VLVideoEmbeddingInputs(
                 type="video_embeds",
                 video_embeds=video_embeds,
@@ -1692,9 +1651,7 @@ class Tarsier2Processor(Qwen2VLProcessor):
 class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
     def get_hf_config(self) -> Qwen2VLConfig:
         model_path = self.ctx.model_config.model
-        original_config = AutoConfig.from_pretrained(model_path)
-        config_dict = original_config.to_dict()
-        correct_config = Qwen2VLConfig.from_dict(config_dict)
+        correct_config = Qwen2VLConfig.from_pretrained(model_path)
 
         return correct_config
 

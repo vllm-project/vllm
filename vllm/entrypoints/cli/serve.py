@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_se
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.engine.core import EngineCoreProc
@@ -88,9 +88,6 @@ def run_headless(args: argparse.Namespace):
         usage_context=usage_context, headless=True
     )
 
-    if not envs.VLLM_USE_V1:
-        raise ValueError("Headless mode is only supported for V1")
-
     if engine_args.data_parallel_hybrid_lb:
         raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
 
@@ -156,15 +153,10 @@ def run_multi_api_server(args: argparse.Namespace):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    if num_api_servers > 1:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("api_server_count > 1 is only supported for V1")
-
-        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-            raise ValueError(
-                "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
-                "with api_server_count > 1"
-            )
+    if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        raise ValueError(
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used with api_server_count > 1"
+        )
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats

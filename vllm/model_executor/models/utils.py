@@ -12,7 +12,6 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -22,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
@@ -576,11 +575,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    if envs.VLLM_USE_V1:
-        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-        uva_offloading = True
-    else:
-        uva_offloading = False
+    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+    uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed

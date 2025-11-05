@@ -39,6 +39,7 @@ from .interfaces import (
     is_attention_free,
     is_hybrid,
     supports_cross_encoding,
+    supports_mamba_prefix_caching,
     supports_multimodal,
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
@@ -117,6 +118,7 @@ _TEXT_GENERATION_MODELS = {
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
+    "KimiLinearForCausalLM": ("kimi_linear", "KimiLinearForCausalLM"),  # noqa: E501
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -131,6 +133,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
+    "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
@@ -145,6 +148,9 @@ _TEXT_GENERATION_MODELS = {
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
+    "OuroForCausalLM": ("ouro", "OuroForCausalLM"),
+    "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
+    "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
@@ -336,6 +342,10 @@ _MULTIMODAL_MODELS = {
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
+    "PaddleOCRVLForConditionalGeneration": (
+        "paddleocr_vl",
+        "PaddleOCRVLForConditionalGeneration",
+    ),
     "PaliGemmaForConditionalGeneration": (
         "paligemma",
         "PaliGemmaForConditionalGeneration",
@@ -398,6 +408,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),
     "MedusaModel": ("medusa", "Medusa"),
+    "OpenPanguMTPModel": ("openpangu_mtp", "OpenPanguMTP"),
     "Qwen3NextMTP": ("qwen3_next_mtp", "Qwen3NextMTP"),
     # Temporarily disabled.
     # # TODO(woosuk): Re-enable this once the MLP Speculator is supported in V1.
@@ -495,6 +506,7 @@ class _ModelInfo:
     is_attention_free: bool
     is_hybrid: bool
     has_noops: bool
+    supports_mamba_prefix_caching: bool
     supports_transcription: bool
     supports_transcription_only: bool
 
@@ -517,6 +529,7 @@ class _ModelInfo:
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
+            supports_mamba_prefix_caching=supports_mamba_prefix_caching(model),
             supports_transcription=supports_transcription(model),
             supports_transcription_only=(
                 supports_transcription(model) and model.supports_transcription_only
