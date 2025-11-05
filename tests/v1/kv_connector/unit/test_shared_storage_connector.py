@@ -132,7 +132,6 @@ def test_shared_storage_connector_hashes(tmp_path):
         enforce_eager=True,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
-        disable_hybrid_kv_cache_manager=True,
     )
 
     # don't put this import at the top level
