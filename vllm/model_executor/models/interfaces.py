@@ -81,6 +81,11 @@ class SupportsMultiModal(Protocol):
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
     """
 
+    multimodal_cpu_fields: ClassVar[set[str] | None] = None
+    """
+    A set indicating CPU-only multimodal fields.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
