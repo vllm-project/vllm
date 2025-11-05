@@ -25,16 +25,13 @@ class SharedFusedMoE(FusedMoE):
         super().__init__(**kwargs)
         self._shared_experts = shared_experts
 
-        # Disable shared expert overlap if EP is disabled or we are not using
+        # Disable shared expert overlap if we are not using
         # flashinfer + DP since there is nothing to be gained in this case.
         # Disabling the overlap optimization also prevents the shared experts
         # from being hidden from torch.compile.
         self.use_overlapped = (
             use_overlapped
-            and not (
-                self.use_ep
-                or (self.use_flashinfer_cutlass_kernels and self.dp_size > 1)
-            )
+            and not (self.use_flashinfer_cutlass_kernels and self.dp_size > 1)
             and self._shared_experts is not None
         )
 
@@ -81,4 +78,12 @@ class SharedFusedMoE(FusedMoE):
                 hidden_states=hidden_states,
                 router_logits=router_logits,
             )
+            # ensure early TP reduction of shared expert outputs when required
+            if (
+                shared_out is not None
+                and self.reduce_results
+                and self.tp_size > 1
+                and self.must_reduce_shared_expert_outputs()
+            ):
+                shared_out = tensor_model_parallel_all_reduce(shared_out)
         return shared_out, fused_out
