@@ -3,6 +3,9 @@
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
+from typing import cast
+
+import vllm.envs as envs
 
 
 # We use dataclass for now because it is used for
@@ -41,6 +44,7 @@ class FlattenLogprobs:
 
     def __init__(self, for_prompt: bool) -> None:
         # The start indices of logprobs for each position.
+        # NOTE: logprob of first prompt token is None.
         self.start_indices_per_position: list[int] = [0, 0] if for_prompt else [0]
 
         # Flatten Logprob information for (each position, rank).
@@ -96,3 +100,69 @@ class FlattenLogprobs:
 PromptLogprobs = FlattenLogprobs | list[dict[int, Logprob] | None]
 # {token_id -> logprob} for each sequence group.
 SampleLogprobs = FlattenLogprobs | list[dict[int, Logprob]]
+
+
+def create_prompt_logprobs() -> PromptLogprobs:
+    """Creates a container to store prompt logprobs for a request"""
+    # NOTE: logprob of first prompt token is None.
+    return FlattenLogprobs(for_prompt=True) if envs.VLLM_FLATTEN_LOGPROBS else [None]
+
+
+def create_sample_logprobs() -> SampleLogprobs:
+    """Creates a container to store decode logprobs for a request"""
+    return FlattenLogprobs(for_prompt=False) if envs.VLLM_FLATTEN_LOGPROBS else []
+
+
+def append_logprobs_for_next_position(
+    request_logprobs: PromptLogprobs | SampleLogprobs,
+    logprobs: list[float],
+    logprob_token_ids: list[int],
+    decoded_tokens: Iterable[str | None],
+    rank: int,
+    num_logprobs: int,
+) -> None:
+    """Appends logprobs for the next position.
+
+    Args:
+        request_logprobs: target request-level logprobs container
+        logprobs: list of log probabilities
+        logprob_token_ids: list of top token ids
+        decoded_tokens: list of decoded top tokens
+        rank: rank of the sampled token
+        num_logprobs: number of logprobs requested by the user
+                      (in addition to sampled logprob)
+    """
+    if num_logprobs == -1:
+        num_logprobs = len(logprobs)
+    # We do not need a special case for the sampled token
+    # being in the topk, since inserting duplicated data
+    # into a dictionary twice is the same as doing it once.
+    topk_ranks = range(1, num_logprobs + 1)
+    ranks = itertools.chain((rank,), topk_ranks)
+
+    if envs.VLLM_FLATTEN_LOGPROBS:
+        request_logprobs = cast(request_logprobs, FlattenLogprobs)
+        for token_id, logprob, rank, token in zip(
+            logprob_token_ids, logprobs, ranks, decoded_tokens
+        ):
+            request_logprobs.logprobs.append(logprob)
+            request_logprobs.token_ids.append(token_id)
+            request_logprobs.ranks.append(rank)
+            request_logprobs.decoded_tokens.append(token)
+
+        request_logprobs.start_indices_per_position.append(
+            len(request_logprobs.logprobs)
+        )
+    else:
+        cast(request_logprobs, list).append(
+            {
+                token_id: Logprob(
+                    logprob=logprob,
+                    rank=rank,
+                    decoded_token=token,
+                )
+                for token_id, logprob, rank, token in zip(
+                    logprob_token_ids, logprobs, ranks, decoded_tokens
+                )
+            }
+        )
