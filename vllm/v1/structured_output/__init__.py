@@ -67,6 +67,15 @@ class StructuredOutputManager:
             reasoning_parser = (
                 self.vllm_config.structured_outputs_config.reasoning_parser
             )
+            reasoning_parser_plugin = (
+                self.vllm_config.structured_outputs_config.reasoning_parser_plugin
+            )
+            if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+                ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
             if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_parser
