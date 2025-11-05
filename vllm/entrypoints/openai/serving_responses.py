@@ -68,6 +68,7 @@ from vllm.entrypoints.harmony_utils import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
+    get_tool_names_from_messages,
     get_user_message,
     has_custom_tools,
     parse_output_message,
@@ -401,7 +402,7 @@ class OpenAIServingResponses(OpenAIServing):
                         sampling_params.structured_outputs.structural_tag = (
                             reasoning_parser.prepare_structured_tag(
                                 sampling_params.structured_outputs.structural_tag,
-                                self.tool_server,
+                                get_tool_names_from_messages(messages),
                             )
                         )
                 generator = self._generate_with_builtin_tools(
