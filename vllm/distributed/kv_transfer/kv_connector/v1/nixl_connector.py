@@ -2026,13 +2026,11 @@ class NixlConnectorWorker:
         num_blocks = self.dst_num_blocks[engine_id]
         if block_size_ratio_inv is not None:
             num_blocks = num_blocks * block_size_ratio_inv
-        num_blocks = np.full((self.num_regions), num_blocks)
 
         # Compute the desc ids for each block.
+        region_ids = region_ids[:, None]
         block_ids = np.array(block_ids)[None, :]
-        region_nblocks = region_ids * num_blocks
-        region_nblocks = region_nblocks[:, None]
-        descs_ids = region_nblocks + block_ids
+        descs_ids = region_ids * num_blocks + block_ids
         return descs_ids.flatten()
 
     def get_backend_aware_kv_block_len(self, layer_idx: int):
