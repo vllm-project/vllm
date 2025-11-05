@@ -68,6 +68,7 @@ from vllm.transformers_utils.tokenizers import (
     validate_request_params,
 )
 from vllm.utils.collection_utils import as_list
+from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -106,6 +107,9 @@ class OpenAIServingChat(OpenAIServing):
         self.chat_template_content_format: Final = chat_template_content_format
         self.trust_request_chat_template = trust_request_chat_template
         self.enable_log_outputs = enable_log_outputs
+
+        # set up logits processors
+        self.logits_processors = self.model_config.logits_processors
 
         # set up reasoning parser
         self.reasoning_parser = self._get_reasoning_parser(
@@ -290,6 +294,10 @@ class OpenAIServingChat(OpenAIServing):
                         max_tokens,
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
+                    )
+                    validate_logits_processors_parameters(
+                        self.logits_processors,
+                        sampling_params,
                     )
 
                 self._log_inputs(

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import importlib.metadata
+import os
 import threading
 from collections.abc import Callable, Collection
 from functools import lru_cache
@@ -66,6 +67,33 @@ def set_default_torch_num_threads(num_threads: int):
     torch.set_num_threads(num_threads)
     yield
     torch.set_num_threads(old_num_threads)
+
+
+@contextlib.contextmanager
+def guard_cuda_initialization():
+    """Avoid unexpected CUDA initialization."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        yield
+        return
+
+    had_key = "CUDA_VISIBLE_DEVICES" in os.environ
+    old_value = os.environ.get("CUDA_VISIBLE_DEVICES")
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+    try:
+        yield
+    except Exception as e:
+        if "No CUDA GPUs are available" in str(e):
+            err_msg = "CUDA initialization is blocked."
+        else:
+            err_msg = str(e)
+        raise RuntimeError(err_msg) from e
+    finally:
+        if had_key:
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
+        else:
+            os.environ.pop("CUDA_VISIBLE_DEVICES")
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
