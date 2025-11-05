@@ -48,8 +48,8 @@ steps:
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
-- label: Async Engine, Inputs, Utils, Worker Test # 36min
-  timeout_in_minutes: 50
+- label: Async Engine, Inputs, Utils, Worker Test # 10min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -616,9 +616,9 @@ steps:
   - uv pip install --system torchao==0.13.0
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
-- label: LM Eval Small Models # 53min
-  timeout_in_minutes: 75
-  mirror_hardwares: [amdexperimental]
+- label: LM Eval Small Models # 15min
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
   source_file_dependencies:
@@ -627,8 +627,8 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
-- label: OpenAI API correctness # 22min
-  timeout_in_minutes: 30
+- label: OpenAI API correctness # 10min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -859,10 +859,10 @@ steps:
     - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
     - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model  # Otherwise, mp_method="spawn" doesn't work
 
-- label: Multi-Modal Accuracy Eval (Small Models) # 50min
-  mirror_hardwares: [amdexperimental]
+- label: Multi-Modal Accuracy Eval (Small Models) # 10min
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  timeout_in_minutes: 70
+  timeout_in_minutes: 15
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - vllm/multimodal/
