@@ -11,7 +11,7 @@ from typing import Optional, Union, cast
 import numpy as np
 import torch
 import torch.nn.functional as F
-from multimodal.inputs import NestedTensors
+from vllm.multimodal.inputs import NestedTensors
 from torch import nn
 from transformers import AutoConfig, AutoProcessor, ProcessorMixin
 from transformers.models.whisper.modeling_whisper import WhisperModel
@@ -19,8 +19,6 @@ from transformers.processing_utils import ProcessingKwargs
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.utils import PlaceholderModule
-
-from ...transformers_utils.tokenizers import Glm4Tokenizer
 
 try:
     import librosa
@@ -262,6 +260,8 @@ class ExtraTokens:
 
 
 def instantiate_extra_tokens(tokenizer):
+    assert tokenizer is not None, (
+        "tokenizer is None, you must set the text tokenizer manually.")
     if hasattr(tokenizer, "special_tokens"):
         map_fn = lambda x: tokenizer.special_tokens[x]
     elif hasattr(tokenizer, "convert_tokens_to_ids"):
@@ -304,7 +304,7 @@ class KimiAContent:
 
         # Storage raw audio consists of sampling rate and raw audio data
         self.audios: list[np.ndarray] = []
-        self.continuous_feature: list[torch.Tensor] = []
+        self.continuous_feature: list[np.ndarray] = []
 
     def audio_append(
         self,
@@ -440,7 +440,7 @@ class KimiAudioProcessor(ProcessorMixin):
         self,
         kimia_text_audiodelaytokens=5,
         kimia_token_offset=152064,
-        audio_tokenizer=None,
+        audio_tokenizer="THUDM/glm-4-voice-tokenizer",
         text_tokenizer=None,
         chat_template=None,
     ):
@@ -450,8 +450,12 @@ class KimiAudioProcessor(ProcessorMixin):
         self.extra_tokens = instantiate_extra_tokens(self.text_tokenizer)
         self.kimia_text_audiodelaytokens = kimia_text_audiodelaytokens
         self.kimia_token_offset = kimia_token_offset
+        self.pad_token_id = self.extra_tokens.kimia_text_blank
         # Just for simple distinguish
         self.audio_token_id = -1
+        self._whisper_config = None
+        # Make sure no conflict with text tokenizer
+        self.audio_placeholder_id = self.text_tokenizer.vocab_size + 10
 
     def _tokenize_text(self, text: str) -> list[int]:
         if text is None:
@@ -472,14 +476,13 @@ class KimiAudioProcessor(ProcessorMixin):
     def _tokenize_audio(self, audio_path: str) -> list[int]:
         # handle audio placeholder here, using sequence
         # with same length as actual audio tensor
-        if self.audio_tokenizer is None:
-            self.audio_tokenizer = Glm4Tokenizer("THUDM/glm-4-voice-tokenizer")
-        if not hasattr(self, "whisper_model_config"):
-            self.whisper_model_config = AutoConfig.from_pretrained(
-                self.tokenizer_path)
+        if self._whisper_config is None:
+            self._whisper_config = AutoConfig.from_pretrained(
+                self.audio_tokenizer
+            )
 
         count = self.get_num_audio_tokens(audio_path,
-                                          self.whisper_model_config)
+                                          self._whisper_config)
         wav_tokens = torch.full((count, ),
                                 self.audio_token_id,
                                 dtype=torch.long)
@@ -497,9 +500,9 @@ class KimiAudioProcessor(ProcessorMixin):
         if model_config is None:
             raise ValueError("model_config for WhisperVQEncoder is None")
 
-        pooling_kernel_size = model_config.pooling_kernel_size or 1
-        conv1_stride = model_config.conv1.stride[0]
-        conv2_stride = model_config.conv2.stride[0]
+        pooling_kernel_size = getattr(model_config, "pooling_kernel_size", 4)
+        conv1_stride = getattr(model_config, "conv1.stride", [1])[0]
+        conv2_stride = getattr(model_config, "conv2.stride", [2])[0]
         total_downsample = conv1_stride * conv2_stride * pooling_kernel_size
 
         total_tokens = 0
@@ -514,17 +517,15 @@ class KimiAudioProcessor(ProcessorMixin):
 
         return total_tokens
 
-    def get_audio_waves(self, audio: Union[str, AUDIO_TYPE]) -> torch.Tensor:
-        if isinstance(wav, str):
-            wav = librosa.load(audio, sr=16000)[0]
-
-            wav_tensor = torch.tensor(wav).unsqueeze(0)[:, :]
-        elif isinstance(wav, AUDIO_TYPE):
-            wav_tensor = wav
+    def get_audio_waves(self, audio: Union[str, AUDIO_TYPE]) -> np.ndarray:
+        if isinstance(audio, str):
+            wav_array = librosa.load(audio, sr=16000)[0]
+        elif isinstance(audio, AUDIO_TYPE):
+            wav_array = audio
         else:
-            raise ValueError(f"Invalid wav type: {type(wav)}")
-        wav_tensor = cast(torch.Tensor, wav_tensor)
-        return wav_tensor
+            raise ValueError(f"Invalid wav type: {type(audio)}")
+        wav_array = cast(np.ndarray, wav_array)
+        return wav_array
 
     def tokenize_message(
         self,
@@ -648,7 +649,7 @@ class KimiAudioProcessor(ProcessorMixin):
         audio_input_ids, text_input_ids, is_continuous_mask, _, _ = (
             messages.to_tensor())
         audio_input_items: list[np.ndarray] = messages.audios
-        audio_features: list[torch.Tensor] = messages.continuous_feature
+        audio_features: list[np.ndarray] = messages.continuous_feature
 
         # Consturct text prompt ids, mm_data and mm_processor_kwargs
         text_input_ids = text_input_ids.cpu().tolist()
@@ -657,7 +658,7 @@ class KimiAudioProcessor(ProcessorMixin):
             audio_input_ids=audio_input_ids.cpu().tolist(),
             text_input_ids=text_input_ids,
             is_continuous_mask=is_continuous_mask.cpu().tolist(),
-            whisper_input_feature=[f.cpu().numpy() for f in audio_features],
+            whisper_input_feature=[torch.as_tensor(f) for f in audio_features],
         )
 
         return {
@@ -777,11 +778,10 @@ class KimiAudioProcessor(ProcessorMixin):
                     end_idx = idx
                 if (start_idx is not None and end_idx is not None
                         and start_idx < end_idx):
-                    token_list = audio_list[start_idx + 1:end_idx]
-                    wav_tokens = self.audio_tokenizer.tokenize(
-                        speech=token_list)
-                    wav_tokens = wav_tokens + self.kimia_token_offset
-                    wav_tokens_list = wav_tokens.squeeze(0).cpu().tolist()
+                    assert hasattr(self, "audio_placeholder_id"), (
+                        "audio_placeholder_id is not set in KimiAudioProcessor"
+                    )
+                    wav_tokens_list = [self.audio_placeholder_id]
                     audio_tokens = (audio_list[:start_idx] + wav_tokens_list +
                                     audio_list[end_idx:])
                     break

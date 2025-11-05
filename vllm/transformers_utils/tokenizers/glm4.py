@@ -36,7 +36,7 @@ from transformers.utils import logging
 
 from vllm.utils import PlaceholderModule
 
-from ..configs import WhisperVQConfig
+from vllm.transformers_utils.configs import WhisperVQConfig
 
 try:
     import librosa

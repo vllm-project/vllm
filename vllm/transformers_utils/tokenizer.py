@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Union
 
 import huggingface_hub
-from tokenizers.tiktoken import TikTokenTokenizer
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
-from vllm.transformers_utils.tokenizers import MistralTokenizer
+from vllm.transformers_utils.tokenizers import (MistralTokenizer, 
+                                                TikTokenTokenizer)
 from vllm.transformers_utils.utils import check_gguf_file
 
 if TYPE_CHECKING:

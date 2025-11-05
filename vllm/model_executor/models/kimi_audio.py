@@ -8,16 +8,17 @@ from typing import Optional, TypedDict, Union, cast
 import numpy as np
 import torch
 import torch.nn as nn
-from mistral_common.protocol.instruct.messages import Audio, RawAudio
+from mistral_common.tokens.tokenizers.audio import Audio
+from mistral_common.protocol.instruct.messages import  RawAudio
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.inputs.data import PromptType
+from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.models.whisper import WhisperForConditionalGeneration
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
                                     MultiModalKwargs, NestedTensors)
@@ -31,12 +32,21 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import cached_tokenizer_from_config
 
-from ...transformers_utils.configs import KimiAudioConfig
-from ...transformers_utils.processors import KimiAudioProcessor, WhisperEncoder
-from .interfaces import (MultiModalEmbeddings, SupportsMultiModal, SupportsPP,
-                         SupportsTranscription)
-from .moonaudio import MoonshotKimiaModel
-from .utils import AutoWeightsLoader, maybe_prefix
+from vllm.transformers_utils.configs import KimiAudioConfig
+from vllm.transformers_utils.processors import (KimiAudioProcessor, 
+                                                WhisperEncoder)
+from vllm.model_executor.models.interfaces import (MultiModalEmbeddings, 
+                        SupportsMultiModal, SupportsPP, SupportsTranscription)
+from vllm.model_executor.models.moonaudio import MoonshotKimiaModel
+from vllm.model_executor.models.utils import AutoWeightsLoader, maybe_prefix
+from vllm.transformers_utils.tokenizers import Glm4Tokenizer
+
+logger = init_logger(__name__)
+
+ISO639_1_SUPPORTED_LANGS = {
+    "zh": "Chinese",
+    "en": "English",
+}
 
 
 class KimiAudioMultiModalProjector(nn.Module):
@@ -128,23 +138,34 @@ class KimiAudioMultiModalProcessor(
         hf_processor_mm_kwargs: Mapping[str, object],
         out_mm_kwargs: MultiModalKwargs,
     ) -> Sequence[PromptUpdate]:
+        logger.info("Updating prompts...")
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        whisper_model_config = getattr(processor, "whisper_model_config", None)
-        audio_id = processor.audio_token_id
+        tokenizer = self.info.get_tokenizer()
+        audio_tokenizer = processor.audio_tokenizer
+        audio_placeholder_id = getattr(processor, "audio_placeholder_id", 
+                                 tokenizer.vocab_size + 10)
+        audio_token_offset = getattr(processor, "kimia_token_offset", 152064)
 
+        assert isinstance(audio_tokenizer, str), (
+            "audio_tokenizer should be a string path to the tokenizer model."
+        )
+        audio_tokenizer = Glm4Tokenizer(audio_tokenizer)
+
+        logger.info("Audio tokenizer initialized.")
         def get_replacement(item_idx: int):
             audios = mm_items.get_items("audio", AudioProcessorItems)
             audio = audios.get(item_idx)
 
-            nb_audio_tokens = processor.get_num_audio_tokens(
-                audio, whisper_model_config)
+            audio_tokens = audio_tokenizer.tokenize(speech=audio)
+            audio_tokens = audio_tokens.squeeze(0).cpu().tolist()
+            audio_tokens = [tok + audio_token_offset for tok in audio_tokens]
 
-            return [audio_id] * nb_audio_tokens
-
+            return audio_tokens
+        
         return [
             PromptReplacement(
                 modality="audio",
-                target="",  # Never match the prompt
+                target=[audio_placeholder_id],
                 replacement=get_replacement,
             ),
         ]
@@ -173,13 +194,14 @@ class KimiAudioMultiModalProcessor(
         return MultiModalDataParser(target_sr=16000)
 
 
-# TODO(HelloWorldU): Consider extends SupportsTranscription as well
 @MULTIMODAL_REGISTRY.register_processor(
     KimiAudioMultiModalProcessor,
     info=KimiAudioProcessingInfo,
     dummy_inputs=KimiAudioDummyInputsBuilder)
-class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
+class MoonshotKimiaForCausalLM(nn.Module, SupportsMultiModal,
                                         SupportsPP, SupportsTranscription):
+
+    supported_languages = ISO639_1_SUPPORTED_LANGS
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
@@ -190,6 +212,7 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        logger.info("Initializing MoonshotKimiaForCausalLM model...")
         model_config = vllm_config.model_config
         config: KimiAudioConfig = model_config.hf_config
         self.config = config
@@ -224,6 +247,7 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
+        logger.info("Init MoonshotKimiaForCausalLM model done.")
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
@@ -384,13 +408,10 @@ class KimiAudioForConditionalGeneration(nn.Module, SupportsMultiModal,
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-        **kwargs: object,
     ) -> Optional[torch.Tensor]:
         # TODO(HelloWorldU): Since currently only text logits
         # are supported, we can add multimodal logits in the future.
-        text_logits = self.logits_processor(self.lm_head, hidden_states,
-                                            sampling_metadata, **kwargs)
+        text_logits = self.logits_processor(self.lm_head, hidden_states)
         return text_logits
 
     @classmethod

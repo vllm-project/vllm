@@ -25,6 +25,9 @@ from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 @dataclass
 class CachedRequestState:
@@ -83,6 +86,7 @@ class InputBatch:
         is_pooling_model: bool = False,
         num_speculative_tokens: int = 0,
     ):
+        logger.info("Creating InputBatch")
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
@@ -95,6 +99,7 @@ class InputBatch:
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
 
+        logger.info(f"Start to create tensors, max_num_reqs: {max_num_reqs}, max_model_len: {max_model_len}")
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
         # This buffer is not directly transferred to the GPU, so it does not
@@ -105,10 +110,13 @@ class InputBatch:
             dtype=torch.int32,
             pin_memory=False,
         )
+        logger.info("token_ids_cpu_tensor is created.")
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
+        logger.info("token_ids_cpu is initialized.")
         self.is_token_ids = torch.zeros(
             (max_num_reqs, max_model_len), device="cpu", dtype=bool, pin_memory=False
         )
+        logger.info("is_token_ids are initialized.")
         # Store prompt embeddings per request to avoid OOM from large upfront
         # allocation if max_model_len is big.
         # Maps req_index -> tensor of shape (num_prompt_tokens, hidden_size)
@@ -124,6 +132,7 @@ class InputBatch:
         )
         self.num_computed_tokens_cpu = self.num_computed_tokens_cpu_tensor.numpy()
 
+        logger.info("num_computed_tokens_cpu is initialized.")
         # Block table.
         self.block_table = MultiGroupBlockTable(
             max_num_reqs=max_num_reqs,
@@ -135,6 +144,7 @@ class InputBatch:
             num_speculative_tokens=num_speculative_tokens,
         )
 
+        logger.info("block_table is initialized.")
         # Sampling-related.
         self.temperature = torch.empty(
             (max_num_reqs,), dtype=torch.float32, device=device
@@ -160,6 +170,7 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
 
+        logger.info("sampling params are initialized.")
         # IDs of requests which do not support spec decoding
         self.spec_decode_unsupported_reqs: set[str] = set()
 
@@ -252,6 +263,8 @@ class InputBatch:
         self.prev_sampled_token_ids: Optional[torch.Tensor] = None
         self.prev_sampled_token_ids_invalid_indices: Optional[set[int]] = None
         self.prev_req_id_to_index: Optional[dict[str, int]] = None
+
+        logger.info("Initialization done.")
 
     @property
     def req_ids(self) -> list[str]:

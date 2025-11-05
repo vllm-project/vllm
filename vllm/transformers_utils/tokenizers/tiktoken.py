@@ -22,6 +22,14 @@ class TikTokenTokenizer(PreTrainedTokenizer):
         self.tokenizer = tokenizer_
         self.model = tokenizer_.model
 
+        self.eos_id = None
+
+        # adapt to kimi-audio
+        if "<|im_kimia_text_eos|>" in self.tokenizer.special_tokens:
+            self.eos_id = self.tokenizer.special_tokens["<|im_kimia_text_eos|>"]
+
+        self.kimia_token_offset = kwargs.get("kimia_token_offset", 152064)
+
     @classmethod
     def from_pretrained(
         cls, path_or_repo_id: str, *, revision: Optional[str] = None
@@ -55,7 +63,7 @@ class TikTokenTokenizer(PreTrainedTokenizer):
 
     @property
     def eos_token_id(self) -> int:
-        return self.tokenizer.eos_id
+        return self.eos_id if self.eos_id is not None else self.tokenizer.eos_id
 
     @property
     def inv_vocab(self):
@@ -105,6 +113,13 @@ class TikTokenTokenizer(PreTrainedTokenizer):
     ) -> list[int]:
         raise NotImplementedError()
 
+    def decode(self, ids: Union[list[int], int], **kwargs) -> str:
+        assert self.kimia_token_offset, (
+            "kimia_token_offset must be set for TikTokenTokenizer." 
+        )
+        token_ids = [t for t in ids if t < self.kimia_token_offset]
+        return self.tokenizer.decode(token_ids, **kwargs)
+
     def _get_bytes_to_id_map(self) -> dict[bytes, int]:
         if hasattr(self, "_bytes_to_id"):
             return self._bytes_to_id
@@ -118,9 +133,6 @@ class TikTokenTokenizer(PreTrainedTokenizer):
                 continue
 
         return self._bytes_to_id
-
-    def decode(self, t: Sequence[int]) -> str:
-        raise NotImplementedError()
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
         special_tokens = set(self.all_special_tokens)

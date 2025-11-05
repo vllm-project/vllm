@@ -296,7 +296,7 @@ _MULTIMODAL_MODELS = {
         "KeyeVL1_5ForConditionalGeneration",
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
-    "KimiAudioForConditionalGeneration": ("kimi_audio", "KimiAudioForConditionalGeneration"),  # noqa: E501
+    "MoonshotKimiaForCausalLM": ("kimi_audio", "MoonshotKimiaForCausalLM"),  # noqa: E501
     "KimiVLForConditionalGeneration": ("kimi_vl", "KimiVLForConditionalGeneration"),  # noqa: E501
     "Llama_Nemotron_Nano_VL": ("nemotron_vl", "LlamaNemotronVLChatModel"),
     "Llama4ForConditionalGeneration": ("mllama4", "Llama4ForConditionalGeneration"),  # noqa: E501

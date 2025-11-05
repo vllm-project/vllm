@@ -62,11 +62,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from ...transformers_utils.configs import KimiAudioConfig
-from .qwen2 import Qwen2Attention
-from .utils import (LayerFn, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory,
-                    maybe_offload_to_cpu)
+from vllm.transformers_utils.configs import KimiAudioConfig
+from vllm.model_executor.models.qwen2 import Qwen2Attention
+from vllm.model_executor.models.utils import (LayerFn, PPMissingLayer, 
+            is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
+            maybe_offload_to_cpu)
 
 
 class MoonshotMLP(nn.Module):
