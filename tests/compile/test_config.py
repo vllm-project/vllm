@@ -4,6 +4,7 @@ import copy
 from contextlib import nullcontext
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
@@ -253,21 +254,21 @@ def test_resolve_operator_overload():
         "expected_max_size",
     ),
     [
-        (None, None, 1, False, 2048, True, 512),
+        (None, None, 1, False, 2048, True, 256),
         ([1, 2, 4], 4, 1, False, 2048, True, 4),
-        ([1, 2, 4], 8, 1, False, 2048, True, RuntimeError),
-        ([1, 256], None, 1, False, 2048, 256),
+        ([1, 2, 4], 8, 1, False, 2048, True, ValidationError),
+        ([1, 256], None, 1, False, 2048, True, 256),
+        ([1, 256], None, 1, False, 2048, False, 0),
         ([], None, 1, False, 2048, False, 0),
         (None, 0, 1, False, 2048, False, 0),
         # truncated to nearest multiple of 8 or 16
         (None, 257, 1, False, 2048, True, 256),
         ([1, 2, 4, 15], None, 1, False, 2048, True, 15),  # max from list
         ([1, 2, 4, 15], None, 2, True, 2048, True, 4),  # filtered out 15 due to SP
-        ([1, 2, 4, 15], None, 1, False, 8, True, 4),  # limited by the max_tokens
         # the list should contain at least 1 element when use cudagraph
-        ([], None, 1, False, 2048, True, RuntimeError),
+        ([], None, 1, False, 2048, True, ValidationError),
         # the max capturing size should be >= 1 when use cudagraph
-        (None, 0, 1, False, 2048, True, RuntimeError),
+        (None, 0, 1, False, 2048, True, ValidationError),
     ],
 )
 def test_cudagraph_sizes_post_init(
@@ -280,7 +281,7 @@ def test_cudagraph_sizes_post_init(
     expected_max_size,
 ):
     ctx = nullcontext()
-    if isinstance(expected_max_size, Exception):
+    if expected_max_size == ValidationError:
         ctx = pytest.raises(expected_max_size)
 
     cudagraph_mode = CUDAGraphMode.PIECEWISE if use_cudagraph else CUDAGraphMode.NONE
@@ -303,6 +304,7 @@ def test_cudagraph_sizes_post_init(
         )
         vllm_config = engine_args.create_engine_config()
 
-    assert (
-        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
-    )
+        assert (
+            vllm_config.compilation_config.max_cudagraph_capture_size
+            == expected_max_size
+        )
