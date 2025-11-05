@@ -1330,49 +1330,37 @@ def fused_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
-    # Map scoring function string to enum
-    scoring_func_map = {
-        "sigmoid": 1,  # SCORING_SIGMOID
-    }
-
     if scoring_func == "sigmoid":
-        # Use fully fused kernel path for sigmoid
-        # scores tensor contains raw logits
-        # bias contains e_score_correction_bias
-        # scoring_func=1 tells kernel to apply sigmoid + bias
-        scores_scratch = torch.empty_like(
-            gating_output
-        )  # Scratch space for intermediate results
+        # Fully fused kernel path for sigmoid
         topk_values, topk_indices = ops.grouped_topk(
             gating_output,  # raw logits
-            scores_scratch,  # scratch space
             num_expert_group,
             topk_group,
             topk,
             renormalize,
             routed_scaling_factor,
-            e_score_correction_bias,  # bias
-            scoring_func_map[scoring_func],  # scoring_func=1 for sigmoid
+            e_score_correction_bias,
+            1,  # scoring_func=1 for sigmoid
         )
     elif scoring_func == "softmax":
-        # Softmax path: apply softmax in Python, then use fused bias
+        # Apply softmax in Python, then use fused kernel
+        # TODO: Add support for softmax in kernel
         scores = torch.softmax(gating_output, dim=-1)
-        scores_scratch = torch.empty_like(gating_output)
         topk_values, topk_indices = ops.grouped_topk(
             scores,  # pre-computed scores
-            scores_scratch,  # scratch space
             num_expert_group,
             topk_group,
             topk,
             renormalize,
             routed_scaling_factor,
-            e_score_correction_bias,  # bias (will be fused)
+            e_score_correction_bias,
             0,  # scoring_func=0 (no activation, scores already computed)
         )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    return topk_values.to(torch.float32), topk_indices.to(torch.int32)
+    # Fused kernel outputs float32 values and int32 indices directly
+    return topk_values, topk_indices
 
 
 def inplace_fused_experts(
