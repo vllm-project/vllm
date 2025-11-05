@@ -310,6 +310,10 @@ def test_historical_mean_calculation():
     for i, step in enumerate(active_steps):
         state.expert_latency_window[step, 0, 0] = latencies[i]
 
+    # Expert 3: Never active (all zeros) - tests active_count = 0 edge case
+    # This ensures safe division by zero handling in historical_mean calculation
+    # state.expert_latency_window[:, 0, 3] remains all zeros (initialized to 0)
+
     state.expert_load_window_step = 10
 
     # Test current latency 30.9ms against historical (steps 0-9)
@@ -344,6 +348,18 @@ def test_historical_mean_calculation():
     state._update_health_mask(current_latency, log_stats=False)
 
     assert not state.expert_health_mask[0, 0], "Expert should be unhealthy (35 > 34.98)"
+
+    # Test active_count = 0 case: Expert 3 has never been active before current step.
+    # This verifies that division by zero is handled correctly
+    # Expert 3 should remain healthy due to insufficient history (active_count = 0
+    # < min_active_count)
+    current_latency[0, 3] = 100.0  # Set high current latency for Expert 3
+    state._update_health_mask(current_latency, log_stats=False)
+
+    assert state.expert_health_mask[0, 3], (
+        "Expert 3 should be healthy (active_count=0, insufficient history). "
+        "This test verifies that division by zero is handled correctly."
+    )
 
 
 # =============================================================================

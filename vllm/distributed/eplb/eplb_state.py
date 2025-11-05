@@ -554,10 +554,15 @@ class EplbState:
         # Historical mean (only for experts with sufficient history)
         # Require at least min(10, window_size * 0.5) active passes
         min_active_count = min(10, int(self.expert_load_window_size * 0.5))
+
+        # To prevent division by zero when active_count is 0.
+        # Although the logic works due to NaN propagation, being explicit is safer.
+        safe_active_count = torch.where(
+            active_count > 0, active_count, torch.ones_like(active_count)
+        )
+        mean = latency_sum / safe_active_count
         historical_mean = torch.where(
-            active_count >= min_active_count,
-            latency_sum / active_count,
-            torch.zeros_like(latency_sum),
+            active_count >= min_active_count, mean, torch.zeros_like(latency_sum)
         )
 
         threshold = self.health_latency_threshold * historical_mean

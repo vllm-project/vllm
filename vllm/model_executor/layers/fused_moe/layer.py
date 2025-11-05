@@ -2781,6 +2781,7 @@ class FusedMoE(CustomOp):
         self.cuda_end_event.synchronize()
 
         # Calculate layer latency in milliseconds
+        assert self.cuda_start_event is not None
         layer_latency_ms = self.cuda_start_event.elapsed_time(self.cuda_end_event)
 
         # Update latency view
