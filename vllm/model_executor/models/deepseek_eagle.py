@@ -24,8 +24,11 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
+from vllm.utils import init_logger
 
 from .utils import AutoWeightsLoader, maybe_prefix
+
+logger = init_logger(__name__)
 
 
 @support_torch_compile
@@ -214,6 +217,10 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = self.config.num_hidden_layers
+        self.set_moe_parameters()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

@@ -189,6 +189,9 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
+
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
