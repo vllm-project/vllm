@@ -1330,23 +1330,48 @@ def fused_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
-    if scoring_func == "softmax":
+    # Map scoring function string to enum
+    scoring_func_map = {
+        "sigmoid": 1,  # SCORING_SIGMOID
+    }
+
+    if scoring_func == "sigmoid":
+        # Use fully fused kernel path for sigmoid
+        # scores tensor contains raw logits
+        # bias contains e_score_correction_bias
+        # scoring_func=1 tells kernel to apply sigmoid + bias
+        scores_scratch = torch.empty_like(
+            gating_output
+        )  # Scratch space for intermediate results
+        topk_values, topk_indices = ops.grouped_topk(
+            gating_output,  # raw logits
+            scores_scratch,  # scratch space
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,  # bias
+            scoring_func_map[scoring_func],  # scoring_func=1 for sigmoid
+        )
+    elif scoring_func == "softmax":
+        # Softmax path: apply softmax in Python, then use fused bias
         scores = torch.softmax(gating_output, dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        scores_scratch = torch.empty_like(gating_output)
+        topk_values, topk_indices = ops.grouped_topk(
+            scores,  # pre-computed scores
+            scores_scratch,  # scratch space
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,  # bias (will be fused)
+            0,  # scoring_func=0 (no activation, scores already computed)
+        )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
-    topk_values, topk_indices = ops.grouped_topk(
-        scores,
-        scores_with_bias.to(scores.dtype),
-        num_expert_group,
-        topk_group,
-        topk,
-        renormalize,
-        routed_scaling_factor,
-    )
     return topk_values.to(torch.float32), topk_indices.to(torch.int32)
 
 

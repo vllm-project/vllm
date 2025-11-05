@@ -1900,7 +1900,24 @@ def grouped_topk(
     topk: int,
     renormalize: bool,
     routed_scaling_factor: float,
+    bias: torch.Tensor | None = None,
+    scoring_func: int = 0,
 ):
+    """
+    Perform grouped top-k routing for mixture of experts.
+
+    Args:
+        scores: Raw inputs (logits if scoring_func=1, scores if scoring_func=0)
+        scores_with_bias: Pre-computed scores+bias (if bias=None) or scratch space (if bias provided)
+        num_expert_group: Number of expert groups
+        topk_group: Number of groups to select
+        topk: Number of experts to select per token
+        renormalize: Whether to renormalize the output weights
+        routed_scaling_factor: Scaling factor for routing weights
+        bias: Optional bias tensor. If provided, bias is always fused in kernel.
+              If None, uses pre-computed scores_with_bias (backward compatibility).
+        scoring_func: 0=none (no activation), 1=sigmoid
+    """
     if not current_platform.is_cuda():
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA platforms"
@@ -1913,6 +1930,8 @@ def grouped_topk(
         topk,
         renormalize,
         routed_scaling_factor,
+        bias,
+        scoring_func,
     )
 
 
