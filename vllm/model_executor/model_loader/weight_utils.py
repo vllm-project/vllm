@@ -595,6 +595,8 @@ def safetensors_weights_iterator(
     if safetensors_load_strategy == "eager":
         loading_desc += " (eager)"
 
+    state_dict = {}
+
     for st_file in tqdm(
         hf_weights_files,
         desc=loading_desc,
@@ -606,9 +608,10 @@ def safetensors_weights_iterator(
                 state_dict = load(f.read())
             yield from state_dict.items()
         elif safetensors_load_strategy == "torchao":
-            if not torchao_version_at_least("0.14.0"):
+            is_last_file = st_file == hf_weights_files[-1]
+            if not torchao_version_at_least("0.15.0"):
                 raise ValueError(
-                    "Please use torchao version >= 0.14.0 \
+                    "Please use torchao version >= 0.15.0 \
                         to load torchao safetensors checkpoint"
                 )
             from torchao.prototype.safetensors.safetensors_support import (
@@ -616,11 +619,12 @@ def safetensors_weights_iterator(
             )
 
             with safe_open(st_file, framework="pt") as f:
-                state_dict = {}
                 for name in f.keys():  # noqa: SIM118
                     state_dict[name] = f.get_tensor(name)
                 metadata = f.metadata()
-                updated_state_dict = unflatten_tensor_state_dict(state_dict, metadata)
+                updated_state_dict = unflatten_tensor_state_dict(
+                    state_dict, metadata, is_last_file
+                )
             yield from updated_state_dict.items()
         else:
             with safe_open(st_file, framework="pt") as f:
