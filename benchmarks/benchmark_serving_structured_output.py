@@ -747,6 +747,7 @@ def evaluate(ret, args, input_requests=None):
             try:
                 # Lazy import to avoid hard dependency
                 import jsonschema  # type: ignore
+
                 jsonschema.validate(instance=actual, schema=expected)
             except ImportError:
                 warnings.warn(
@@ -780,7 +781,9 @@ def evaluate(ret, args, input_requests=None):
     for idx, res in enumerate(ret):
         expected = res["expected"]
         # For JSON dataset, expected may be None in ret; fallback to request schema
-        if expected is None and getattr(args, "structure_type", "") == "json" and input_requests is not None:
+        is_json = getattr(args, "structure_type", "") == "json"
+        has_requests = input_requests is not None
+        if expected is None and is_json and has_requests:
             try:
                 expected = input_requests[idx].schema
             except Exception:
@@ -1130,7 +1133,10 @@ def create_argument_parser():
     parser.add_argument(
         "--validate-schema",
         action="store_true",
-        help="Validate JSON outputs against the provided JSON schema (requires jsonschema).",
+        help=(
+            "Validate JSON outputs against the provided JSON schema "
+            "(requires jsonschema)."
+        ),
     )
 
     return parser

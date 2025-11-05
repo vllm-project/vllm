@@ -1,4 +1,5 @@
-import asyncio
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 from types import SimpleNamespace
 
@@ -34,7 +35,7 @@ class _AsyncIterable:
         try:
             return next(self._iter)
         except StopIteration:
-            raise StopAsyncIteration
+            raise StopAsyncIteration from None
 
 
 class _FakeResponse:
@@ -79,14 +80,18 @@ def _sse_chunk(obj):
 async def test_trt_llm_streaming_content(monkeypatch):
     # Simulate streaming content tokens via delta.content
     sse_chunks = [
-        _sse_chunk({
-            "object": "chat.completion.chunk",
-            "choices": [{"delta": {"content": "Hello"}}],
-        }),
-        _sse_chunk({
-            "object": "chat.completion.chunk",
-            "choices": [{"delta": {"content": " World"}}],
-        }),
+        _sse_chunk(
+            {
+                "object": "chat.completion.chunk",
+                "choices": [{"delta": {"content": "Hello"}}],
+            }
+        ),
+        _sse_chunk(
+            {
+                "object": "chat.completion.chunk",
+                "choices": [{"delta": {"content": " World"}}],
+            }
+        ),
         b"data: [DONE]",
     ]
 
@@ -94,6 +99,7 @@ async def test_trt_llm_streaming_content(monkeypatch):
 
     # Patch ClientSession in module under test
     import benchmarks.backend_request_func as mod
+
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     req = RequestFuncInput(
@@ -118,24 +124,30 @@ async def test_trt_llm_streaming_content(monkeypatch):
 async def test_trt_llm_role_only_deltas_fallback(monkeypatch):
     # First call: role-only deltas, no content
     sse_chunks = [
-        _sse_chunk({
-            "object": "chat.completion.chunk",
-            "choices": [{"delta": {"role": "assistant"}}],
-        }),
-        _sse_chunk({
-            "object": "chat.completion.chunk",
-            "choices": [{"delta": {}, "finish_reason": "stop"}]}),
+        _sse_chunk(
+            {
+                "object": "chat.completion.chunk",
+                "choices": [{"delta": {"role": "assistant"}}],
+            }
+        ),
+        _sse_chunk(
+            {
+                "object": "chat.completion.chunk",
+                "choices": [{"delta": {}, "finish_reason": "stop"}],
+            }
+        ),
         b"data: [DONE]",
     ]
     # Fallback non-streaming: full response JSON
     fallback_json = {
-        "choices": [{"message": {"content": "{\"name\": \"Alice\"}"}}],
+        "choices": [{"message": {"content": '{"name": "Alice"}'}}],
         "usage": {"completion_tokens": 10},
     }
 
     fake = _FakeSession(responses=[(200, sse_chunks, None), (200, [], fallback_json)])
 
     import benchmarks.backend_request_func as mod
+
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     req = RequestFuncInput(
@@ -163,6 +175,7 @@ async def test_trt_llm_headers_auth_optional(monkeypatch):
     fake = _FakeSession(responses=[(200, sse_done, None)])
 
     import benchmarks.backend_request_func as mod
+
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     req = RequestFuncInput(
@@ -202,6 +215,7 @@ async def test_trt_llm_payload_shapes_chat_vs_completions(monkeypatch):
     sse_done = [b"data: [DONE]"]
     fake = _FakeSession(responses=[(200, sse_done, None)])
     import benchmarks.backend_request_func as mod
+
     monkeypatch.setattr(mod.aiohttp, "ClientSession", lambda **_: fake)
 
     # Chat
@@ -235,5 +249,3 @@ async def test_trt_llm_payload_shapes_chat_vs_completions(monkeypatch):
     _ = await async_request_trt_llm(req_comp)
     assert "prompt" in fake2.calls[0].json
     assert "messages" not in fake2.calls[0].json
-
-
