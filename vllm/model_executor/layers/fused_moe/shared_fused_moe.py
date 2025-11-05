@@ -3,7 +3,10 @@
 
 import torch
 
-from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed import (
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 
 
@@ -62,7 +65,7 @@ class SharedFusedMoE(FusedMoE):
                 # should have been created with reduce_results=False.
                 if (
                     self.reduce_results
-                    and self.tp_size > 1
+                    and get_tensor_model_parallel_world_size() > 1
                     and self.must_reduce_shared_expert_outputs()
                 ):
                     shared_out = tensor_model_parallel_all_reduce(shared_out)
@@ -82,7 +85,7 @@ class SharedFusedMoE(FusedMoE):
             if (
                 shared_out is not None
                 and self.reduce_results
-                and self.tp_size > 1
+                and get_tensor_model_parallel_world_size() > 1
                 and self.must_reduce_shared_expert_outputs()
             ):
                 shared_out = tensor_model_parallel_all_reduce(shared_out)
