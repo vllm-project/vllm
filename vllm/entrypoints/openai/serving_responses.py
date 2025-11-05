@@ -375,9 +375,12 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = HarmonyContext(messages, available_tools)
                 else:
-                    # context = SimpleContext()
-                    # TODO: gate this behind a flag
-                    context = ParsableContext(tokenizer=tokenizer)
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is an feature in development for parsing tokens during generation
+                        # instead of at the end
+                        context = ParsableContext(tokenizer=tokenizer)
+                    else:
+                        context = SimpleContext()
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
