@@ -994,6 +994,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        moe_layer_freq = getattr(config, "moe_layer_freq", 1)
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep=".")[-1])
@@ -1024,7 +1025,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
-            and layer_idx % config.moe_layer_freq == 0
+            and layer_idx % moe_layer_freq == 0
         ):
             self.mlp = DeepseekV2MoE(
                 config=config,
