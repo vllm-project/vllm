@@ -201,6 +201,8 @@ class GptOssReasoningParser(ReasoningParser):
         original_tag: str | None,
         tool_names: list[str] | None = None,
     ) -> str:
+        if original_tag is not None:
+            return original_tag
         # Easiest way to separate based on channel for now
         analysis_tools = set()
         commentary_tools = set()
@@ -210,8 +212,4 @@ class GptOssReasoningParser(ReasoningParser):
                     commentary_tools.add(tool_name)
                 else:
                     analysis_tools.add(tool_name)
-        if original_tag is None:
-            return get_structural_tags(analysis_tools, commentary_tools)
-        else:
-            # There is potential risk for appending the tag to the original tag
-            return original_tag
+        return get_structural_tags(analysis_tools, commentary_tools)
