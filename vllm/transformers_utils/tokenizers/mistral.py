@@ -214,6 +214,7 @@ class MistralTokenizer(TokenizerBase):
     def from_pretrained(
         cls, path_or_repo_id: str, *, revision: str | None = None
     ) -> "MistralTokenizer":
+        from mistral_common.protocol.instruct.validator import ValidationMode
         from transformers.tokenization_mistral_common import (
             MistralCommonTokenizer as TransformersMistralTokenizer,
         )
@@ -221,7 +222,7 @@ class MistralTokenizer(TokenizerBase):
         str_revision = "main" if revision is None else revision
         return cls(
             TransformersMistralTokenizer.from_pretrained(
-                path_or_repo_id, revision=str_revision
+                path_or_repo_id, revision=str_revision, mode=ValidationMode.test
             )
         )
 
