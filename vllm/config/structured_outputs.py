@@ -69,14 +69,14 @@ class StructuredOutputsConfig:
         if self.reasoning_parser_plugin and len(self.reasoning_parser_plugin) > 3:
             ReasoningParserManager.import_reasoning_parser(self.reasoning_parser_plugin)
 
-        valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+        valid_reasoning_parsers = ReasoningParserManager.list_registered()
         if (
             self.reasoning_parser != ""
-            and self.reasoning_parser not in valid_reasoning_parses
+            and self.reasoning_parser not in valid_reasoning_parsers
         ):
             raise ValueError(
                 f"invalid reasoning parser: {self.reasoning_parser} "
-                f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+                f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
             )
 
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):

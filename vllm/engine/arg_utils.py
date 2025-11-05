@@ -706,7 +706,7 @@ class EngineArgs:
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
-            # Choices are dynamic to include plugins so they are validated later
+            # Choices need to be validated after parsing to include plugins
             **structured_outputs_kwargs["reasoning_parser"],
         )
         structured_outputs_group.add_argument(
