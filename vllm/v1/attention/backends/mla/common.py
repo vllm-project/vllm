@@ -800,7 +800,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             dcp_local_seq_lens[:num_decodes] = seq_lens[
                 :num_decodes
             ] // self.dcp_world_size + (
-                self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
+                self.dcp_rank < seq_lens[:num_decodes] % self.dcp_world_size
             )
 
         assert num_decodes + num_prefills == num_reqs
