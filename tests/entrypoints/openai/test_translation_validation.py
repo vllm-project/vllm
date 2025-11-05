@@ -48,6 +48,40 @@ async def test_non_asr_model(foscolo):
         assert err["message"] == "The model does not support Translations API"
 
 
+@pytest.mark.asyncio
+async def test_basic_audio_with_lora(mary_had_lamb):
+    """Ensure STT (translate) requests can pass LoRA through to generate."""
+    # NOTE - careful to call this test before the module scoped server
+    # fixture, otherwise it'll OOMkill the CI
+    model_name = "ibm-granite/granite-speech-3.3-2b"
+    lora_model_name = "speech"
+    server_args = [
+        "--enforce-eager",
+        "--enable-lora",
+        "--max-lora-rank",
+        "64",
+        "--lora-modules",
+        f"{lora_model_name}={model_name}",
+        "--max-model-len",
+        "2048",
+        "--max-num-seqs",
+        "1",
+    ]
+
+    # Based on https://github.com/openai/openai-cookbook/blob/main/examples/Whisper_prompting_guide.ipynb.
+    with RemoteOpenAIServer(model_name, server_args) as remote_server:
+        client = remote_server.get_async_client()
+        translation = await client.audio.translations.create(
+            model=lora_model_name,
+            file=mary_had_lamb,
+            extra_body=dict(language="en", to_language="es"),
+            response_format="text",
+            temperature=0.0,
+        )
+    out = json.loads(translation)["text"].strip().lower()
+    assert "mary tenía un pequeño cordero" in out
+
+
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
 @pytest.mark.asyncio
 async def test_basic_audio(foscolo, client_and_model):
