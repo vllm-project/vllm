@@ -14,14 +14,6 @@ from typing import Final
 
 import jinja2
 from fastapi import Request
-from openai.types.chat import (
-    ChatCompletionAssistantMessageParam,
-    ChatCompletionMessageToolCallParam,
-    ChatCompletionToolMessageParam,
-)
-from openai.types.chat.chat_completion_message_tool_call_param import (
-    Function as FunctionCallTool,
-)
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -49,7 +41,6 @@ from openai.types.responses import (
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
-    ToolChoiceFunction,
     response_function_web_search,
     response_text_delta_event,
 )
@@ -59,7 +50,6 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai.types.responses.tool import Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
-from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.engine.protocol import EngineClient
@@ -89,15 +79,12 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
-    FunctionCall,
-    FunctionDefinition,
     InputTokensDetails,
     OutputTokensDetails,
     RequestResponseMetadata,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
     ResponseInProgressEvent,
-    ResponseInputOutputItem,
     ResponseReasoningPartAddedEvent,
     ResponseReasoningPartDoneEvent,
     ResponsesRequest,
@@ -107,6 +94,7 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.responses_utils import construct_chat_message_with_tool_call
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
@@ -876,95 +864,6 @@ class OpenAIServingResponses(OpenAIServing):
             outputs.extend(tool_call_items)
         return outputs
 
-    def _parse_tool_calls_from_content(
-        self,
-        request: ResponsesRequest,
-        tokenizer: AnyTokenizer,
-        content: str | None = None,
-    ) -> tuple[list[FunctionCall] | None, str | None]:
-        function_calls = list[FunctionCall]()
-
-        if not self.enable_auto_tools or not self.tool_parser:
-            # Tools are not enabled
-            return None, content
-        elif request.tool_choice is None:
-            # No tool calls.
-            return None, content
-        elif request.tool_choice and isinstance(
-            request.tool_choice, ToolChoiceFunction
-        ):
-            # Forced Function Call
-            function_calls.append(
-                FunctionCall(name=request.tool_choice.name, arguments=content)
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice == "required":
-            assert content is not None
-            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
-            function_calls.extend(
-                [
-                    FunctionCall(
-                        name=tool_call.name,
-                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
-                    )
-                    for tool_call in tool_calls
-                ]
-            )
-            content = None  # Clear content since tool is called.
-        elif request.tool_choice == "auto" or request.tool_choice == "none":
-            try:
-                tool_parser = self.tool_parser(tokenizer)
-            except RuntimeError as e:
-                logger.exception("Error in tool parser creation.")
-                raise e
-            tool_call_info = tool_parser.extract_tool_calls(
-                content if content is not None else "",
-                request=request,  # type: ignore
-            )
-            if tool_call_info is not None and tool_call_info.tools_called:
-                # extract_tool_calls() returns a list of tool calls.
-                function_calls.extend(
-                    FunctionCall(
-                        name=tool_call.function.name,
-                        arguments=tool_call.function.arguments,
-                    )
-                    for tool_call in tool_call_info.tool_calls
-                )
-                content = tool_call_info.content
-            else:
-                # No tool calls.
-                return None, content
-        else:
-            raise ValueError(f"Invalid tool_choice: {request.tool_choice}")
-        return function_calls, content
-
-    def _construct_chat_message_with_tool_call(
-        self, item: ResponseInputOutputItem
-    ) -> ChatCompletionMessageParam:
-        if isinstance(item, ResponseFunctionToolCall):
-            # Append the function call as a tool call.
-            return ChatCompletionAssistantMessageParam(
-                role="assistant",
-                tool_calls=[
-                    ChatCompletionMessageToolCallParam(
-                        id=item.call_id,
-                        function=FunctionCallTool(
-                            name=item.name,
-                            arguments=item.arguments,
-                        ),
-                        type="function",
-                    )
-                ],
-            )
-        elif item.get("type") == "function_call_output":
-            # Append the function call output as a tool message.
-            return ChatCompletionToolMessageParam(
-                role="tool",
-                content=item.get("output"),
-                tool_call_id=item.get("call_id"),
-            )
-        return item  # type: ignore
-
     def _make_response_output_items_with_harmony(
         self,
         context: HarmonyContext,
@@ -1017,7 +916,7 @@ class OpenAIServingResponses(OpenAIServing):
             messages.append({"role": "user", "content": request.input})
         else:
             for item in request.input:
-                messages.append(self._construct_chat_message_with_tool_call(item))
+                messages.append(construct_chat_message_with_tool_call(item))
         return messages
 
     def _construct_harmony_system_input_message(
