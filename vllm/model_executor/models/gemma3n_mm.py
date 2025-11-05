@@ -54,7 +54,12 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsMultiModal,
+    SupportsTranscription,
+    SupportsLoRA,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -461,8 +466,12 @@ class Gemma3nMultimodalEmbedder(nn.Module):
     dummy_inputs=Gemma3nDummyInputsBuilder,
 )
 class Gemma3nForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsTranscription
+    nn.Module, SupportsMultiModal, SupportsTranscription, SupportsLoRA
 ):
+    # LoRA specific attributes - empty since we don't apply LoRA to embeddings
+    embedding_modules: dict[str, str] = {}
+    embedding_padding_modules: list[str] = []
+
     merge_by_field_config = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
@@ -601,8 +610,14 @@ class Gemma3nForConditionalGeneration(
         )
         # Normalize and embed the soft tokens into language model space.
         vision_outputs *= self.config.vision_config.hidden_size**0.5
-        # Return a list of embeddings instead of a batched tensor
-        return self.embed_vision(inputs_embeds=vision_outputs).unbind(0)
+        embedded_vision = self.embed_vision(inputs_embeds=vision_outputs)
+        # Handle both 2D [batch*tokens, hidden] and 3D [batch*tokens, 1, hidden] cases
+        batch_size = pixel_values.shape[0]
+        tokens_per_image = self.config.vision_soft_tokens_per_image
+        if embedded_vision.shape[0] == batch_size * tokens_per_image:
+            # Tensor was flattened, reshape it back to [batch, tokens, hidden]
+            embedded_vision = embedded_vision.view(batch_size, tokens_per_image, -1)
+        return embedded_vision.unbind(0)
 
     def _process_audio_input(
         self,
@@ -743,8 +758,8 @@ class Gemma3nForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="multi_modal_projector",
-            tower_model="vision_tower",
+            connector=["multi_modal_projector", "embed_audio", "embed_vision"],
+            tower_model=["vision_tower", "audio_tower"],
         )
 
     @classmethod
