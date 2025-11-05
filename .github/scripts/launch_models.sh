@@ -52,10 +52,19 @@ case "$MODEL_NAME" in
     )
     ;;
     
-  "deepseek-r1")
+  "deepseekr1")
     export GPU_ARCHS=gfx942
     export AITER_ENABLE_VSKIP=0
     export VLLM_ROCM_USE_AITER=1
+    export SAFETENSORS_FAST_GPU=1
+    export VLLM_ROCM_USE_AITER=1
+    export VLLM_ROCM_USE_AITER_MOE=1
+    export VLLM_USE_TRITON_FLASH_ATTN=0
+    export NCCL_DEBUG=WARN
+    export VLLM_RPC_TIMEOUT=1800000
+    export VLLM_ROCM_USE_AITER_MHA=0
+    export VLLM_ROCM_USE_TRITON_ROPE=1 # add for acc
+    export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 
     
     MODEL_PATH="${MODEL_PATH_OVERRIDE:-deepseek-ai/DeepSeek-R1}"
     TP_SIZE=8
@@ -64,6 +73,28 @@ case "$MODEL_NAME" in
       --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\"}'
       --trust-remote-code
       --block-size 1
+    )
+    ;;
+    
+  "qwen3next")
+    export VLLM_ROCM_USE_AITER=1
+    export SAFETENSORS_FAST_GPU=1
+    export VLLM_ROCM_USE_AITER_MHA=0 
+    export HIP_VISIBLE_DEVICES=0,1,2,3
+
+    pip install flash-linear-attention
+    git clone https://github.com/Dao-AILab/causal-conv1d.git
+    cd causal-conv1d
+    python3 setup.py install
+
+    # cudagraph|tp=4|bf16
+    MODEL_PATH="${MODEL_PATH_OVERRIDE:-Qwen/Qwen3-Next-80B-A3B-Instruct}"
+    TP_SIZE=4
+    EXTRA_ARGS=(
+      --max-model-len 262114
+      --disable-log-requests
+      --trust-remote-code
+      --compilation-config '{\"cudagraph_mode\":\"FULL_AND_PIECEWISE\"}'
     )
     ;;
     
@@ -108,7 +139,7 @@ case "$MODEL_NAME" in
     )
     ;;
     
-  "qwen3-coder-480b")
+  "qwen3coder_ptpc_fp8")
     export GPU_ARCHS=gfx942
     export AITER_ENABLE_VSKIP=0
     export AITER_ONLINE_TUNE=1
@@ -127,12 +158,12 @@ case "$MODEL_NAME" in
   *)
     echo "Error: Unknown model name '$MODEL_NAME'"
     echo "Available models:"
-    echo "  - deepseek-r1"
-    echo "  - deepseek-r1-fp8"
+    echo "  - deepseekr1"
+    echo "  - deepseekr1_ptpc_fp8"
     echo "  - qwen25vl-72b"
     echo "  - qwen25vl-72b-fp8"
     echo "  - qwen3vl-235b"
-    echo "  - qwen3-coder-480b"
+    echo "  - qwen3coder_ptpc_fp8"
     exit 1
     ;;
 esac
