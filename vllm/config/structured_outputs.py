@@ -9,7 +9,6 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
@@ -64,6 +63,9 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
+        # Import here to avoid circular import
+        from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
+
         if self.reasoning_parser_plugin and len(self.reasoning_parser_plugin) > 3:
             ReasoningParserManager.import_reasoning_parser(self.reasoning_parser_plugin)
 
