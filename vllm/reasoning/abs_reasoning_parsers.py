@@ -118,7 +118,7 @@ class ReasoningParser:
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_names: list[str] | None = None,
+        tool_names: set[str] | None = None,
     ) -> str:
         """
         Instance method that is implemented for preparing the structured tag
