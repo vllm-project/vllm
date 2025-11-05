@@ -25,6 +25,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
+from vllm.v1.eps.state import EpsJLState
 
 
 @dataclass
@@ -45,6 +46,7 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    eps_states: list[EpsJLState | None] | None = None
 
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(

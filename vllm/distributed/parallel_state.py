@@ -39,7 +39,10 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
-import torch.distributed._symmetric_memory
+try:
+    import torch.distributed._symmetric_memory  # noqa: F401
+except ModuleNotFoundError:
+    torch.distributed._symmetric_memory = None  # type: ignore[attr-defined]
 from torch.distributed import Backend, ProcessGroup
 from typing_extensions import deprecated
 

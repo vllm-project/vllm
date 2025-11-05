@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from functools import reduce
 from itertools import product
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, Sequence, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -92,6 +92,20 @@ from vllm.v1.attention.backends.utils import (
     split_attn_metadata,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.eps import (
+    EpsReporter,
+    EpsRuntimeConfig,
+    EpsStepCounters,
+    EpsJLState,
+    EpsAggregator,
+    build_eps_forward_context,
+    eps_context,
+    jl_update_block,
+    jl_update_once,
+    run_union_prepass,
+    to_runtime_config,
+)
+from vllm.v1.eps.telemetry import blocks_to_groups
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -250,6 +264,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
+        self.eps_runtime_config: EpsRuntimeConfig = to_runtime_config(
+            vllm_config.eps_config
+        )
+        self._eps_union_enabled = self.eps_runtime_config.union_enabled
+        self.eps_reporter = EpsReporter(self.eps_runtime_config.metrics_path)
+        self.eps_aggregator = EpsAggregator()
+        self._eps_layer_lookup: dict[str, tuple[int, int]] = {}
+        self.latest_eps_counters: EpsStepCounters | None = None
 
         from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 
@@ -718,6 +740,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             self.requests[req_id] = req_state
 
+            self._ensure_eps_states(req_state)
+
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 self._init_mrope_positions(req_state)
@@ -738,6 +762,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             req_state.num_computed_tokens = num_computed_tokens
             req_index = self.input_batch.req_id_to_index.get(req_id)
+
+            self._ensure_eps_states(req_state)
 
             if not is_last_rank:
                 # When using PP, the scheduler sends the sampled tokens back,
@@ -1065,6 +1091,142 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return encoder_seq_lens
 
+    def _ensure_eps_states(self, req_state: CachedRequestState) -> None:
+        if not self._eps_union_enabled:
+            return
+        if req_state.eps_states is not None:
+            return
+
+        eps_states: list[EpsJLState | None] = []
+        for group_idx, group_spec in enumerate(self.kv_cache_config.kv_cache_groups):
+            kv_spec = group_spec.kv_cache_spec
+            if isinstance(kv_spec, EncoderOnlyAttentionSpec):
+                eps_states.append(None)
+                continue
+
+            block_table = self.input_batch.block_table.block_tables[group_idx]
+            max_blocks = block_table.max_num_blocks_per_req
+            num_groups = blocks_to_groups(max_blocks, self.eps_runtime_config.group_blocks)
+            if num_groups <= 0:
+                eps_states.append(None)
+                continue
+
+            eps_states.append(
+                EpsJLState.init(
+                    num_layers=len(group_spec.layer_names),
+                    num_heads=kv_spec.num_kv_heads,
+                    head_dim=kv_spec.head_size,
+                    num_groups=num_groups,
+                    sketch_dim=self.eps_runtime_config.dim,
+                    device=self.device,
+                )
+            )
+
+        req_state.eps_states = eps_states
+
+    def _gather_eps_request_data(
+        self, num_reqs: int
+    ) -> tuple[list[str], list[Sequence[EpsJLState | None]], list[tuple[list[int], ...]], list[int]]:
+        request_ids = [req_id for req_id in self.input_batch.req_ids[:num_reqs]]
+        group_count = len(self.input_batch.block_table.block_tables)
+        request_states: list[Sequence[EpsJLState | None]] = []
+        request_block_ids: list[tuple[list[int], ...]] = []
+        for req_id in request_ids:
+            req_state = self.requests[req_id]
+            self._ensure_eps_states(req_state)
+            eps_states = req_state.eps_states or [None] * group_count
+            if len(eps_states) < group_count:
+                eps_states = list(eps_states) + [None] * (group_count - len(eps_states))
+            request_states.append(eps_states)
+            request_block_ids.append(req_state.block_ids)
+        block_sizes = [
+            table.block_size for table in self.input_batch.block_table.block_tables
+        ]
+        return request_ids, request_states, request_block_ids, block_sizes
+
+    def _build_eps_context_for_prepass(self, num_reqs: int) -> EpsForwardContext | None:
+        if not self._eps_union_enabled or num_reqs <= 0:
+            return None
+        request_ids, request_states, request_block_ids, block_sizes = self._gather_eps_request_data(num_reqs)
+        return build_eps_forward_context(
+            cfg=self.eps_runtime_config,
+            layer_lookup=self._eps_layer_lookup,
+            group_block_sizes=block_sizes,
+            request_ids=request_ids,
+            request_states=request_states,
+            request_block_ids=request_block_ids,
+            token_request_indices=None,
+            cudagraph_capture=False,
+        )
+
+    def _maybe_build_eps_context(
+        self,
+        *,
+        req_indices: np.ndarray,
+        num_reqs: int,
+        cudagraph_runtime_mode: CUDAGraphMode,
+    ) -> EpsForwardContext | None:
+        if not self._eps_union_enabled or num_reqs <= 0:
+            return None
+
+        request_ids, request_states, request_block_ids, block_sizes = self._gather_eps_request_data(num_reqs)
+        token_indices = torch.as_tensor(req_indices, dtype=torch.int32, device="cpu")
+
+        return build_eps_forward_context(
+            cfg=self.eps_runtime_config,
+            layer_lookup=self._eps_layer_lookup,
+            group_block_sizes=block_sizes,
+            request_ids=request_ids,
+            request_states=request_states,
+            request_block_ids=request_block_ids,
+            token_request_indices=token_indices,
+            cudagraph_capture=cudagraph_runtime_mode != CUDAGraphMode.NONE,
+        )
+
+
+    def get_eps_metrics(self) -> dict[str, float]:
+        if not self._eps_union_enabled:
+            return {}
+        return self.eps_aggregator.snapshot()
+
+    def _run_eps_prepass(self, scheduler_output: "SchedulerOutput") -> None:
+        if not self._eps_union_enabled:
+            self.latest_eps_counters = None
+            return
+
+        num_reqs = self.input_batch.num_reqs
+        if num_reqs <= 0:
+            self.latest_eps_counters = None
+            return
+
+        block_tables = self.input_batch.block_table.block_tables
+        kv_specs = [group.kv_cache_spec for group in self.kv_cache_config.kv_cache_groups]
+        eps_ctx = self._build_eps_context_for_prepass(num_reqs)
+
+        pushed = False
+        if torch.cuda.is_available() and hasattr(torch.cuda, "nvtx"):
+            torch.cuda.nvtx.range_push("eps_prepass")
+            pushed = True
+
+        start = time.perf_counter()
+        try:
+            counters = run_union_prepass(
+                block_tables,
+                kv_specs,
+                self.kv_cache_config.kv_cache_groups,
+                self.eps_runtime_config,
+                num_reqs,
+                eps_ctx,
+            )
+        finally:
+            if pushed:
+                torch.cuda.nvtx.range_pop()
+
+        counters.eps_prepass_ms = (time.perf_counter() - start) * 1000.0
+        self.latest_eps_counters = counters
+        if self.eps_reporter is not None:
+            self.eps_reporter.add_step(scheduler_output.req_ids, counters)
+
     def _prepare_inputs(
         self, scheduler_output: "SchedulerOutput"
     ) -> tuple[
@@ -1090,6 +1252,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+
+        if self._eps_union_enabled:
+            self._run_eps_prepass(scheduler_output)
+        else:
+            self.latest_eps_counters = None
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -1456,6 +1623,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ubatch_slices,
             num_tokens_across_dp,
             use_cascade_attn,
+            req_indices,
         )
 
     def _compute_cascade_attn_prefix_len(
@@ -2484,6 +2652,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     ubatch_slices,
                     num_tokens_across_dp,
                     use_cascade_attn,
+                    req_indices,
                 ) = self._prepare_inputs(scheduler_output)
 
             dp_rank = self.parallel_config.data_parallel_rank
@@ -2532,6 +2701,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ):
                 cudagraph_runtime_mode = CUDAGraphMode.NONE
 
+        eps_ctx = self._maybe_build_eps_context(
+            req_indices=req_indices,
+            num_reqs=self.input_batch.num_reqs,
+            cudagraph_runtime_mode=cudagraph_runtime_mode,
+        )
+
+        decode_start = time.perf_counter()
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -2544,6 +2720,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
             ),
+            eps_context(eps_ctx),
             record_function_or_nullcontext("Forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
@@ -2554,6 +2731,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+
+        decode_elapsed = (time.perf_counter() - decode_start) * 1000.0
+        if self.latest_eps_counters is not None:
+            self.latest_eps_counters.decode_ms = decode_elapsed
+            self.eps_aggregator.ingest(self.latest_eps_counters)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4071,6 +4253,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
+
+        self._init_eps_layer_lookup(kv_cache_config)
+
+    def _init_eps_layer_lookup(self, kv_cache_config: KVCacheConfig) -> None:
+        if not self._eps_union_enabled:
+            self._eps_layer_lookup = {}
+            return
+
+        layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        mapping: dict[str, tuple[int, int]] = {}
+        for group_idx, attn_group in enumerate(self.attn_groups):
+            for layer_idx, layer_name in enumerate(attn_group.layer_names):
+                mapping[layer_name] = (group_idx, layer_idx)
+                layer = layers[layer_name]
+                setattr(layer, "_eps_layer_name", layer_name)
+                setattr(layer, "_eps_layer_index", layer_idx)
+                setattr(layer, "_eps_kv_group_id", group_idx)
+        self._eps_layer_lookup = mapping
 
     def initialize_metadata_builders(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]

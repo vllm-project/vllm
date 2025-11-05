@@ -38,6 +38,7 @@ from vllm.config import (
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    EpsConfig,
     EPLBConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -495,6 +496,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
+    eps_config: EpsConfig = get_field(VllmConfig, "eps_config")
 
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
@@ -570,6 +572,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.eps_config, dict):
+            self.eps_config = EpsConfig(**self.eps_config)
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -724,6 +728,22 @@ class EngineArgs:
                 help=(f"[DEPRECATED] {arg} will be removed in v0.12.0."),
                 deprecated=True,
             )
+
+        eps_kwargs = get_kwargs(EpsConfig)
+        eps_group = parser.add_argument_group(
+            title="EpsConfig", description=EpsConfig.__doc__
+        )
+        eps_group.add_argument("--eps-enabled", **eps_kwargs["enabled"])
+        eps_group.add_argument("--eps-method", **eps_kwargs["method"])
+        eps_group.add_argument("--eps-heads", **eps_kwargs["heads"])
+        eps_group.add_argument("--eps-scope", **eps_kwargs["scope"])
+        eps_group.add_argument("--eps-group-blocks", **eps_kwargs["group_blocks"])
+        eps_group.add_argument("--eps-last-n", **eps_kwargs["last_n"])
+        eps_group.add_argument("--eps-alpha", **eps_kwargs["alpha"])
+        eps_group.add_argument("--eps-dim", **eps_kwargs["dim"])
+        eps_group.add_argument("--eps-top-pages", **eps_kwargs["top_pages"])
+        eps_group.add_argument("--eps-strict", **eps_kwargs["strict"])
+        eps_group.add_argument("--eps-metrics-path", **eps_kwargs["metrics_path"])
 
         # Parallel arguments
         parallel_kwargs = get_kwargs(ParallelConfig)
@@ -1693,6 +1713,7 @@ class EngineArgs:
             load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
+            eps_config=self.eps_config,
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,

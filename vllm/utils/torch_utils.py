@@ -590,6 +590,23 @@ def direct_register_custom_op(
         dispatch_key = current_platform.dispatch_key
 
     import torch.library
+    from types import GenericAlias
+    from typing import Any, List
+
+    annotations = getattr(op_func, "__annotations__", None)
+    if annotations:
+        normalized: dict[str, object] = {}
+        changed = False
+        for name, annot in annotations.items():
+            if isinstance(annot, GenericAlias) and getattr(annot, "__origin__", None) is list:
+                args = getattr(annot, "__args__", ())
+                elem = args[0] if args else Any
+                normalized[name] = List[elem]
+                changed = True
+            else:
+                normalized[name] = annot
+        if changed:
+            op_func.__annotations__ = normalized
 
     if hasattr(torch.library, "infer_schema"):
         schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)

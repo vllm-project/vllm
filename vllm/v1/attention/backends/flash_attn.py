@@ -584,6 +584,14 @@ class FlashAttentionImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
+            layer_name = getattr(layer, "_eps_layer_name", None)
+            if layer_name is not None:
+                num_slots = attn_metadata.slot_mapping.shape[0]
+                apply_eps_prefill_updates(
+                    layer_name=layer_name,
+                    key=key[:num_slots],
+                    slot_mapping=attn_metadata.slot_mapping,
+                )
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
             # NOTE(woosuk): Here, key and value are padded while slot_mapping is

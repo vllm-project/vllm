@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .eps import EpsConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -88,6 +89,8 @@ class VllmConfig:
         default_factory=ObservabilityConfig
     )
     """Observability configuration."""
+    eps_config: EpsConfig = Field(default_factory=EpsConfig)
+    """EigenPage Summaries configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
@@ -173,6 +176,10 @@ class VllmConfig:
         else:
             vllm_factors.append("None")
         vllm_factors.append(self.observability_config.compute_hash())
+        if self.eps_config:
+            vllm_factors.append(self.eps_config.compute_hash())
+        else:
+            vllm_factors.append("None")
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:

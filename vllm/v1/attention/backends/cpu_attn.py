@@ -570,6 +570,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     layer._v_scale,
                 )
 
+                # EPS JL update hooked in GPU path; CPU backend remains noop.
+
         if attn_type != AttentionType.ENCODER:
             # Decoder self-attention supports chunked prefill.
             # Encoder/decoder cross-attention requires no chunked
