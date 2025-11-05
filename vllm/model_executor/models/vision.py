@@ -416,7 +416,7 @@ def run_dp_sharded_mrope_vision_model(
     if rope_type == "rope_2d":
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(
-                pixel_values_local, torch.tensor(local_grid_thw_list, dtype=torch.int32)
+                pixel_values_local, torch.tensor(local_grid_thw_list)
             )
             if isinstance(image_embeds_local, list):
                 image_embeds_local = torch.cat(image_embeds_local, dim=0)
@@ -429,9 +429,7 @@ def run_dp_sharded_mrope_vision_model(
             )
     else:
         if pixel_values_local.shape[0] > 0:
-            image_embeds_local = vision_model(
-                pixel_values_local, torch.tensor(local_grid_thw_list, dtype=torch.int32)
-            )
+            image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
         else:
             # Handle empty case
             image_embeds_local = torch.empty(

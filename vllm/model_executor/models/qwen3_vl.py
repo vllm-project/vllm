@@ -521,12 +521,17 @@ class Qwen3_VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
     ) -> torch.Tensor:
         hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
         hidden_states = self.patch_embed(hidden_states)
 
-        grid_thw_list = grid_thw.tolist()
+        if isinstance(grid_thw, list):
+            grid_thw_list = grid_thw
+            grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
+        else:
+            grid_thw_list = grid_thw.tolist()
+
         pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
         hidden_states = hidden_states + pos_embeds
         rotary_pos_emb = self.rot_pos_emb(grid_thw_list)

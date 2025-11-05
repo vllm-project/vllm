@@ -798,14 +798,20 @@ class Qwen2VisionTransformer(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        grid_thw: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
     ) -> torch.Tensor:
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
         x = self.patch_embed(x)
 
+        if isinstance(grid_thw, list):
+            grid_thw_list = grid_thw
+            grid_thw = torch.tensor(grid_thw, dtype=torch.int32)
+        else:
+            grid_thw_list = grid_thw.tolist()
+
         # compute position embedding
-        rotary_pos_emb = self.rot_pos_emb(grid_thw.tolist())
+        rotary_pos_emb = self.rot_pos_emb(grid_thw_list)
 
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(
