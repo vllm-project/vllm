@@ -1,16 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from openai.types.chat import (
+    ChatCompletionAssistantMessageParam,
+    ChatCompletionMessageToolCallParam,
+    ChatCompletionToolMessageParam,
+)
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import ResponseFunctionToolCall
 
 from vllm.entrypoints.openai.protocol import (
-    ChatCompletionAssistantMessageParam,
     ChatCompletionMessageParam,
-    ChatCompletionMessageToolCallParam,
-    ChatCompletionToolMessageParam,
     ResponseInputOutputItem,
 )
 

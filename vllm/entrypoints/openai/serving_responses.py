@@ -817,8 +817,12 @@ class OpenAIServingResponses(OpenAIServing):
                 ],
                 status=None,  # NOTE: Only the last output item has status.
             )
-        function_calls, content = self._parse_tool_calls_from_content(
-            request, tokenizer, content=content
+        tool_calls, content = self._parse_tool_calls_from_content(
+            request=request,
+            tokenizer=tokenizer,
+            content=content,
+            enable_auto_tools=self.enable_auto_tools,
+            tool_parser_cls=self.tool_parser,
         )
         if content:
             output_text = ResponseOutputText(
@@ -849,7 +853,7 @@ class OpenAIServingResponses(OpenAIServing):
             outputs.append(reasoning_item)
         if message_item:
             outputs.append(message_item)
-        if function_calls:
+        if tool_calls:
             tool_call_items = [
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
@@ -859,7 +863,7 @@ class OpenAIServingResponses(OpenAIServing):
                     name=tool_call.name,
                     arguments=tool_call.arguments,
                 )
-                for tool_call in function_calls
+                for tool_call in tool_calls
             ]
             outputs.extend(tool_call_items)
         return outputs
