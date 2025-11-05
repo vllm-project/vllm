@@ -219,7 +219,6 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
     # define a reasoning parser and register it to vllm
     # the name list in register_module can be used
     # in --reasoning-parser.
-    @ReasoningParserManager.register_module(["example"])
     class ExampleParser(ReasoningParser):
         def __init__(self, tokenizer: AnyTokenizer):
             super().__init__(tokenizer)
@@ -263,6 +262,12 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
             tuple[Optional[str], Optional[str]]
                 A tuple containing the reasoning content and the content.
             """
+    # Register the reasoning parser
+    ReasoningParserManager.register_lazy_module(
+        name="example",
+        module_path="vllm.reasoning.example_reasoning_parser",
+        class_name="ExampleParser",
+    )
     ```
 
 Additionally, to enable structured output, you'll need to create a new `Reasoner` similar to the one in [vllm/reasoning/deepseek_r1_reasoning_parser.py](../../vllm/reasoning/deepseek_r1_reasoning_parser.py).
