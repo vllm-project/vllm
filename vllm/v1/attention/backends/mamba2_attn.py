@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import torch
 
@@ -245,8 +245,8 @@ class Mamba2AttentionMetadataBuilder(
                 dtype=torch.int32,
             )
 
-        return self.metadata_cls(
-            **vars(common),
+        return replace(
+            common,
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
             seq_idx_p=seq_idx_p,
