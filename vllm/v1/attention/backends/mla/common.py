@@ -359,10 +359,9 @@ class MLACommonPrefillMetadata:
         workspace: torch.Tensor
 
         # for mla DCP
-        cp_chunk_seq_lens: list[list[int]] | None = None
-        origin_context_lens: list[int] | None = None
-        cp_cu_seq_lens: torch.Tensor | None = None
-        chunk_size: int | None = None
+        local_chunk_seq_lens: list[list[int]] | None = None
+        local_context_lens_allrank: list[list[int]] | None = None
+        local_cu_seq_lens: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
 
     block_table: torch.Tensor
@@ -555,7 +554,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_kv_cache_interleave_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_local_block_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -784,15 +784,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             reqs_start = num_decodes  # prefill_start
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
-            # Note(hc): The context lengths in the perspective of dcp rank0.
-            cp_context_lens_cpu = (
-                torch.ceil(
-                    context_lens_cpu.float()
-                    / (self.dcp_world_size * self.dcp_kv_cache_interleave_size)
-                ).int()
-                * self.dcp_kv_cache_interleave_size
-            )
-            origin_context_lens = context_lens_cpu.tolist()
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
@@ -848,32 +839,55 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 )
 
                 if self.dcp_world_size > 1:
+                    local_context_lens_allrank = get_dcp_local_seq_lens(
+                        context_lens_cpu,
+                        self.dcp_world_size,
+                        None,
+                        self.dcp_local_block_size,
+                    )
+                    # Note(qcs): The max local context lengths
+                    # padded to `dcp_local_block_size`.
+                    local_context_lens_cpu = (
+                        cdiv(
+                            context_lens_cpu,
+                            self.dcp_virtual_block_size,
+                        )
+                        * self.dcp_local_block_size
+                    )
                     # Note(hc): The above max_context_chunk already enforces
                     # block_size alignment, DCP just need the block_size can
                     # be divisible by dcp_world_size, because DCP use
                     # cp_gather_cache which not require `cp_chunk_starts`
                     # aligned to page_size.
                     assert max_context_chunk % self.dcp_world_size == 0
-                    cp_max_context_chunk = max_context_chunk // self.dcp_world_size
-                    cp_chunk_starts = (
+                    local_max_context_chunk = (
+                        cdiv(
+                            max_context_chunk,
+                            self.dcp_virtual_block_size,
+                        )
+                        * self.dcp_local_block_size
+                    )
+                    local_chunk_starts = (
                         torch.arange(num_chunks, dtype=torch.int32)
                         .unsqueeze(1)
                         .expand(-1, num_prefills)
-                        * cp_max_context_chunk
+                        * local_max_context_chunk
                     )
-                    cp_chunk_ends = torch.min(
-                        cp_context_lens_cpu.unsqueeze(0),
-                        cp_chunk_starts + cp_max_context_chunk,
+                    local_chunk_ends = torch.min(
+                        local_context_lens_cpu.unsqueeze(0),
+                        local_chunk_starts + local_max_context_chunk,
                     )
-                    cp_chunk_seq_lens = (cp_chunk_ends - cp_chunk_starts).clamp(min=0)
+                    local_chunk_seq_lens = (
+                        local_chunk_ends - local_chunk_starts
+                    ).clamp(min=0)
 
-                    cp_cu_seq_lens_cpu = torch.zeros(
+                    local_cu_chunk_seq_lens_cpu = torch.zeros(
                         num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
                     )
                     torch.cumsum(
-                        cp_chunk_seq_lens,
+                        local_chunk_seq_lens,
                         dim=1,
-                        out=cp_cu_seq_lens_cpu[:, 1:],
+                        out=local_cu_chunk_seq_lens_cpu[:, 1:],
                         dtype=torch.int32,
                     )
 
@@ -885,15 +899,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 if self.dcp_world_size > 1:
                     chunked_context_metadata = chunked_context_metadata_cls(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=cp_chunk_starts.to(device, non_blocking=True),
-                        seq_tot=cp_chunk_seq_lens.sum(dim=1).tolist(),
+                        starts=local_chunk_starts.to(device, non_blocking=True),
+                        seq_tot=local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         seq_lens=chunk_seq_lens,
                         workspace=self.chunked_prefill_workspace,
-                        cp_chunk_seq_lens=cp_chunk_seq_lens.tolist(),
-                        origin_context_lens=origin_context_lens,
-                        cp_cu_seq_lens=cp_cu_seq_lens_cpu.to(device, non_blocking=True),
-                        chunk_size=max_context_chunk,
+                        local_chunk_seq_lens=local_chunk_seq_lens.tolist(),
+                        local_context_lens_allrank=local_context_lens_allrank.tolist(),
+                        local_cu_seq_lens=local_cu_chunk_seq_lens_cpu.to(
+                            device, non_blocking=True
+                        ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                     )
                 else:
@@ -970,70 +985,48 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 def reorg_kvcache(
     allgatered_kv_c_normed: torch.Tensor,
     allgatered_k_pe: torch.Tensor,
-    cp_chunk_seq_lens_lst: list[int],
-    origin_context_lens: list[int],
-    cp_world_size: int,
+    local_chunk_seq_lens_lst: list[int],
+    local_context_lens_allrank: list[list[int]],
     sum_seq_len: int,
     max_seq_len: int,
-    chunk_size: int,
-    chunk_idx: int,
     toks: int,
-    interleave_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     reorg kvcache after cp local gather to tp layout for attn kernel.
 
     Args:
-        cp_chunk_seq_lens_lst: chunk context lengths under CP.
-        origin_context_lens: origin full context lengths under CP.
-        cp_world_size: CP size.
+        local_chunk_seq_lens_lst: local chunk context lengths
+            under current CP rank.
+        local_context_lens_allrank: local context lengths on each CP rank.
         sum_seq_len: the sum of cp_chunk_seq_lens_lst.
         max_seq_len: the max value of cp_chunk_seq_lens_lst.
-        chunk_size: equals to max_context_chunk from
-            chunked_context_metadata building.
-        chunk_idx: chunk idx of chunked_prefill.
         toks: the number of tokens for local gather cache.
-        interleave_size: Interleave size of kv_cache storage.
     """
     kv_c_segments = []
     k_pe_segments = []
     src_token_idx = 0
     max_seq_len_check = 0
-    local_context_lens_allrank = get_dcp_local_seq_lens(
-        torch.Tensor(origin_context_lens),
-        cp_world_size,
-        None,
-        interleave_size,
-    )
-    # print(origin_context_lens, local_context_lens_allrank)
-    for cp_chunk_seq_len, origin_context_len, local_context_lens in zip(
-        cp_chunk_seq_lens_lst, origin_context_lens, local_context_lens_allrank
+    for local_chunk_seq_len, local_context_lens in zip(
+        local_chunk_seq_lens_lst, local_context_lens_allrank
     ):
-        chunk_context_len = chunk_size
-        if cp_chunk_seq_len != 0:
-            chunk_context_len = min(
-                chunk_context_len, origin_context_len - chunk_size * chunk_idx
-            )
-
         cur_seq_len = 0
-        for rank in range(cp_world_size):
-            real_cp_chunk_seq_len = local_context_lens[rank]
-            if real_cp_chunk_seq_len != 0:
+        for rank, local_context_len in enumerate(local_context_lens):
+            if local_context_len != 0:
                 kv_c_segment = allgatered_kv_c_normed[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + real_cp_chunk_seq_len
+                    + local_context_len
                 ]
                 k_pe_segment = allgatered_k_pe[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + real_cp_chunk_seq_len
+                    + local_context_len
                 ]
                 kv_c_segments.append(kv_c_segment)
                 k_pe_segments.append(k_pe_segment)
-                cur_seq_len += real_cp_chunk_seq_len
+                cur_seq_len += local_context_len
         max_seq_len_check = max(max_seq_len_check, cur_seq_len)
-        src_token_idx += cp_chunk_seq_len
+        src_token_idx += local_chunk_seq_len
     reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
     reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
     assert reorganized_kv_c_normed.shape[0] == sum_seq_len
@@ -1591,10 +1584,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None
-        assert prefill_metadata.chunked_context.cp_chunk_seq_lens is not None
-        assert prefill_metadata.chunked_context.origin_context_lens is not None
-        assert prefill_metadata.chunked_context.cp_cu_seq_lens is not None
-        assert prefill_metadata.chunked_context.chunk_size is not None
+        assert prefill_metadata.chunked_context.local_chunk_seq_lens is not None
+        assert prefill_metadata.chunked_context.local_context_lens_allrank is not None
+        assert prefill_metadata.chunked_context.local_cu_seq_lens is not None
         assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
 
         output = None
@@ -1607,7 +1599,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
-                cu_seq_lens=prefill_metadata.chunked_context.cp_cu_seq_lens[i],
+                cu_seq_lens=prefill_metadata.chunked_context.local_cu_seq_lens[i],
                 batch_size=attn_metadata.num_prefills,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
@@ -1637,17 +1629,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_c_normed, k_pe = reorg_kvcache(
                 allgatered_kv_c_normed,
                 allgatered_k_pe,
-                cp_chunk_seq_lens_lst=prefill_metadata.chunked_context.cp_chunk_seq_lens[
+                local_chunk_seq_lens_lst=prefill_metadata.chunked_context.local_chunk_seq_lens[
                     i
                 ],
-                origin_context_lens=prefill_metadata.chunked_context.origin_context_lens,
-                cp_world_size=dcp_world_size,
+                local_context_lens_allrank=prefill_metadata.chunked_context.local_context_lens_allrank,
                 sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1],
                 max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
-                chunk_size=prefill_metadata.chunked_context.chunk_size,
-                chunk_idx=i,
                 toks=toks,
-                interleave_size=self.dcp_kv_cache_interleave_size,
             )
 
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
