@@ -82,7 +82,6 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     get_model_path,
     is_interleaved,
@@ -497,7 +496,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
-
+    reasoning_parser_plugin: str | None = None
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -710,9 +709,12 @@ class EngineArgs:
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
-            # This choice is a special case because it's not static
-            choices=list(ReasoningParserManager.list_registered()),
+            # Choices need to be validated after parsing to include plugins
             **structured_outputs_kwargs["reasoning_parser"],
+        )
+        structured_outputs_group.add_argument(
+            "--reasoning-parser-plugin",
+            **structured_outputs_kwargs["reasoning_parser_plugin"],
         )
         # Deprecated guided decoding arguments
         for arg, type in [
@@ -1635,6 +1637,11 @@ class EngineArgs:
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
 
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
