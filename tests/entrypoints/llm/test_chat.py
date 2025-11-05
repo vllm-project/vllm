@@ -8,7 +8,7 @@ from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.sampling_params import SamplingParams
 
-from ..openai.test_vision import TEST_IMAGE_ASSETS
+from ..openai.multimodal.test_vision import TEST_IMAGE_ASSETS
 
 
 @pytest.fixture(scope="function")

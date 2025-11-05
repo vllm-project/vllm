@@ -133,12 +133,19 @@ steps:
   torch_nightly: true
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
+  - tests/entrypoints/openai/basic
+  - tests/entrypoints/openai/individual
+  - tests/entrypoints/openai/lora
+  - tests/entrypoints/openai/multimodal
+  - tests/entrypoints/test_chat_utils.py
+  - tests/entrypoints/openai/test_collective_rpc.py
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/openai/test_collective_rpc.py # PYTHONPATH is needed to import custom Worker extension
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/test_collective_rpc.py --ignore=entrypoints/openai/tool_parsers/
+  - pytest -v -s entrypoints/openai/basic/
+  - pytest -v -s entrypoints/openai/individual/
+  - pytest -v -s entrypoints/openai/lora/
+  - pytest -v -s entrypoints/openai/multimodal/
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (Pooling)
