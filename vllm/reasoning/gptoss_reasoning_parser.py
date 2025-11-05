@@ -205,7 +205,7 @@ class GptOssReasoningParser(ReasoningParser):
     def prepare_structured_tag(
         self,
         original_tag: str | None,
-        tool_names: list[str] | None = None,
+        tool_names: set[str] | None = None,
     ) -> str:
         if original_tag is not None:
             return original_tag
