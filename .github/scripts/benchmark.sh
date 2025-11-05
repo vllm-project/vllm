@@ -100,11 +100,11 @@ flexible_extract_value=$(jq '.results.gsm8k["exact_match,flexible-extract"]' "$r
     # If either delta_strict or delta_flexible is greater than 0.05, then fail/exit
     awk -v d1="$delta_strict" -v d2="$delta_flexible" '
         BEGIN {
-            if (d1 < -0.05 || d1 > 0.05 || d2 < -0.05 || d2 > 0.05) {
-                print "vLLM BENCHMARK FAILED: the delta of strict match or flexible match exceeds 0.05";
+            if (d1 < -0.03 || d1 > 0.03 || d2 < -0.03 || d2 > 0.03) {
+                print "vLLM BENCHMARK FAILED: the delta of strict match or flexible match exceeds 0.03";
                 exit 1;
             }
-            print "vLLM BENCHMARK PASSED: the delta of strict match or flexible match is within 0.05";
+            print "vLLM BENCHMARK PASSED: the delta of strict match or flexible match is within 0.03";
         }'
 } | tee comparison-$model_name.log
 

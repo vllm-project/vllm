@@ -5,8 +5,8 @@ on:
     branches:
       - dev/perf
   schedule:
-    # 0 16 * * * means every day at 16:00 UTC, which is 00:00 Beijing time.
-    - cron: '0 16 * * *'
+    # 0 15 * * * means every day at 15:00 UTC, which is 23:00 Beijing time.
+    - cron: '0 15 * * *'
   workflow_dispatch:
     inputs:
       vllm_repo:
@@ -63,13 +63,13 @@ jobs:
       matrix:
         include:
           - model: deepseekr1_ptpc_fp8
-            enabled: ${{ github.event_name == 'pull_request' || github.event.inputs.deepseekr1_ptpc_fp8 }}
+            enabled: ${{ github.event_name == 'pull_request' || github.event.inputs.deepseekr1_ptpc_fp8 == 'true' || github.event_name == 'schedule' }}
           - model: deepseekr1
-            enabled: ${{ github.event.inputs.deepseekr1 && github.event_name != 'pull_request' }}
+            enabled: ${{ github.event.inputs.deepseekr1 == 'true' || github.event_name == 'schedule' }}
           - model: qwen3coder_ptpc_fp8
-            enabled: ${{ github.event.inputs.qwen3coder_ptpc_fp8 && github.event_name != 'pull_request' }}
+            enabled: ${{ github.event.inputs.qwen3coder_ptpc_fp8 == 'true' || github.event_name == 'schedule' }}
           - model: qwen3next
-            enabled: ${{ github.event.inputs.qwen3next && github.event_name != 'pull_request' }}
+            enabled: ${{ github.event.inputs.qwen3next == 'true' || github.event_name == 'schedule' }}
       fail-fast: false
     runs-on: vllm-mi308-8gpu
     steps:
