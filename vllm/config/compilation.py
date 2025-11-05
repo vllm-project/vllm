@@ -923,7 +923,7 @@ class CompilationConfig:
 
     def get_compile_ranges(self) -> list[tuple[int, int]]:
         """Get the compile ranges for the compilation config."""
-        split_points = self.compile_ranges_split_points
+        split_points = set(self.compile_ranges_split_points)
         compile_ranges = []
         for i, s in enumerate(split_points):
             if i == 0:

@@ -410,6 +410,7 @@ def run_benchmarks(
     use_residual: bool,
     allreduce_params: FlashInferFusedAllReduceParams | None,
     quant_modes: set[str],
+    no_oneshot: bool,
 ):
     """Run all benchmarks for given configuration.
 
@@ -431,6 +432,7 @@ def run_benchmarks(
     rms_eps = 1e-6
     results = {}
     vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
+    use_oneshot_options = [False] if no_oneshot else [True, False]
 
     # Create RMSNorm and QuantFP8 layers once for native benchmarks
 
@@ -476,7 +478,7 @@ def run_benchmarks(
 
         # FlashInfer Fused AllReduce + RMSNorm Oneshot/Twoshot
         if flashinfer_comm is not None and allreduce_params is not None:
-            for use_oneshot in [True, False]:
+            for use_oneshot in use_oneshot_options:
                 suffix = "_oneshot" if use_oneshot else "_twoshot"
                 try:
                     time_ms = benchmark_operation(
@@ -560,7 +562,7 @@ def run_benchmarks(
 
         # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
-            for use_oneshot in [True, False]:
+            for use_oneshot in use_oneshot_options:
                 suffix = "_oneshot" if use_oneshot else "_twoshot"
                 try:
                     time_ms = benchmark_operation(
@@ -645,7 +647,7 @@ def run_benchmarks(
 
         # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant Oneshot
         if flashinfer_comm is not None and allreduce_params is not None:
-            for use_oneshot in [True, False]:
+            for use_oneshot in use_oneshot_options:
                 suffix = "_oneshot" if use_oneshot else "_twoshot"
                 try:
                     time_ms = benchmark_operation(
@@ -901,7 +903,7 @@ def save_results_to_file(
     try:
         markdown_content = format_results_markdown(all_results, world_size, args)
 
-        with open(output_path, "w") as f:
+        with open(output_path, "a") as f:
             f.write(markdown_content)
 
     except Exception as e:
@@ -958,6 +960,12 @@ def main():
         help="""Output file path for markdown results 
                 (default: benchmark_results_<timestamp>.md)
         """,
+    )
+
+    parser.add_argument(
+        "--no-oneshot",
+        action="store_true",
+        help="Skip oneshot benchmarks",
     )
 
     args = parser.parse_args()
