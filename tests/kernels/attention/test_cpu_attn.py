@@ -138,6 +138,7 @@ def ref_paged_attn(
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
+    dtype = query.dtype
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -152,16 +153,16 @@ def ref_paged_attn(
     for i in range(num_seqs):
         query_len = query_lens[i]
         kv_len = kv_lens[i]
-        q = query[start_idx : start_idx + query_len]
+        q = query[start_idx : start_idx + query_len].float()
         q *= scale
 
         num_kv_blocks = (kv_len + block_size - 1) // block_size
         block_indices = block_tables[i, :num_kv_blocks]
 
         k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
-        k = k[:kv_len]
+        k = k[:kv_len].float()
         v = value_cache[block_indices].view(-1, num_kv_heads, head_size)
-        v = v[:kv_len]
+        v = v[:kv_len].float()
 
         if q.shape[1] != k.shape[1]:
             k = torch.repeat_interleave(k, q.shape[1] // k.shape[1], dim=1)
@@ -197,12 +198,12 @@ def ref_paged_attn(
             s_aux_ext = s_aux.repeat(1, query_len, 1)
             attn = torch.cat((s_aux_ext, attn), dim=-1)
 
-        attn = torch.softmax(attn, dim=-1).to(v.dtype)
+        attn = torch.softmax(attn, dim=-1)
 
         if s_aux is not None:
             attn = attn[:, :, 1:]
 
-        out = torch.einsum("hqk,khd->qhd", attn, v)
+        out = torch.einsum("hqk,khd->qhd", attn, v).to(dtype=dtype)
 
         outputs.append(out)
         start_idx += query_len
