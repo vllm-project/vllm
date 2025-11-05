@@ -1140,6 +1140,12 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         max_token_num = min(
             max_token_num, config.scheduler_config.max_num_batched_tokens
         )
+        logger.debug_once(
+            f"Flashinfer max size: {max_size // (1024 * 1024)} MB,"
+            "Maximal number of tokens used by "
+            f"Flashinfer Allreduce Fusion: {self.max_token_num}",
+            scope="global",
+        )
 
         self.ipc_handles, workspace_tensor = (
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
