@@ -707,6 +707,12 @@ class FusedMoEModularKernel(torch.nn.Module):
             f"{fused_experts.activation_formats[0]}"
         )
 
+    def supports_expert_map(self) -> bool:
+        """
+        A flag indicating whether or not this class supports expert maps.
+        """
+        return self.fused_experts.supports_expert_map()
+
     def output_is_reduced(self) -> bool:
         """
         Indicates whether or not the output of fused MoE kernel
