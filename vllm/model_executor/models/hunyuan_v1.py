@@ -1033,7 +1033,9 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        expert_latency_view: torch.Tensor | None = None,
     ) -> None:
+        self.expert_latency_view = expert_latency_view
         for layer_idx, layer in enumerate(self.moe_layers):
             self.expert_weights.append(layer.get_expert_weights())
             # Register the expert weights.
@@ -1042,6 +1044,7 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
+                expert_latency_view=expert_latency_view,
             )
 
     def update_physical_experts_metadata(
@@ -1063,6 +1066,17 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """
+        Get the expert latency tensor for all MoE layers.
+
+        Returns:
+            Tensor of shape (num_moe_layers, num_physical_experts) containing
+            latency in milliseconds (0 if expert was inactive), or None if
+            latency tracking is not enabled.
+        """
+        return self.expert_latency_view
 
 
 class HunYuanDenseV1Base(HunyuanV1ModelBase):
