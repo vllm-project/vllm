@@ -7,12 +7,11 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("glm45")
 class Glm4MoeModelReasoningParser(ReasoningParser):
     """
     Reasoning parser for the Glm4MoeModel model.

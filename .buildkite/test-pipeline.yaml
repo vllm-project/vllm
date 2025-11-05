@@ -205,6 +205,24 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
   - popd
 
+- label: Distributed Tests (8 GPUs) # 4min
+  timeout_in_minutes: 10
+  gpu: h100
+  num_gpus: 8
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - examples/offline_inference/torchrun_dp_example.py
+  - vllm/config/parallel.py
+  - vllm/distributed/
+  - vllm/v1/engine/llm_engine.py
+  - vllm/v1/executor/uniproc_executor.py
+  - vllm/v1/worker/gpu_worker.py
+  commands:
+  # https://github.com/NVIDIA/nccl/issues/1838
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  # test with torchrun tp=2 and dp=4 with ep
+  - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+
 - label: EPLB Algorithm Test # 5min
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
@@ -214,8 +232,8 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
 
-- label: EPLB Execution Test # 5min
-  timeout_in_minutes: 15
+- label: EPLB Execution Test # 10min
+  timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -223,6 +241,7 @@ steps:
   - tests/distributed/test_eplb_execute.py
   commands:
   - pytest -v -s distributed/test_eplb_execute.py
+  - pytest -v -s distributed/test_eplb_spec_decode.py
 
 - label: Metrics, Tracing Test # 12min
   timeout_in_minutes: 20
@@ -297,6 +316,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
@@ -321,6 +341,15 @@ steps:
     - tests/v1/attention
   commands:
     - pytest -v -s v1/attention
+
+- label: V1 Test attention (B200) # 10min
+  timeout_in_minutes: 30
+  gpu: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - tests/v1/attention
+  commands:
+    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
 
 - label: V1 Test others (CPU) # 5 mins
   source_file_dependencies:
@@ -399,9 +428,9 @@ steps:
       --ignore=lora/test_llm_with_multi_loras.py \
       --ignore=lora/test_olmoe_tp.py \
       --ignore=lora/test_deepseekv2_tp.py \
-      --ignore=lora/test_gptoss.py \
+      --ignore=lora/test_gptoss_tp.py \
       --ignore=lora/test_qwen3moe_tp.py
-      
+
   parallelism: 4
 
 - label: PyTorch Compilation Unit Tests # 15min
@@ -1101,6 +1130,7 @@ steps:
     - pytest -v -s -x lora/test_llama_tp.py
     - pytest -v -s -x lora/test_llm_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
+    - pytest -v -s -x lora/test_gptoss_tp.py
 
 
 - label: Weight Loading Multiple GPU Test  # 33min
@@ -1126,7 +1156,7 @@ steps:
   - tests/weight_loading
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt
-  
+
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
@@ -1168,6 +1198,19 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
+##### H100 test #####
+- label: LM Eval Large Models (H100) # optional
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+
 ##### H200 test #####
 - label: Distributed Tests (H200) # optional
   gpu: h200
@@ -1181,6 +1224,7 @@ steps:
     - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
+    - pytest -v -s tests/v1/distributed/test_dbo.py  
 
 ##### B200 test #####
 - label: Distributed Tests (B200) # optional
@@ -1191,6 +1235,7 @@ steps:
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
+    - pytest -v -s tests/v1/distributed/test_dbo.py
 
 ##### RL Integration Tests #####
 - label: Prime-RL Integration Test # 15min
@@ -1203,3 +1248,21 @@ steps:
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
     - bash .buildkite/scripts/run-prime-rl-test.sh
+
+- label: DeepSeek V2-Lite Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy
+  timeout_in_minutes: 60
+  gpu: h100
+  optional: true
+  num_gpus: 4
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep.sh 0.8 200 8020

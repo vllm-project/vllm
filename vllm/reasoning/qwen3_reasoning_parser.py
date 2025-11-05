@@ -3,11 +3,9 @@
 
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ResponsesRequest
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
-@ReasoningParserManager.register_module("qwen3")
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for the Qwen3 model.
