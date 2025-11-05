@@ -163,7 +163,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
-            logger.info("HERE! SUBMITTING THE RETRIEVE REQUEST!")
+            logger.info("HERE! SUBMITTING THE RETRIEVE REQUEST %s", meta.request_id)
             self.worker_adapter.submit_retrieve_request(meta.request_id, meta.op)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
