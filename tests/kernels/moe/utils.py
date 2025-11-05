@@ -216,11 +216,11 @@ def moe_quantize_weights_2d(
 
 def moe_quantize_weights(
     w: torch.Tensor,
-    w_s: Optional[torch.Tensor],
-    quant_dtype: Union[torch.dtype, str, None],
+    w_s: torch.Tensor | None,
+    quant_dtype: torch.dtype | str | None,
     per_token_quant: bool,
-    block_shape: Optional[list[int]],
-) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    block_shape: list[int] | None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     assert w.dim() == 3
     e, rows, cols = w.shape
     w_l = [None] * e
@@ -517,7 +517,7 @@ def make_shared_experts(
     N: int,
     K: int,
     in_dtype: torch.dtype = torch.bfloat16,
-    quant_dtype: Union[torch.dtype, str, None] = None,
+    quant_dtype: torch.dtype | str | None = None,
 ) -> torch.nn.Module:
     (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
         1,
