@@ -862,6 +862,7 @@ class Scheduler(SchedulerInterface):
             if self.ec_connector is not None and remote_cache_has_item[i]:
                 mm_hashes_to_schedule.add(request.mm_features[i].identifier)
                 external_load_encoder_input.append(i)
+                num_tokens_to_schedule += num_encoder_tokens
                 continue
 
             num_tokens_to_schedule += num_encoder_tokens
