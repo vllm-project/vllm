@@ -156,7 +156,7 @@ def append_logprobs_for_next_position(
             len(request_logprobs.logprobs)
         )
     else:
-        cast(request_logprobs, list).append(
+        request_logprobs.append(
             {
                 token_id: Logprob(
                     logprob=logprob,

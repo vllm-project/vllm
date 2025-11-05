@@ -1468,7 +1468,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # the original list[dict[int, Logprob]] approach.
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
     # FlattenLogprobs.
-    "VLLM_FLATTEN_LOGPROBS": bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
+    "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]

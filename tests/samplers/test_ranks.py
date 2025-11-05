@@ -6,54 +6,75 @@ import pytest
 from vllm import SamplingParams
 
 MODELS = ["distilbert/distilgpt2"]
+MAX_TOKENS = 5
+NUM_TOP_LOGPROBS = 5
+NUM_PROMPT_LOGPROBS = 7
+MAX_LOGPROBS = max(NUM_TOP_LOGPROBS, NUM_PROMPT_LOGPROBS)
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("greedy", [True, False])
 def test_ranks(
     vllm_runner,
     model,
     dtype,
+    greedy,
     example_prompts,
 ):
-    max_tokens = 5
-    num_top_logprobs = 5
-    num_prompt_logprobs = 5
-
-    with vllm_runner(model, dtype=dtype, max_logprobs=num_top_logprobs) as vllm_model:
-        ## Test greedy logprobs ranks
-        vllm_sampling_params = SamplingParams(
-            temperature=0.0,
-            top_p=1.0,
-            max_tokens=max_tokens,
-            logprobs=num_top_logprobs,
-            prompt_logprobs=num_prompt_logprobs,
-        )
-        vllm_results = vllm_model.generate_w_logprobs(
-            example_prompts, vllm_sampling_params
-        )
-
-        ## Test non-greedy logprobs ranks
+    with vllm_runner(model, dtype=dtype, max_logprobs=MAX_LOGPROBS) as vllm_model:
+        tokenizer = vllm_model.llm.get_tokenizer()
+        example_prompt_tokens = [tokenizer.encode(prompt) for prompt in example_prompts]
         sampling_params = SamplingParams(
-            temperature=1.0,
+            temperature=0.0 if greedy else 1.0,
             top_p=1.0,
-            max_tokens=max_tokens,
-            logprobs=num_top_logprobs,
-            prompt_logprobs=num_prompt_logprobs,
+            max_tokens=MAX_TOKENS,
+            logprobs=NUM_TOP_LOGPROBS,
+            prompt_logprobs=NUM_PROMPT_LOGPROBS,
         )
-        res = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
+        results = vllm_model.generate_w_logprobs(example_prompts, sampling_params)
 
-    for result in vllm_results:
-        assert result[2] is not None
-        assert len(result[2]) == len(result[0])
-        # check whether all chosen tokens have ranks = 1
-        for token, logprobs in zip(result[0], result[2]):
-            assert token in logprobs
-            assert logprobs[token].rank == 1
+    assert len(results) == len(example_prompt_tokens)
+    for i, (result, prompt_tokens) in enumerate(zip(results, example_prompt_tokens)):
+        decode_tokens, _, decode_logprobs, prompt_logprobs = result
+        assert decode_logprobs is not None
+        assert len(decode_logprobs) == len(decode_tokens)
 
-    for result in res:
-        assert result[2] is not None
-        assert len(result[2]) == len(result[0])
-        # check whether all chosen tokens have ranks
-        for token, logprobs in zip(result[0], result[2]):
-            assert logprobs[token].rank >= 1
+        ########################
+        # Check prompt logprobs
+        ########################
+        # Prompt logprob for first token is None
+        assert prompt_logprobs[0] is None
+        for token, logprobs in zip(prompt_tokens[1:], prompt_logprobs[1:]):
+            # Ensure logprobs of prompt token is always returned
+            logprob = logprobs.get(token)
+            assert logprob is not None
+            assert logprob.rank >= 1
+            # Ensure # of returned logprobs should be
+            # either NUM_PROMPT_LOGPROBS or NUM_PROMPT_LOGPROBS+1
+            assert NUM_PROMPT_LOGPROBS <= len(logprobs) <= NUM_PROMPT_LOGPROBS + 1
+            # Ensure top NUM_PROMPT_LOGPROBS is always extracted
+            all_ranks = {logprob.rank for logprob in logprobs.values()}
+            assert (
+                len(all_ranks & set(range(1, NUM_PROMPT_LOGPROBS + 1)))
+                == NUM_PROMPT_LOGPROBS
+            )
+
+        ########################
+        # Check sample logprobs
+        ########################
+        for token, logprobs in zip(decode_tokens, decode_logprobs):
+            logprob = logprobs.get(token)
+            if greedy:
+                # For greedy sampling, all chosen logprob should be top ranked
+                assert logprob.rank == 1
+            else:
+                assert logprob.rank >= 1
+            # Ensure # of returned logprobs should be
+            # either NUM_TOP_LOGPROBS or NUM_TOP_LOGPROBS+1
+            assert NUM_TOP_LOGPROBS <= len(logprobs) <= NUM_TOP_LOGPROBS + 1
+            # Ensure top NUM_TOP_LOGPROBS logprobs is always extracted
+            all_ranks = {logprob.rank for logprob in logprobs.values()}
+            assert (
+                len(all_ranks & set(range(1, NUM_TOP_LOGPROBS + 1))) == NUM_TOP_LOGPROBS
+            )
