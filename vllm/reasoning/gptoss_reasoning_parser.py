@@ -57,7 +57,6 @@ def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) 
     return new_tag
 
 
-
 class GptOssReasoningParser(ReasoningParser):
     """
     Reasoning parser for GptOss model.
