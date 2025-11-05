@@ -220,14 +220,8 @@ async def build_async_engine_client_from_engine_args(
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # V1 AsyncLLM.
-    assert envs.VLLM_USE_V1
-
     if disable_frontend_multiprocessing:
-        logger.warning(
-            "V1 is enabled, but got --disable-frontend-multiprocessing. "
-            "To disable frontend multiprocessing, set VLLM_USE_V1=0."
-        )
+        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -1943,14 +1937,14 @@ def create_server_unix_socket(path: str) -> socket.socket:
 
 
 def validate_api_server_args(args):
-    valid_tool_parses = ToolParserManager.tool_parsers.keys()
+    valid_tool_parses = ToolParserManager.list_registered()
     if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
         raise KeyError(
             f"invalid tool call parser: {args.tool_call_parser} "
             f"(chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
-    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    valid_reasoning_parses = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
     ) and reasoning_parser not in valid_reasoning_parses:
