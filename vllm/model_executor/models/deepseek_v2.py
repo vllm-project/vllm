@@ -250,7 +250,7 @@ class DeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
 
-        self.routed_scaling_factor = config.routed_scaling_factor
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = self.ep_group.rank()
@@ -273,7 +273,7 @@ class DeepseekV2MoE(nn.Module):
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
-        if config.topk_method == "noaux_tc":
+        if getattr(config, "topk_method", None) == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
                 torch.empty(config.n_routed_experts, dtype=torch.float32)
             )
@@ -1143,7 +1143,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.routed_scaling_factor = config.routed_scaling_factor
+        self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
 
     def forward(
         self,
@@ -1319,7 +1319,7 @@ class DeepseekV2ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts, SupportsLoR
 
         # Set MoE hyperparameters
         self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
-        self.num_expert_groups = config.n_group
+        self.num_expert_groups = getattr(config, "n_group", 1)
 
         self.moe_layers: list[SharedFusedMoE] = []
         example_moe = None
