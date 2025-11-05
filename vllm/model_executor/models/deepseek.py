@@ -157,8 +157,8 @@ class DeepseekMoE(nn.Module):
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
             use_grouped_topk=True,
-            num_expert_group=config.n_group,
-            topk_group=config.topk_group,
+            num_expert_group=getattr(config, "n_group", 1),
+            topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
             # we do scaling outside, set factor to 1.0 to avoid double mul
