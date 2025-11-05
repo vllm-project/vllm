@@ -6,7 +6,7 @@ This page describes how to use the benchmark scripts in `benchmarks/` to run str
 
 Use this path when your TRT-LLM server implements endpoints like `/v1/chat/completions` or `/v1/completions` and supports guided decoding via the OpenAI-compatible `response_format` field (e.g., JSON schema, regex, or EBNF grammar).
 
-To support guided decoding, ensure that the endpoint was started with this addtional parameter to extra_llm_api_options.yaml as specified below
+To support guided decoding, ensure that the endpoint was started with this additional parameter to extra_llm_api_options.yaml as specified below
 
 `guided_decoding_backend: xgrammar`
 
