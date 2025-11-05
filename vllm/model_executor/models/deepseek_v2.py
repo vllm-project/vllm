@@ -1334,6 +1334,9 @@ class DeepseekV2ForCausalLM(
             dim == 0 for dim in (qk_nope_head_dim, qk_rope_head_dim)
         )
 
+        if self.use_mha:
+            self.packed_modules_mapping["qkv_proj"] = ["q_proj", "k_proj", "v_proj"]
+
         # `packed_modules_mapping` needs to be modified before
         # initializing DeepseekV2Model, as it is passed inplace to
         # quantization config init and may be used to select the
