@@ -430,11 +430,11 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         Example:
         sliding_window=4, num_computed_tokens=7
 
-            Tokens:   [ 0  1  2  3  4  5  6  7 ]
-                      | ---- computed -----|
-                                             ^ next token to be computed
-                                    |-----------| sliding window for next token
-                      |--skipped--|
+        Tokens:   [ 0  1  2  3  4  5  6  7 ]
+                  | ---- computed -----|
+                                         ^ next token to be computed
+                               |-----------| sliding window for next token
+                  |--skipped---|
 
         The current window contains tokens 4~7. Tokens 0~3 will be skipped for
         attention computation since they are outside the sliding window.
@@ -555,28 +555,32 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         the left side of the current chunk.
 
         Example 1:
-        # chunk size = 8, num_computed_tokens = 13
-        # Tokens:  0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 | ...
-        #          | ----- computed -------------|
-        #                                         ^^ next token to be computed
-        #         [skipped]         [current chunk/attended]
-        # Output: get_num_skipped_tokens(13) == 8
+        chunk size = 8, num_computed_tokens = 13
+        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 | ----- computed ---------------|
+                                                  ^^ next token to be computed
+                                   |----------------| <-- attention window for
+                                                          next token
+                 |--- skipped -----|
+        Output: get_num_skipped_tokens(13) == 8
 
         Example 2:
-        # chunk size = 8, num_computed_tokens = 8
-        # Tokens:  0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 | ...
-        #          | --- computed -|
-        #                            ^ next token to be computed
-        #         [skipped]        |[current chunk/attended]
-        # Output: get_num_skipped_tokens(8) == 8
+        chunk size = 8, num_computed_tokens = 8
+        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 | --- computed ---|
+                                     ^ next token to be computed
+                                   |--| <-- attention window for next token
+                 | --- skipped ----|
+        Output: get_num_skipped_tokens(8) == 8
 
         Example 3:
-        # chunk size = 8, num_computed_tokens = 7
-        # Tokens:  0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 | ...
-        #          |--computed-|
-        #                        ^ next token to be computed
-        #          |[current chunk]|
-        # Output: get_num_skipped_tokens(7) == 0
+        chunk size = 8, num_computed_tokens = 7
+        Tokens:  [ 0 1 2 3 4 5 6 7 | 8 9 10 11 12 13 14 15 ] ...
+                 |---computed---|
+                                 ^ next token to be computed
+                 |-----------------| <-- attention window for next token
+                 no token should be skipped.
+        Output: get_num_skipped_tokens(7) == 0
 
         Args:
             num_computed_tokens: The number of tokens that have been computed.
