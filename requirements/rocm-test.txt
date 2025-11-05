@@ -42,4 +42,10 @@ lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7
 
 pqdm==0.2.0
 
+# Required for audio tests (matching test.in)
+torchaudio==2.9.0
+
+# Required for smolvlm test (matching test.in)
+num2words
+
 terratorch @ git+https://github.com/IBM/terratorch.git@07184fcf91a1324f831ff521dd238d97fe350e3e
