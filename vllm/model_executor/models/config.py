@@ -285,10 +285,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-
-        if not envs.VLLM_USE_V1:
-            return
-
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
@@ -329,10 +325,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-
-        if not envs.VLLM_USE_V1:
-            return
-
         # Save the user input before it gets modified by MambaModelConfig
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default
