@@ -147,6 +147,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         num_decode_tokens = 0
         if self.use_sdpa_prefill and causal:
             # Decoder, need reorder and truncate
+            assert self.reorder_batch_threshold
             (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
                 split_decodes_and_prefills(
                     common_attn_metadata,

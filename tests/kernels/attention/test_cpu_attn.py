@@ -307,6 +307,17 @@ def test_varlen_with_paged_kv(
         0, num_blocks, (num_seqs, max_num_blocks_per_seq), dtype=torch.int32
     )
 
+    # use reshape_and_cache to pack key_cache and value_cache
+    slot_mapping = torch.arange(0, num_blocks * block_size, dtype=torch.int64)
+    cpu_attn_reshape_and_cache(
+        key=key_cache.view(-1, num_kv_heads, head_size),
+        value=value_cache.view(-1, num_kv_heads, head_size),
+        key_cache=packed_key_cache,
+        value_cache=packed_value_cache,
+        slot_mapping=slot_mapping,
+        isa=isa,
+    )
+
     metadata = cpu_attn_get_scheduler_metadata(
         num_reqs=num_seqs,
         num_heads=num_query_heads,
@@ -319,17 +330,6 @@ def test_varlen_with_paged_kv(
         sliding_window_size=sliding_window if sliding_window is not None else -1,
         isa=isa,
         enable_kv_split=False,
-    )
-
-    # use reshape_and_cache to pack key_cache and value_cache
-    slot_mapping = torch.arange(0, num_blocks * block_size, dtype=torch.int64)
-    cpu_attn_reshape_and_cache(
-        key=key_cache.view(-1, num_kv_heads, head_size),
-        value=value_cache.view(-1, num_kv_heads, head_size),
-        key_cache=packed_key_cache,
-        value_cache=packed_value_cache,
-        slot_mapping=slot_mapping,
-        scheduler_metadata=metadata,
     )
 
     out_without_split = torch.empty_like(query)

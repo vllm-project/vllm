@@ -189,7 +189,7 @@ class CpuPlatform(Platform):
 
         if cache_config.block_size % 32 != 0:
             block_size = cache_config.block_size
-            block_size = ((block_size + 31) // 32) * 32
+            block_size = ((block_size + 31) // 32) * 32  # type: ignore
             cache_config.block_size = block_size
             logger.warning("CPU backend requires block_size is divisible by 32")
 
@@ -205,7 +205,7 @@ class CpuPlatform(Platform):
 
         if cache_config.cache_dtype != "auto":
             logger.warning(
-                "CPU backend doesn't support KV cache quantizationfallback to auto."
+                "CPU backend doesn't support KV cache quantization fallback to auto."
             )
             cache_config.cache_dtype = "auto"
 
