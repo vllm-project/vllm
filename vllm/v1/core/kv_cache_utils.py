@@ -682,7 +682,12 @@ def check_enough_kv_cache_memory(
     if not kv_cache_spec:
         return
 
-    if available_memory <= 0:
+    # Account for CPU offloading when checking memory availability
+    # When CPU offloading is enabled, effective memory is GPU + CPU offload
+    cpu_offload_bytes = int(vllm_config.cache_config.cpu_offload_gb * GiB_bytes)
+    effective_available_memory = available_memory + cpu_offload_bytes
+    
+    if effective_available_memory <= 0:
         raise ValueError(
             "No available memory for the cache blocks. "
             "Try increasing `gpu_memory_utilization` when "
@@ -692,25 +697,32 @@ def check_enough_kv_cache_memory(
     max_model_len = vllm_config.model_config.max_model_len
     needed_memory = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
 
-    if needed_memory > available_memory:
+    if needed_memory > effective_available_memory:
         # Estimate the maximum model length that can fit in the available memory
         estimated_max_len = estimate_max_model_len(
-            vllm_config, kv_cache_spec, available_memory
+            vllm_config, kv_cache_spec, effective_available_memory
         )
         estimated_msg = ""
         if estimated_max_len > 0:
             estimated_msg = (
-                "Based on the available memory, "
+                "Based on the available memory (GPU + CPU offload), "
                 f"the estimated maximum model length is {estimated_max_len}."
+            )
+
+        offload_info = ""
+        if cpu_offload_bytes > 0:
+            offload_info = (
+                f" (GPU: {available_memory / GiB_bytes:.2f} GiB + "
+                f"CPU offload: {cpu_offload_bytes / GiB_bytes:.2f} GiB)"
             )
 
         raise ValueError(
             f"To serve at least one request with the models's max seq len "
             f"({max_model_len}), ({needed_memory / GiB_bytes:.2f} GiB KV "
             f"cache is needed, which is larger than the available KV cache "
-            f"memory ({available_memory / GiB_bytes:.2f} GiB). "
+            f"memory ({effective_available_memory / GiB_bytes:.2f} GiB{offload_info}). "
             f"{estimated_msg} "
-            f"Try increasing `gpu_memory_utilization` or decreasing "
+            f"Try increasing `gpu_memory_utilization`, `cpu_offload_gb`, or decreasing "
             f"`max_model_len` when initializing the engine."
         )
 
