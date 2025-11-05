@@ -277,8 +277,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         o = torch.zeros(
-            B, self.num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
-        )
+            B, self.num_heads, self.kv_lora_rank, dtype=torch.bfloat16, device=q.device
+        ).fill_(-1)
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
@@ -295,6 +295,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.decode.paged_kv_indptr,
             attn_metadata.decode.paged_kv_indices,
             attn_metadata.decode.paged_kv_last_page_len,
+            q_scale=layer._q_scale,
+            kv_scale=layer._k_scale,
         )
 
         return o, None
