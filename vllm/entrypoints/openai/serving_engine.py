@@ -16,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.chat_utils import parse_minimax_prompt_to_messages
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -1102,6 +1104,8 @@ class OpenAIServing:
                 model_config=model_config,
                 **_chat_template_kwargs,
             )
+
+            temp = parse_minimax_prompt_to_messages(request_prompt)
 
         mm_data = await mm_data_future
 

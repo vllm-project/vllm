@@ -11,19 +11,13 @@ logger = logging.getLogger(__name__)
 class StreamableParser:
     """Incremental parser over completion tokens with reasoning support."""
 
-    def __init__(self, *, tokenizer, reasoning_parser: ReasoningParser | None = None):
+    def __init__(self, *, tokenizer, reasoning_parser: ReasoningParser):
         self.sentences: list[Sentence] = []
         self.tokens: list[int] = []
         self.tokenizer = tokenizer
 
         # Initialize reasoning parser instance if provided
-        self.reasoning_parser_instance = None
-        if reasoning_parser is not None:
-            try:
-                self.reasoning_parser_instance = reasoning_parser(tokenizer)
-            except Exception as e:
-                # If instantiation fails, we'll skip reasoning parsing
-                logger.warning(f"Failed to instantiate reasoning parser: {e}")
+        self.reasoning_parser_instance = reasoning_parser(tokenizer)
 
         # start like this
         self.current_role = Role.ASSISTANT
@@ -69,7 +63,7 @@ class StreamableParser:
 
 
 def get_streamable_parser_for_simple_context(
-    *, tokenizer, reasoning_parser=None
+    *, tokenizer, reasoning_parser: ReasoningParser, sentences
 ) -> StreamableParser:
     """Factory function to create a StreamableParser with optional reasoning parser.
 

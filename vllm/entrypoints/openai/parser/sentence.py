@@ -52,3 +52,5 @@ class TextContent(Content):
 class Sentence(BaseModel):
     author: Author
     content: list[Content]
+
+# class

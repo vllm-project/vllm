@@ -4,6 +4,7 @@
 import asyncio
 import inspect
 import json
+import re
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
 from collections.abc import Awaitable, Callable, Iterable
@@ -280,6 +281,112 @@ ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 
 # Used internally
 _ChatTemplateContentFormat = Literal["string", "openai"]
+
+
+def parse_minimax_prompt_to_messages(
+    prompt: str,
+    include_incomplete: bool = True,
+) -> list[dict]:
+    """
+    Parse a MiniMax-M2 formatted prompt back into structured conversation messages.
+
+    This function reverses the operation of apply_hf_chat_template for MiniMax-M2 format.
+
+    Args:
+        prompt: The formatted prompt string with MiniMax-M2 special tokens
+                Format: ']~!b[]~b]role\ncontent[e~[\n]~b]role\ncontent[e~[...'
+        include_incomplete: Whether to include incomplete messages (e.g., partial assistant responses)
+
+    Returns:
+        List of conversation messages in the format:
+        [{'role': 'system', 'content': [{'type': 'text', 'text': '...'}]}, ...]
+
+    Example:
+        >>> prompt = "]~!b[]~b]system\\nYou are helpful.[e~[\\n]~b]user\\nHello?[e~["
+        >>> messages = parse_minimax_prompt_to_messages(prompt)
+        >>> print(messages)
+        [{'role': 'system', 'content': [{'type': 'text', 'text': 'You are helpful.'}]},
+         {'role': 'user', 'content': [{'type': 'text', 'text': 'Hello?'}]}]
+    """
+    # MiniMax-M2 special tokens
+    START_TOKEN = r"\]~!b\[\]~b\]"  # Start of conversation
+    MESSAGE_START = r"\]~b\]"  # Start of each message
+    MESSAGE_END = r"\[e~\["  # End of each message
+    THINK_START = "<think>"
+    THINK_END = "</think>"
+
+    # Role mapping: MiniMax uses 'ai' but we normalize to 'assistant'
+    ROLE_MAP = {
+        "system": "system",
+        "user": "user",
+        "ai": "assistant",
+        "assistant": "assistant",
+    }
+
+    conversation = []
+
+    # Remove the start token if present
+    prompt = re.sub(f"^{START_TOKEN}", "", prompt)
+
+    # Split by message boundaries
+    # Pattern: ]~b]role\ncontent[e~[
+    message_pattern = f"{MESSAGE_START}([^\\n]+)\\n(.*?)(?:{MESSAGE_END}|$)"
+
+    for match in re.finditer(message_pattern, prompt, re.DOTALL):
+        role_raw = match.group(1).strip()
+        content_raw = match.group(2)
+
+        # Check if message is complete (has end token)
+        is_complete = prompt[match.end() : match.end() + len("[e~[")] == "[e~["
+
+        if not include_incomplete and not is_complete:
+            continue
+
+        # Normalize role
+        role = ROLE_MAP.get(role_raw, role_raw)
+
+        # Parse content - handle <think> tags
+        content_parts = []
+
+        # Check for thinking content
+        think_pattern = f"{re.escape(THINK_START)}(.*?)(?:{re.escape(THINK_END)}|$)"
+        remaining_content = content_raw
+
+        for think_match in re.finditer(think_pattern, content_raw, re.DOTALL):
+            # Add any content before the think tag
+            before_think = content_raw[
+                len(remaining_content) - len(content_raw) : think_match.start()
+            ]
+            if before_think.strip():
+                content_parts.append(
+                    {"type": "text", "text": before_think.strip(), "channel": "final"}
+                )
+
+            # Add thinking content
+            think_text = think_match.group(1).strip()
+            if think_text:
+                content_parts.append(
+                    {"type": "text", "text": think_text, "channel": "think"}
+                )
+
+            remaining_content = content_raw[think_match.end() :]
+
+        # Add any remaining content after all think tags
+        if remaining_content.strip():
+            content_parts.append(
+                {"type": "text", "text": remaining_content.strip(), "channel": "final"}
+            )
+
+        # If no structured content was found, treat entire content as text
+        if not content_parts and content_raw.strip():
+            content_parts.append(
+                {"type": "text", "text": content_raw.strip(), "channel": "final"}
+            )
+
+        if content_parts or is_complete:
+            conversation.append({"role": role, "content": content_parts})
+
+    return conversation
 
 
 def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:

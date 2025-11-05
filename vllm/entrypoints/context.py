@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.parser.parser import (
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if TYPE_CHECKING:
@@ -185,7 +186,13 @@ class SimpleContext(ConversationContext):
 
 
 class ParsableContext(ConversationContext):
-    def __init__(self, *, tokenizer: AnyTokenizer, reasoning_parser=None):
+    def __init__(
+        self,
+        *,
+        sentences: list,
+        tokenizer: AnyTokenizer,
+        reasoning_parser: ReasoningParser,
+    ):
         self.last_output = None
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -196,10 +203,13 @@ class ParsableContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.parser = get_streamable_parser_for_simple_context(
-            tokenizer=tokenizer, reasoning_parser=reasoning_parser
+            tokenizer=tokenizer, reasoning_parser=reasoning_parser, sentences=sentences
         )
         self.tokenizer = tokenizer
         self.reasoning_parser = reasoning_parser
+
+        self.num_init_sentences = len(sentences)
+        self.sentences = sentences
 
     def append_output(self, output) -> None:
         self.last_output = output
