@@ -5,7 +5,7 @@ import os
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import islice
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import torch
 import zmq
@@ -52,6 +52,12 @@ def striding_block_hashes(
     for the 16th, 32nd, 48th, ... blocks.
     """
     return islice(block_hashes, blocks_in_chunk - 1, None, blocks_in_chunk)
+
+
+def convert_block_hashes_to_bytes(
+    block_hashes: list[BlockHash],
+) -> list[bytes]:
+    return cast(list[bytes], block_hashes)
 
 
 class LMCacheMPRequestState(enum.Enum):
@@ -210,7 +216,9 @@ class LMCacheMPRequestMetadata:
         if num_chunks >= 1:
             start = tracker.num_stored_blocks
             end = start + num_chunks * blocks_in_chunk
-            block_hashes = tracker.block_hashes[start:end]
+            block_hashes = convert_block_hashes_to_bytes(
+                tracker.block_hashes[start:end]
+            )
             block_ids = tracker.allocated_block_ids[start:end]
 
             ret = LMCacheMPRequestMetadata(
@@ -256,7 +264,9 @@ class LMCacheMPRequestMetadata:
             "number of LMCache hit blocks. "
         )
         if end > start:
-            block_hashes = tracker.block_hashes[start:end]
+            block_hashes = convert_block_hashes_to_bytes(
+                tracker.block_hashes[start:end]
+            )
             block_ids = tracker.allocated_block_ids[start:end]
 
             ret = LMCacheMPRequestMetadata(

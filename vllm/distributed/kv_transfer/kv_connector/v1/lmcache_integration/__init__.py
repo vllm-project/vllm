@@ -10,6 +10,7 @@ from .multi_process import (
     LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
     LoadStoreOp,
+    convert_block_hashes_to_bytes,
 )
 
 __all__ = [
@@ -21,4 +22,5 @@ __all__ = [
     "LMCacheMPSchedulerAdapter",
     "LMCacheMPWorkerAdapter",
     "LoadStoreOp",
+    "convert_block_hashes_to_bytes",
 ]

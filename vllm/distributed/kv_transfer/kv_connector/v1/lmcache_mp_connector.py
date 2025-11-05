@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
     LMCacheMPRequestTracker,
     LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
+    convert_block_hashes_to_bytes,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
@@ -317,7 +318,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         tracker = self._get_or_create_request_tracker(request)
 
         self.scheduler_adapter.maybe_submit_lookup_request(
-            request.request_id, request.block_hashes
+            request.request_id, convert_block_hashes_to_bytes(request.block_hashes)
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
