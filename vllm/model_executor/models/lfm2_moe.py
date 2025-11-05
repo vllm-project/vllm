@@ -33,6 +33,7 @@ from vllm.model_executor.layers.mamba.short_conv import ShortConv
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -104,7 +105,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -422,15 +423,20 @@ class Lfm2MoeModel(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
+        lora_config = vllm_config.lora_config
         parallel_config = vllm_config.parallel_config
         enable_eplb = parallel_config.enable_eplb
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-
-        self.vocab_size = config.vocab_size
+        lora_vocab = (
+            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
+            if lora_config
+            else 0
+        )
+        self.vocab_size = config.vocab_size + lora_vocab
+        self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size, config.hidden_size, org_num_embeddings=config.vocab_size
@@ -466,7 +472,7 @@ class Lfm2MoeModel(nn.Module):
         else:
             self.embedding_norm = PPMissingLayer()
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -480,7 +486,7 @@ class Lfm2MoeModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.embed_input_ids(input_ids)
+                hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -656,7 +662,7 @@ class Lfm2MoeForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
-
+        lora_config = vllm_config.lora_config
         assert not cache_config.enable_prefix_caching, (
             "Lfm2Moe currently does not support prefix caching"
         )
@@ -668,9 +674,21 @@ class Lfm2MoeForCausalLM(
         )
 
         if get_pp_group().is_last_rank:
+            self.unpadded_vocab_size = self.config.vocab_size
+            if lora_config:
+                self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
             self.lm_head = ParallelLMHead(
-                config.vocab_size,
+                self.unpadded_vocab_size,
                 config.hidden_size,
+                org_num_embeddings=config.vocab_size,
+                padding_size=(
+                    DEFAULT_VOCAB_PADDING_SIZE
+                    # We need bigger padding if using lora for kernel
+                    # compatibility
+                    if not lora_config
+                    else lora_config.lora_vocab_padding_size
+                ),
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
@@ -678,7 +696,9 @@ class Lfm2MoeForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
 
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(
+            self.unpadded_vocab_size, config.vocab_size
+        )
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
@@ -687,7 +707,7 @@ class Lfm2MoeForCausalLM(
         # Set MoE hyperparameters
         self.expert_weights = []
 
-        self.moe_layers = []
+        self.moe_layers: list[FusedMoE] = []
         example_layer = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
@@ -714,8 +734,27 @@ class Lfm2MoeForCausalLM(
         self.num_routed_experts = example_layer.n_routed_experts
         self.num_redundant_experts = example_layer.n_redundant_experts
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        expert_latency_view: torch.Tensor | None = None,
+    ) -> None:
+        self.expert_latency_view = expert_latency_view
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+                expert_latency_view=expert_latency_view,
+            )
 
     def update_physical_experts_metadata(
         self,
@@ -760,3 +799,14 @@ class Lfm2MoeForCausalLM(
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """
+        Get the expert latency tensor for all MoE layers.
+
+        Returns:
+            Tensor of shape (num_moe_layers, num_physical_experts) containing
+            latency in milliseconds (0 if expert was inactive), or None if
+            latency tracking is not enabled.
+        """
+        return self.expert_latency_view

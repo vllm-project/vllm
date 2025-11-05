@@ -98,7 +98,7 @@ class MixtralMoE(nn.Module):
         self.hidden_size = hidden_size
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
+        self.ep_rank = self.ep_group.rank()
         self.ep_size = self.ep_group.size()
 
         # Expert Parallelism Load balancing settings.
@@ -345,7 +345,7 @@ class MixtralModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -359,7 +359,7 @@ class MixtralModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.embed_input_ids(input_ids)
+                hidden_states = self.get_input_embeddings(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -546,7 +546,7 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         )
 
         self.expert_weights = []
-        self.moe_layers = []
+        self.moe_layers: list[FusedMoE] = []
         example_moe = None
 
         for layer in self.model.layers:
@@ -572,6 +572,25 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         self.num_expert_groups = 1
         self.num_shared_experts = 0
 
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        expert_latency_view: torch.Tensor | None = None,
+    ) -> None:
+        self.expert_latency_view = expert_latency_view
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+                expert_latency_view=expert_latency_view,
+            )
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -591,8 +610,8 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -619,3 +638,14 @@ class MixtralForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
+
+    def get_expert_latencies(self) -> torch.Tensor | None:
+        """
+        Get the expert latency tensor for all MoE layers.
+
+        Returns:
+            Tensor of shape (num_moe_layers, num_physical_experts) containing
+            latency in milliseconds (0 if expert was inactive), or None if
+            latency tracking is not enabled.
+        """
+        return self.expert_latency_view
