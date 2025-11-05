@@ -353,6 +353,14 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
         if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+            if (
+                self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                and not self.moe.is_act_and_mul
+            ):
+                logger.info_once(
+                    "Non-gated MoE is not supported for min-latency mode,"
+                    "falling back to high-throughput mode"
+                )
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
