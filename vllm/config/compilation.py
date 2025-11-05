@@ -143,7 +143,6 @@ class PassConfig:
         if max_size_mb is None:
             max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
         max_size_bytes = int(max_size_mb * MiB) if max_size_mb is not None else None
-        logger.debug_once(f"flashinfer_max_size: {max_size_bytes}", scope="global")
         return max_size_bytes
 
     @staticmethod
