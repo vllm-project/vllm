@@ -402,6 +402,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len_np = self.paged_kv_last_page_len_cpu.numpy()
 
+        if self.head_dim == 256 and current_platform.is_device_capability(100):
+            # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
+            # head size 256 and block size 16 is not supported on blackwell.
+            assert kv_cache_spec.block_size != 16, (
+                "There is a bug in FlashInfer "
+                "block_size 16 head size 256 support. Please avoid this combination by "
+                "passing --block-size 32 or --block-size 64."
+            )
+
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
             buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE
