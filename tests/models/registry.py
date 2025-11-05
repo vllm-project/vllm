@@ -220,7 +220,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
     ),
     "DeepseekForCausalLM": _HfExamplesInfo(
-        "deepseek-ai/deepseek-moe-16b-base", trust_remote_code=True
+        "deepseek-ai/deepseek-moe-16b-base",
+        trust_remote_code=True,
     ),
     "DeepseekV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V2-Lite-Chat",
