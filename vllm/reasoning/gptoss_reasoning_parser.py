@@ -71,22 +71,30 @@ STRUCTURAL_TAG_TEMPLATE = {
 }
 
 
-def create_tool_tags(channel_name: str, tool_name: str) -> list[dict]:
+def create_tool_tags(
+    channel_name: str, tool_name: str, content_type: str | None = None
+) -> list[dict]:
     """
     Generate tool-specific tags based on channel name and tool name.
 
     Args:
         channel_name: The channel name (e.g., "analysis", "commentary")
         tool_name: The tool name (e.g., "python", "container")
+        content_type: Optional explicit content type. If not provided,
+                      inferred from channel.
 
     Returns:
         List of two tag dictionaries for first and last message positions
     """
-    analysis_content_type = "code"
-    commentary_content_type = "<|constrain|>json"
-    content_type = (
-        analysis_content_type if channel_name == "analysis" else commentary_content_type
-    )
+    if content_type is None:
+        analysis_content_type = "code"
+        commentary_content_type = "<|constrain|>json"
+        content_type = (
+            analysis_content_type
+            if channel_name == "analysis"
+            else commentary_content_type
+        )
+
     return [
         # Tool as first message
         {
@@ -126,6 +134,11 @@ def get_structural_tags(analysis_tools: set[str], commentary_tools: set[str]):
     for tool_name in analysis_tools:
         if tool_name:  # Skip empty strings from split
             tags.extend(create_tool_tags("analysis", tool_name))
+            # If commentary tools exist, also allow analysis tools on commentary
+            # This handles model training issue where it flips between channels
+            # Use "code" content type (analysis tools keep their format)
+            if commentary_tools:
+                tags.extend(create_tool_tags("commentary", tool_name, "code"))
 
     # Build the complete structural tag
     structural_tags = copy.deepcopy(STRUCTURAL_TAG_TEMPLATE)

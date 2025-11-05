@@ -522,6 +522,10 @@ def get_tool_names_from_messages(messages: list[Message]) -> set[str]:
                 message_content.tools.values() if message_content.tools else []
             )
             for tool_namespace_config in tool_namespace_configs:
+                # gpt-oss special case for python tool not needing a namespace
+                if tool_namespace_config.name == "python":
+                    tool_names.add("python")
+                    continue
                 for tool in tool_namespace_config.tools:
                     tool_names.add(f"{tool_namespace_config.name}.{tool.name}")
     return tool_names
