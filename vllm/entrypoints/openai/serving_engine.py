@@ -17,6 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
+from vllm.entrypoints.context import HarmonyContext, StreamingHarmonyContext
+
 if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
@@ -77,6 +79,9 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.entrypoints.renderer import BaseRenderer, CompletionRenderer, RenderConfig
+from vllm.entrypoints.responses_utils import (
+    construct_input_messages,
+)
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.inputs.data import PromptType
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -1225,6 +1230,31 @@ class OpenAIServing:
         )
         return engine_request, tokenization_kwargs
 
+    async def _render_next_turn(
+        self,
+        request,
+        tokenizer,
+        messages,
+        tool_dicts,
+        tool_parser,
+        chat_template,
+        chat_template_content_format,
+    ):
+        new_messages = construct_input_messages(
+            request_input=messages,
+        )
+
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
+            request,
+            tokenizer,
+            new_messages,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+        )
+        return request_prompts, engine_prompts
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -1287,11 +1317,38 @@ class OpenAIServing:
 
             # Create inputs for the next turn.
             # Render the next prompt token ids.
-            prompt_token_ids = context.render_for_completion()
-            engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
-            request_prompt = prompt_token_ids
+            if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
+                prompt_token_ids = context.render_for_completion()
+                engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+                request_prompt = prompt_token_ids
+            else:
+                [
+                    request,
+                    tokenizer,
+                    messages,
+                    tool_dicts,
+                    tool_parser,
+                    chat_template,
+                    chat_template_content_format,
+                ] = context.render_for_completion()
+
+                # HACK
+                request_prompts, engine_prompts = await self._render_next_turn(
+                    request,
+                    tokenizer,
+                    messages,
+                    tool_dicts,
+                    tool_parser,
+                    chat_template,
+                    chat_template_content_format,
+                )
+                engine_prompt = engine_prompts[0]
+                request_prompt = request_prompts[0]
+
             # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
+            sampling_params.max_tokens = self.max_model_len - len(
+                engine_prompt["prompt_token_ids"]
+            )
             # OPTIMIZATION
             priority = orig_priority - 1
             sub_request += 1

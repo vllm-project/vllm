@@ -35,6 +35,9 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from openai.types.responses import ResponseInputImageParam
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -232,6 +235,7 @@ ChatCompletionContentPartParam: TypeAlias = (
     | CustomChatCompletionContentSimpleVideoParam
     | str
     | CustomThinkCompletionContentParam
+    | ResponseReasoningTextContent
 )
 
 
@@ -1530,6 +1534,12 @@ def _parse_chat_message_content(
     role = message["role"]
     content = message.get("content")
     reasoning = message.get("reasoning") or message.get("reasoning_content")
+    # TODO: get from reasoning_content?
+
+    # HACK
+    if role == "tool":
+        content_format = "openai"
+
     if content is None:
         content = []
     elif isinstance(content, str):
@@ -1538,7 +1548,9 @@ def _parse_chat_message_content(
         role,
         content,  # type: ignore
         mm_tracker,
-        wrap_dicts=(content_format == "openai"),
+        wrap_dicts=(
+            content_format == "openai"
+        ),  # kimik2 thinks this is string, breaks on tool
         interleave_strings=interleave_strings,
     )
 

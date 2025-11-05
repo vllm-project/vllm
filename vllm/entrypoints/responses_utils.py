@@ -13,6 +13,7 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
+from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_output_message import ResponseOutputMessage
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
 from openai.types.responses.tool import Tool
@@ -22,6 +23,31 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionMessageParam,
     ResponseInputOutputItem,
 )
+
+
+def make_response_output_items_from_parsable_context(
+    response_messages: list[ResponseInputOutputItem],
+) -> list[ResponseOutputItem]:
+    """Given a list of sentences, construct ResponseOutput Items."""
+    output_messages: list[ResponseOutputItem] = []
+    for message in response_messages:
+        if not isinstance(message, ResponseFunctionToolCallOutputItem):
+            output_messages.append(message)
+        else:
+            if isinstance(output_messages[-1], ResponseFunctionToolCall):
+                mcp_message = McpCall(
+                    id="lol",
+                    arguments=output_messages[-1].arguments,
+                    name=output_messages[-1].name,
+                    server_label=output_messages[-1].name,  # TODO
+                    type="mcp_call",
+                    status="completed",
+                    output=message.output,
+                    # TODO: support error output
+                )
+                output_messages[-1] = mcp_message
+
+    return output_messages
 
 
 def construct_input_messages(

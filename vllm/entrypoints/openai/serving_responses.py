@@ -59,6 +59,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import (
     ConversationContext,
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
     StreamingHarmonyContext,
 )
@@ -97,6 +98,7 @@ from vllm.entrypoints.responses_utils import (
     construct_input_messages,
     convert_tool_responses_to_completions_format,
     extract_tool_types,
+    make_response_output_items_from_parsable_context,
 )
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
@@ -269,6 +271,9 @@ class OpenAIServingResponses(OpenAIServing):
         | ErrorResponse
     ):
         error_check_ret = await self._check_model(request)
+        import fbvscode
+
+        fbvscode.set_trace()
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
@@ -333,7 +338,7 @@ class OpenAIServingResponses(OpenAIServing):
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
+        if self.tool_server is not None:
             if self.tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
@@ -368,12 +373,33 @@ class OpenAIServingResponses(OpenAIServing):
 
                 context: ConversationContext
                 if self.use_harmony:
+                    # note: in harmomy, the system message is included
                     if request.stream:
                         context = StreamingHarmonyContext(messages, available_tools)
                     else:
                         context = HarmonyContext(messages, available_tools)
                 else:
-                    context = SimpleContext()
+                    if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
+                        # This is an feature in development for parsing
+                        # tokens during generation instead of at the end
+                        context = ParsableContext(
+                            response_messages=messages,
+                            tokenizer=tokenizer,
+                            reasoning_parser=self.reasoning_parser,
+                            request=request,
+                            tool_parser_cls=self.tool_parser,
+                            available_tools=available_tools,
+                            tool_dicts=[
+                                convert_tool_responses_to_completions_format(
+                                    tool.model_dump()
+                                )
+                                for tool in request.tools
+                            ],
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
+                        )
+                    else:
+                        context = SimpleContext()
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -602,6 +628,22 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "cancelled"
             else:
                 status = "incomplete"
+        elif isinstance(context, ParsableContext):
+            response_messages = context.parser.response_messages[
+                context.parser.num_init_messages :
+            ]
+            output = make_response_output_items_from_parsable_context(response_messages)
+
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently only supported for gpt-oss"
+                )
+
+            # TODO: Calculate usage.
+            # assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -621,7 +663,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-        assert isinstance(context, (SimpleContext, HarmonyContext))
+        assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
