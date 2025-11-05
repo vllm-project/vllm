@@ -162,6 +162,14 @@ fused_add_rms_norm_kernel(
 
 }  // namespace vllm
 
+#define LAUNCH_RMS_NORM_KERNEL(NUM_DIMS)                                      \
+  VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {  \
+    vllm::rms_norm_kernel<scalar_t, NUM_DIMS><<<grid, block, 0, stream>>>(    \
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),                 \
+        input_stride_inner, input_stride_outer, input_shape_inner,            \
+        weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);       \
+  });
+
 void rms_norm(torch::Tensor& out,     // [..., hidden_size]
               torch::Tensor& input,   // [..., hidden_size]
               torch::Tensor& weight,  // [hidden_size]
@@ -185,19 +193,9 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   if (num_dims == 2) {
-    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-      vllm::rms_norm_kernel<scalar_t, 2><<<grid, block, 0, stream>>>(
-          out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-          input_stride_inner, input_stride_outer, input_shape_inner,
-          weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
-    });
+    LAUNCH_RMS_NORM_KERNEL(2);
   } else {  // num_dims == 3
-    VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "rms_norm_kernel", [&] {
-      vllm::rms_norm_kernel<scalar_t, 3><<<grid, block, 0, stream>>>(
-          out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
-          input_stride_inner, input_stride_outer, input_shape_inner,
-          weight.data_ptr<scalar_t>(), epsilon, num_tokens, hidden_size);
-    });
+    LAUNCH_RMS_NORM_KERNEL(3);
   }
 }
 
