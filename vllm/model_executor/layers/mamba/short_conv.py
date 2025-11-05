@@ -170,7 +170,7 @@ class ShortConv(MambaBase, CustomOp):
             dim=0,
         )
         query_start_loc_p = (
-            attn_metadata.query_start_loc[-num_prefills - 1 :] - num_decodes
+            attn_metadata.query_start_loc_p[-num_prefills - 1 :] - num_decodes
             if has_prefill
             else None
         )
