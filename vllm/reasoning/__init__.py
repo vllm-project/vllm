@@ -6,6 +6,7 @@ from .basic_parsers import BaseThinkingReasoningParser
 from .deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from .deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 from .ernie45_reasoning_parser import Ernie45ReasoningParser
+from .exaone4_reasoning_parser import Exaone4ReasoningParser
 from .glm4_moe_reasoning_parser import Glm4MoeModelReasoningParser
 from .gptoss_reasoning_parser import GptOssReasoningParser
 from .granite_reasoning_parser import GraniteReasoningParser
@@ -26,6 +27,7 @@ __all__ = [
     "IdentityReasoningParser",
     "DeepSeekV3ReasoningParser",
     "Ernie45ReasoningParser",
+    "Exaone4ReasoningParser",
     "GraniteReasoningParser",
     "HunyuanA13BReasoningParser",
     "Qwen3ReasoningParser",
