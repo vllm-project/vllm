@@ -76,7 +76,7 @@ class LazyConfigDict(dict):
         return getattr(configs, value)
 
 
-_CONFIG_REGISTRY: dict[str, type[PretrainedConfig] | PretrainedConfig] = LazyConfigDict(
+_CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     chatglm="ChatGLMConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32=DeepseekV3Config,
