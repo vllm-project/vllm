@@ -4,10 +4,13 @@
 """Integration tests for handler override functionality.
 
 Tests real customer usage scenarios:
-- Using @custom_ping_handler and @custom_invocation_handler decorators to override handlers
+- Using @custom_ping_handler and @custom_invocation_handler decorators
+  to override handlers
 - Setting environment variables for handler specifications
-- Writing customer scripts with custom_sagemaker_ping_handler() and custom_sagemaker_invocation_handler() functions
-- Priority: env vars > decorators > customer script files > framework defaults
+- Writing customer scripts with custom_sagemaker_ping_handler() and
+  custom_sagemaker_invocation_handler() functions
+- Priority: env vars > decorators > customer script files > framework
+  defaults
 
 Note: These tests focus on validating server responses rather than directly calling
 get_ping_handler() and get_invoke_handler() to ensure full integration testing.
@@ -15,7 +18,6 @@ get_ping_handler() and get_invoke_handler() to ensure full integration testing.
 
 import os
 import tempfile
-from unittest.mock import patch
 
 import pytest
 import requests
@@ -31,7 +33,8 @@ class TestHandlerOverrideIntegration:
     Each test simulates a fresh server startup where customers:
     - Use @custom_ping_handler and @custom_invocation_handler decorators
     - Set environment variables (CUSTOM_FASTAPI_PING_HANDLER, etc.)
-    - Write customer scripts with custom_sagemaker_ping_handler() and custom_sagemaker_invocation_handler() functions
+    - Write customer scripts with custom_sagemaker_ping_handler() and
+      custom_sagemaker_invocation_handler() functions
     """
 
     def setup_method(self):
@@ -61,11 +64,11 @@ class TestHandlerOverrideIntegration:
     def _clear_env_vars(self):
         """Clear SageMaker environment variables."""
         try:
-            from model_hosting_container_standards.sagemaker.config import (
-                SageMakerEnvVars,
-            )
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,
+            )
+            from model_hosting_container_standards.sagemaker.config import (
+                SageMakerEnvVars,
             )
 
             # Clear SageMaker env vars
@@ -86,7 +89,8 @@ class TestHandlerOverrideIntegration:
 
     @pytest.mark.asyncio
     async def test_customer_script_functions_auto_loaded(self):
-        """Test customer scenario: script functions automatically override framework defaults."""
+        """Test customer scenario: script functions automatically override
+        framework defaults."""
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -137,7 +141,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
             ]
 
             with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
-                # Customer tests their server and sees their overrides work automatically
+                # Customer tests their server and sees their overrides work
+                # automatically
                 ping_response = requests.get(server.url_for("ping"))
                 assert ping_response.status_code == 200
                 ping_data = ping_response.json()
@@ -166,7 +171,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     @pytest.mark.asyncio
     async def test_customer_decorator_usage(self):
-        """Test customer scenario: using @custom_ping_handler and @custom_invocation_handler decorators."""
+        """Test customer scenario: using @custom_ping_handler and
+        @custom_invocation_handler decorators."""
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -242,7 +248,8 @@ async def my_invoke(request: Request):
 
     @pytest.mark.asyncio
     async def test_handler_priority_order(self):
-        """Test priority: @custom_ping_handler/@custom_invocation_handler decorators vs script functions."""
+        """Test priority: @custom_ping_handler/@custom_invocation_handler
+        decorators vs script functions."""
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -266,7 +273,8 @@ async def decorated_ping():
         "priority": "decorator"
     }
 
-# Customer also has a regular function (lower priority than @custom_ping_handler decorator)
+# Customer also has a regular function (lower priority than
+# @custom_ping_handler decorator)
 async def custom_sagemaker_ping_handler():
     return {
         "status": "healthy",
@@ -320,7 +328,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 assert invoke_response.status_code == 200
                 invoke_data = invoke_response.json()
 
-                # @custom_ping_handler decorator has higher priority than script function
+                # @custom_ping_handler decorator has higher priority than
+                # script function
                 assert ping_data["source"] == "ping_decorator_in_script"
                 assert ping_data["priority"] == "decorator"
 
@@ -333,7 +342,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     @pytest.mark.asyncio
     async def test_environment_variable_script_loading(self):
-        """Test that environment variables correctly specify script location and loading."""
+        """Test that environment variables correctly specify script location
+        and loading."""
         try:
             from model_hosting_container_standards.sagemaker.config import (
                 SageMakerEnvVars,
@@ -411,7 +421,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     @pytest.mark.asyncio
     async def test_framework_default_handlers(self):
-        """Test that framework default handlers work when no customer overrides exist."""
+        """Test that framework default handlers work when no customer
+        overrides exist."""
         args = [
             "--dtype",
             "bfloat16",
@@ -425,11 +436,11 @@ async def custom_sagemaker_invocation_handler(request: Request):
         # Explicitly pass empty env_dict to ensure no SageMaker env vars are set
         # This prevents pollution from previous tests
         try:
-            from model_hosting_container_standards.sagemaker.config import (
-                SageMakerEnvVars,
-            )
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,
+            )
+            from model_hosting_container_standards.sagemaker.config import (
+                SageMakerEnvVars,
             )
 
             env_dict = {
@@ -459,13 +470,14 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     @pytest.mark.asyncio
     async def test_handler_env_var_override(self):
-        """Test CUSTOM_FASTAPI_PING_HANDLER and CUSTOM_FASTAPI_INVOCATION_HANDLER environment variable overrides."""
+        """Test CUSTOM_FASTAPI_PING_HANDLER and CUSTOM_FASTAPI_INVOCATION_HANDLER
+        environment variable overrides."""
         try:
-            from model_hosting_container_standards.sagemaker.config import (
-                SageMakerEnvVars,
-            )
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,
+            )
+            from model_hosting_container_standards.sagemaker.config import (
+                SageMakerEnvVars,
             )
         except ImportError:
             pytest.skip("model-hosting-container-standards not available")
@@ -522,8 +534,12 @@ async def custom_sagemaker_invocation_handler(request: Request):
             env_vars = {
                 SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
                 SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-                FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER: f"{script_name}:env_var_ping_handler",
-                FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER: f"{script_name}:env_var_invoke_handler",
+                FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER: (
+                    f"{script_name}:env_var_ping_handler"
+                ),
+                FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER: (
+                    f"{script_name}:env_var_invoke_handler"
+                ),
             }
 
             args = [
@@ -567,13 +583,14 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     @pytest.mark.asyncio
     async def test_env_var_priority_over_decorator_and_script(self):
-        """Test that environment variables have highest priority over decorators and script functions for both ping and invocation handlers."""
+        """Test that environment variables have highest priority over decorators
+        and script functions for both ping and invocation handlers."""
         try:
-            from model_hosting_container_standards.sagemaker.config import (
-                SageMakerEnvVars,
-            )
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,
+            )
+            from model_hosting_container_standards.sagemaker.config import (
+                SageMakerEnvVars,
             )
         except ImportError:
             pytest.skip("model-hosting-container-standards not available")
@@ -656,8 +673,12 @@ async def custom_sagemaker_invocation_handler(request: Request):
             env_vars = {
                 SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
                 SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-                FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER: f"{script_name}:env_priority_ping",
-                FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER: f"{script_name}:env_priority_invoke",
+                FastAPIEnvVars.CUSTOM_FASTAPI_PING_HANDLER: (
+                    f"{script_name}:env_priority_ping"
+                ),
+                FastAPIEnvVars.CUSTOM_FASTAPI_INVOCATION_HANDLER: (
+                    f"{script_name}:env_priority_invoke"
+                ),
             }
 
             args = [
@@ -701,7 +722,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
     @pytest.mark.asyncio
     async def test_disable_sagemaker_standards_flag(self):
-        """Test that --disable-sagemaker-standards flag actually disables SageMaker features."""
+        """Test that --disable-sagemaker-standards flag actually disables
+        SageMaker features."""
 
         # Test with SageMaker standards disabled
         disabled_args = [
@@ -732,7 +754,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
             assert chat_response.status_code == 200
 
             # Test that SageMaker-specific features are disabled
-            # The invocations endpoint should either not exist or not process SageMaker headers
+            # The invocations endpoint should either not exist or not process
+            # SageMaker headers
             invocation_response = requests.post(
                 server.url_for("invocations"),
                 json={
@@ -742,7 +765,8 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 },
             )
 
-            # When SageMaker standards are disabled, the invocations endpoint should either:
+            # When SageMaker standards are disabled, the invocations endpoint
+            # should either:
             # 1. Return 404 (endpoint doesn't exist), or
             # 2. Return 200 but without SageMaker-specific processing
             assert invocation_response.status_code in [

@@ -6,16 +6,11 @@
 Tests that customer middlewares get called correctly with a vLLM server.
 """
 
-import importlib
 import os
 import tempfile
-from unittest.mock import patch
 
 import pytest
 import requests
-from fastapi import FastAPI, Request
-from fastapi.testclient import TestClient
-from starlette.middleware.base import BaseHTTPMiddleware
 
 from ..utils import RemoteOpenAIServer
 
@@ -35,7 +30,7 @@ class TestMiddlewareIntegration:
             from model_hosting_container_standards.common.fastapi.middleware import (
                 middleware_registry,
             )
-            from model_hosting_container_standards.common.fastapi.middleware.source.decorator_loader import (
+            from model_hosting_container_standards.common.fastapi.middleware.source.decorator_loader import (  # noqa: E501
                 decorator_loader,
             )
             from model_hosting_container_standards.sagemaker.sagemaker_loader import (
@@ -51,8 +46,9 @@ class TestMiddlewareIntegration:
     @pytest.mark.asyncio
     async def test_customer_middleware_with_vllm_server(self):
         """Test that customer middlewares work with actual vLLM server.
-        
-        Tests decorator-based middlewares (@custom_middleware, @input_formatter, @output_formatter)
+
+        Tests decorator-based middlewares (@custom_middleware, @input_formatter,
+        @output_formatter)
         on multiple endpoints (chat/completions, invocations).
         """
         try:
@@ -66,7 +62,9 @@ class TestMiddlewareIntegration:
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(
                 """
-from model_hosting_container_standards.common.fastapi.middleware import custom_middleware, input_formatter, output_formatter
+from model_hosting_container_standards.common.fastapi.middleware import (
+    custom_middleware, input_formatter, output_formatter
+)
 
 # Global flag to track if input formatter was called
 _input_formatter_called = False
@@ -90,7 +88,8 @@ async def customer_throttle_middleware(request, call_next):
 async def customer_output_formatter(response):
     global _input_formatter_called
     response.headers["X-Customer-Processed"] = "true"
-    # Since input_formatter and output_formatter are combined into pre_post_process middleware,
+    # Since input_formatter and output_formatter are combined into
+    # pre_post_process middleware,
     # if output_formatter is called, input_formatter should have been called too
     if _input_formatter_called:
         response.headers["X-Input-Formatter-Called"] = "true"
@@ -134,19 +133,21 @@ async def customer_output_formatter(response):
                 )
 
                 assert chat_response.status_code == 200
-                
+
                 # Verify all middlewares were executed
                 assert "X-Customer-Throttle" in chat_response.headers
                 assert chat_response.headers["X-Customer-Throttle"] == "applied"
                 assert "X-Customer-Processed" in chat_response.headers
                 assert chat_response.headers["X-Customer-Processed"] == "true"
-                
+
                 # Verify input formatter was called
                 assert "X-Input-Formatter-Called" in chat_response.headers
                 assert chat_response.headers["X-Input-Formatter-Called"] == "true"
 
                 # Verify middleware execution order
-                execution_order = chat_response.headers.get("X-Middleware-Order", "").rstrip(",")
+                execution_order = chat_response.headers.get(
+                    "X-Middleware-Order", ""
+                ).rstrip(",")
                 order_parts = execution_order.split(",") if execution_order else []
                 assert "throttle" in order_parts
                 assert "output_formatter" in order_parts
@@ -163,16 +164,18 @@ async def customer_output_formatter(response):
                 )
 
                 assert invocations_response.status_code == 200
-                
+
                 # Verify all middlewares were executed
                 assert "X-Customer-Throttle" in invocations_response.headers
                 assert invocations_response.headers["X-Customer-Throttle"] == "applied"
                 assert "X-Customer-Processed" in invocations_response.headers
                 assert invocations_response.headers["X-Customer-Processed"] == "true"
-                
+
                 # Verify input formatter was called
                 assert "X-Input-Formatter-Called" in invocations_response.headers
-                assert invocations_response.headers["X-Input-Formatter-Called"] == "true"
+                assert (
+                    invocations_response.headers["X-Input-Formatter-Called"] == "true"
+                )
 
         finally:
             os.unlink(script_path)
@@ -191,7 +194,9 @@ async def customer_output_formatter(response):
         with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
             f.write(
                 """
-from model_hosting_container_standards.common.fastapi.middleware import custom_middleware
+from model_hosting_container_standards.common.fastapi.middleware import (
+    custom_middleware
+)
 
 @custom_middleware("pre_post_process")
 async def ping_tracking_middleware(request, call_next):
@@ -237,11 +242,11 @@ async def ping_tracking_middleware(request, call_next):
     async def test_middleware_env_var_override(self):
         """Test middleware environment variable overrides."""
         try:
-            from model_hosting_container_standards.sagemaker.config import (
-                SageMakerEnvVars,
-            )
             from model_hosting_container_standards.common.fastapi.config import (
                 FastAPIEnvVars,
+            )
+            from model_hosting_container_standards.sagemaker.config import (
+                SageMakerEnvVars,
             )
         except ImportError:
             pytest.skip("model-hosting-container-standards not available")
@@ -270,7 +275,8 @@ async def env_post_process(response):
     global _pre_process_called
     if hasattr(response, 'headers'):
         response.headers["X-Env-Post-Process"] = "applied"
-        # Since pre_process and post_process are combined into pre_post_process middleware,
+        # Since pre_process and post_process are combined into
+        # pre_post_process middleware,
         # if post_process is called, pre_process should have been called too
         if _pre_process_called:
             response.headers["X-Pre-Process-Called"] = "true"
@@ -288,7 +294,9 @@ async def env_post_process(response):
             env_vars = {
                 SageMakerEnvVars.SAGEMAKER_MODEL_PATH: script_dir,
                 SageMakerEnvVars.CUSTOM_SCRIPT_FILENAME: script_name,
-                FastAPIEnvVars.CUSTOM_FASTAPI_MIDDLEWARE_THROTTLE: f"{script_name}:env_throttle_middleware",
+                FastAPIEnvVars.CUSTOM_FASTAPI_MIDDLEWARE_THROTTLE: (
+                    f"{script_name}:env_throttle_middleware"
+                ),
                 FastAPIEnvVars.CUSTOM_PRE_PROCESS: f"{script_name}:env_pre_process",
                 FastAPIEnvVars.CUSTOM_POST_PROCESS: f"{script_name}:env_post_process",
             }
@@ -311,14 +319,20 @@ async def env_post_process(response):
                 headers = response.headers
 
                 # Verify that env var middlewares were applied
-                assert "X-Env-Throttle" in headers, "Throttle middleware should be applied via env var"
+                assert "X-Env-Throttle" in headers, (
+                    "Throttle middleware should be applied via env var"
+                )
                 assert headers["X-Env-Throttle"] == "applied"
-                
-                assert "X-Env-Post-Process" in headers, "Post-process middleware should be applied via env var"
+
+                assert "X-Env-Post-Process" in headers, (
+                    "Post-process middleware should be applied via env var"
+                )
                 assert headers["X-Env-Post-Process"] == "applied"
-                
+
                 # Verify that pre_process was called
-                assert "X-Pre-Process-Called" in headers, "Pre-process should be called via env var"
+                assert "X-Pre-Process-Called" in headers, (
+                    "Pre-process should be called via env var"
+                )
                 assert headers["X-Pre-Process-Called"] == "true"
 
         finally:
