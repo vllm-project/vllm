@@ -13,6 +13,7 @@ from mistral_common.protocol.instruct.messages import  RawAudio
 from mistral_common.protocol.transcription.request import TranscriptionRequest
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -109,12 +110,18 @@ class KimiAudioDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         target_length = self.info.get_max_audio_len()
+
+        audio_overrides = mm_options.get("audio") if mm_options else None
+
         return {
             "audio":
-            self._get_dummy_audios(length=target_length, num_audios=num_audios)
+            self._get_dummy_audios(
+                length=target_length, num_audios=num_audios, overrides=audio_overrides
+            )
         }
 
 
