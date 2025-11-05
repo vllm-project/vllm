@@ -74,6 +74,7 @@ FROM base AS test
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
 # Install vLLM using uv
+RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
     && uv pip install --system -U -r requirements/rocm.txt \
