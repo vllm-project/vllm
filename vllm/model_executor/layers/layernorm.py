@@ -123,7 +123,6 @@ def rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
 
 def rocm_aiter_rmsnorm_fp8_group_quant_impl(
     x: torch.Tensor,
-    residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -136,7 +135,7 @@ def rocm_aiter_rmsnorm_fp8_group_quant_impl(
         None,
         group_size=rocm_aiter_fp8_quant_group_size,
         dtype_quant=rocm_aiter_fp8_dtype,
-        res1=residual,
+        res1=None,
     )
     return (x_quant, x_quant_scales)
 
@@ -176,7 +175,6 @@ def rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
 
 def rocm_aiter_rmsnorm_fp8_group_quant_fake(
     x: torch.Tensor,
-    residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:

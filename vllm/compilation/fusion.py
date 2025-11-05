@@ -347,13 +347,13 @@ if is_rocm_aiter_rmsnorm_enabled():
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
-                weight: torch.Tensor,  # result_rms: torch.Tensor,
+                weight: torch.Tensor,
             ):
                 at1 = AITER_RMS_OP(
                     x=input, weight=weight, variance_epsilon=self.epsilon
                 )
 
-                at2 = AITER_BLOCK_QUANT_OP(x=at1[0])
+                at2 = AITER_BLOCK_QUANT_OP(x=at1)
 
                 return at2[0], at2[1]
 
@@ -362,7 +362,7 @@ if is_rocm_aiter_rmsnorm_enabled():
                 weight: torch.Tensor,
             ):
                 at = AITER_RMS_GROUP_QUANT_OP(
-                    x=input, residual=None, weight=weight, variance_epsilon=self.epsilon
+                    x=input, weight=weight, variance_epsilon=self.epsilon
                 )
 
                 return at[0], at[1]
