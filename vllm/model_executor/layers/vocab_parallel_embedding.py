@@ -455,8 +455,25 @@ class VocabParallelEmbedding(CustomOp):
 
         # Copy the data. Select chunk corresponding to current shard.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
-        param[loaded_weight.shape[0] :].data.fill_(0)
+
+        # Handle TorchAO tensor subclass
+        if type(loaded_weight) is not torch.Tensor:
+            param_name, device = None, None
+            for name, p in self.named_parameters():
+                if p is param:
+                    param_name = name
+                    device = p.device
+                    break
+
+            if param_name is not None:
+                delattr(self, param_name)
+                new_param = Parameter(
+                    loaded_weight.to(device), requires_grad=loaded_weight.requires_grad
+                )
+                self.register_parameter(param_name, new_param)
+        else:
+            param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
+            param[loaded_weight.shape[0] :].data.fill_(0)
 
     def forward_native(self, input_):
         if self.tp_size > 1:
