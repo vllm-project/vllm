@@ -851,28 +851,35 @@ class AttentionMainLoop {
   class Attention {
    public:
     // Args:
-    //  q_heads_buffer: [MaxQHeadNumPerIteration, head_dim]
-    //  k_head_cache_ptr: [num_blocks, block_size * head_dim]
-    //  v_head_cache_ptr: [num_blocks, block_size * head_dim]
-    //  logits_buffer: [MaxQHeadNumPerIteration, kv_tile_token_num], store Q@K
-    //  logits partial_q_buffer: [MaxQHeadNumPerIteration, head_dim], store
-    //  partial output max_buffer: [MaxQHeadNumPerIteration, 1], store max
-    //  logits sum_buffer: [MaxQHeadNumPerIteration, 1], store sum of exp
-    //  block_table
-    //  kv_tile_start_pos: start position of KV cache, aligned to
-    //  BlockSizeAlignment kv_tile_end_pos: end position of KV cache, aligned to
-    //  BlockSizeAlignment kv_tile_token_num: KV token num, aligned to
-    //  BlockSizeAlignment kv_cache_num_blocks_stride q_head_num: head num of
-    //  q_tile q_token_num: token num of q_tile, should be q_head_num /
-    //  q_heads_per_kv q_tile_start_pos: start pos of the first token in
-    //  q_heads_buffer q_heads_per_kv block_size left_window_size
-    //  right_window_size
-    //  scale
-    //  softcap_scale
-    //  alibi_slopes
-    //  is_first_iter
-    //  use_sink
-    //  debug_info
+    //  - q_heads_buffer: [MaxQHeadNumPerIteration, head_dim]
+    //  - k_head_cache_ptr: [num_blocks, block_size * head_dim]
+    //  - v_head_cache_ptr: [num_blocks, block_size * head_dim]
+    //  - logits_buffer: [MaxQHeadNumPerIteration, kv_tile_token_num], store Q@K
+    //  - logits partial_q_buffer: [MaxQHeadNumPerIteration, head_dim], store
+    //  partial output
+    //  - max_buffer: [MaxQHeadNumPerIteration, 1], store max logits
+    //  - sum_buffer: [MaxQHeadNumPerIteration, 1], store sum of exp
+    //  - block_table
+    //  - kv_tile_start_pos: start position of KV cache, aligned to
+    //  BlockSizeAlignment
+    //  - kv_tile_end_pos: end position of KV cache, aligned to
+    //  BlockSizeAlignment
+    //  - kv_tile_token_num: KV token num, aligned to BlockSizeAlignment
+    //  - kv_cache_num_blocks_stride
+    //  - q_head_num: head num of q_tile
+    //  - q_token_num: token num of q_tile, should be q_head_num /
+    //  q_heads_per_kv
+    //  - q_tile_start_pos: start pos of the first token in q_heads_buffer
+    //  - q_heads_per_kv
+    //  - block_size
+    //  - left_window_size
+    //  - right_window_size
+    //  - scale
+    //  - softcap_scale
+    //  - alibi_slopes
+    //  - is_first_iter
+    //  - use_sink
+    //  - debug_info
     void operator()(DEFINE_CPU_ATTENTION_PARAMS) {
       // k_cache_token_group_stride: stride of K cache when move to next
       // BlockSizeAlignment tokens in a block
@@ -918,9 +925,10 @@ class AttentionMainLoop {
                block_group_idx < curr_group_num_in_block; ++block_group_idx) {
             // logits_tile = q_tile @ k_tile, [MaxQHeadNumPerIteration,
             // BlockSizeAlignment] = [MaxQHeadNumPerIteration, head_dim] @
-            // [head_dim, BlockSizeAlignment] By default, logits_buffer,
-            // q_buffer and k_cache are row-major, but may be packed by ISA
-            // implementation.
+            // [head_dim, BlockSizeAlignment]
+
+            // By default, logits_buffer, q_buffer and k_cache are row-major,
+            // but may be packed by ISA implementation.
             tile_gemm_t::template gemm<AttentionGemmPhase::QK, head_dim>(
                 q_head_num, q_heads_buffer, k_cache_block_ptr,
                 curr_logits_buffer, head_dim, block_size, kv_tile_token_num,
