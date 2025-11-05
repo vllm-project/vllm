@@ -135,6 +135,12 @@ def get_structural_tags(analysis_tools: set[str], commentary_tools: set[str]):
 
 @ReasoningParserManager.register_module("openai_gptoss")
 class GptOssReasoningParser(ReasoningParser):
+    """
+    Reasoning parser for GptOss model.
+    The GptOss model uses harmony to extract reasoning content and this parser
+    is only used for detecting the end of the reasoning content.
+    """
+
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         self.reasoning_end_token_ids = self.model_tokenizer.encode(
