@@ -73,6 +73,16 @@ if current_platform.is_cuda():
         ),
     ]
 
+    MODELS_MOE = [
+        ModelBackendTestCase(
+            model_name="Qwen/Qwen3-30B-A3B",
+            model_kwargs=dict(max_model_len=1024),
+            backend=_Backend.TRITON_ATTN,
+            attention_fusions=0,
+            allreduce_fusions=97,
+        ),
+    ]
+
 elif current_platform.is_rocm():
     MODELS_FP8 = [
         ModelBackendTestCase(
@@ -191,7 +201,7 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
         )
     )
     # Toggle RMSNorm for FP4 models and unquant models
-    + list(flat_product(MODELS_FP4 + MODELS, CUSTOM_OPS_RMS_NORM)),
+    + list(flat_product(MODELS_FP4 + MODELS + MODELS_MOE, CUSTOM_OPS_RMS_NORM)),
 )
 @pytest.mark.parametrize("inductor_graph_partition", [True, False])
 @pytest.mark.skipif(
