@@ -1944,7 +1944,7 @@ def validate_api_server_args(args):
             f"(chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
-    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    valid_reasoning_parses = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
     ) and reasoning_parser not in valid_reasoning_parses:
