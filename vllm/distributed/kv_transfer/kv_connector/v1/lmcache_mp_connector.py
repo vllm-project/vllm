@@ -211,10 +211,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # TODO:
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            event = torch.cuda.Event(interprocess=True)
+            event.record()
+
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
-            self.worker_adapter.submit_store_request(meta.request_id, meta.op)
+            self.worker_adapter.submit_store_request(meta.request_id, meta.op, event)
 
     def get_finished(
         self, finished_req_ids: set[str]

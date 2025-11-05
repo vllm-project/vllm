@@ -364,15 +364,18 @@ class LMCacheMPWorkerAdapter:
         )
         future.result()
 
-    def submit_store_request(self, request_id: str, op: LoadStoreOp):
+    def submit_store_request(
+        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
+    ):
         keys = self._block_hashes_to_keys(op.block_hashes)
         future = send_lmcache_request(
-            self.mq_client, RequestType.STORE, [keys, self.instance_id, op.block_ids]
+            self.mq_client,
+            RequestType.STORE,
+            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         )
         self.store_futures[request_id] = future
 
     def submit_retrieve_request(self, request_id: str, op: LoadStoreOp):
-        # TODO: submit the retrieve task
         keys = self._block_hashes_to_keys(op.block_hashes)
         future = send_lmcache_request(
             self.mq_client, RequestType.RETRIEVE, [keys, self.instance_id, op.block_ids]

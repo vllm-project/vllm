@@ -1,0 +1,5 @@
+Correctness test
+Performance test - long doc qa
+End to end test with 2 instances
+Merge multiple store requests into one
+Enable cuda-event based execution
