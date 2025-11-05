@@ -42,7 +42,10 @@ lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7
 
 pqdm==0.2.0
 
-# Required for audio tests (matching test.in)
+# Required for audio tests - Install from PyTorch ROCm repository
+# Note: Must use --extra-index-url in Dockerfile to get ROCm version
+# (matching rocm-build.txt)
+--extra-index-url https://download.pytorch.org/whl/rocm6.4
 torchaudio==2.9.0
 
 # Required for smolvlm test (matching test.in)
