@@ -43,6 +43,22 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
+// TODO replace 32 with WARP_SIZE
+__device__ float warpReduceMax(volatile float* val, int tid) {
+  val[tid] = fmaxf(val[tid], val[tid + 32]);
+  // printf("s_max vals red 32: %f (%d)\n", val[tid], tid);
+  val[tid] = fmaxf(val[tid], val[tid + 16]);
+  // printf("s_max vals red 16: %f (%d)\n", val[tid], tid);
+  val[tid] = fmaxf(val[tid], val[tid + 8]);
+  // printf("s_max vals red 8: %f (%d)\n", val[tid], tid);
+  val[tid] = fmaxf(val[tid], val[tid + 4]);
+  // printf("s_max vals red 4: %f (%d)\n", val[tid], tid);
+  val[tid] = fmaxf(val[tid], val[tid + 2]);
+  // printf("s_max vals red 2: %f (%d)\n", val[tid], tid);
+  val[tid] = fmaxf(val[tid], val[tid + 1]);
+  return val[tid];
+}
+
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
 __device__ void compute_dynamic_per_token_scales(
     float* __restrict__ token_scale, float* __restrict__ all_token_scales,
@@ -53,18 +69,95 @@ __device__ void compute_dynamic_per_token_scales(
   float block_absmax_val_maybe = 0.0f;
   constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
   if (group_size > 0) {
-    int64_t const token_block_offset =
-        blockIdx.x * static_cast<int64_t>(group_size);
-    int64_t const hidden_element_offset = token_block_offset % hidden_size;
-    for (auto i = threadIdx.x; i < group_size; i += blockDim.x) {
-      float x = static_cast<float>(input[token_block_offset + i]);
+    // if (threadIdx.x == 0) {
+    //   printf("block size: %d\n", blockDim.x);
+    // }
+
+   __shared__ float s_max_vals[1024];
+    int32_t const token_offset =
+        blockIdx.x * static_cast<int64_t>(hidden_size);
+    int32_t num_groups = hidden_size / group_size;
+    int32_t const threads_per_group = blockDim.x / num_groups;
+    int32_t const thread_in_group = threadIdx.x % threads_per_group;
+    int32_t const thread_offset = threadIdx.x / threads_per_group * group_size +
+        thread_in_group;
+    // printf("%d %d %d %d\n", threadIdx.x, threads_per_group, thread_in_group, thread_offset);
+    // int64_t const hidden_element_offset = token_block_offset % hidden_size;
+    for (auto i = thread_offset; i < thread_offset + group_size; i += threads_per_group) {
+      float x = static_cast<float>(input[token_offset + i]);
       if constexpr (has_residual) {
-        x += static_cast<float>(residual[token_block_offset + i]);
+        x += static_cast<float>(residual[token_offset + i]);
       }
       x = static_cast<float>(static_cast<scalar_t>(x * rms) *
-                             weight[hidden_element_offset + i]);
+                             weight[i]);
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
+    s_max_vals[threadIdx.x] = block_absmax_val_maybe;
+    // printf("s_max_vals 0: %f (%d)\n", block_absmax_val_maybe, threadIdx.x);
+    __syncthreads();
+
+    int step_size = threads_per_group;
+    int ctr = 1;
+    while (step_size > 32 * 2) {
+      step_size /= 2;
+      if (thread_in_group < step_size) {
+        s_max_vals[threadIdx.x] = fmaxf(s_max_vals[threadIdx.x], s_max_vals[threadIdx.x + step_size]);
+        // printf("s_max_vals %d: %f (%d)\n", ctr, s_max_vals[threadIdx.x], threadIdx.x);
+        ++ctr;
+      }
+      __syncthreads();
+    }
+    float reduced_local = 0.0f;
+    if (thread_in_group < 32) {
+      reduced_local = warpReduceMax(s_max_vals, threadIdx.x);
+    }
+    if (thread_in_group == 0) {
+      block_absmax_val_maybe = reduced_local;
+      // printf("s_max_vals end: %f (%d)\n", block_absmax_val_maybe, threadIdx.x);
+    }
+    __syncthreads();
+
+    if (thread_in_group == 0) {
+      // printf("block_absmax_val_maybe: %f (%d)\n", block_absmax_val_maybe, threadIdx.x);
+      float scale = 0.0f;
+      if (scale_ub) {
+        scale = min(block_absmax_val_maybe, *scale_ub);
+      } else {
+        scale = block_absmax_val_maybe;
+      }
+      // token scale computation
+      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+      all_token_scales[blockIdx.x * num_groups + threadIdx.x / threads_per_group] = scale;  // Global output store
+      token_scale[blockIdx.x * num_groups + threadIdx.x / threads_per_group] = scale;
+      __syncthreads();
+    }
+
+    // using BlockReduce = cub::BlockReduce<float, 1024>;
+    // __shared__ typename BlockReduce::TempStorage reduceStore;
+    // block_absmax_val_maybe =
+    //     BlockReduce(reduceStore)
+    //         .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
+  
+    // __shared__ float s_token_scale;
+    // if (threadIdx.x == 0) {
+    //   float scale = 0.0f;
+    //   if (scale_ub) {
+    //     scale = min(block_absmax_val_maybe, *scale_ub);
+    //   } else {
+    //     scale = block_absmax_val_maybe;
+    //   }
+    //   // token scale computation
+    //   scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+    //   s_token_scale = scale;                 // Shared memory store
+    //   all_token_scales[blockIdx.x] = scale;  // Global output store
+    // }
+    // __syncthreads();
+  
+    // *token_scale = s_token_scale;
+
+      // for each first warp of the group, do the for-loop reduction
+      // then, call warpReduceMax and sync
+
   } else {
     int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
@@ -77,30 +170,29 @@ __device__ void compute_dynamic_per_token_scales(
       x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
-  }
-
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
-  block_absmax_val_maybe =
-      BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
-
-  __shared__ float s_token_scale;
-  if (threadIdx.x == 0) {
-    float scale = 0.0f;
-    if (scale_ub) {
-      scale = min(block_absmax_val_maybe, *scale_ub);
-    } else {
-      scale = block_absmax_val_maybe;
+    using BlockReduce = cub::BlockReduce<float, 1024>;
+    __shared__ typename BlockReduce::TempStorage reduceStore;
+    block_absmax_val_maybe =
+        BlockReduce(reduceStore)
+            .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
+  
+    __shared__ float s_token_scale;
+    if (threadIdx.x == 0) {
+      float scale = 0.0f;
+      if (scale_ub) {
+        scale = min(block_absmax_val_maybe, *scale_ub);
+      } else {
+        scale = block_absmax_val_maybe;
+      }
+      // token scale computation
+      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+      s_token_scale = scale;                 // Shared memory store
+      all_token_scales[blockIdx.x] = scale;  // Global output store
     }
-    // token scale computation
-    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-    s_token_scale = scale;                 // Shared memory store
-    all_token_scales[blockIdx.x] = scale;  // Global output store
+    __syncthreads();
+  
+    *token_scale = s_token_scale;
   }
-  __syncthreads();
-
-  *token_scale = s_token_scale;
 }
 
 template <typename scalar_t, typename scalar_out_t, bool is_scale_inverted,

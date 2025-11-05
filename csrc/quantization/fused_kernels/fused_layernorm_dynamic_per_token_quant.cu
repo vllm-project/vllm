@@ -114,9 +114,8 @@ __global__ void rms_norm_per_block_quant_kernel_2(
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // Compute Scale
   // Always able to vectorize due to constraints on hidden_size
-  vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
-                                                     has_residual>(
-      token_scale + blockIdx.x, scales, input, weight,
+  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+      token_scale, scales, input, weight,
       rms[blockIdx.x / (hidden_size / group_size)], scale_ub, hidden_size,
       residual, group_size);
 }
@@ -263,7 +262,7 @@ void rms_norm_per_block_quant_dispatch(
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_per_block_quant_kernel_2", [&] {
           vllm::rms_norm_per_block_quant_kernel_2<scalar_in_t, scalar_t, true>
-              <<<grid2, block2, 0, stream>>>(
+              <<<grid13, block13, 0, stream>>>(
                   rms.data_ptr<float>(), token_scale.data_ptr<float>(),
                   out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
@@ -296,7 +295,7 @@ void rms_norm_per_block_quant_dispatch(
     VLLM_DISPATCH_QUANT_TYPES(
         out.scalar_type(), "rms_norm_per_block_quant_kernel_2", [&] {
           vllm::rms_norm_per_block_quant_kernel_2<scalar_in_t, scalar_t, false>
-              <<<grid2, block2, 0, stream>>>(
+              <<<grid13, block13, 0, stream>>>(
                   rms.data_ptr<float>(), token_scale.data_ptr<float>(),
                   out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
                   input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
