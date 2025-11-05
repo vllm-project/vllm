@@ -262,6 +262,24 @@ async def validate_json_request(raw_request: Request):
             errors=["Unsupported Media Type: Only 'application/json' is allowed"]
         )
 
+async def validate_response_schema(raw_request: Request):
+    request_dict = await raw_request.json()
+    try:
+        from vllm.entrypoints.openai.protocol import validate_schema_format
+        if request_dict.get("response_format", {}).get("json_schema", {}).get("schema"):
+            validate_schema_format(request_dict["response_format"]["json_schema"]["schema"])
+    except Exception as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "object": "error",
+                "message": str(getattr(e, "error", str(e))),
+                "type": "BadRequestError",
+                "param": None,
+                "code": 400,
+            },
+        )
+
 
 router = APIRouter()
 
@@ -658,7 +676,8 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 
 @router.post(
     "/v1/chat/completions",
-    dependencies=[Depends(validate_json_request)],
+    dependencies=[Depends(validate_json_request),
+                  Depends(validate_response_schema)],
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
@@ -699,7 +718,8 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
 
 @router.post(
     "/v1/completions",
-    dependencies=[Depends(validate_json_request)],
+    dependencies=[Depends(validate_json_request),
+                  Depends(validate_response_schema)],
     responses={
         HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
