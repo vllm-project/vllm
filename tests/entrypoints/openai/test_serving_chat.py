@@ -353,6 +353,7 @@ class MockModelConfig:
     tokenizer_revision = None
     multimodal_config = MultiModalConfig()
     hf_config = MockHFConfig()
+    logits_processors: list[str] | None = None
     logits_processor_pattern = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
