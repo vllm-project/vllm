@@ -214,28 +214,32 @@ def test_splitting_ops_dynamic():
         assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
-def test_resolve_operator_overload():
+def test_should_split():
     import torch
 
-    from vllm.compilation.partition_rules import resolve_defined_ops
+    from vllm.compilation.partition_rules import should_split
 
-    # Test valid operator names
-    resolved = resolve_defined_ops(["aten::mm.default", "aten::addmm.default"])
-    assert len(resolved) == 2
-    assert resolved[0] is torch.ops.aten.mm.default
-    assert resolved[1] is torch.ops.aten.addmm.default
-
-    # Test that invalid operators are skipped (not raising exceptions)
-    resolved = resolve_defined_ops(
-        [
-            "aten::mm.default",
-            "aten::nonexistent_op.default",  # This should be skipped
-            "aten::addmm.default",
-        ]
+    graph = torch.fx.Graph()
+    node = torch.fx.Node(
+        graph=graph,
+        name="dummy_node",
+        op="call_function",
+        target=torch.ops.aten.add.default,
+        args=(),
+        kwargs={},
     )
-    assert len(resolved) == 2  # Only 2 valid ops
-    assert resolved[0] is torch.ops.aten.mm.default
-    assert resolved[1] is torch.ops.aten.addmm.default
+
+    # supports OpOverloadPacket
+    splitting_ops = ["aten::add"]
+    assert should_split(node, splitting_ops)
+
+    # supports OpOverload
+    splitting_ops = ["aten::add.default"]
+    assert should_split(node, splitting_ops)
+
+    # supports OpOverload
+    splitting_ops = ["aten::add.Tensor"]
+    assert not should_split(node, splitting_ops)
 
 
 @pytest.mark.skipif(

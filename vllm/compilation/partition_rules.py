@@ -2,54 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-import logging
 
 import torch
-from torch._library.utils import lookup_op
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-def resolve_defined_ops(op_names: list[str]) -> list["torch._ops.OpOverload"]:
-    """Resolve operator names to OpOverload objects.
+def should_split(node: torch.fx.Node, splitting_ops: list[str]) -> bool:
+    """Checks if a node should be split for pieceiwse cudagraph."""
+    # Match node.target against resolved_ops
+    # node.target can be OpOverloadPacket, need to check .default
 
-    Skips operators that fail to resolve (e.g., operators not registered or
-    model-specific operators not present in the current model).
+    if node.op != "call_function":
+        return False
 
-    Note: Users should inspect the operator graph before lowering and ensure
-    the specified operators are present in the final graph. Built-in PyTorch
-    operators (aten::*, torch::*) may be decomposed, fused, or transformed
-    during Inductor's compilation passes, so use them with caution.
+    op_overload = node.target
+    assert isinstance(op_overload, torch._ops.OpOverload)
 
-    Args:
-        op_names: List of operator names in PyTorch format
-            (e.g., "vllm::unified_attention")
+    # Example: "aten::add"
+    op_overload_packet_name = op_overload.name()
 
-    Returns:
-        List of successfully resolved operator overloads
-    """
-    resolved = []
-    for op_name in op_names:
-        try:
-            resolved.append(lookup_op(op_name))
-        except Exception:
-            # Skip operators that don't exist (e.g., model-specific ops)
-            # Do not warn for attention ops, warn for others
-            # (most likely manually specified)
-            from vllm.config import CompilationConfig
+    # Example: "aten::add.default"
+    op_overload_name = f"{op_overload_packet_name}.{op_overload._overloadname}"
 
-            logger.log(
-                logging.DEBUG
-                if op_name in CompilationConfig._attention_ops
-                else logging.WARNING,
-                "Failed to resolve operator for CUDAGraph partition: %s",
-                op_name,
-            )
-            continue
-
-    return resolved
+    return op_overload_packet_name in splitting_ops or op_overload_name in splitting_ops
 
 
 @contextlib.contextmanager
