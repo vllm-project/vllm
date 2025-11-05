@@ -8,6 +8,7 @@ from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -25,10 +26,14 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
+    DeepseekV2MixtureOfExperts,
+    DeepseekV2MoE,
     get_spec_layer_idx_from_weight_name,
 )
 from .interfaces import SupportsPP
 from .utils import maybe_prefix
+
+logger = init_logger(__name__)
 
 
 class SharedHead(nn.Module):
@@ -119,6 +124,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
         # to map the exact layer index from weights
+
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): DeepSeekMultiTokenPredictorLayer(
@@ -172,13 +178,33 @@ class DeepSeekMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class DeepSeekMTP(nn.Module, SupportsPP):
+class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.model = DeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
+
+    def set_moe_parameters(self):
+        self.expert_weights = []
+        self.num_moe_layers = self.config.num_nextn_predict_layers
+        self.num_expert_groups = self.config.n_group
+
+        self.moe_layers = []
+        self.moe_mlp_layers = []
+        example_moe = None
+        for layer in self.model.layers.values():
+            assert isinstance(layer, DeepSeekMultiTokenPredictorLayer)
+            layer = layer.mtp_block
+            assert isinstance(layer, DeepseekV2DecoderLayer)
+            if isinstance(layer.mlp, DeepseekV2MoE):
+                example_moe = layer.mlp
+                self.moe_mlp_layers.append(layer.mlp)
+                self.moe_layers.append(layer.mlp.experts)
+        self.extract_moe_parameters(example_moe)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
