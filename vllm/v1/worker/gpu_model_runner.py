@@ -3395,7 +3395,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(
-            self.lora_config, num_scheduled_tokens, num_sampled_tokens, activate_lora, remove_lora
+            self.lora_config,
+            num_scheduled_tokens,
+            num_sampled_tokens,
+            activate_lora,
+            remove_lora,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_after_padding <= self.max_num_tokens
