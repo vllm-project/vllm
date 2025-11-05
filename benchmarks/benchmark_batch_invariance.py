@@ -21,7 +21,7 @@ Environment variables:
     VLLM_BENCH_TEMPERATURE: Temperature for sampling (default: 0.0)
     VLLM_BENCH_GPU_MEMORY_UTILIZATION: GPU memory utilization (default: 0.4)
     VLLM_BENCH_MAX_MODEL_LEN: Max model length (default: 5120)
-    VLLM_BENCH_BACKEND: Attention backend (default: FLASHINFER)
+    VLLM_BENCH_BACKEND: Attention backend (default: FLASH_ATTN)
 
 Example usage:
     # Benchmark qwen3 (default)
