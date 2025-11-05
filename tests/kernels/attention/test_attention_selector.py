@@ -104,13 +104,6 @@ def test_env(
                                 16, torch.float16, None, block_size, use_mla=use_mla
                             )
                         assert f"The selected backend, {name}" in str(exc_info.value)
-                    elif name == "ROCM_AITER_MLA" and block_size != 1:
-                        # ROCM_AITER_MLA only supports block_size == 1
-                        with pytest.raises(ValueError) as exc_info:
-                            get_attn_backend(
-                                16, torch.float16, None, block_size, use_mla=use_mla
-                            )
-                        assert f"The selected backend, {name}" in str(exc_info.value)
                     else:
                         # Valid backend-block_size combination
                         backend = get_attn_backend(
