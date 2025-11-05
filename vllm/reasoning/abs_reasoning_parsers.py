@@ -173,9 +173,7 @@ class ReasoningParserManager:
         module_path, class_name = cls.lazy_parsers[name]
         try:
             mod = importlib.import_module(module_path)
-            print(f"-----{module_path=}-------{dir(mod)}--{class_name=}--")
             parser_cls = getattr(mod, class_name)
-            print(f"------------{parser_cls=}----")
             if not issubclass(parser_cls, ReasoningParser):
                 raise TypeError(
                     f"{class_name} in {module_path} is not a ReasoningParser subclass."
