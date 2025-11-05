@@ -291,14 +291,13 @@ async def async_request_openai_chat_completions(
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,
-        "messages": [
-            {"role": "user", "content": content},
-        ],
+        "messages": [{"role": "user", "content": content}],
         "temperature": 0.0,
         "max_completion_tokens": request_func_input.output_len,
         "stream": True,
         "stream_options": {
             "include_usage": True,
+            "continuous_usage_stats": True,
         },
     }
     _update_payload_common(payload, request_func_input)
@@ -316,10 +315,25 @@ async def async_request_openai_chat_completions(
     ttft = 0.0
     st = time.perf_counter()
     output.start_time = st
-    most_recent_timestamp = st
+
+    # Running clocks / state
+    last_ts = st  # timestamp of the last processed data event
+    last_completion = 0  # running completion_tokens counter from usage
+    last_emit_ts = st  # time we last observed *usage*-based new tokens
+    last_chunk_ts = st  # time we last observed a content-bearing chunk
+
+    saw_first_token = False  # becomes True on first *usage*-based token event
+    saw_usage_delta = False  # True if we observed any usage delta > 0
+
+    usage_itl: list[float] = []  # per-token ITL derived from usage deltas (seconds)
+    chunk_itl: list[float] = []  # fallback: inter-chunk gaps after TTFT (seconds)
+
     try:
         async with session.post(url=api_url, json=payload, headers=headers) as response:
-            if response.status == 200:
+            if response.status != 200:
+                output.error = response.reason or ""
+                output.success = False
+            else:
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     chunk_bytes = chunk_bytes.strip()
@@ -328,41 +342,95 @@ async def async_request_openai_chat_completions(
 
                     messages = handler.add_chunk(chunk_bytes)
                     for message in messages:
-                        # NOTE: SSE comments (often used as pings) start with
-                        # a colon. These are not JSON data payload and should
-                        # be skipped.
+                        # Skip SSE ping/comments (e.g., ": keep-alive")
                         if message.startswith(":"):
                             continue
 
-                        chunk = message.removeprefix("data: ")
+                        data_str = message.removeprefix("data: ").strip()
+                        if data_str == "[DONE]":
+                            continue
 
-                        if chunk != "[DONE]":
-                            timestamp = time.perf_counter()
-                            data = json.loads(chunk)
+                        timestamp = time.perf_counter()
+                        try:
+                            data = json.loads(data_str)
+                        except Exception:
+                            # Malformed event: ignore
+                            continue
 
-                            if choices := data.get("choices"):
-                                content = choices[0]["delta"].get("content")
-                                # First token
+                        # --- Prefer usage-based timing when available ---
+                        usage = data.get("usage")
+                        if usage is not None:
+                            curr = usage.get("completion_tokens")
+                            if isinstance(curr, int):
+                                delta = curr - last_completion
+                                if delta > 0:
+                                    saw_usage_delta = True
+                                    if not saw_first_token:
+                                        # First *usage*-observed token(s)
+                                        if ttft == 0.0:
+                                            ttft = timestamp - st
+                                            output.ttft = ttft
+                                        # Any extra tokens delivered alongside
+                                        #  the first one
+                                        # are credited as 0 ms ITL (same emission).
+                                        if delta > 1:
+                                            usage_itl.extend([0.0] * (delta - 1))
+                                        saw_first_token = True
+                                    else:
+                                        # Distribute elapsed time evenly across Δ tokens
+                                        dt = timestamp - last_emit_ts
+                                        per_tok = dt / float(delta)
+                                        usage_itl.extend([per_tok] * delta)
+                                        last_emit_ts = timestamp
+
+                                    last_completion = curr
+                                    output.output_tokens = curr
+
+                                # Always move 'usage clock' forward
+                                last_emit_ts = timestamp
+
+                                # Update the "last seen event"
+                                # clock even if delta <= 0
+                                last_ts = timestamp
+
+                        # --- Content path: build text; TTFT fallback;
+                        # chunk-gap fallback ---
+                        choices = data.get("choices")
+                        if choices:
+                            delta_obj = choices[0].get("delta") or {}
+                            piece = delta_obj.get("content")
+
+                            if piece is not None:
                                 if ttft == 0.0:
+                                    # First observed token may arrive
+                                    # via content before usage
                                     ttft = timestamp - st
                                     output.ttft = ttft
-
-                                # Decoding phase
+                                    # Do NOT flip saw_first_token here:
+                                    # we only set that when we *observe
+                                    # usage-based tokens*. This preserves
+                                    # the “first-chunk extras = 0 ms”
+                                    # behavior when usage
+                                    # arrives later for the first time.
+                                    last_chunk_ts = timestamp
                                 else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                                    # After TTFT, inter-chunk gaps
+                                    # can serve as a fallback ITL
+                                    gap = timestamp - last_chunk_ts
+                                    if gap > 0:
+                                        chunk_itl.append(gap)
+                                    last_chunk_ts = timestamp
 
-                                generated_text += content or ""
-                            elif usage := data.get("usage"):
-                                output.output_tokens = usage.get("completion_tokens")
+                                generated_text += piece or ""
+                                last_ts = timestamp
 
-                            most_recent_timestamp = timestamp
-
+                # Choose usage-based ITL when available;
+                # otherwise fallback to chunk gaps
+                output.itl = usage_itl if (saw_usage_delta and usage_itl) else chunk_itl
                 output.generated_text = generated_text
                 output.success = True
-                output.latency = most_recent_timestamp - st
-            else:
-                output.error = response.reason or ""
-                output.success = False
+                output.latency = max(0.0, last_ts - st)
+
     except Exception:
         output.success = False
         exc_info = sys.exc_info()
