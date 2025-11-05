@@ -451,11 +451,11 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
-FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
+FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[str, dict[int, float]] = {
     "9.0": {
         2: 64,  # 64MB
         4: 2,  # 2MB
-        8: 1,  # 1MB
+        8: 0.5,  # 0.5MB
     },
     "10.0": {
         2: 64,  # 64MB
@@ -466,11 +466,11 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer one shot fused allreduce
-_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB = {
+_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[str, dict[int, float]] = {
     "9.0": {
         2: 32,  # 32MB
         4: 2,  # 2MB
-        8: 1,  # 1MB
+        8: 0.5,  # 0.5MB
     },
     "10.0": {
         2: 32,  # 32MB
