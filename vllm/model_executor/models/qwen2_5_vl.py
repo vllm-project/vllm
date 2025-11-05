@@ -42,6 +42,7 @@ from vllm.attention.layer import check_upstream_fa_availability
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -1019,15 +1020,18 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             )
         else:
             self.visual = None
+        if has_ec_transfer() and get_ec_transfer().is_producer:
+            self.language_model = None
+            self.make_empty_intermediate_tensors = None
+        else:
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["Qwen2ForCausalLM"],
+            )
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            architectures=["Qwen2ForCausalLM"],
-        )
-
-        self.make_empty_intermediate_tensors = (
-            self.language_model.make_empty_intermediate_tensors)
+            self.make_empty_intermediate_tensors = (
+                self.language_model.make_empty_intermediate_tensors)
 
     def _validate_and_reshape_mm_tensor(self, mm_input: object,
                                         name: str) -> torch.Tensor:
@@ -1467,6 +1471,8 @@ class Qwen2_5_VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         skip_prefixes = []
         if self.visual is None:
             skip_prefixes.extend(["visual."])
+        if self.language_model is None:
+            skip_prefixes.extend(["language_model."])
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
