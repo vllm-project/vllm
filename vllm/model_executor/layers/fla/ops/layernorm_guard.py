@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
 
@@ -165,8 +166,12 @@ def layer_norm_fwd_kernel(
 @lru_cache
 def _get_sm_count(device: torch.device) -> int:
     """Get and cache the SM count for a given device."""
-    props = torch.cuda.get_device_properties(device)
-    return props.multi_processor_count
+    if current_platform.is_xpu():
+        props = torch.xpu.get_device_properties(device)
+        return props.max_compute_units
+    else:
+        props = torch.cuda.get_device_properties(device)
+        return props.multi_processor_count
 
 
 def calc_rows_per_block(M: int, device: torch.device) -> int:
