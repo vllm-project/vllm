@@ -78,6 +78,7 @@ class WorkerGuard:
         vllm_config: VllmConfig,
         pause_event: threading.Event,
         init_distributed_env_callback: Callable,
+        device: torch.cuda.device,
     ):
         self.vllm_config = vllm_config
         self.zmq_ctx = zmq.Context()
@@ -85,6 +86,7 @@ class WorkerGuard:
         self.tp_rank = get_tp_group().rank_in_group
         self.pp_rank = get_pp_group().rank_in_group
         self.init_distributed_env_callback = init_distributed_env_callback
+        self.device = device
         identity = f"{self.tp_rank}_{self.pp_rank}".encode()
         worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
@@ -116,6 +118,7 @@ class WorkerGuard:
 
     def run(self):
         """Run the message receiving loop and handle control commands"""
+        torch.cuda.set_device(self.device)
         while True:
             # Use blocking receive - will wait until a message arrives
             has_msg, _, cmd_str = recv_router_dealer_message(self.cmd_socket)
@@ -137,8 +140,7 @@ class WorkerGuard:
                         level="error",
                     )
                     success = False
-                if method == "restart_worker":
-                    self._send_execution_result(success, method_uuid)
+                self._send_execution_result(success, method_uuid)
 
     def pause_by_signal(self):
         self.pause_event.set()
@@ -151,7 +153,7 @@ class WorkerGuard:
         """
         if self.communicator_aborted:
             return True
-
+        torch.cuda.set_device(self.device)
         model_groups = get_all_model_groups()
         futures = []
 
@@ -214,6 +216,8 @@ class WorkerGuard:
 
     def restart_worker(self):
         if self.communicator_aborted:
+            torch.cuda.set_device(self.device)
+            torch.cuda.synchronize()
             with set_current_vllm_config(self.vllm_config):
                 self.init_distributed_env_callback()
                 self.communicator_aborted = False
@@ -448,6 +452,7 @@ class Worker(WorkerBase):
                 self.vllm_config,
                 self.model_runner.pause_event,
                 init_distributed_env_callback,
+                self.device,
             )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
