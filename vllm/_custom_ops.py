@@ -836,7 +836,11 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+    try:
+        return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+    except AttributeError:
+        # Return False on non-CUDA platforms where it is not available
+        return False
 
 
 def cutlass_sparse_compress(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
