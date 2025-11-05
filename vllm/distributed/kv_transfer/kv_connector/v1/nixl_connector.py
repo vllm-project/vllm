@@ -1342,18 +1342,13 @@ class NixlConnectorWorker:
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(engine_id)
 
-        # when block_size_ratio > 1, one prefill block is n decode_block
-        # loop n times of decode block_len to match to prefill
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id] = nixl_agent_meta.kv_caches_base_addr
 
-        self._validate_remote_agent_handshake(
-            nixl_agent_meta,
-            remote_tp_size,
-        )
+        self._validate_remote_agent_handshake(nixl_agent_meta, remote_tp_size)
 
         # Number of D TP workers reading from a single P TP worker. This is
         # 1 when P and D `--tensor-parallel-size` match.
@@ -1375,8 +1370,6 @@ class NixlConnectorWorker:
                 kv_block_len = remote_kv_block_len
             rank_offset = (
                 self.tp_rank % tp_ratio * remote_kv_block_len
-                if not replicates_kv_cache
-                else 0
                 if not replicates_kv_cache
                 else 0
             )
