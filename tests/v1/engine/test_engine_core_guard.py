@@ -42,7 +42,7 @@ def create_engine_core_guard(
 
 
 def test_engine_core_guard_initialization():
-    fault_signal_q = queue.Queue()
+    fault_signal_q: queue.Queue = queue.Queue()
     busy_loop_active = threading.Event()
 
     guard = create_engine_core_guard(fault_signal_q, busy_loop_active)
@@ -63,7 +63,7 @@ def test_engine_core_guard_initialization():
 
 @pytest.mark.parametrize("instruction", ["pause", "retry"])
 def test_run_handle_instruction(instruction):
-    fault_signal_q = queue.Queue()
+    fault_signal_q: queue.Queue = queue.Queue()
     busy_loop_active = threading.Event()
 
     client_socket = make_zmq_socket(
