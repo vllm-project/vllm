@@ -820,7 +820,7 @@ class EplbState:
             logger.error("Async processor is not initialized")
             return None
         if self.update_expert_map_and_weight_flag():
-           self._async_processor.step()
+            self._async_processor.step()
         process_result = self._async_processor.result
         if process_result is None:
             logger.warning("Async processor result is None, skipping layer.")
