@@ -82,6 +82,8 @@ RUN cd /vllm-workspace \
 # Final vLLM image
 FROM base AS final
 
+RUN echo "74a5, 00, AMD Instinct MI325" >> /usr/share/libdrm/amdgpu.ids
+
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Error related to odd state for numpy 1.20.3 where there is no METADATA etc, but an extra LICENSES_bundled.txt.
 # Manually remove it so that later steps of numpy upgrade can continue
