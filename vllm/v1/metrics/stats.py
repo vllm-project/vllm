@@ -6,6 +6,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+import vllm.envs as envs
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
@@ -169,8 +170,6 @@ class SchedulerStats:
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
-    num_corrupted_reqs: int = 0
-
 
 @dataclass
 class LoRAStats:
@@ -196,6 +195,9 @@ class RequestStateStats:
     # first token latency
     first_token_latency: float = 0.0
 
+    # Track if this request is corrupted (NaNs in logits)
+    is_corrupted: bool = False
+
 
 @dataclass
 class FinishedRequestStats:
@@ -211,6 +213,7 @@ class FinishedRequestStats:
     inference_time: float = 0.0
     decode_time: float = 0.0
     mean_time_per_output_token: float = 0.0
+    is_corrupted: bool = False
 
 
 class IterationStats:
@@ -228,6 +231,7 @@ class IterationStats:
         self.inter_token_latencies_iter: list[float] = []
         self.waiting_lora_adapters: dict[str, int] = {}
         self.running_lora_adapters: dict[str, int] = {}
+        self.num_corrupted_reqs: int = 0
 
     def __repr__(self) -> str:
         field_to_value_str = ", ".join(f"{k}={v}" for k, v in vars(self).items())
@@ -257,6 +261,15 @@ class IterationStats:
             req_stats.first_token_latency = first_token_latency
 
         req_stats.num_generation_tokens += num_new_generation_tokens
+
+        # Track if this request is corrupted (only check once per request)
+        # Early exit if already marked as corrupted to avoid redundant checks
+        if (
+            envs.VLLM_COMPUTE_NANS_IN_LOGITS
+            and not req_stats.is_corrupted
+            and output.num_nans_in_logits > 0
+        ):
+            req_stats.is_corrupted = True
 
         # Process request-level engine core events
         if output.events is not None:
@@ -339,8 +352,13 @@ class IterationStats:
             inference_time=inference_time,
             decode_time=decode_time,
             mean_time_per_output_token=mean_time_per_output_token,
+            is_corrupted=req_stats.is_corrupted,
         )
         self.finished_requests.append(finished_req)
+
+        # Count corrupted requests when they finish (only once per request)
+        if req_stats.is_corrupted:
+            self.num_corrupted_reqs += 1
 
 
 class LoRARequestStates:
