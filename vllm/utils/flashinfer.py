@@ -19,6 +19,9 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -222,6 +225,9 @@ def force_use_trtllm_attention() -> bool | None:
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
     """
+    if vllm_is_batch_invariant():
+        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is disabled for batch-invariant")
+        return False
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
 
