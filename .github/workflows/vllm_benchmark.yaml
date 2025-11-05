@@ -4,6 +4,9 @@ on:
   pull_request:
     branches:
       - dev/perf
+  schedule:
+    # 0 16 * * * means every day at 16:00 UTC, which is 00:00 Beijing time.
+    - cron: '0 16 * * *'
   workflow_dispatch:
     inputs:
       vllm_repo:
