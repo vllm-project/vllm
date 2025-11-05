@@ -185,7 +185,7 @@ class SimpleContext(ConversationContext):
 
 
 class ParsableContext(ConversationContext):
-    def __init__(self, *, tokenizer: AnyTokenizer):
+    def __init__(self, *, tokenizer: AnyTokenizer, reasoning_parser=None):
         self.last_output = None
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
@@ -195,8 +195,11 @@ class ParsableContext(ConversationContext):
         # not implemented yet for SimpleContext
         self.all_turn_metrics = []
 
-        self.parser = get_streamable_parser_for_simple_context(tokenizer=tokenizer)
+        self.parser = get_streamable_parser_for_simple_context(
+            tokenizer=tokenizer, reasoning_parser=reasoning_parser
+        )
         self.tokenizer = tokenizer
+        self.reasoning_parser = reasoning_parser
 
     def append_output(self, output) -> None:
         self.last_output = output

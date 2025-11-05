@@ -378,7 +378,10 @@ class OpenAIServingResponses(OpenAIServing):
                     if envs.VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT:
                         # This is an feature in development for parsing tokens during generation
                         # instead of at the end
-                        context = ParsableContext(tokenizer=tokenizer)
+                        context = ParsableContext(
+                            tokenizer=tokenizer,
+                            reasoning_parser=self.reasoning_parser,
+                        )
                     else:
                         context = SimpleContext()
 
