@@ -1,5 +1,5 @@
-# Minimal stub of tblib used for test environment without dependency.
-# Provides a no-op install() emulating tblib.pickling_support.install.
+# ABOUTME: Minimal stub exposing tblib pickling helpers for tests.
+# ABOUTME: Provides a no-op install() matching tblib.pickling_support.install.
 
 class _PicklingSupport:
     def install(self) -> None:  # pragma: no cover - simple stub
