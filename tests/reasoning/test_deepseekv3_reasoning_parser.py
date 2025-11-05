@@ -5,11 +5,9 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
-from vllm.reasoning import (
-    DeepSeekR1ReasoningParser,
-    DeepSeekV3ReasoningParser,
-    IdentityReasoningParser,
-)
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
+from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
 
