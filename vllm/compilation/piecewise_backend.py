@@ -122,14 +122,21 @@ class PiecewiseBackend:
         return fake_example_inputs
 
     def _maybe_compile_for_range_entry(self, range_entry: RangeEntry, args) -> Any:
+        is_compile_size = lambda range: range[0] == range[1]
         if not range_entry.compiled:
             range_entry.compiled = True
             self.to_be_compiled_ranges.remove(range_entry.compile_range)
 
             # args are real arguments
+            # fakify for range, real args for concrete size
+            args = (
+                self.fakify_args(args)
+                if not is_compile_size(range_entry.compile_range)
+                else args
+            )
             range_entry.runnable = self.vllm_backend.compiler_manager.compile(
                 self.graph,
-                self.fakify_args(args),
+                args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
                 graph_index=self.piecewise_compile_index,
