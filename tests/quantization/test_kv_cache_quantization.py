@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test attention quantization of gpt-oss model.
-The qkv_proj and o_proj in self_attention can be either quantized or excluded.
-Run `pytest tests/models/quantization/test_gpt_oss_attn_quantization.py`.
+"""Test KV cache quantization.
+This script currently tests GPT-OSS with FP8-quantized KV cache via AMD-Quark,
+but is designed to be extended for other models.
+Run `pytest tests/quantization/test_kv_cache_quantization.py`.
 """
 
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ class EvaluationConfig:
         )
 
 
-EXPECTED_ACCURACIES = {"arc_challenge": 0.20}
+EXPECTED_ACCURACIES = {"arc_challenge": 0.19}
 
 
 @pytest.mark.skipif(
