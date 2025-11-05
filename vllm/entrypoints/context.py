@@ -23,6 +23,7 @@ from vllm.entrypoints.openai.parser.parser import (
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 if TYPE_CHECKING:
     from mcp.client import ClientSession
@@ -160,6 +161,54 @@ class SimpleContext(ConversationContext):
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")
+
+    def need_builtin_tool_call(self) -> bool:
+        return False
+
+    async def call_tool(self) -> list[Message]:
+        raise NotImplementedError("Should not be called.")
+
+    def render_for_completion(self) -> list[int]:
+        raise NotImplementedError("Should not be called.")
+
+    async def init_tool_sessions(
+        self,
+        tool_server: ToolServer | None,
+        exit_stack: AsyncExitStack,
+        request_id: str,
+        mcp_tools: dict[str, Mcp],
+    ) -> None:
+        pass
+
+    async def cleanup_session(self) -> None:
+        raise NotImplementedError("Should not be called.")
+
+
+class ParsableContext(ConversationContext):
+    def __init__(self, *, tokenizer: AnyTokenizer):
+        self.last_output = None
+        self.num_prompt_tokens = 0
+        self.num_output_tokens = 0
+        self.num_cached_tokens = 0
+        # todo num_reasoning_tokens is not implemented yet.
+        self.num_reasoning_tokens = 0
+        # not implemented yet for SimpleContext
+        self.all_turn_metrics = []
+
+        self.parser = get_streamable_parser_for_simple_context(tokenizer=tokenizer)
+        self.tokenizer = tokenizer
+
+    def append_output(self, output) -> None:
+        self.last_output = output
+        if not isinstance(output, RequestOutput):
+            raise ValueError("SimpleContext only supports RequestOutput.")
+        self.num_prompt_tokens = len(output.prompt_token_ids or [])
+        self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_output_tokens += len(output.outputs[0].token_ids or [])
+
+        output_token_ids = output.outputs[0].token_ids
+        for token_id in output_token_ids:
+            self.parser.process(token_id)
 
     def need_builtin_tool_call(self) -> bool:
         return False

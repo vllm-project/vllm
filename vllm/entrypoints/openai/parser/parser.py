@@ -19,8 +19,8 @@ class StreamableParser:
         self.current_channel = "think"
         self.current_text = ""
 
-    def render_for_completion():
-        """Maybe this can be the chat template to help generate the initial prompt?"""
+    def render_for_completion(self):
+        """TODO: Maybe this can be the chat template to help generate the initial prompt?"""
 
         pass
 

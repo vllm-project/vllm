@@ -59,6 +59,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import (
     ConversationContext,
     HarmonyContext,
+    ParsableContext,
     SimpleContext,
     StreamingHarmonyContext,
 )
@@ -75,6 +76,7 @@ from vllm.entrypoints.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.parser.sentence import Sentence
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -373,7 +375,9 @@ class OpenAIServingResponses(OpenAIServing):
                     else:
                         context = HarmonyContext(messages, available_tools)
                 else:
-                    context = SimpleContext()
+                    # context = SimpleContext()
+                    # TODO: gate this behind a flag
+                    context = ParsableContext(tokenizer=tokenizer)
 
                 if self.reasoning_parser is not None:
                     reasoning_parser = self.reasoning_parser(tokenizer)
@@ -597,6 +601,22 @@ class OpenAIServingResponses(OpenAIServing):
                     status = "cancelled"
             else:
                 status = "incomplete"
+        elif isinstance(context, ParsableContext):
+            sentences = context.parser.sentences
+            output = self._make_response_output_items_from_parsable_context(
+                request, sentences
+            )
+
+            # TODO: context for non-gptoss models doesn't use messages
+            # so we can't get them out yet
+            if request.enable_response_messages:
+                raise NotImplementedError(
+                    "enable_response_messages is currently only supported for gpt-oss"
+                )
+
+            # TODO: Calculate usage.
+            # assert final_res.prompt_token_ids is not None
+            num_tool_output_tokens = 0
         else:
             assert isinstance(context, SimpleContext)
             final_res = context.last_output
@@ -616,7 +636,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
 
-        assert isinstance(context, (SimpleContext, HarmonyContext))
+        assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
@@ -753,6 +773,57 @@ class OpenAIServingResponses(OpenAIServing):
             )
             for lg in lgs
         ]
+
+    def _make_response_output_items_from_parsable_context(
+        self, request: ResponsesRequest, sentences: list[Sentence]
+    ) -> list[ResponseOutputItem]:
+        """Given a list of sentences, construct ResponseOutput Items.
+
+        For now, a sentence can have multiple textContents. the textContents we support right now are only
+        - if current_channel = think, then it's a ResponseReasoningItem
+        - if current_channel = final, then it's a ResponseOutputMessage
+        DO NOT implement tool call parsing for now. We will implement it later.
+        """
+        output_items: list[ResponseOutputItem] = []
+
+        for sentence in sentences:
+            for text_content in sentence.content:
+                channel = text_content.channel
+                text = text_content.text
+
+                if channel == "think" or channel == "analysis":
+                    # Reasoning content
+                    reasoning_item = ResponseReasoningItem(
+                        id=f"rs_{random_uuid()}",
+                        summary=[],
+                        type="reasoning",
+                        content=[
+                            ResponseReasoningTextContent(
+                                text=text, type="reasoning_text"
+                            )
+                        ],
+                        status="completed",
+                    )
+                    output_items.append(reasoning_item)
+                elif channel == "final":
+                    # Final output content
+                    output_text = ResponseOutputText(
+                        text=text,
+                        annotations=[],
+                        type="output_text",
+                        logprobs=None,  # Not available from parser
+                    )
+                    message_item = ResponseOutputMessage(
+                        id=f"msg_{random_uuid()}",
+                        content=[output_text],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                    output_items.append(message_item)
+                # Ignore other channels for now (e.g., "tool", "commentary")
+
+        return output_items
 
     def _make_response_output_items(
         self,
