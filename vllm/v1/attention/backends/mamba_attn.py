@@ -14,11 +14,12 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    compute_causal_conv1d_metadata,
     split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 
-M = TypeVar("M")
+M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
 @dataclass
@@ -29,11 +30,13 @@ class BaseMambaAttentionMetadata:
     num_decode_tokens: int
     num_padded_decodes: int
 
-    query_start_loc_p: torch.Tensor | None
+    # The following tensors only contain prefill requests and will be None if
+    # the batch has no prefill request.
     has_initial_states_p: torch.Tensor | None
+
+    query_start_loc_p: torch.Tensor | None
     state_indices_tensor: torch.Tensor
 
-    # Prefix caching fields
     block_idx_last_scheduled_token: torch.Tensor | None
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
@@ -41,8 +44,14 @@ class BaseMambaAttentionMetadata:
 
     num_reqs: int
 
+    # The following attributes are for triton implementation of causal_conv1d
+    nums_dict: dict | None = None
+    batch_ptr: torch.Tensor | None = None
+    token_chunk_offset_ptr: torch.Tensor | None = None
+
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
+    metadata_cls: type[M]
     reorder_batch_threshold: int = 1
     cudagraph_support: ClassVar[AttentionCGSupport] = (
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
@@ -141,7 +150,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     def _compute_common_metadata(
         self,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> BaseMambaAttentionMetadata:
+    ) -> M:
         """
         Compute metadata common to both Mamba1 and Mamba2.
         """
@@ -159,10 +168,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         num_padded_decodes = num_decodes
         num_computed_tokens = None
         num_computed_tokens_p = None
+
+        # for prefix caching
         block_idx_first_scheduled_token = None
         block_idx_first_scheduled_token_p = None
         block_idx_last_computed_token = None
         block_idx_last_scheduled_token = None
+
+        # for causal_conv1d
+        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
         if self.vllm_config.cache_config.enable_prefix_caching:
             # Return a tensor of shape (#requests, #max blocks)
@@ -198,6 +212,10 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 common_attn_metadata.query_start_loc.device
             )
 
+            nums_dict, batch_ptr, token_chunk_offset_ptr = (
+                compute_causal_conv1d_metadata(query_start_loc_p)
+            )
+
             if self.vllm_config.cache_config.enable_prefix_caching:
                 assert num_computed_tokens is not None
                 num_computed_tokens_p = num_computed_tokens[
@@ -207,9 +225,9 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 block_idx_first_scheduled_token_p = block_idx_first_scheduled_token[
                     num_reqs - num_prefills : num_reqs
                 ]
-
         elif (
-            num_decodes <= self.decode_cudagraph_max_bs
+            num_decodes > 0
+            and num_decodes <= self.decode_cudagraph_max_bs
             and self.compilation_config.full_cuda_graph
         ):
             num_padded_decodes = self.vllm_config.pad_for_cudagraph(num_decodes)
@@ -236,7 +254,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 ]
                 block_idx_last_computed_token[num_decodes:] = 0
 
-        return BaseMambaAttentionMetadata(
+        return self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             num_decodes=num_decodes,
@@ -250,4 +268,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             block_idx_last_computed_token=block_idx_last_computed_token,
             num_computed_tokens_p=num_computed_tokens_p,
             num_reqs=num_reqs,
+            nums_dict=nums_dict,
+            batch_ptr=batch_ptr,
+            token_chunk_offset_ptr=token_chunk_offset_ptr,
         )

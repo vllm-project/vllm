@@ -8,10 +8,12 @@ import torch
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backends.mamba_attn import BaseMambaAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba_attn import (
+    BaseMambaAttentionMetadata,
+    BaseMambaAttentionMetadataBuilder,
+)
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
-    compute_causal_conv1d_metadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -92,46 +94,27 @@ class Mamba2AttentionBackend(AttentionBackend):
 
 
 @dataclass
-class Mamba2AttentionMetadata:
-    num_prefills: int
-    num_prefill_tokens: int
-    num_decodes: int
-    num_decode_tokens: int
-    query_start_loc_p: torch.Tensor
+class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
+    prep_initial_states: bool = False
+    chunk_size: int = 0
 
-    prep_initial_states: bool
-    chunk_size: int
-
-    # The following tensors only contain prefill requests and will be None if
-    # the batch has no prefill request.
-    has_initial_states_p: torch.Tensor | None
-    seq_idx_p: torch.Tensor | None
-
+    # Chunk-related metadata (only for prefill)
+    seq_idx_p: torch.Tensor | None = None
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
     # each chunk, its offests into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
     # cu_chunk_seqlen_p[i+1].
-    cu_chunk_seqlen_p: torch.Tensor | None
-
+    cu_chunk_seqlen_p: torch.Tensor | None = None
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
-    last_chunk_indices_p: torch.Tensor | None
-
-    state_indices_tensor: torch.Tensor  # shape: [batch,]
-    block_idx_last_scheduled_token: torch.Tensor  # shape: [batch,]
-    block_idx_first_scheduled_token_p: torch.Tensor  # shape: [batch,]
-    block_idx_last_computed_token: torch.Tensor  # shape: [batch,]
-    num_computed_tokens_p: torch.Tensor  # shape: [batch,]
-
-    # The following attributes are for triton implementation of causal_conv1d
-    nums_dict: dict | None = None
-    batch_ptr: torch.Tensor | None = None
-    token_chunk_offset_ptr: torch.Tensor | None = None
+    last_chunk_indices_p: torch.Tensor | None = None
 
 
 class Mamba2AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba2AttentionMetadata]
 ):
+    metadata_cls = Mamba2AttentionMetadata
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -219,8 +202,8 @@ class Mamba2AttentionMetadataBuilder(
         cu_chunk_seqlen_p = None
         last_chunk_indices_p = None
         prep_initial_states = False
-        nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
+        # Compute seq_idx for prefill only
         if common.num_prefills > 0:
             prep_initial_states = (
                 torch.any(common.has_initial_states_p).item()
@@ -248,42 +231,25 @@ class Mamba2AttentionMetadataBuilder(
 
             seq_idx_p = torch.as_tensor(
                 seq_idx,
-                device=common.query_start_loc_p.device,
+                device=common_attn_metadata.query_start_loc.device,
                 dtype=torch.int32,
             )
             cu_chunk_seqlen_p = torch.as_tensor(
                 cu_chunk_seqlen,
-                device=common.query_start_loc_p.device,
+                device=common_attn_metadata.query_start_loc.device,
                 dtype=torch.int32,
             )
             last_chunk_indices_p = torch.as_tensor(
                 last_chunk_indices,
-                device=common.query_start_loc_p.device,
+                device=common_attn_metadata.query_start_loc.device,
                 dtype=torch.int32,
             )
 
-            nums_dict, batch_ptr, token_chunk_offset_ptr = (
-                compute_causal_conv1d_metadata(common.query_start_loc_p)
-            )
-
-        return Mamba2AttentionMetadata(
-            num_prefills=common.num_prefills,
-            num_prefill_tokens=common.num_prefill_tokens,
-            num_decodes=common.num_decodes,
-            num_decode_tokens=common.num_decode_tokens,
-            query_start_loc_p=common.query_start_loc_p,
+        return self.metadata_cls(
+            **vars(common),
             prep_initial_states=prep_initial_states,
             chunk_size=self.chunk_size,
-            has_initial_states_p=common.has_initial_states_p,
             seq_idx_p=seq_idx_p,
-            state_indices_tensor=common.state_indices_tensor,
             cu_chunk_seqlen_p=cu_chunk_seqlen_p,
             last_chunk_indices_p=last_chunk_indices_p,
-            nums_dict=nums_dict,
-            batch_ptr=batch_ptr,
-            token_chunk_offset_ptr=token_chunk_offset_ptr,
-            block_idx_last_scheduled_token=common.block_idx_last_scheduled_token,
-            block_idx_first_scheduled_token_p=common.block_idx_first_scheduled_token_p,
-            block_idx_last_computed_token=common.block_idx_last_computed_token,
-            num_computed_tokens_p=common.num_computed_tokens_p,
         )
