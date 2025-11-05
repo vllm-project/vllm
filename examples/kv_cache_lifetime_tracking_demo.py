@@ -43,8 +43,7 @@ def run_inference_workload(llm: LLM, prompts: list[str]) -> None:
     sampling_params = SamplingParams(temperature=0.1, top_p=0.9, max_tokens=50)
 
     # Generate responses - this will create and free KV cache blocks
-    outputs = llm.generate(prompts, sampling_params)
-    return outputs
+    llm.generate(prompts, sampling_params)
 
 
 def demonstrate_lifetime_stats():
