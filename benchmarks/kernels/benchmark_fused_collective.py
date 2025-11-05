@@ -1076,6 +1076,7 @@ def main():
                 use_residual,
                 allreduce_params,
                 quant_modes=quant_modes,
+                no_oneshot=args.no_oneshot,
             )
 
             # Store results for markdown export
