@@ -509,7 +509,8 @@ class Worker(WorkerBase):
         return self.model_runner.get_supported_tasks()
 
     def annotate_profile(self, scheduler_output):
-        # add trace annotation so that we can easily distinguish new/cached request numbers in each iteration
+        # add trace annotation so that we can easily distinguish
+        # new/cached request numbers in each iteration
         if not self.profiler:
             return nullcontext()
 
