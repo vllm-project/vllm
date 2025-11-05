@@ -15,3 +15,4 @@ setuptools-scm>=8
 runai-model-streamer[s3,gcs]==0.15.0
 conch-triton-kernels==1.2.1
 timm>=1.0.17
+uv==0.9.7
