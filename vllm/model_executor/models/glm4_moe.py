@@ -660,7 +660,7 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[SharedFusedMoE] = []
-        example_moe = None
+        self.example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
@@ -668,34 +668,18 @@ class Glm4MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
             assert isinstance(layer, Glm4MoeDecoderLayer)
             if isinstance(layer.mlp, Glm4MoE):
                 # Pick last one layer since the first ones may be dense layers.
-                example_moe = layer.mlp
+                self.example_moe = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
-        if example_moe is None:
+        if self.example_moe is None:
             raise RuntimeError("No Glm4MoE layer found in model.layers.")
 
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
+        self.num_logical_experts = self.example_moe.n_logical_experts
+        self.num_physical_experts = self.example_moe.n_physical_experts
+        self.num_local_physical_experts = self.example_moe.n_local_physical_experts
+        self.num_routed_experts = self.example_moe.n_routed_experts
+        self.num_shared_experts = self.example_moe.n_shared_experts
+        self.num_redundant_experts = self.example_moe.n_redundant_experts
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
