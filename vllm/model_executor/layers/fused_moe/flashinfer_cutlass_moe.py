@@ -149,8 +149,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "silu": ActivationType.Swiglu,  # This is the default
             "relu2_no_mul": ActivationType.Relu2,
         }
-        assert activation in activation_str_to_value_map, f"{activation=} missing from {activation_str_to_value_map.keys()=}"
-        
+        assert activation in activation_str_to_value_map, (
+            f"{activation=} missing from {activation_str_to_value_map.keys()=}"
+        )
+
         if self.quant_dtype == torch.float8_e4m3fn:
             quant_scales = [
                 self.g1_alphas,
