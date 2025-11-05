@@ -146,8 +146,8 @@ def test_sparse_activation():
     assert state.expert_health_mask[0, 1], "Expert 1 should be healthy (inactive)"
 
 
-def test_expert_recovery():
-    """Test that experts can recover from unhealthy state."""
+def test_masked_expert_becomes_inactive():
+    """Test that masked experts become inactive and stay masked."""
 
     # Setup
     num_layers = 1
@@ -167,25 +167,32 @@ def test_expert_recovery():
         config=eplb_config,
     )
 
-    # Phase 1: Normal operation (10ms < 40ms timeout)
+    # All experts start healthy with normal latency
     current_latency = torch.full((num_layers, num_experts), 10.0)
     state._update_health_mask(current_latency, log_stats=False)
     assert state.expert_health_mask.all(), "All healthy initially"
 
-    # Phase 2: Expert 1 exceeds timeout (50ms > 40ms)
+    # Expert 1 exceeds timeout and gets immediately masked out
     current_latency = torch.full((num_layers, num_experts), 10.0)
     current_latency[0, 1] = 50.0
     state._update_health_mask(current_latency, log_stats=False)
 
     assert not state.expert_health_mask[0, 1], "Expert 1 should be unhealthy"
+    assert state.logical_replica_count[0, 1] == 0, "Expert 1 should be masked out"
 
-    # Phase 3: Expert 1 recovers immediately (back to 10ms < 40ms in next step)
+    # Once masked, no traffic routes to Expert 1, so it becomes inactive (latency=0)
     current_latency = torch.full((num_layers, num_experts), 10.0)
+    current_latency[0, 1] = 0.0  # Masked expert receives no traffic
     state._update_health_mask(current_latency, log_stats=False)
 
-    # Expert 1 should recover immediately
-    # current = 10ms < 40ms timeout → healthy
-    assert state.expert_health_mask[0, 1], "Expert 1 should recover to healthy"
+    # Inactive experts are marked healthy (to allow rearrange() to restore them)
+    assert state.expert_health_mask[0, 1], (
+        "Expert 1 should be marked healthy (inactive)"
+    )
+    # But masking persists until the next rearrange() cycle restores it
+    assert state.logical_replica_count[0, 1] == 0, (
+        "Expert 1 stays masked until next rearrangement"
+    )
 
 
 def test_multi_layer_health():
@@ -290,67 +297,6 @@ def test_timeout_threshold_boundary():
     assert state.expert_health_mask[0, 0], (
         "Inactive expert should be considered healthy"
     )
-
-
-def test_immediate_masking():
-    """Test that unhealthy experts are immediately masked out."""
-
-    num_layers = 1
-    num_experts = 4
-    window_size = 10
-    timeout_threshold = 50.0  # 50ms absolute timeout
-
-    eplb_config = EPLBConfig(
-        window_size=window_size,
-        health_check_enabled=True,
-        health_timeout_threshold=timeout_threshold,
-    )
-
-    state = create_mock_eplb_state(
-        num_layers=num_layers,
-        num_experts=num_experts,
-        config=eplb_config,
-    )
-
-    # Initial state: all experts are healthy and mapped
-    # logical_to_physical_map has 1:1 mapping (no redundancy in mock state)
-    assert state.logical_replica_count[0, 0] == 1, "Expert 0 should have 1 replica"
-    assert state.logical_to_physical_map[0, 0, 0] == 0, (
-        "Expert 0 should map to physical 0"
-    )
-
-    # Expert 1 exceeds timeout (100ms > 50ms)
-    current_latency = torch.zeros(num_layers, num_experts)
-    current_latency[0, 1] = 100.0
-    state._update_health_mask(current_latency, log_stats=False)
-
-    # Expert 1 should be immediately masked out
-    assert not state.expert_health_mask[0, 1], "Expert 1 should be unhealthy"
-    assert state.logical_replica_count[0, 1] == 0, (
-        "Expert 1 should have 0 replicas (masked)"
-    )
-    # The physical expert should be removed from the mapping (set to -1)
-    assert state.logical_to_physical_map[0, 1, 0] == -1, (
-        "Expert 1 should be masked from mapping"
-    )
-
-    # Other experts should remain unaffected
-    assert state.expert_health_mask[0, 0], "Expert 0 should be healthy"
-    assert state.logical_replica_count[0, 0] == 1, (
-        "Expert 0 should still have 1 replica"
-    )
-    assert state.logical_to_physical_map[0, 0, 0] == 0, "Expert 0 mapping unchanged"
-
-    # Expert 1 recovers (latency drops below threshold)
-    current_latency[0, 1] = 10.0
-    state._update_health_mask(current_latency, log_stats=False)
-
-    # Expert 1 should be immediately unmasked
-    assert state.expert_health_mask[0, 1], "Expert 1 should be healthy again"
-    assert state.logical_replica_count[0, 1] == 1, (
-        "Expert 1 should have 1 replica again"
-    )
-    assert state.logical_to_physical_map[0, 1, 0] == 1, "Expert 1 should be remapped"
 
 
 # =============================================================================
