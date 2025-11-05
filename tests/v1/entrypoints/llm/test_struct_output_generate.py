@@ -19,7 +19,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
-from vllm.reasoning import ReasoningParserManager
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.sampling_params import (
     GuidedDecodingParams,
     SamplingParams,

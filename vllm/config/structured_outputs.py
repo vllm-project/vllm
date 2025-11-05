@@ -9,7 +9,7 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
-from vllm.reasoning import ReasoningParserManager
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
