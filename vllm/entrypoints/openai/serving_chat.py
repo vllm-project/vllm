@@ -771,13 +771,8 @@ class OpenAIServingChat(OpenAIServing):
                     if self.use_harmony:
                         if cur_channel == "final":
                             delta_message = DeltaMessage(content=delta_text)
-                        elif cur_channel == "analysis":
-                            if request.include_reasoning:
-                                delta_message = DeltaMessage(reasoning=delta_text)
-                            else:
-                                delta_message = None
                         elif (
-                            cur_channel == "commentary"
+                            (cur_channel == "commentary" or cur_channel == "analysis")
                             and cur_recipient
                             and cur_recipient.startswith("functions.")
                         ):
@@ -785,7 +780,7 @@ class OpenAIServingChat(OpenAIServing):
                             base_index = 0
                             for msg in harmony_parser.messages:
                                 if (
-                                    msg.channel == "commentary"
+                                    (msg.channel == "commentary" or msg.channel == "analysis")
                                     and msg.recipient
                                     and msg.recipient.startswith("functions.")
                                 ):
@@ -825,6 +820,13 @@ class OpenAIServingChat(OpenAIServing):
                         elif cur_channel == "commentary":
                             # Tool call preambles meant to be shown to the user
                             delta_message = DeltaMessage(content=delta_text)
+                        elif cur_channel == "analysis":
+                            if request.include_reasoning:
+                                delta_message = DeltaMessage(
+                                    reasoning_content=delta_text
+                                )
+                            else:
+                                delta_message = None
                         else:
                             delta_message = None
                     # handle streaming deltas for tools with named tool_choice
