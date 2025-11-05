@@ -1944,13 +1944,13 @@ def validate_api_server_args(args):
             f"(chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
-    valid_reasoning_parses = ReasoningParserManager.list_registered()
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
-    ) and reasoning_parser not in valid_reasoning_parses:
+    ) and reasoning_parser not in valid_reasoning_parsers:
         raise KeyError(
             f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
 
 
@@ -1963,6 +1963,9 @@ def setup_server(args):
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     validate_api_server_args(args)
 
@@ -2012,6 +2015,9 @@ async def run_server_worker(
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
