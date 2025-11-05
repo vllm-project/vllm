@@ -97,10 +97,9 @@ class CompilerManager:
         compilation (e.g. partition rules, pass context)."""
         with pass_context(runtime_shape):
             if self.compilation_config.use_inductor_graph_partition:
-                inductor_partition_ops = resolve_defined_ops(
+                with inductor_partition_rule_context(
                     self.compilation_config.splitting_ops
-                )
-                with inductor_partition_rule_context(inductor_partition_ops):
+                ):
                     yield
             else:
                 yield

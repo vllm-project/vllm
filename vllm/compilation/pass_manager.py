@@ -113,27 +113,6 @@ class PostGradPassManager(CustomGraphPass):
             self.post_cleanup = PostCleanupPass(config)
             self.fix_functionalization = FixFunctionalizationPass(config)
 
-        # [HACK: Bug with Inductor graph partition and torch.compile cache]
-        # In PyTorch 2.9, torch.compile has a bug where the graph
-        # partition is not taken into account during caching.
-        # Because vLLM's Mode.VLLM_COMPILE is the only mode that uses
-        # Inductor graph partition, and VLLM_COMPILE implies there
-        # is a PostGradPassManager, we put the list of operators to graph
-        # partition into the PostGradPassManager's uuid (which
-        # then gets incorporated into Inductor's FX graph cache key).
-        # Remove this hack whenever torch.compile fixes it.
-
-        # This is the list of operators that vLLM asks Inductor to split.
-        self.inductor_splitting_ops = []
-        if (
-            config.compilation_config.use_inductor_graph_partition
-            and config.compilation_config.splitting_ops is not None
-        ):
-            # Sort them so we're not dependent on the ordering.
-            self.inductor_splitting_ops = sorted(
-                config.compilation_config.splitting_ops
-            )
-
     def add(self, pass_: InductorPass):
         assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)
@@ -144,16 +123,9 @@ class PostGradPassManager(CustomGraphPass):
         affects compilation caching. Its uuid depends on the UUIDs of all
         dependent passes and the pass config. See InductorPass for more info.
         """
-        state = {
-            "pass_config": self.pass_config.uuid(),
-            "passes": [],
-            "inductor_splitting_ops": [],
-        }
+        state = {"pass_config": self.pass_config.uuid(), "passes": []}
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
-
-        # See [HACK: Bug with Inductor graph partition and torch.compile cache]
-        state["inductor_splitting_ops"].extend(self.inductor_splitting_ops)
 
         return InductorPass.hash_dict(state)
