@@ -16,13 +16,16 @@ _DEPRECATED_MAPPINGS = {
     "cprofile_context": "profiling",
     # Used by lm-eval
     "get_open_port": "network_utils",
-    # Attention backend constants
-    "STR_BACKEND_ENV_VAR": "attention.constants",
-    "STR_FLASHINFER_ATTN_VAL": "attention.constants",
-    "STR_TORCH_SDPA_ATTN_VAL": "attention.constants",
-    "STR_XFORMERS_ATTN_VAL": "attention.constants",
-    "STR_FLASH_ATTN_VAL": "attention.constants",
-    "STR_INVALID_VAL": "attention.constants",
+    # Attention backend constants - TEMPORARILY COMMENTED OUT FOR TESTING
+    # Temporarily disabled to verify all internal vLLM code uses new import paths.
+    # Will be uncommented after tests pass to provide backward compatibility
+    # for downstream code. See: https://github.com/vllm-project/vllm/pull/28066
+    # "STR_BACKEND_ENV_VAR": "attention.constants",
+    # "STR_FLASHINFER_ATTN_VAL": "attention.constants",
+    # "STR_TORCH_SDPA_ATTN_VAL": "attention.constants",
+    # "STR_XFORMERS_ATTN_VAL": "attention.constants",
+    # "STR_FLASH_ATTN_VAL": "attention.constants",
+    # "STR_INVALID_VAL": "attention.constants",
 }
 
 
