@@ -1134,11 +1134,11 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             )
             return
         element_size = 4 if use_fp32_lamport else 2
-        max_token_num = max_size // (self.hidden_dim * element_size)
+        self.max_token_num = max_size // (self.hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways
-        max_token_num = min(
-            max_token_num, config.scheduler_config.max_num_batched_tokens
+        self.max_token_num = min(
+            self.max_token_num, config.scheduler_config.max_num_batched_tokens
         )
         logger.debug_once(
             f"Flashinfer max size: {max_size // (1024 * 1024)} MB,"
@@ -1151,7 +1151,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
                 tp_rank=rank,
                 tp_size=self.tp_size,
-                max_token_num=max_token_num,
+                max_token_num=self.max_token_num,
                 hidden_dim=self.hidden_dim,
                 group=self.group,
                 use_fp32_lamport=use_fp32_lamport,
@@ -1164,7 +1164,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             rank=rank,
             world_size=self.tp_size,
             use_fp32_lamport=use_fp32_lamport,
-            max_token_num=max_token_num,
+            max_token_num=self.max_token_num,
         )
 
         self.register_patterns()
