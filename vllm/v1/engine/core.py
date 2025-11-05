@@ -135,13 +135,14 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.poller = zmq.Poller()
         self.communicator_aborted = False
         self.engine_running = True
+        self.engine_core_guard_dead = False
 
     def run(self) -> None:
         """
         Run the main monitoring loop for EngineCoreGuard.
         """
         poll_timeout_ms = 100
-        while True:
+        while not self.engine_core_guard_dead:
             # Check for engine fault signals
             try:
                 engine_exception = self.fault_signal_q.get_nowait()
@@ -162,6 +163,9 @@ class EngineCoreGuard(threading.Thread):  # changed
             except queue.Empty:
                 pass
 
+            if self.client_cmd_socket.closed:
+                logger.info("[EngineCoreGuard] Client socket closed")
+                break
             has_msg, _, cmd_str = recv_router_dealer_message(
                 self.client_cmd_socket, use_poller=True, poll_timeout=poll_timeout_ms
             )
@@ -304,6 +308,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             self.worker_cmd_socket.close()
         if self.ctx is not None:
             self.ctx.term()
+        self.engine_core_guard_dead = True
 
 
 def busy_loop_wrapper(busy_loop_func):

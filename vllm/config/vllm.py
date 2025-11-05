@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import field, replace
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -104,7 +104,9 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
-    fault_tolerance_config: FaultToleranceConfig = FaultToleranceConfig()
+    fault_tolerance_config: FaultToleranceConfig = field(
+        default_factory=FaultToleranceConfig
+    )
     """The configurations for fault tolerance."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of

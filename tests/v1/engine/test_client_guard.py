@@ -192,21 +192,29 @@ async def test_handle_fault_async():
     cmd_socket.setsockopt(zmq.IDENTITY, b"engine_identity")
     cmd_socket.connect(CMD_ADDR)
 
+    uuid = None
+
     def receive_cmd(cmd_socket):
+        nonlocal uuid
         time.sleep(0.1)
 
-        identity, _, msg = cmd_socket.recv_multipart()
-        assert msg.decode("utf-8") == {"engine_index": 1, "success": True}
+        identity, msg = cmd_socket.recv_multipart()
+        cmd_dict = json.loads(msg.decode("utf-8"))
+        assert cmd_dict["method"] == "retry"
+        assert cmd_dict["timeout"] == 3
+        uuid = cmd_dict["method_uuid"]
 
-    def cmd_response(cmd_socket):
-        execute_result = {"engine_index": 1, "success": True}
+    def response_cmd(cmd_socket):
+        nonlocal uuid
+        while uuid is None:
+            time.sleep(0.1)
+        execute_result = {"engine_index": 1, "success": True, "method_uuid": uuid}
         cmd_socket.send_multipart([b"", json.dumps(execute_result).encode("utf-8")])
 
     threading.Thread(target=receive_cmd, args=(cmd_socket,)).start()
-    threading.Thread(target=cmd_response, args=(cmd_socket,)).start()
+    threading.Thread(target=response_cmd, args=(cmd_socket,)).start()
 
-    result = await guard.handle_fault("retry", 10)
-    time.sleep(0.1)
+    result = await guard.handle_fault("retry", 3)
 
     assert result is True
     assert engine_status_dict[1] == "Healthy"
