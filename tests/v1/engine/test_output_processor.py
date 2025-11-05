@@ -1090,7 +1090,7 @@ def test_abort_requests(runner: str, dummy_test_vectors):
 @pytest.mark.parametrize(
     "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
 )
-def test_propogate_back_engine_core_additional_outputs(
+def test_propagate_back_engine_core_additional_outputs(
     request_output_kind: RequestOutputKind, dummy_test_vectors
 ):
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
