@@ -533,6 +533,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[M] | None = None,
+        supports_dcp_with_varlen: bool = False,
     ):
         self.metadata_cls = (
             metadata_cls if metadata_cls is not None else MLACommonMetadata
@@ -626,7 +627,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode
+            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
         )
 
         # Validate consistency between query_len_support and reorder_batch_threshold
@@ -787,7 +788,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             dcp_local_seq_lens[:num_decodes] = seq_lens[
                 :num_decodes
             ] // self.dcp_world_size + (
-                self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
+                self.dcp_rank < seq_lens[:num_decodes] % self.dcp_world_size
             )
 
         assert num_decodes + num_prefills == num_reqs
