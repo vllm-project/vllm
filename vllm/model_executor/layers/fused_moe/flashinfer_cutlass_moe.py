@@ -56,6 +56,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         ep_size: int = 1,
         tp_rank: int = 0,
         tp_size: int = 1,
+        use_dp: bool = False,
         use_deepseek_fp8_block_scale: bool = False,
     ):
         super().__init__(quant_config)
@@ -68,6 +69,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.tp_rank = tp_rank
         self.tp_size = tp_size
         self.out_dtype = out_dtype
+        self.use_dp = use_dp
         # Enables DeepSeek-style FP8 block-scale path:
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
@@ -122,7 +124,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         workspace1 = (M, K)
         workspace2 = (0,)
-        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
+        # For TP, the quantization is fused with fused_moe call.
+        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" and self.use_dp else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)
@@ -235,6 +238,7 @@ def flashinfer_cutlass_moe_fp4(
         FlashInferExperts(
             out_dtype=hidden_states.dtype,
             quant_config=quant_config,
+            use_dp=False,
         ),
     )
 

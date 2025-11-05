@@ -177,29 +177,35 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
-
-        if not self.use_deepseek_fp8_block_scale:
-            a1q, a1q_scale = moe_kernel_quantize_input(
-                a1,
-                quant_config.a1_gscale,
-                quant_config.quant_dtype,
-                quant_config.per_act_token_quant,
-                quant_config.block_shape,
-                is_fp4_scale_swizzled=not self.use_dp,
-            )
+        if not self.use_dp:
+            # Non-DP case: quantize activations unless using block-scale path
+            if not self.use_deepseek_fp8_block_scale:
+                a1q, a1q_scale = moe_kernel_quantize_input(
+                    a1,
+                    quant_config.a1_gscale,
+                    quant_config.quant_dtype,
+                    quant_config.per_act_token_quant,
+                    quant_config.block_shape,
+                    is_fp4_scale_swizzled=not self.use_dp,
+                )
         else:
-            # Block-scale path: pass activations through, omit per-token scales
-            a1q = a1
-            a1q_scale = None
+            # DP case: use FlashInfer AllToAll
+            global_num_tokens_cpu = get_local_sizes()
+            top_k = topk_ids.size(1)
 
-        if self.use_dp:
-            topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
-                [topk_weights, topk_ids, a1q, a1q_scale],
-                dim=0,
-                sizes=get_local_sizes(),
+            (self.alltoall_info, topk_ids, topk_weights, a1q, a1q_scale) = (
+                flashinfer_alltoall_dispatch(
+                    self.all2all_manager,
+                    global_num_tokens_cpu,
+                    a1,
+                    quant_config.a1_gscale,
+                    topk_ids,
+                    topk_weights,
+                    top_k,
+                    num_experts,
+                    quant_config,
+                )
             )
-            if quant_config.quant_dtype == "nvfp4":
-                a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
