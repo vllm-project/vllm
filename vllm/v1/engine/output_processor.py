@@ -192,6 +192,7 @@ class RequestState:
         finish_reason: FinishReason | None,
         stop_reason: int | str | None,
         kv_transfer_params: dict[str, Any] | None = None,
+        additional_outputs: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput | None:
         finished = finish_reason is not None
         final_only = self.output_kind == RequestOutputKind.FINAL_ONLY
@@ -203,7 +204,10 @@ class RequestState:
         request_id = self.request_id
         if pooling_output is not None:
             return self._new_request_output(
-                request_id, [self._new_pooling_output(pooling_output)], finished
+                request_id,
+                [self._new_pooling_output(pooling_output)],
+                finished,
+                additional_outputs=additional_outputs
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -218,7 +222,7 @@ class RequestState:
                 return None
 
         return self._new_request_output(
-            request_id, outputs, finished, kv_transfer_params
+            request_id, outputs, finished, kv_transfer_params, additional_outputs
         )
 
     def _new_request_output(
@@ -227,6 +231,7 @@ class RequestState:
         outputs: list[CompletionOutput] | list[PoolingOutput],
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
+        additional_outputs: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
@@ -262,6 +267,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            additional_outputs=additional_outputs,
         )
 
     def _new_completion_output(
@@ -348,6 +354,7 @@ class OutputProcessor:
                         finish_reason=FinishReason.ABORT,
                         stop_reason=None,
                         kv_transfer_params=None,
+                        additional_outputs=None,
                     )
                 ):
                     req_state.queue.put(request_output)
@@ -458,6 +465,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
+                additional_outputs=self.get_additional_outputs_from_engine_core(engine_core_output),
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
@@ -490,6 +498,17 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+
+    def get_additional_outputs_from_engine_core(
+        self,
+        engine_core_output: EngineCoreOutput,
+    ) -> dict[str, Any] | None:
+        """
+        Get additional outputs from the engine core output.
+        This is a hook for subclasses to override and add additional tensor outputs.
+        """
+        return engine_core_output.additional_outputs
 
     def do_tracing(
         self,
