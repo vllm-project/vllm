@@ -2,18 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("glm45")
 class Glm4MoeModelReasoningParser(ReasoningParser):
     """
     Reasoning parser for the Glm4MoeModel model.
@@ -80,7 +78,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
@@ -137,7 +135,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
 

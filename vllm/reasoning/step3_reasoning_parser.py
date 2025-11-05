@@ -2,19 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("step3")
 class Step3ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Step3 model.
@@ -50,7 +48,7 @@ class Step3ReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
@@ -81,7 +79,7 @@ class Step3ReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         # Check if the model output contains the </think> token
         if self.think_end_token not in model_output:
             # If no </think> token, everything is reasoning content

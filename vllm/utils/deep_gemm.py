@@ -5,41 +5,36 @@
 Users of vLLM should always import **only** these wrappers.
 """
 
-from __future__ import annotations
-
 import functools
 import importlib
 import os
-from typing import Any, Callable, NoReturn
+from collections.abc import Callable
+from typing import Any, NoReturn
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, has_deep_gemm
+from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.math_utils import cdiv
 
 
 @functools.cache
 def is_deep_gemm_supported() -> bool:
-    """Return ``True`` if DeepGEMM is supported on the current platform.
+    """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability(100)
     )
-    return (
-        envs.VLLM_USE_DEEP_GEMM
-        and has_deep_gemm()
-        and is_supported_arch
-        and not envs.VLLM_USE_FLASHINFER_MOE_FP8
-    )
+    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
 @functools.cache
 def is_deep_gemm_e8m0_used() -> bool:
-    """Return ``True`` if vLLM is configured to use DeepGEMM "
+    """Return `True` if vLLM is configured to use DeepGEMM "
     "E8M0 scale on a Hopper or Blackwell-class GPU.
     """
     if not is_deep_gemm_supported():
@@ -58,15 +53,8 @@ def is_deep_gemm_e8m0_used() -> bool:
         logger.info_once("DeepGEMM E8M0 disabled: FlashInfer MOE is enabled.")
         return False
 
-    if current_platform.is_device_capability(100) and envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.info_once("DeepGEMM E8M0 enabled on Blackwell GPU.")
-        return True
-
-    if (
-        current_platform.is_device_capability(90)
-        and envs.VLLM_USE_DEEP_GEMM_E8M0_HOPPER
-    ):
-        logger.info_once("DeepGEMM E8M0 enabled on Hopper GPU.")
+    if envs.VLLM_USE_DEEP_GEMM_E8M0:
+        logger.info_once("DeepGEMM E8M0 enabled on current platform.")
         return True
 
     logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
@@ -88,6 +76,7 @@ _fp8_mqa_logits_impl: Callable[..., Any] | None = None
 _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
+_get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
@@ -96,7 +85,7 @@ def _lazy_init() -> None:
     global _fp8_mqa_logits_impl, _fp8_paged_mqa_logits_impl
     global _get_paged_mqa_logits_metadata_impl
     global _get_mn_major_tma_aligned_tensor_impl
-
+    global _get_mk_alignment_for_contiguous_layout_impl
     # fast path
     if (
         _fp8_gemm_nt_impl is not None
@@ -105,6 +94,7 @@ def _lazy_init() -> None:
         or _fp8_mqa_logits_impl is not None
         or _fp8_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
+        or _get_mk_alignment_for_contiguous_layout_impl is not None
     ):
         return
 
@@ -131,12 +121,24 @@ def _lazy_init() -> None:
     _get_mn_major_tma_aligned_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_tensor", None
     )
+    _get_mk_alignment_for_contiguous_layout_impl = getattr(
+        _dg, "get_mk_alignment_for_contiguous_layout", None
+    )
 
 
 def get_num_sms() -> int:
     _lazy_init()
     _dg = importlib.import_module("deep_gemm")
     return int(_dg.get_num_sms())
+
+
+@functools.cache
+def get_mk_alignment_for_contiguous_layout() -> list[int]:
+    _lazy_init()
+    if _get_mk_alignment_for_contiguous_layout_impl is None:
+        return _missing()
+    mk_align_size = _get_mk_alignment_for_contiguous_layout_impl()
+    return [mk_align_size, mk_align_size]
 
 
 def get_col_major_tma_aligned_tensor(x: torch.Tensor) -> torch.Tensor:
@@ -310,9 +312,9 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
     """Return a global difference metric for unit tests.
 
     DeepGEMM kernels on Blackwell/B200 currently exhibit noticeable per-element
-    error, causing ``torch.testing.assert_close`` to fail.  Instead of checking
+    error, causing `torch.testing.assert_close` to fail.  Instead of checking
     every element, we compute a cosine-style similarity over the whole tensor
-    and report ``1 - sim``.  Once kernel accuracy improves this helper can be
+    and report `1 - sim`.  Once kernel accuracy improves this helper can be
     removed.
     """
 
@@ -351,4 +353,5 @@ __all__ = [
     "get_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
+    "get_mk_alignment_for_contiguous_layout",
 ]

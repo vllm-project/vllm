@@ -4,14 +4,13 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
 
 import regex as re
 import torch
-import torch.distributed
 from torch import nn
 from transformers import MiniMaxConfig
 
@@ -83,7 +82,7 @@ class MiniMaxText01MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int = None,
         prefix: str = "mlp",
     ) -> None:
@@ -121,9 +120,9 @@ class MiniMaxText01MoE(nn.Module):
         top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        params_dtype: Optional[torch.dtype] = None,
+        params_dtype: torch.dtype | None = None,
         layer_idx: int = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "moe",
     ) -> None:
         super().__init__()
@@ -191,10 +190,10 @@ class MiniMaxText01Attention(nn.Module):
         rotary_dim: int,
         max_position: int = 4096 * 32,
         rope_theta: float = 10000,
-        sliding_window: Optional[int] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        sliding_window: int | None = None,
+        quant_config: QuantizationConfig | None = None,
         layer_idx: int = None,
-        cache_config: Optional[CacheConfig] = None,
+        cache_config: CacheConfig | None = None,
         prefix: str = "mha",
     ) -> None:
         super().__init__()
@@ -273,12 +272,12 @@ class MiniMaxText01DecoderLayer(nn.Module):
     def __init__(
         self,
         config: MiniMaxConfig,
-        model_config: Optional[ModelConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        model_config: ModelConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         expert_num: int = 1,
         layer_id: int = None,
-        linear_layer_id: Optional[int] = None,
+        linear_layer_id: int | None = None,
         prefix: str = "decoder",
     ) -> None:
         self._ilayer = layer_id
@@ -428,7 +427,7 @@ class MiniMaxText01DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         positions: torch.Tensor,
         attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
+        residual: torch.Tensor | None,
         is_warmup: bool = False,
         **kwargs,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -627,12 +626,12 @@ class MiniMaxText01Model(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
@@ -722,8 +721,8 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
         hidden_states = self.model(

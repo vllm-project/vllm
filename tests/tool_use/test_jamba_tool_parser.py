@@ -3,14 +3,13 @@
 
 import json
 from collections.abc import Generator
-from typing import Optional
 
 import partial_json_parser
 import pytest
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.openai.protocol import DeltaMessage, FunctionCall, ToolCall
-from vllm.entrypoints.openai.tool_parsers import JambaToolParser
+from vllm.entrypoints.openai.tool_parsers.jamba_tool_parser import JambaToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
@@ -248,7 +247,7 @@ def test_extract_tool_calls_streaming(
     function_names: list[str] = []
     function_args_strs: list[str] = []
     tool_call_idx: int = -1
-    tool_call_ids: list[Optional[str]] = []
+    tool_call_ids: list[str | None] = []
 
     for delta_message in stream_delta_message_generator(
         jamba_tool_parser, jamba_tokenizer, model_output

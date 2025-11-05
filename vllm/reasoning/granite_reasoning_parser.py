@@ -2,19 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Optional, Union
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("granite")
 class GraniteReasoningParser(ReasoningParser):
     """
     Reasoning parser for IBM Granite.
@@ -53,7 +51,7 @@ class GraniteReasoningParser(ReasoningParser):
 
     def extract_reasoning_content(
         self, model_output: str, request: ChatCompletionRequest
-    ) -> tuple[Optional[str], Optional[str]]:
+    ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -82,7 +80,7 @@ class GraniteReasoningParser(ReasoningParser):
         previous_token_ids: Sequence[int],
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         """Extract the reasoning content / content emitted by granite models;
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
@@ -322,7 +320,7 @@ class GraniteReasoningParser(ReasoningParser):
 
     def _get_content_sections(
         self, current_text: str
-    ) -> tuple[Optional[str], Optional[int], Optional[str]]:
+    ) -> tuple[str | None, int | None, str | None]:
         """Parse the text to extract the reasoning content / content
         if we have them.
 

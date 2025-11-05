@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional
 
 import torch
 
 from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     create_vllm_config,
-    get_attention_backend,
+    try_get_attention_backend,
 )
 from vllm.attention.backends.registry import _Backend
 from vllm.config import ParallelConfig, SpeculativeConfig
@@ -37,7 +36,7 @@ def forward_attention(
     slot_mapping: torch.Tensor,
     seqlen_k: int,
     backend: _Backend,
-    spec_token_tree: Optional[str] = None,
+    spec_token_tree: str | None = None,
     num_spec_tokens: int = 0,
 ) -> torch.Tensor:
     batch_size, q_len, num_heads, dim_per_head = q.shape
@@ -63,7 +62,7 @@ def forward_attention(
 
     # Build common metadata.
     model_name = "meta-llama/Meta-Llama-3-8B"
-    builder_cls, impl_cls = get_attention_backend(backend)
+    builder_cls, impl_cls = try_get_attention_backend(backend)
     vllm_config = create_vllm_config(model_name=model_name, max_model_len=max(seq_lens))
     if spec_token_tree is not None:
         # Create speculative config if token tree is specified.

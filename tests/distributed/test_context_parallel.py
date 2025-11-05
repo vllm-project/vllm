@@ -11,11 +11,11 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
-from vllm.config import RunnerOption
+from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -36,29 +36,15 @@ class ParallelSetup(NamedTuple):
 
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
 
 
 @dataclass
 class CPTestSettings:
     parallel_setups: list[ParallelSetup]
-    # NOTE: the length of distributed_backends and
-    # vllm_major_versions should be the same, and they
-    # are first zipped together to iterate over all
-    # test settings.
     distributed_backends: list[str]
-    # vllm major version: "0" for V0, "1" for V1
-    vllm_major_versions: list[str]
     runner: RunnerOption
     test_options: CPTestOptions
-
-    def __post_init__(self):
-        if len(self.distributed_backends) != len(self.vllm_major_versions):
-            raise ValueError(
-                f"Length mismatch: distributed_backends "
-                f"({len(self.distributed_backends)}) != "
-                f"vllm_major_versions ({len(self.vllm_major_versions)})"
-            )
 
     @staticmethod
     def detailed(
@@ -68,7 +54,7 @@ class CPTestSettings:
         dcp_base: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -87,7 +73,6 @@ class CPTestSettings:
         return CPTestSettings(
             parallel_setups=parallel_setups,
             distributed_backends=["mp"],
-            vllm_major_versions=["1"],
             runner=runner,
             test_options=CPTestOptions(
                 multi_node_only=multi_node_only, load_format=load_format
@@ -98,14 +83,11 @@ class CPTestSettings:
         opts = self.test_options
 
         for parallel_setup in self.parallel_setups:
-            for backend, vllm_major_version in zip(
-                self.distributed_backends, self.vllm_major_versions
-            ):
+            for backend in self.distributed_backends:
                 yield (
                     model_id,
                     parallel_setup,
                     backend,
-                    vllm_major_version,
                     self.runner,
                     opts,
                 )
@@ -115,7 +97,6 @@ def _compare_cp_with_tp(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: CPTestOptions,
     num_gpus_available: int,
@@ -191,10 +172,6 @@ def _compare_cp_with_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
-    cp_env = tp_env = {
-        "VLLM_USE_V1": vllm_major_version,  # Note(hc): DCP only support V1 engine only
-    }
-
     cp_args = [
         *common_args,
         "--tensor-parallel-size",
@@ -217,29 +194,21 @@ def _compare_cp_with_tp(
         distributed_backend,
     ]
 
-    try:
-        compare_two_settings(
-            model_id,
-            cp_args,
-            tp_args,
-            cp_env,
-            tp_env,
-            method=method,
-            max_wait_seconds=720,
-        )
-    except Exception:
-        testing_ray_compiled_graph = cp_env is not None
-        if testing_ray_compiled_graph and vllm_major_version == "0":
-            # Ray Compiled Graph tests are flaky for V0,
-            # so we don't want to fail the test
-            logger.exception("Ray Compiled Graph tests failed")
-        else:
-            raise
+    compare_two_settings(
+        model_id,
+        cp_args,
+        tp_args,
+        method=method,
+        max_wait_seconds=720,
+    )
 
 
 CP_TEXT_GENERATION_MODELS = {
-    # [MLA attention only]
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(),
+        CPTestSettings.detailed(tp_base=2),
+    ],
+    "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
     ],
@@ -249,6 +218,7 @@ CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "bigcode/gpt_bigcode-santacoder",
 ]
 
 
@@ -257,7 +227,6 @@ CP_TEST_MODELS = [
         "model_id",
         "parallel_setup",
         "distributed_backend",
-        "vllm_major_version",
         "runner",
         "test_options",
     ),
@@ -274,7 +243,6 @@ def test_cp_generation(
     model_id: str,
     parallel_setup: ParallelSetup,
     distributed_backend: str,
-    vllm_major_version: str,
     runner: RunnerOption,
     test_options: CPTestOptions,
     num_gpus_available,
@@ -283,7 +251,6 @@ def test_cp_generation(
         model_id,
         parallel_setup,
         distributed_backend,
-        vllm_major_version,
         runner,
         test_options,
         num_gpus_available,

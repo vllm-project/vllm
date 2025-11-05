@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
+from itertools import product
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
@@ -44,12 +44,12 @@ class CudagraphDispatcher:
             not_use_piecewise_compilation
             or self.compilation_config.is_attention_compiled_piecewise()
         ), (
-            "Compilation level should be CompilationLevel.PIECEWISE when "
+            "Compilation mode should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "
             "and attention should be in splitting_ops or "
             "inductor splitting should be used. "
             f"cudagraph_mode={self.cudagraph_mode}, "
-            f"compilation_level={self.compilation_config.level}, "
+            f"compilation_mode={self.compilation_config.mode}, "
             f"splitting_ops={self.compilation_config.splitting_ops}"
         )
 
@@ -68,14 +68,27 @@ class CudagraphDispatcher:
     ):
         # This should be called only after attention backend is initialized.
 
+        # LoRA activation cases to specialize the cuda graphs on
+        if self.vllm_config.lora_config:
+            if self.compilation_config.cudagraph_specialize_lora:
+                lora_cases = [True, False]
+            else:
+                lora_cases = [True]
+        else:
+            lora_cases = [False]
+
         # Note: we create all valid keys for cudagraph here but do not
         # guarantee all keys would be used. For example, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-            for bs in self.compilation_config.cudagraph_capture_sizes:
+            for bs, has_lora in product(
+                self.compilation_config.cudagraph_capture_sizes, lora_cases
+            ):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False),
+                    BatchDescriptor(
+                        num_tokens=bs, uniform_decode=False, has_lora=has_lora
+                    ),
                 )
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
@@ -93,16 +106,18 @@ class CudagraphDispatcher:
                 for x in self.compilation_config.cudagraph_capture_sizes
                 if x <= max_num_tokens and x >= uniform_decode_query_len
             ]
-            for bs in cudagraph_capture_sizes_for_decode:
+            for bs, has_lora in product(cudagraph_capture_sizes_for_decode, lora_cases):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True),
+                    BatchDescriptor(
+                        num_tokens=bs, uniform_decode=True, has_lora=has_lora
+                    ),
                 )
         self.keys_initialized = True
 
     def dispatch(
         self, batch_descriptor: BatchDescriptor, use_cascade_attn: bool = False
-    ) -> tuple[CUDAGraphMode, Optional[BatchDescriptor]]:
+    ) -> tuple[CUDAGraphMode, BatchDescriptor | None]:
         """
         Given conditions(e.g.,batch descriptor and if using cascade attention),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.

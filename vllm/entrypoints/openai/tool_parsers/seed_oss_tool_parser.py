@@ -7,7 +7,7 @@ import ast
 import json
 import uuid
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any
 
 import regex as re
 
@@ -23,7 +23,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -31,7 +30,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("seed_oss")
 class SeedOssToolParser(ToolParser):
     TOOL_CALL_START = "<seed:tool_call>"
     TOOL_CALL_END = "</seed:tool_call>"
@@ -109,8 +107,8 @@ class SeedOssToolParser(ToolParser):
         self.json_closed = False
 
     def _parse_xml_function_call(
-        self, function_call_str: str, tools: Optional[list[ChatCompletionToolsParam]]
-    ) -> Optional[ToolCall]:
+        self, function_call_str: str, tools: list[ChatCompletionToolsParam] | None
+    ) -> ToolCall | None:
         def get_arguments_config(func_name: str) -> dict:
             if tools is None:
                 return {}
@@ -357,7 +355,7 @@ class SeedOssToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Union[DeltaMessage, None]:
+    ) -> DeltaMessage | None:
         # If no delta text, return None unless
         # it's an EOS token after tool calls
         if not delta_text:

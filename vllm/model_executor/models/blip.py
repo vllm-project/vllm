@@ -4,7 +4,6 @@
 within a vision language model."""
 
 from collections.abc import Iterable
-from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -38,7 +37,7 @@ def get_blip_num_patches(*, image_size: int, patch_size: int) -> int:
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
 class BlipVisionEmbeddings(nn.Module):
-    def __init__(self, config: Union[BlipVisionConfig, Blip2VisionConfig]):
+    def __init__(self, config: BlipVisionConfig | Blip2VisionConfig):
         super().__init__()
 
         self.config = config
@@ -86,8 +85,8 @@ class BlipAttention(nn.Module):
 
     def __init__(
         self,
-        config: Union[BlipVisionConfig, Blip2VisionConfig],
-        quant_config: Optional[QuantizationConfig] = None,
+        config: BlipVisionConfig | Blip2VisionConfig,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -151,7 +150,7 @@ class BlipMLP(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -186,7 +185,7 @@ class BlipEncoderLayer(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -228,8 +227,8 @@ class BlipEncoder(nn.Module):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        num_hidden_layers_override: Optional[int] = None,
+        quant_config: QuantizationConfig | None = None,
+        num_hidden_layers_override: int | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -268,10 +267,10 @@ class BlipVisionModel(nn.Module, SupportsQuant):
     def __init__(
         self,
         config: BlipVisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         *,
-        num_hidden_layers_override: Optional[int] = None,
-        require_post_norm: Optional[bool] = None,
+        num_hidden_layers_override: int | None = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()

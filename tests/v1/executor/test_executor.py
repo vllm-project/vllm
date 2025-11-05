@@ -3,7 +3,9 @@
 
 import asyncio
 import os
-from typing import Any, Callable, Optional, Union
+from collections.abc import Callable
+from concurrent.futures import Future
+from typing import Any
 
 import pytest
 
@@ -20,17 +22,19 @@ class Mock: ...
 class CustomMultiprocExecutor(MultiprocExecutor):
     def collective_rpc(
         self,
-        method: Union[str, Callable],
-        timeout: Optional[float] = None,
+        method: str | Callable,
+        timeout: float | None = None,
         args: tuple = (),
-        kwargs: Optional[dict] = None,
+        kwargs: dict | None = None,
         non_block: bool = False,
-        unique_reply_rank: Optional[int] = None,
-    ) -> list[Any]:
+        unique_reply_rank: int | None = None,
+    ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
-        return super().collective_rpc(method, timeout, args, kwargs)
+        return super().collective_rpc(
+            method, timeout, args, kwargs, non_block, unique_reply_rank
+        )
 
 
 CustomMultiprocExecutorAsync = CustomMultiprocExecutor

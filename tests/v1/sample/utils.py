@@ -3,13 +3,13 @@
 
 from collections.abc import Iterator
 from enum import Enum
-from typing import NamedTuple, Optional
+from typing import NamedTuple
 
 import regex as re
 import torch
 
 from vllm import CompletionOutput
-from vllm.utils import make_tensor_with_pad
+from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -23,7 +23,7 @@ class BatchLogprobsComposition(Enum):
     SAMPLE_PROMPT = 3
 
 
-BatchLogprobsSpecType = list[tuple[Optional[int], Optional[int]]]
+BatchLogprobsSpecType = list[tuple[int | None, int | None]]
 
 
 def get_test_batch(
@@ -215,3 +215,23 @@ def fake_apply_logitsprocs(
     for processor in test_fakes.get_logitsprocs():
         logits = processor.apply(logits)
     return logits
+
+
+def create_allowed_token_ids(
+    batch_size: int,
+    vocab_size: int,
+    num_allowed_token_ids: int,
+    device: torch.device,
+) -> torch.Tensor | None:
+    mask: torch.Tensor | None = None
+    for i in range(batch_size):
+        if i % 2 == 1:
+            continue
+        if mask is None:
+            mask = torch.zeros(
+                (batch_size, vocab_size), dtype=torch.bool, device=device
+            )
+        start = min(i, vocab_size - 1)
+        end = min(i + num_allowed_token_ids, vocab_size - 1)
+        mask[i, start:end] = True
+    return mask

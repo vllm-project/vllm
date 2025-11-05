@@ -4,7 +4,6 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional
 from unittest.mock import patch
 
 import pytest
@@ -106,7 +105,7 @@ def skip_cuda_with_stage_false(request):
 
 def get_random_id_to_index(
     num_loras: int, num_slots: int, log: bool = True
-) -> list[Optional[int]]:
+) -> list[int | None]:
     """Creates a random lora_id_to_index mapping.
 
     Args:
@@ -122,7 +121,7 @@ def get_random_id_to_index(
             "num_loras must be less than or equal to num_slots."
         )
 
-    slots: list[Optional[int]] = [None] * num_slots
+    slots: list[int | None] = [None] * num_slots
     random_slot_selections = (torch.randperm(num_slots)[:num_loras]).tolist()
     for lora_id, slot_idx in enumerate(random_slot_selections, start=1):
         slots[slot_idx] = lora_id
@@ -134,7 +133,7 @@ def get_random_id_to_index(
 
 
 def populate_loras(
-    id_to_index: list[Optional[int]],
+    id_to_index: list[int | None],
     layer: BaseLayerWithLoRA,
     layer_weights: torch.Tensor,
     generate_embeddings_tensor: int = 0,

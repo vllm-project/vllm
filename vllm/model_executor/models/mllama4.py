@@ -19,7 +19,7 @@
 import math
 from collections.abc import Iterable, Mapping
 from itertools import tee
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal
 
 import torch
 from torch import nn
@@ -65,13 +65,14 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
+    MixtureOfExperts,
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsMultiModal,
     SupportsPP,
 )
 from .llama4 import Llama4ForCausalLM
-from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 from .vision import run_dp_sharded_vision_model
 
 
@@ -86,7 +87,7 @@ class Llama4ImagePatchInputs(TensorSchema):
 
     type: Literal["pixel_values"] = "pixel_values"
 
-    flat_data: Annotated[
+    pixel_values: Annotated[
         torch.Tensor,
         TensorShape("total_num_chunks", "num_channels", "image_size", "image_size"),
     ]
@@ -96,7 +97,7 @@ class Llama4ImagePatchInputs(TensorSchema):
     The number of total patches for each image in the batch.
     
     This is used to split the embeddings which has the first two dimensions
-    flattened just like `flat_data`.
+    flattened just like `pixel_values`.
     """
 
     aspect_ratios: Annotated[torch.Tensor, TensorShape("batch_size", 2)]
@@ -115,7 +116,7 @@ class Llama4VisionMLP(nn.Module):
         output_size: int,
         bias: bool,
         output_activation: bool,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -152,7 +153,7 @@ class Llama4MultiModalProjector(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -199,7 +200,7 @@ class Llama4VisionPixelShuffleMLP(nn.Module):
     def __init__(
         self,
         config,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -229,7 +230,7 @@ class Llama4VisionAttention(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -323,7 +324,7 @@ class Llama4VisionEncoderLayer(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -376,7 +377,7 @@ class Llama4VisionEncoder(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig],
+        quant_config: QuantizationConfig | None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -419,7 +420,7 @@ class Llama4UnfoldConvolution(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -449,7 +450,7 @@ class Llama4VisionModel(nn.Module):
     def __init__(
         self,
         config: Llama4VisionConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
     ):
@@ -547,7 +548,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
-    def get_supported_mm_limits(self) -> Mapping[str, Optional[int]]:
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
         # perspective, we do not recommend using >10 images in practice.
         return {"image": None}
@@ -699,7 +700,7 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -723,8 +724,10 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
     dummy_inputs=Mllama4DummyInputsBuilder,
 )
 class Llama4ForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module, SupportsMultiModal, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -733,7 +736,7 @@ class Llama4ForConditionalGeneration(
     supports_encoder_tp_data = True
 
     @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> Optional[str]:
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
             return "<|image|>"
 
@@ -774,6 +777,17 @@ class Llama4ForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
+        # Set MoE hyperparameters
+        self.num_expert_groups = 1
+        self.num_logical_experts = self.language_model.num_logical_experts
+        self.num_physical_experts = self.language_model.num_physical_experts
+        self.num_local_physical_experts = self.language_model.num_local_physical_experts
+        self.num_routed_experts = self.language_model.num_routed_experts
+        self.num_shared_experts = self.language_model.num_shared_experts
+        self.num_redundant_experts = self.language_model.num_redundant_experts
+        self.moe_layers = self.language_model.moe_layers
+        self.num_moe_layers = len(self.moe_layers)
+
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         """Set which layers should output auxiliary hidden states for EAGLE3."""
         # Delegate to underlying language model (Llama4ForCausalLM)
@@ -790,25 +804,38 @@ class Llama4ForConditionalGeneration(
         assert hasattr(self.language_model, "get_eagle3_aux_hidden_state_layers")
         return self.language_model.get_eagle3_aux_hidden_state_layers()
 
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ):
+        self.language_model.set_eplb_state(
+            expert_load_view, logical_to_physical_map, logical_replica_count
+        )
+        self.expert_weights = self.language_model.expert_weights
+
+    def update_physical_experts_metadata(
+        self, num_physical_experts: int, num_local_physical_experts: int
+    ):
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts, num_local_physical_experts
+        )
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
-    ) -> Optional[Llama4ImagePatchInputs]:
+    ) -> Llama4ImagePatchInputs | None:
         # num_images, 1, num_chunks, channel, image_size, image_size
         pixel_values = kwargs.pop("pixel_values", None)
         if pixel_values is None:
             return None
 
-        # num_images x num_chunks, channel, image_size, image_size
-        # TODO: confirm handling for variable lengths
-        flat_pixel_values = flatten_bn(pixel_values, concat=True)
-        patches_per_image = flatten_bn(kwargs.pop("patches_per_image"))
+        patches_per_image = kwargs.pop("patches_per_image")
         aspect_ratios = kwargs.pop("aspect_ratios")
-        if aspect_ratios.ndim == 3:
-            aspect_ratios = aspect_ratios.squeeze(1)
 
         return Llama4ImagePatchInputs(
             type="pixel_values",
-            flat_data=flat_pixel_values,
+            pixel_values=pixel_values,
             patches_per_image=patches_per_image,
             aspect_ratios=aspect_ratios,
         )
@@ -817,16 +844,16 @@ class Llama4ForConditionalGeneration(
         self, image_input: Llama4ImagePatchInputs
     ) -> MultiModalEmbeddings:
         assert self.vision_model and self.multi_modal_projector
-        flat_data = image_input["flat_data"]
+        pixel_values = image_input["pixel_values"]
         patches_per_image = image_input["patches_per_image"].tolist()
 
         # shard image input
         if self.use_data_parallel:
             vision_embeddings_flat = run_dp_sharded_vision_model(
-                flat_data, self.vision_model
+                pixel_values, self.vision_model
             )
         else:
-            vision_embeddings_flat = self.vision_model(flat_data)
+            vision_embeddings_flat = self.vision_model(pixel_values)
 
         vision_embeddings_flat = self.multi_modal_projector(vision_embeddings_flat)
 
@@ -849,10 +876,10 @@ class Llama4ForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor | IntermediateTensors:
         if intermediate_tensors is not None:
             inputs_embeds = None
 
@@ -863,7 +890,7 @@ class Llama4ForConditionalGeneration(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
     def separate_weights(

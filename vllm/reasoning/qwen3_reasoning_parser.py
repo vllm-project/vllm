@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional, Union
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, ResponsesRequest
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
-@ReasoningParserManager.register_module("qwen3")
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for the Qwen3 model.
@@ -31,8 +28,8 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         return "</think>"
 
     def extract_reasoning_content(
-        self, model_output: str, request: Union[ChatCompletionRequest, ResponsesRequest]
-    ) -> tuple[Optional[str], Optional[str]]:
+        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+    ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
 

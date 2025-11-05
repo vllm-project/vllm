@@ -7,18 +7,15 @@ set -euo pipefail
 # Requires: curl, apt-get, root privileges
 if [[ $(id -u) -ne 0 ]]; then
   echo "Must be run as root" >&2
-  
   exit 1
 fi
 if [[ $# -ne 3 ]]; then
   echo "Usage: $0 <GDRCOPY_OS_VERSION> <GDRCOPY_CUDA_VERSION> <uuarch(x64|aarch64)>" >&2
   exit 1
 fi
-
 OS_VER="$1"
 CUDA_VER="$2"
 UUARCH_RAW="$3"
-
 # Normalize/validate arch
 case "${UUARCH_RAW,,}" in
   aarch64|arm64)
