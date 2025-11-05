@@ -281,7 +281,7 @@ def test_cudagraph_sizes_post_init(
     expected_max_size,
 ):
     ctx = nullcontext()
-    if expected_max_size == ValidationError:
+    if issubclass(expected_max_size, Exception):
         ctx = pytest.raises(expected_max_size)
 
     cudagraph_mode = CUDAGraphMode.PIECEWISE if use_cudagraph else CUDAGraphMode.NONE
