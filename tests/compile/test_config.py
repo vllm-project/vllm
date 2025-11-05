@@ -241,6 +241,46 @@ def test_should_split():
     splitting_ops = ["aten::add.Tensor"]
     assert not should_split(node, splitting_ops)
 
+    @torch.library.custom_op(
+        "silly::attention",
+        mutates_args=["out"],
+    )
+    def attention(
+        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor
+    ) -> None:
+        out.copy_(q + k + v)
+
+    q, k, v, out = [torch.randn(1)] * 4
+
+    # supports custom ops as OpOverloadPacket
+    node = torch.fx.Node(
+        graph=graph,
+        name="dummy_node",
+        op="call_function",
+        target=torch.ops.silly.attention,
+        args=(q, k, v, out),
+        kwargs={},
+    )
+
+    splitting_ops = ["silly::attention"]
+    assert should_split(node, splitting_ops)
+
+    # supports custom ops as OpOverload
+    node = torch.fx.Node(
+        graph=graph,
+        name="dummy_node",
+        op="call_function",
+        target=torch.ops.silly.attention.default,
+        args=(q, k, v, out),
+        kwargs={},
+    )
+
+    splitting_ops = ["silly::attention"]
+    assert should_split(node, splitting_ops)
+
+    splitting_ops = ["silly::attention.default"]
+    assert should_split(node, splitting_ops)
+
 
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),

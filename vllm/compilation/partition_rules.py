@@ -11,23 +11,30 @@ logger = init_logger(__name__)
 
 
 def should_split(node: torch.fx.Node, splitting_ops: list[str]) -> bool:
-    """Checks if a node should be split for pieceiwse cudagraph."""
-    # Match node.target against resolved_ops
-    # node.target can be OpOverloadPacket, need to check .default
+    """
+    Check if a node should be split for dynamo graph partition.
+    It operates on dynamo graph, so the node.target can be anything.
+    We need to check and split only on OpOverload and OpOverloadPacket.
+    """
 
     if node.op != "call_function":
         return False
 
-    op_overload = node.target
-    assert isinstance(op_overload, torch._ops.OpOverload)
+    target = node.target
 
-    # Example: "aten::add"
-    op_overload_packet_name = op_overload.name()
+    if isinstance(target, torch._ops.OpOverloadPacket):
+        # Example: "aten::add"
+        return target._qualified_op_name in splitting_ops
 
-    # Example: "aten::add.default"
-    op_overload_name = f"{op_overload_packet_name}.{op_overload._overloadname}"
+    if isinstance(target, torch._ops.OpOverload):
+        # Example: "aten::add"
+        packet_name = target.name()
 
-    return op_overload_packet_name in splitting_ops or op_overload_name in splitting_ops
+        # Example: "aten::add.default"
+        op_overload_name = f"{packet_name}.{target._overloadname}"
+        return op_overload_name in splitting_ops or packet_name in splitting_ops
+
+    return False
 
 
 @contextlib.contextmanager
