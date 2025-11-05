@@ -11,7 +11,7 @@ from vllm.platforms import current_platform
 NUM_ROWS = [1, 32, 2050]
 TOP_K_VALUES = [2048]
 BATCH_SIZE = [1, 2, 2048]
-NEXT_N = [1, 2, 8]
+NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
 
 
@@ -141,7 +141,7 @@ def test_top_k_per_row(
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
     # Run CUDA implementation
-    torch.ops._C.top_k_per_row(
+    torch.ops._C.top_k_per_row_prefill(
         logits,
         row_starts,
         row_ends,
@@ -161,7 +161,75 @@ def test_top_k_per_row(
     # Compare results
     assert compare_top_k_results(
         logits, indices, torch_indices, row_starts, row_ends, top_k
-    ), "CUDA top_k_per_row results don't match torch.topk"
+    ), "CUDA top_k_per_row_prefill results don't match torch.topk"
+
+
+def _run_top_k_per_row_decode_test(
+    top_k: int,
+    batch_size: int,
+    next_n: int,
+    vocab_size: int,
+    data_generation: str,
+) -> None:
+    """
+    Helper function to run top_k_per_row_decode test with given parameters.
+    """
+    torch.set_default_device("cuda:0")
+
+    # Create test data
+    num_rows = batch_size * next_n
+    seq_lens = torch.randint(
+        vocab_size, (batch_size,), dtype=torch.int32, device="cuda"
+    )
+    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
+    row_indices = torch.arange(num_rows, device="cuda") // next_n
+    next_n_offset = torch.arange(num_rows, device="cuda") % next_n
+    row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
+    logits = create_random_logits(
+        row_starts, row_ends, torch.float32, 42, data_generation
+    )
+
+    # Create output tensors
+    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
+    # Auxiliary tensors for long sequences (used when vocab_size >= 200,000)
+    splitWorkThreshold = 200 * 1000
+    aux_indices = torch.empty((0,), dtype=torch.int32, device=logits.device)
+    aux_logits = torch.empty((0,), dtype=torch.float32, device=logits.device)
+    if logits.shape[1] >= splitWorkThreshold:
+        aux_indices = torch.empty(
+            (num_rows, 10 * 2048), dtype=torch.int32, device=logits.device
+        )
+        aux_logits = torch.empty(
+            (num_rows, 10 * 2048), dtype=torch.float32, device=logits.device
+        )
+
+    # Run CUDA implementation
+    torch.ops._C.top_k_per_row_decode(
+        logits,
+        next_n,
+        seq_lens,
+        indices,
+        aux_indices,
+        aux_logits,
+        num_rows,
+        logits.stride(0),
+        logits.stride(1),
+        splitWorkThreshold,
+    )
+
+    torch.cuda.synchronize()
+
+    # Run reference implementation
+    torch_indices = logits.topk(min(top_k, max(row_ends)), dim=-1)[1]
+    mask_lo = torch_indices >= 0
+    mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
+    mask = mask_lo & mask_hi
+    torch_indices = torch_indices.masked_fill(~mask, -1)
+
+    # Compare results
+    assert compare_top_k_results(
+        logits, indices, torch_indices, row_starts, row_ends, top_k
+    ), "CUDA top_k_per_row_decode results don't match torch.topk"
 
 
 @pytest.mark.parametrize("top_k", TOP_K_VALUES)
@@ -179,46 +247,23 @@ def test_top_k_per_row_decode(
     """
     Test top_k_per_row with seq_lens tensor.
     """
-    torch.set_default_device("cuda:0")
-
-    # Create test data
-    num_rows = batch_size * next_n
     vocab_size = 20000
-    seq_lens = torch.randint(
-        vocab_size, (batch_size,), dtype=torch.int32, device="cuda"
-    )
-    row_starts = torch.zeros(num_rows, dtype=torch.int32, device="cuda")
-    row_indices = torch.arange(num_rows, device="cuda") // next_n
-    next_n_offset = torch.arange(num_rows, device="cuda") % next_n
-    row_ends = seq_lens[row_indices] - next_n + next_n_offset + 1
-    logits = create_random_logits(
-        row_starts, row_ends, torch.float32, 42, data_generation
+    _run_top_k_per_row_decode_test(
+        top_k, batch_size, next_n, vocab_size, data_generation
     )
 
-    # Create output tensors
-    indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
-    # Run CUDA implementation
-    torch.ops._C.top_k_per_row_decode(
-        logits,
-        next_n,
-        seq_lens,
-        indices,
-        num_rows,
-        logits.stride(0),
-        logits.stride(1),
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@torch.inference_mode()
+def test_top_k_per_row_decode_large_vocab_size() -> None:
+    """
+    Test top_k_per_row_decode with large vocabulary size.
+    """
+    top_k = 2048
+    batch_size = 2
+    next_n = 2
+    vocab_size = 300000
+    data_generation = "random"
+    _run_top_k_per_row_decode_test(
+        top_k, batch_size, next_n, vocab_size, data_generation
     )
-
-    torch.cuda.synchronize()
-
-    # Run reference implementation
-    torch_indices = logits.topk(min(top_k, max(row_ends)), dim=-1)[1]
-    mask_lo = torch_indices >= 0
-    mask_hi = (torch_indices - (row_ends - row_starts)[:, None]) < 0
-    mask = mask_lo & mask_hi
-    torch_indices = torch_indices.masked_fill(~mask, -1)
-
-    # Compare results
-    assert compare_top_k_results(
-        logits, indices, torch_indices, row_starts, row_ends, top_k
-    ), "CUDA top_k_per_row results don't match torch.topk"
