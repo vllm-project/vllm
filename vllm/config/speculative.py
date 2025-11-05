@@ -37,6 +37,7 @@ MTPModelTypes = Literal[
     "qwen3_next_mtp",
     "longcat_flash_mtp",
     "mtp",
+    "pangu_ultra_moe_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
@@ -173,6 +174,13 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekMTPModel"]}
+            )
+        if hf_config.model_type in ("pangu_ultra_moe"):
+            hf_config.model_type = "pangu_ultra_moe_mtp"
+        if hf_config.model_type == "pangu_ultra_moe_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":

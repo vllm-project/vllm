@@ -540,7 +540,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
         self.transfer_event = torch.cuda.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
-            (self.max_model_len, 1),
+            (self.max_num_reqs, 1),
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory,
