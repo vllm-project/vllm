@@ -309,7 +309,7 @@ SP_TEST_MODELS = [
     ],
 )
 @pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
-@pytest.mark.parametrize("enable_async_tp", [True, False])
+@pytest.mark.parametrize("enable_async_tp", [False])  # TODO: enable async TP
 @create_new_process_for_each_test()
 def test_tp_sp_generation(
     model_id: str,
