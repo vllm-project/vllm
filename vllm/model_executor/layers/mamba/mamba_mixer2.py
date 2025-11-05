@@ -3,6 +3,8 @@
 
 from typing import TYPE_CHECKING
 
+from vllm import envs
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -592,7 +594,7 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=0,
         )
 
-        if prefix_caching_enabled:
+        if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE and prefix_caching_enabled:
             # If prefix caching is enabled, retrieve the relevant variables
             # for prefill and decode
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -793,7 +795,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # Process decode requests
         if has_decode:
-            if prefix_caching_enabled:
+            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE and prefix_caching_enabled:
                 state_indices_tensor_d_input = state_indices_tensor_d.gather(
                     1, block_idx_last_computed_token_d.unsqueeze(1)
                 ).squeeze(1)
