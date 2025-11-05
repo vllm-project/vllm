@@ -7,10 +7,8 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import (
-    DeepSeekR1ReasoningParser,
-    ReasoningParser,
-)
+from vllm.reasoning import ReasoningParser
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 from .identity_reasoning_parser import IdentityReasoningParser
 
