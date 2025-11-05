@@ -33,7 +33,6 @@ class EPLBProcess:
             [torch.Tensor, int, int, int, int],
             tuple[torch.Tensor, torch.Tensor, torch.Tensor],
         ],
-        num_wait_worker_iterations: int,
     ):
         """
         Initialize asynchronous process manager
@@ -41,11 +40,8 @@ class EPLBProcess:
         Args:
             target_func: Target function to execute in asynchronous process
                 (e.g., rebalance_experts)
-            num_wait_worker_iterations: Number of steps to wait before
-                checking results
         """
         self.target_func = target_func
-        self._num_wait_worker_iterations = num_wait_worker_iterations
 
         # Process management related
         self._process: mp.Process | None = None
@@ -53,7 +49,6 @@ class EPLBProcess:
         self._output_queue: Queue | None = None
         self._exception_queue: Queue | None = None
         self._map_queue: Queue | None = None
-        self._step_counter = 0
         self._result: list | None = None
         self._is_running = False
         self._has_pending_task = False
@@ -332,7 +327,6 @@ class EPLBProcess:
             combined_args = (args, expert_mapper_args)
             self._input_queue.put(combined_args)
             self._has_pending_task = True
-            self._step_counter = 0
             self._result = None
             return True
 
@@ -349,8 +343,6 @@ class EPLBProcess:
         """
         if not self._is_running or not self._has_pending_task:
             return False
-
-        self._step_counter += 1
 
         # Check for exceptions first
         if self._exception_queue and not self._exception_queue.empty():
@@ -370,12 +362,7 @@ class EPLBProcess:
         """Determine if results need processing"""
         if not self._process or not self._output_queue:
             return True
-
-        return (
-            self._step_counter >= self._num_wait_worker_iterations
-            or not self._process.is_alive()
-            or not self._output_queue.empty()
-        )
+        return self._process.is_alive() or not self._output_queue.empty()
 
     def _fetch_result(self) -> None:
         """Retrieve subprocess results"""

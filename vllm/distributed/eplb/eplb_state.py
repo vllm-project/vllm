@@ -440,10 +440,7 @@ class EplbState:
     def __post_init__(self) -> None:
         # Initialize asynchronous process manager
         if self.enable_async:
-            self._async_processor = EPLBProcess(
-                target_func=rebalance_experts,
-                num_wait_worker_iterations=self.num_wait_worker_iterations,
-            )
+            self._async_processor = EPLBProcess(target_func=rebalance_experts)
 
     def step(
         self,
@@ -567,7 +564,7 @@ class EplbState:
 
                 self.rebalance_task(input_args, expert_mapper_args)
 
-            if self.update_expert_map_flag():
+            if self.update_expert_map_and_weight_flag():
                 for req in self.reqs:
                     req.wait()
                 if self.comm_op_list is not None:
@@ -822,7 +819,8 @@ class EplbState:
         if not self._async_processor:
             logger.error("Async processor is not initialized")
             return None
-        self._async_processor.step()
+        if self.update_expert_map_and_weight_flag():
+           self._async_processor.step()
         process_result = self._async_processor.result
         if process_result is None:
             logger.warning("Async processor result is None, skipping layer.")
@@ -948,7 +946,7 @@ class EplbState:
             self.expert_rearrangement_step_interval - 1
         )
 
-    def update_expert_map_flag(self) -> bool:
+    def update_expert_map_and_weight_flag(self) -> bool:
         """
         Determines if expert maps should be updated in the current iteration. This
         is typically true for a short window after the EPLB update and worker wait.
