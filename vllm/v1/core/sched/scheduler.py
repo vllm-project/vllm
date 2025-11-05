@@ -27,7 +27,6 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
-    GrammarOutput,
     NewRequestData,
     SchedulerOutput,
 )
@@ -430,6 +429,8 @@ class Scheduler(SchedulerInterface):
                             skipped_waiting_requests.prepend_request(request)
                             continue
 
+                        num_external_computed_tokens = ext_tokens
+
                         self._update_connector_prefix_cache_stats(
                             request, num_external_computed_tokens
                         )
@@ -752,7 +753,7 @@ class Scheduler(SchedulerInterface):
 
         return CachedRequestData(
             req_ids=req_ids,
-            resumed_req_ids=resumed_req_ids,
+            resumed_from_preemption=resumed_from_preemption,
             new_token_ids=new_token_ids,
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
