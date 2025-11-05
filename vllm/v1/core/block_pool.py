@@ -215,8 +215,7 @@ class BlockPool:
         block_hash_with_group_id: BlockHashWithGroupId = make_block_hash_with_group_id(
             new_block_hash, kv_cache_group_id)
         block.block_hash = block_hash_with_group_id
-        self.cached_block_hash_to_block[block_hash_with_group_id][
-            block.block_id] = block
+        self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
         if new_hashes is not None:
             new_hashes.append(maybe_convert_block_hash(new_block_hash))
 

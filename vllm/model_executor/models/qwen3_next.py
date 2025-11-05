@@ -1191,9 +1191,6 @@ class Qwen3NextForCausalLM(
             assert not cache_config.enable_prefix_caching, (
                 "Qwen3NextMTP currently does not support prefix caching"
             )
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3Next currently does not support prefix caching"
-        )
         self.quant_config = vllm_config.quant_config
 
         super().__init__()

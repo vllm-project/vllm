@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal, overload
 
+from vllm import envs
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
@@ -304,7 +305,9 @@ class KVCacheManager:
                 "Computed blocks should be empty when prefix caching is disabled"
             )
 
-        if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+        if (envs.VLLM_USE_LIGHTER_MAMBA_CACHE 
+            or new_computed_block_list is not self.empty_kv_cache_blocks.blocks
+        ):
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.save_new_computed_blocks(

@@ -293,18 +293,25 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             cache_config.mamba_block_size = model_config.max_model_len
 
         if cache_config.enable_prefix_caching:
-            if model_config.supports_mamba_prefix_caching:
-                logger.info(
-                    "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba layers is experimental. "
-                    "Please report any issues you may observe."
-                )
+            if not envs.VLLM_USE_LIGHTER_MAMBA_CACHE:
+                if model_config.supports_mamba_prefix_caching:
+                    logger.info(
+                        "Warning: Prefix caching is currently enabled. "
+                        "Its support for Mamba layers is experimental. "
+                        "Please report any issues you may observe."
+                    )
+                else:
+                    logger.info(
+                        "Hybrid or mamba-based model detected without "
+                        "support for prefix caching: disabling."
+                    )
+                    cache_config.enable_prefix_caching = False
             else:
                 logger.info(
-                    "Hybrid or mamba-based model detected without "
-                    "support for prefix caching: disabling."
-                )
-                cache_config.enable_prefix_caching = False
+                    "Warning: Lighter Mamba Prefix caching is currently"
+                    " enabled. Its support is experimental. "
+                    "Please report any issues you may observe."
+                )        
 
         # TODO(tdoublep): remove once cascade attention is supported
         logger.info(
@@ -394,7 +401,8 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if mamba_page_size == 0:
             return
 
-        if cache_config.enable_prefix_caching:
+        if (cache_config.enable_prefix_caching 
+            and not envs.VLLM_USE_LIGHTER_MAMBA_CACHE):
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
