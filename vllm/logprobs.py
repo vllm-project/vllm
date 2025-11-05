@@ -44,7 +44,9 @@ class FlattenLogprobs:
 
     def __init__(self, for_prompt: bool) -> None:
         # The start indices of logprobs for each position.
-        # NOTE: logprob of first prompt token is None.
+        # NOTE: There's no logprob of first prompt token, so if the
+        # FlattenLogprobs is for prompt, we directly set
+        # the start index for the second prompt token.
         self.start_indices_per_position: list[int] = [0, 0] if for_prompt else [0]
 
         # Flatten Logprob information for (each position, rank).
