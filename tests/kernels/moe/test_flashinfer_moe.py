@@ -16,11 +16,11 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
+    create_flashinfer_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
-)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 
@@ -76,7 +76,7 @@ def test_flashinfer_fp4_moe_no_graph(
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
         flashinfer_experts = FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
             FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
         )
 
