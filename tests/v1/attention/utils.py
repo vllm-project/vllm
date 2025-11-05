@@ -172,7 +172,6 @@ def create_vllm_config(
     cache_config = CacheConfig(
         block_size=block_size,
         cache_dtype="auto",
-        swap_space=0,
     )
     # Set cache blocks for testing
     #   (these may be set during initialization normally)

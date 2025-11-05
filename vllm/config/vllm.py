@@ -343,8 +343,6 @@ class VllmConfig:
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
-
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 

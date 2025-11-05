@@ -146,12 +146,6 @@ class LLM:
             compared with using gpu_memory_utilization. Note that
             kv_cache_memory_bytes (when not-None) ignores
             gpu_memory_utilization
-        swap_space: The size (GiB) of CPU memory per GPU to use as swap space.
-            This can be used for temporarily storing the states of the requests
-            when their `best_of` sampling parameters are larger than 1. If all
-            requests will have `best_of=1`, you can safely set this to 0.
-            Noting that `best_of` is only supported in V0. Otherwise, too small
-            values may cause out-of-memory (OOM) errors.
         cpu_offload_gb: The size (GiB) of CPU memory to use for offloading
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
@@ -206,7 +200,6 @@ class LLM:
         tokenizer_revision: str | None = None,
         seed: int | None = None,
         gpu_memory_utilization: float = 0.9,
-        swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: bool = False,
         disable_custom_all_reduce: bool = False,
@@ -320,7 +313,6 @@ class LLM:
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
             kv_cache_memory_bytes=kv_cache_memory_bytes,
-            swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
             disable_custom_all_reduce=disable_custom_all_reduce,
