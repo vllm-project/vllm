@@ -129,6 +129,7 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim> {
   constexpr static int64_t MaxQHeadNumPerIteration = 8;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::VEC;
+  constexpr static bool scale_on_logits = false;  // apply scale on q_buffer
 
  public:
   template <template <typename tile_gemm_t> typename attention>
@@ -165,11 +166,12 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim> {
       scalar_t* __restrict__ src,  // [q_num, q_heads_per_kv, head_size]
       float* __restrict__ q_buffer, const int32_t q_num,
       const int32_t q_heads_per_kv, const int64_t q_num_stride,
-      const int64_t q_head_stride) {
+      const int64_t q_head_stride, float scale) {
     static_assert(head_dim % 16 == 0);
     constexpr int32_t unroll_size = head_dim / 16;
     using load_vec_t = typename VecTypeTrait<scalar_t>::vec_t;
 
+    vec_op::FP32Vec16 scale_vec(scale);
     for (int32_t q_num_idx = 0; q_num_idx < q_num; ++q_num_idx) {
       for (int32_t q_head_idx = 0; q_head_idx < q_heads_per_kv; ++q_head_idx) {
         scalar_t* __restrict__ curr_q =
@@ -180,7 +182,9 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim> {
 
         vec_op::unroll_loop<int32_t, unroll_size>([&](int32_t i) {
           load_vec_t vec(curr_q);
-          vec_op::FP32Vec16(vec).save(curr_q_buffer);
+          vec_op::FP32Vec16 fp32_vec(vec);
+          fp32_vec = fp32_vec * scale_vec;
+          fp32_vec.save(curr_q_buffer);
 
           curr_q += 16;
           curr_q_buffer += 16;

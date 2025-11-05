@@ -322,6 +322,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
   constexpr static int64_t MaxQHeadNumPerIteration = 32;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::AMX;
+  constexpr static bool scale_on_logits = true;
 
  public:
   AttentionImpl() : current_q_head_num_(0) {
@@ -374,7 +375,7 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
       scalar_t* __restrict__ src,  // [q_num, q_heads_per_kv, head_size]
       scalar_t* __restrict__ q_buffer, const int32_t q_num,
       const int32_t q_heads_per_kv, const int64_t q_num_stride,
-      const int64_t q_head_stride) {
+      const int64_t q_head_stride, const float scale) {
     constexpr int64_t bytes_per_head = head_dim * sizeof(scalar_t);
     static_assert(bytes_per_head % AMX_TILE_ROW_BYTES == 0);
     constexpr int64_t head_size_block_num = bytes_per_head / AMX_TILE_ROW_BYTES;

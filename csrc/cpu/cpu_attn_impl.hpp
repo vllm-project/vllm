@@ -647,6 +647,15 @@ class AttentionScheduler {
 
     // metadata_ptr->print();
 
+    // test out of boundary access
+    // {
+    //     float* cache_ptr =
+    //     DNNLScratchPadManager::get_dnnl_scratchpad_manager()->get_data<float>();
+    //     for (int64_t i = 0; i < scratchpad_size / sizeof(float); ++i) {
+    //         cache_ptr[i] = std::numeric_limits<float>::quiet_NaN();
+    //     }
+    // }
+
     return metadata_tensor;
   }
 
@@ -846,6 +855,9 @@ class AttentionMainLoop {
       attention_impl_t::HeadDimAlignment;
   static constexpr int64_t head_dim = attention_impl_t::HeadDim;
   static constexpr ISA ISAType = attention_impl_t::ISAType;
+  static constexpr bool scale_on_logits =
+      attention_impl_t::scale_on_logits;  // apply scale on logits, otherwise
+                                          // apply scale on q_buffer
 
   template <typename tile_gemm_t>
   class Attention {
@@ -934,6 +946,22 @@ class AttentionMainLoop {
                 curr_logits_buffer, head_dim, block_size, kv_tile_token_num,
                 block_size, head_dim, false);
 
+            if constexpr (scale_on_logits) {
+              float* __restrict__ scale_curr_logits_buffer = curr_logits_buffer;
+              vec_op::FP32Vec16 scale_vec(scale);
+              for (int32_t i = 0; i < q_head_num; ++i) {
+                static_assert(blocksize_alignment % 16 == 0);
+                constexpr int32_t vec_num = blocksize_alignment / 16;
+                vec_op::unroll_loop<int32_t, vec_num>([&](int32_t vec_idx) {
+                  vec_op::FP32Vec16 vec(scale_curr_logits_buffer +
+                                        vec_idx * 16);
+                  vec = vec * scale_vec;
+                  vec.save(scale_curr_logits_buffer + vec_idx * 16);
+                });
+                scale_curr_logits_buffer += kv_tile_token_num;
+              }
+            }
+
             // Move buffer ptrs
             k_cache_block_ptr += k_cache_token_group_stride;
             curr_logits_buffer += blocksize_alignment;
@@ -954,22 +982,16 @@ class AttentionMainLoop {
         // }
 
         if (softcap_scale != 0.0f) {
-          apply_softcap_and_scale(logits_buffer, kv_tile_token_num, q_head_num,
-                                  kv_tile_token_num, softcap_scale, scale);
-          // reset scale as it has been applied
-          scale = 1.0f;
-
+          apply_softcap(logits_buffer, kv_tile_token_num, q_head_num,
+                        kv_tile_token_num, softcap_scale);
           // print_logits("softcap raw logits", logits_buffer, q_head_num,
           // kv_tile_token_num, kv_tile_token_num);
         }
 
         if (alibi_slopes != nullptr) {
-          apply_alibi_slopes_and_scale(
-              logits_buffer, alibi_slopes, kv_tile_token_num, q_tile_start_pos,
-              kv_tile_start_pos, q_token_num, kv_tile_token_num, q_heads_per_kv,
-              scale);
-          // reset scale as it has been applied
-          scale = 1.0f;
+          apply_alibi_slopes(logits_buffer, alibi_slopes, kv_tile_token_num,
+                             q_tile_start_pos, kv_tile_start_pos, q_token_num,
+                             kv_tile_token_num, q_heads_per_kv);
 
           // print_logits("alibi raw logits", logits_buffer, q_head_num,
           // kv_tile_token_num, kv_tile_token_num);
@@ -987,7 +1009,7 @@ class AttentionMainLoop {
         // }
 
         apply_softmax(logits_buffer, partial_q_buffer, max_buffer, sum_buffer,
-                      kv_tile_token_num, q_head_num, kv_tile_token_num, scale,
+                      kv_tile_token_num, q_head_num, kv_tile_token_num,
                       is_first_iter, use_sink);
 
         // if (debug_info){
@@ -1051,10 +1073,10 @@ class AttentionMainLoop {
           accum_c = true;
         }
       }
-      // if (debug_info) {
-      //   print_logits("output", partial_q_buffer, q_head_num, head_dim,
-      //   head_dim);
-      // }
+      //   if (debug_info) {
+      //     print_logits("output", partial_q_buffer, q_head_num, head_dim,
+      //     head_dim);
+      //   }
     }
 
     void apply_mask(logits_buffer_t* __restrict__ logits_buffer,
@@ -1113,26 +1135,21 @@ class AttentionMainLoop {
                        float* __restrict__ max_buffer,
                        float* __restrict__ sum_buffer,
                        const int64_t logits_buffer_stride, int32_t q_head_num,
-                       int32_t kv_tile_token_num, float scale,
-                       bool is_first_iter, bool use_sink) {
+                       int32_t kv_tile_token_num, bool is_first_iter,
+                       bool use_sink) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
 #endif
       using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
       static_assert(sizeof(prob_buffer_t) <= sizeof(logits_buffer_t));
 
-      vec_op::FP32Vec16 scale_vec(scale);
       logits_buffer_t* __restrict__ curr_logits_buffer = logits_buffer;
       float* __restrict__ curr_partial_q_buffer = partial_q_buffer;
       const int32_t vec_num = kv_tile_token_num / 16;
       const int32_t head_vec_num = head_dim / 16;
       for (int32_t i = 0; i < q_head_num; ++i) {
-        float init_max_val = std::numeric_limits<logits_buffer_t>::lowest();
-        float init_sum_val = 0;
-        if (!is_first_iter || use_sink) {
-          init_max_val = max_buffer[i];
-          init_sum_val = sum_buffer[i];
-        }
+        float init_max_val = max_buffer[i];
+        float init_sum_val = sum_buffer[i];
 
         // apply scale and compute max
         vec_op::FP32Vec16 max_vec(init_max_val);
@@ -1141,8 +1158,6 @@ class AttentionMainLoop {
               curr_logits_buffer;
           for (int32_t j = 0; j < vec_num; ++j) {
             vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
-            vec = vec * scale_vec;
-            vec.save(curr_logits_buffer_iter);
             max_vec = vec.max(max_vec);
 
             curr_logits_buffer_iter += 16;
@@ -1153,8 +1168,8 @@ class AttentionMainLoop {
 
         // use same rescale threshold with FA4.
         // https://github.com/Dao-AILab/flash-attention/blob/1b8e1e641c6a179be9a0538b7f40fd595050b735/flash_attn/cute/flash_fwd_sm100.py#L1271
-        bool need_rescale = rescale_factor < -8.0 && !is_first_iter;
-        if (!need_rescale && !is_first_iter) {
+        bool need_rescale = rescale_factor < -8.0;
+        if (!need_rescale) {
           new_max_val = init_max_val;
         } else {
           max_buffer[i] = new_max_val;
@@ -1231,15 +1246,13 @@ class AttentionMainLoop {
       }
     }
 
-    void apply_softcap_and_scale(logits_buffer_t* __restrict__ logits_buffer,
-                                 const int64_t logits_buffer_stride,
-                                 int32_t q_head_num, int32_t kv_tile_token_num,
-                                 float softcap_scale, float scale) {
+    void apply_softcap(logits_buffer_t* __restrict__ logits_buffer,
+                       const int64_t logits_buffer_stride, int32_t q_head_num,
+                       int32_t kv_tile_token_num, float softcap_scale) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
 #endif
       float inv_softcap_scale = 1.0 / softcap_scale;
-      vec_op::FP32Vec16 scale_vec(scale);
       vec_op::FP32Vec16 softcap_scale_vec(softcap_scale);
       vec_op::FP32Vec16 inv_softcap_scale_vec(inv_softcap_scale);
       vec_op::FP32Vec16 ones_vec(1.0);
@@ -1250,7 +1263,7 @@ class AttentionMainLoop {
             curr_logits_buffer;
         for (int32_t j = 0; j < vec_num; ++j) {
           vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
-          vec = vec * scale_vec * inv_softcap_scale_vec;
+          vec = vec * inv_softcap_scale_vec;
 
 #ifdef DEFINE_FAST_EXP
           vec = fast_exp(vec);
@@ -1273,13 +1286,14 @@ class AttentionMainLoop {
       }
     }
 
-    void apply_alibi_slopes_and_scale(
-        logits_buffer_t* __restrict__ logits_buffer,
-        const float* __restrict__ alibi_slopes,
-        const int64_t logits_buffer_stride, const int32_t q_tile_start_pos,
-        const int32_t kv_tile_start_pos, const int32_t q_token_num,
-        const int32_t kv_tile_token_num, const int32_t q_heads_per_kv,
-        float scale) {
+    void apply_alibi_slopes(logits_buffer_t* __restrict__ logits_buffer,
+                            const float* __restrict__ alibi_slopes,
+                            const int64_t logits_buffer_stride,
+                            const int32_t q_tile_start_pos,
+                            const int32_t kv_tile_start_pos,
+                            const int32_t q_token_num,
+                            const int32_t kv_tile_token_num,
+                            const int32_t q_heads_per_kv) {
       alignas(64) constexpr float initial_arange_vals[16] = {
           0.0f, 1.0f, 2.0f,  3.0f,  4.0f,  5.0f,  6.0f,  7.0f,
           8.0f, 9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f};
@@ -1288,7 +1302,6 @@ class AttentionMainLoop {
       vec_op::FP32Vec16 initial_arange_vals_vec(initial_arange_vals);
       initial_arange_vals_vec =
           initial_arange_vals_vec + vec_op::FP32Vec16((float)kv_tile_start_pos);
-      vec_op::FP32Vec16 scale_vec(scale);
       vec_op::FP32Vec16 pos_offset_vec(16.0);
       logits_buffer_t* __restrict__ curr_logits_buffer = logits_buffer;
       for (int32_t i = 0; i < q_token_num; ++i) {
@@ -1302,7 +1315,6 @@ class AttentionMainLoop {
             vec_op::FP32Vec16 alibi_bias_vec =
                 alibi_scale_vec * (curr_kv_pos_vec - curr_q_pos_vec);
             vec_op::FP32Vec16 vec(curr_logits_buffer_iter);
-            vec = vec * scale_vec;
             vec = vec + alibi_bias_vec;
 
             vec.save(curr_logits_buffer_iter);
@@ -1560,7 +1572,7 @@ class AttentionMainLoop {
                 attn_impl.copy_q_heads_tile(
                     q_tile_ptr, q_buffer, actual_q_token_num,
                     actual_q_heads_per_kv, q_token_num_stride,
-                    q_head_num_stride);
+                    q_head_num_stride, scale);
               }
 
               if (use_sink) {
@@ -1577,6 +1589,21 @@ class AttentionMainLoop {
                        ++head_idx) {
                     curr_sum_buffer[head_idx] = 1.0f;
                     curr_max_buffer[head_idx] = s_aux_fp32[head_idx];
+                  }
+
+                  curr_sum_buffer += actual_q_heads_per_kv;
+                  curr_max_buffer += actual_q_heads_per_kv;
+                }
+              } else {
+                float* __restrict__ curr_sum_buffer = sum_buffer;
+                float* __restrict__ curr_max_buffer = max_buffer;
+                for (int32_t token_idx = 0; token_idx < actual_q_token_num;
+                     ++token_idx) {
+                  for (int32_t head_idx = 0; head_idx < actual_q_heads_per_kv;
+                       ++head_idx) {
+                    curr_sum_buffer[head_idx] = 0.0f;
+                    curr_max_buffer[head_idx] =
+                        std::numeric_limits<float>::lowest();
                   }
 
                   curr_sum_buffer += actual_q_heads_per_kv;
