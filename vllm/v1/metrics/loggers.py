@@ -1046,8 +1046,9 @@ class StatLoggerManager:
         )
 
     def record_sleep_state(self, sleep: int = 0, level: int = 0):
-        for logger in self.stat_loggers:
-            logger.record_sleep_state(sleep, level)
+        for per_engine_loggers in self.per_engine_logger_dict.values():
+            for logger in per_engine_loggers:
+                logger.record_sleep_state(sleep, level)
 
     def log(self):
         for per_engine_loggers in self.per_engine_logger_dict.values():
