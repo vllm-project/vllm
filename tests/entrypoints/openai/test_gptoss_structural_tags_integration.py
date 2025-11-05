@@ -397,8 +397,7 @@ def server(monkeypatch_module: pytest.MonkeyPatch):
         "--enforce-eager",
         "--tool-server",
         "demo",
-        "--structured_outputs_config="
-        '{"enable_in_reasoning": true, "reasoning_parser": "openai_gptoss"}',
+        '--structured_outputs_config={"enable_in_reasoning": true}',
     ]
 
     with monkeypatch_module.context() as m:
