@@ -3,7 +3,6 @@
 import itertools
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import cast
 
 import vllm.envs as envs
 
@@ -58,43 +57,44 @@ class FlattenLogprobs:
         self.ranks: list[int] = []
         self.decoded_tokens: list[str | None] = []
 
-    def append_logprobs_for_next_position(
-        self,
-        logprobs: list[float],
-        token_ids: list[int],
-        decoded_tokens: Iterable[str | None],
-        rank: int,
-        num_logprobs: int,
-    ) -> None:
-        if num_logprobs == -1:
-            num_logprobs = len(logprobs)
-        topk_ranks = range(1, num_logprobs + 1)
-        ranks = itertools.chain((rank,), topk_ranks)
+    def num_positions(self) -> None:
+        """Gets number of positions stored in the container"""
+        return len(self.start_indices_per_position) - 1
 
-        for logprob, token_id, rank, decoded_token in zip(
-            logprobs, token_ids, ranks, decoded_tokens
-        ):
-            self.logprobs.append(logprob)
-            self.token_ids.append(token_id)
-            self.ranks.append(rank)
-            self.decoded_tokens.append(decoded_token)
+    def num_logprobs_per_position(self, position: int) -> int:
+        """Gets the number of logprobs of a given position"""
+        return (
+            self.start_indices_per_position[position + 1]
+            - self.start_indices_per_position[position]
+        )
 
-        self.start_indices_per_position.append(len(self.logprobs))
+    def logprob(self, position: int, token_id: int) -> float | None:
+        """Gets logprob value of a given position and token ID."""
+        idx = self._idx(position, token_id)
+        if idx is not None:
+            return self.logprobs[idx]
+        return None
 
-    def get_logprob(self, position: int, token_id: int) -> float:
-        for i in range(
-            self.start_indices_per_position[position],
-            self.start_indices_per_position[position + 1],
-        ):
-            if self.token_ids[i] == token_id:
-                return self.logprobs[i]
-        raise ValueError(f"{token_id=} not found in {position=}.")
+    def rank(self, position: int, token_id: int) -> int | None:
+        """Gets rank of a given position and token ID."""
+        idx = self._idx(position, token_id)
+        if idx is not None:
+            return self.ranks[idx]
+        return None
 
-    # TODO(Jialin): add more helper functions here to extract logprob info
-    # from this flatten structure.
-
-    # TODO(Jialin): Maybe add a helper function to convert the structure
-    # back to the original PromptLogprobs or SampleLogprobs structure.
+    def _idx(self, position: int, token_id: int) -> int | None:
+        """Locates the index of a given position and token ID."""
+        return next(
+            (
+                idx
+                for idx in range(
+                    self.start_indices_per_position[position],
+                    self.start_indices_per_position[position + 1],
+                )
+                if self.token_ids[idx] == token_id
+            ),
+            None,
+        )
 
 
 # {token_id -> logprob} per each sequence group. None if the corresponding
@@ -113,6 +113,50 @@ def create_prompt_logprobs() -> PromptLogprobs:
 def create_sample_logprobs() -> SampleLogprobs:
     """Creates a container to store decode logprobs for a request"""
     return FlattenLogprobs(for_prompt=False) if envs.VLLM_FLATTEN_LOGPROBS else []
+
+
+def num_positions(logprobs: PromptLogprobs | SampleLogprobs) -> int:
+    """Gets the number of positions stored in the logprobs"""
+    return (
+        logprobs.num_positions()
+        if isinstance(logprobs, FlattenLogprobs)
+        else len(logprobs)
+    )
+
+
+def num_logprobs_per_position(
+    logprobs: PromptLogprobs | SampleLogprobs, position: int
+) -> int:
+    """Gets the number of logprobs of a given position"""
+    if isinstance(logprobs, FlattenLogprobs):
+        return logprobs.num_logprobs_per_position(position)
+    return len(logprobs[position]) if logprobs[position] is not None else 0
+
+
+def get_logprob(
+    logprobs: PromptLogprobs | SampleLogprobs, position: int, token_id: int
+) -> int | None:
+    """Gets the logprob value of a given position and token ID"""
+    if isinstance(logprobs, FlattenLogprobs):
+        return logprobs.logprob(position, token_id)
+    if (single_position_logprobs := logprobs[position]) and (
+        logprob := single_position_logprobs.get(token_id)
+    ):
+        return logprob.logprob
+    return None
+
+
+def get_rank(
+    logprobs: PromptLogprobs | SampleLogprobs, position: int, token_id: int
+) -> int | None:
+    """Gets the rank of a given position and token ID"""
+    if isinstance(logprobs, FlattenLogprobs):
+        return logprobs.rank(position, token_id)
+    if (single_position_logprobs := logprobs[position]) and (
+        logprob := single_position_logprobs.get(token_id)
+    ):
+        return logprob.rank
+    return None
 
 
 def append_logprobs_for_next_position(
@@ -142,8 +186,7 @@ def append_logprobs_for_next_position(
     topk_ranks = range(1, num_logprobs + 1)
     ranks = itertools.chain((rank,), topk_ranks)
 
-    if envs.VLLM_FLATTEN_LOGPROBS:
-        request_logprobs = cast(request_logprobs, FlattenLogprobs)
+    if isinstance(request_logprobs, FlattenLogprobs):
         for token_id, logprob, rank, token in zip(
             logprob_token_ids, logprobs, ranks, decoded_tokens
         ):
