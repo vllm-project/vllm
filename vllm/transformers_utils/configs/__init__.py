@@ -28,7 +28,6 @@ from vllm.transformers_utils.configs.mlp_speculator import MLPSpeculatorConfig
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 from vllm.transformers_utils.configs.nemotron import NemotronConfig
 from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
-from vllm.transformers_utils.configs.nemotron_vl import Nemotron_Nano_VL_Config
 from vllm.transformers_utils.configs.olmo3 import Olmo3Config
 from vllm.transformers_utils.configs.ovis import OvisConfig
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
@@ -59,7 +58,6 @@ __all__ = [
     "KimiVLConfig",
     "NemotronConfig",
     "NemotronHConfig",
-    "Nemotron_Nano_VL_Config",
     "Olmo3Config",
     "OvisConfig",
     "RadioConfig",
