@@ -972,12 +972,6 @@ class NixlConnectorWorker:
             remote_agent_name = self.add_remote_agent(
                 metadata, p_remote_rank, remote_tp_size
             )
-            if metadata.block_size < self.block_size:
-                # when prefill with small block_size, we need to init a
-                # new handler with same block_len to match
-                self.src_xfer_side_handles[metadata.block_size] = (
-                    self.register_local_xfer_handler(metadata.block_size)
-                )
 
             setup_agent_time = time.perf_counter()
             logger.debug(
@@ -1341,8 +1335,6 @@ class NixlConnectorWorker:
 
         # Create dst descs and xfer side handles. TP workers have same #blocks
         # so we only register once per engine_id.
-        # All attn in vLLM uses blocks starts with 1st(0 is for empty)
-        # For hetero block size case, block 0 should always remote block_len
         # Example:
         # block_size_ratio < 1:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
@@ -1420,6 +1412,13 @@ class NixlConnectorWorker:
         self.dst_xfer_side_handles[engine_id] = self.nixl_wrapper.prep_xfer_dlist(
             remote_agent_name, descs
         )
+
+        if block_size_ratio < 1:
+            # when prefill with small block_size, we need to init a
+            # new handler with same block_len to match
+            self.src_xfer_side_handles[nixl_agent_meta.block_size] = (
+                self.register_local_xfer_handler(nixl_agent_meta.block_size)
+            )
 
         return remote_agent_name
 
@@ -1649,7 +1648,7 @@ class NixlConnectorWorker:
             )
 
         block_ids_to_permute = []
-        block_ids_for_blocksize_post_process: dict[float, list[list[int]]] = {}
+        block_ids_for_blocksize_post_process = defaultdict(list)
         for req_id in done_recving:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
@@ -1663,8 +1662,6 @@ class NixlConnectorWorker:
             block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
                 meta.remote_engine_id
             )
-            if block_size_ratio not in block_ids_for_blocksize_post_process:
-                block_ids_for_blocksize_post_process[block_size_ratio] = []
             if block_size_ratio != 1 and self.kv_cache_layout == "HND":
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
                     meta.local_block_ids
