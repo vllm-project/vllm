@@ -17,6 +17,9 @@ from vllm.entrypoints.harmony_utils import (
     get_streamable_parser_for_assistant,
     render_for_completion,
 )
+from vllm.entrypoints.openai.parser.parser import (
+    get_streamable_parser_for_simple_context,
+)
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
