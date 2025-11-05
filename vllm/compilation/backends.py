@@ -51,7 +51,9 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             and hasattr(torch._inductor, "standalone_compile")
         ):
             logger.debug("Using InductorStandaloneAdaptor")
-            return InductorStandaloneAdaptor()
+            return InductorStandaloneAdaptor(
+                compilation_config.compile_cache_save_format
+            )
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
@@ -95,10 +97,9 @@ class CompilerManager:
         compilation (e.g. partition rules, pass context)."""
         with pass_context(runtime_shape):
             if self.compilation_config.use_inductor_graph_partition:
-                inductor_partition_ops = resolve_defined_ops(
+                with inductor_partition_rule_context(
                     self.compilation_config.splitting_ops
-                )
-                with inductor_partition_rule_context(inductor_partition_ops):
+                ):
                     yield
             else:
                 yield

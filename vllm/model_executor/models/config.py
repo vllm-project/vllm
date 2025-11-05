@@ -285,10 +285,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-
-        if not envs.VLLM_USE_V1:
-            return
-
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
 
@@ -299,7 +295,7 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             if model_config.supports_mamba_prefix_caching:
                 logger.info(
                     "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba2 layers is experimental. "
+                    "Its support for Mamba layers is experimental. "
                     "Please report any issues you may observe."
                 )
             else:
@@ -329,10 +325,6 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         Args:
             vllm_config: vLLM Config
         """
-
-        if not envs.VLLM_USE_V1:
-            return
-
         # Save the user input before it gets modified by MambaModelConfig
         mamba_block_size = vllm_config.cache_config.mamba_block_size
         # Enable FULL_AND_PIECEWISE by default

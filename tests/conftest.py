@@ -6,6 +6,9 @@ from copy import deepcopy
 
 from tblib import pickling_support
 
+# Import fixture
+from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
+
 # ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
@@ -149,26 +152,6 @@ VIDEO_ASSETS = VideoTestAssets()
 """Singleton instance of {class}`VideoTestAssets`."""
 AUDIO_ASSETS = AudioTestAssets()
 """Singleton instance of {class}`AudioTestAssets`."""
-
-
-@pytest.fixture(scope="function", autouse=True)
-def cleanup_VLLM_USE_V1(monkeypatch):
-    """
-    The V1 oracle sets "VLLM_USE_V1" during loading. This means
-    that each invocation of a test change the env variable.
-
-    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
-    made during the test run by vLLM will be cleaned up.
-
-    This fixture is used by every test.
-    """
-
-    # If VLLM_USE_V1 is not set, set then delete. This will
-    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
-    # if VLLM modifies the value of envs.VLLM_USE_V1.
-    if "VLLM_USE_V1" not in os.environ:
-        monkeypatch.setenv("VLLM_USE_V1", "")
-        monkeypatch.delenv("VLLM_USE_V1")
 
 
 @pytest.fixture(autouse=True)
