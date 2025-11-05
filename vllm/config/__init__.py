@@ -104,8 +104,7 @@ class VllmConfig:
     """Scheduler configuration."""
     device_config: DeviceConfig = field(default_factory=DeviceConfig)
     """Device configuration."""
-    ec_transfer_config: ECTransferConfig = field(
-        default_factory=ECTransferConfig)
+    ec_transfer_config: Optional[ECTransferConfig] = None
     """EC Transfer configuration."""
     load_config: LoadConfig = field(default_factory=LoadConfig)
     """Load configuration."""
