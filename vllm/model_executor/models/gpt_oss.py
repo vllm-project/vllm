@@ -337,9 +337,6 @@ class GptOssModel(nn.Module):
             if is_pp_missing_parameter(name, self):
                 continue
 
-            # FIXME(woosuk): Remove this after testing.
-            weight = weight.cuda()
-
             if ".w13_weight_scale" in name:
                 # Handle MLP gate and up projection weights scale
                 if use_ep:
