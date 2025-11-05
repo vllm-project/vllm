@@ -548,7 +548,9 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+            output = self.model_runner.execute_model(
+                scheduler_output, intermediate_tensors
+            )
             if isinstance(output, (ModelRunnerOutput, NoneType)):
                 return output
 
