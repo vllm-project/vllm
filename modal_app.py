@@ -33,7 +33,6 @@ def _include(path: str) -> bool:
 repo_mount = Mount._from_local_dir(".", remote_path="/workspace", condition=_include)
 
 common_kwargs: dict[str, object] = {
-    "mounts": [repo_mount],
     "timeout": 30 * 60,  # 30 minutes default
 }
 
