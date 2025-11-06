@@ -385,10 +385,24 @@ class ClientGuard:
             self.engine_status_dict,
         )
 
+        self.logger = self._make_client_guard_logger()
+
         self.client_guard_dead = False
         Thread(
             target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
         ).start()
+
+    def _make_client_guard_logger(self):
+        prefix = "[client_guard] "
+
+        def log(msg, *args, level="info", **kwargs):
+            """
+            level: "info", "warning", "error", "debug"
+            msg: log message
+            """
+            getattr(logger, level)(prefix + msg, *args, **kwargs)
+
+        return log
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """
@@ -421,7 +435,7 @@ class ClientGuard:
                 self.fault_receiver_socket
             )
             if self.client_guard_dead:
-                logger.info("client guard dead, stop receiving fault")
+                self.logger("client guard dead, stop receiving fault")
                 break
             assert message is not None, (
                 "message should not be None at fault tolerance scenario"
@@ -448,7 +462,7 @@ class ClientGuard:
         self.cmd_socket.close()
         self.fault_pub_socket.close()
         self.zmq_ctx.term()
-        logger.info("ClientGuard is closed.")
+        self.logger("ClientGuard is closed.", level="info")
 
 
 @dataclass

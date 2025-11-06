@@ -1356,6 +1356,20 @@ class FaultHandler:
         self._loop = asyncio.get_event_loop()
         self._dispatcher_task = self._loop.create_task(self._dispatcher())
 
+        self.logger = self._make_fault_handler_logger()
+
+    def _make_fault_handler_logger(self):
+        prefix = "[FaultHandler] "
+
+        def log(msg, *args, level="info", **kwargs):
+            """
+            level: "info", "warning", "error", "debug"
+            msg: log message
+            """
+            getattr(logger, level)(prefix + msg, *args, **kwargs)
+
+        return log
+
     async def _dispatcher(self):
         while True:
             # each elements in the queue contains:
@@ -1375,9 +1389,10 @@ class FaultHandler:
         self, instruction: str, timeout: int, **kwargs
     ) -> bool:
         if instruction == "retry" and "Dead" in self.engine_status_dict.values():
-            logger.info(
-                "engine_core dead unexpectedly, retry is impossible,"
-                "shutdown will be performed"
+            self.logger(
+                "[FaultHandler] engine_core dead unexpectedly, retry is impossible,"
+                "shutdown will be performed",
+                level="info",
             )
             return False
 
@@ -1417,19 +1432,22 @@ class FaultHandler:
             response = engine_responses.get(engine_id)
 
             if response is None:
-                logger.error(
-                    "EngineCoreGuard[%s] did not respond"
+                self.logger(
+                    "[FaultHandler] EngineCoreGuard[%s] did not respond"
                     ' to command "%s" within timeout.',
                     engine_index,
                     instruction,
+                    level="info",
                 )
                 all_success = False
             elif not response.get("success", False):
-                logger.error(
-                    'EngineCoreGuard[%s] failed to execute command "%s" (reason: %s)',
+                self.logger(
+                    "[FaultHandler] EngineCoreGuard[%s] failed to execute command"
+                    ' "%s" (reason: %s)',
                     engine_index,
                     instruction,
                     response.get("reason", "unknown"),
+                    level="error",
                 )
                 all_success = False
 
