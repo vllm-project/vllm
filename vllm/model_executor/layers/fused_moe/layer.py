@@ -10,7 +10,7 @@ from typing import Literal, get_args, overload
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import UninitializedParameter, Parameter
+from torch.nn.parameter import Parameter, UninitializedParameter
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -55,7 +55,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe, has_flashinfer
+from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_pplx
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
@@ -478,7 +478,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             and current_platform.get_device_capability()[0] >= 10
         )
 
-         # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
+        # FlashInfer CUTLASS MoE is only supported on Hopper and later GPUS
         self.flashinfer_cutlass_moe_enabled = (
             has_flashinfer_cutlass_fused_moe()
             and envs.VLLM_USE_FLASHINFER_MOE_FP16
@@ -495,8 +495,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # Import the module to register the custom op
             import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: F401
 
-            # Use torch.ops directly - the function doesn't accept 
-            # tp_rank, tp_size, ep_rank, ep_size parameters
+            self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
             self.flashinfer_trtllm_moe = torch.ops.vllm.flashinfer_fused_moe_bf16
         elif self.flashinfer_cutlass_moe_enabled:
             logger.info_once(
@@ -647,11 +646,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
             layer.w13_weight.data = shuffled_w13
             layer.w2_weight.data = shuffled_w2
-        
+
         if self.flashinfer_trtllm_moe_enabled:
-            from flashinfer import shuffle_matrix_a
-            from flashinfer.fused_moe import convert_to_block_layout
-            from flashinfer.fused_moe.core import reorder_rows_for_gated_act_gemm
+            from flashinfer.fused_moe.core import (
+                convert_to_block_layout,
+                get_w2_permute_indices_with_cache,
+            )
+
             # Swap halves to arrange as [w3; w1] (kernel expectation)
             w1_w, w3_w = torch.chunk(layer.w13_weight.data, 2, dim=1)
             w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
@@ -662,12 +663,26 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             w13_weights_bf16_shuffled = []
             w2_weights_bf16_shuffled = []
             for i in range(self.moe.num_experts):
-                tmp_weights1 = reorder_rows_for_gated_act_gemm(
-                    layer.w13_weight.data[i].clone().view(torch.uint8)
+                permute_indices = get_w2_permute_indices_with_cache(
+                    self._cache_permute_indices,
+                    layer.w13_weight.data[i].clone().view(torch.uint8),
+                    epilogue_tile_m,
                 )
-                tmp_weights1 = shuffle_matrix_a(tmp_weights1, epilogue_tile_m)
-                tmp_weights2 = shuffle_matrix_a(
-                    layer.w2_weight.data[i].clone().view(torch.uint8), epilogue_tile_m
+                tmp_weights1 = (
+                    layer.w13_weight.data[i]
+                    .view(torch.uint8)[permute_indices.to(layer.w13_weight.data.device)]
+                    .contiguous()
+                )
+
+                permute_indices = get_w2_permute_indices_with_cache(
+                    self._cache_permute_indices,
+                    layer.w2_weight.data[i].clone().view(torch.uint8),
+                    epilogue_tile_m,
+                )
+                tmp_weights2 = (
+                    layer.w2_weight.data[i]
+                    .view(torch.uint8)[permute_indices.to(layer.w2_weight.data.device)]
+                    .contiguous()
                 )
 
                 tmp_weights1 = convert_to_block_layout(
@@ -682,14 +697,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
             # Stack weights for all experts
             w13_weights_bf16_shuffled = (
-                torch.stack(w13_weights_bf16_shuffled)
-                .view(torch.bfloat16)
-                .contiguous()
+                torch.stack(w13_weights_bf16_shuffled).view(torch.bfloat16).contiguous()
             )
             w2_weights_bf16_shuffled = (
-                torch.stack(w2_weights_bf16_shuffled)
-                .view(torch.bfloat16)
-                .contiguous()
+                torch.stack(w2_weights_bf16_shuffled).view(torch.bfloat16).contiguous()
             )
             layer.w13_weight = Parameter(w13_weights_bf16_shuffled, requires_grad=False)
             layer.w2_weight = Parameter(w2_weights_bf16_shuffled, requires_grad=False)
