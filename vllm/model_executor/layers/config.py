@@ -36,11 +36,6 @@ class AttentionConfig(VerifyAndUpdateConfig):
             if cache_config.block_size is not None
             else 16,
         )
-        # For now enable it for FlashInfer only.
-        # Other backend need debugging.
-        # TODO: enable it for all backends.
-        if backend_cls.get_name() != "FLASHINFER":
-            return
 
         supported_sizes = backend_cls.get_supported_kernel_block_size()
         supported_sizes = [
