@@ -30,7 +30,7 @@ def _include(path: str) -> bool:
     return not any(part in SKIP_DIRS for part in parts)
 
 
-repo_mount = Mount.from_local_dir(
+repo_mount = Mount._new().add_local_dir(
     ".",
     remote_path="/workspace",
     condition=_include,
