@@ -58,7 +58,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
         if isinstance(self.base_layer, ReplicatedLinear):
+            lora_a_in_size = self.input_size
             lora_a_out_size = lora_config.max_lora_rank
+            lora_b_in_size = lora_a_out_size
             lora_b_out_size = self.output_size
 
         elif isinstance(self.base_layer, ColumnParallelLinear):
