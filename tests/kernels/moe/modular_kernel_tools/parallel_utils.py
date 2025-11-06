@@ -40,6 +40,7 @@ def _set_vllm_config(
     tp_pp_world_size = vllm_config.parallel_config.world_size
     vllm_config.parallel_config.data_parallel_rank = rank // tp_pp_world_size
     tp_pp_rank = rank % tp_pp_world_size
+    vllm_config.parallel_config.rank = tp_pp_rank
 
     print(f"INIT CONF {rank}, {local_rank}, {vllm_config.parallel_config}")
 
