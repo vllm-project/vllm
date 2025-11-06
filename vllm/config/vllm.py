@@ -386,7 +386,6 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            # NOTE: we won't reach here until async scheduling is enabled by default.
             if (
                 self.parallel_config.pipeline_parallel_size > 1
                 or self.speculative_config is not None
