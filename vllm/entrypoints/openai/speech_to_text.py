@@ -11,7 +11,6 @@ from typing import Literal, TypeAlias, TypeVar, cast
 import numpy as np
 from fastapi import Request
 from transformers import PreTrainedTokenizerBase
-from vllm.transformers_utils.tokenizer_base import TokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
@@ -98,14 +97,14 @@ class OpenAISpeechToText(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
-        self.tokenizer = cast(
-            PreTrainedTokenizerBase,
-            get_tokenizer(
-                tokenizer_name=self.model_config.tokenizer,
-                tokenizer_mode=self.model_config.tokenizer_mode,
-            ),
-        )
-        print("self.tokenizer", self.tokenizer, type(self.tokenizer))
+        if self.model_cls.supports_segment_timestamp:
+            self.tokenizer = cast(
+                PreTrainedTokenizerBase,
+                get_tokenizer(
+                    tokenizer_name=self.model_config.tokenizer,
+                    tokenizer_mode=self.model_config.tokenizer_mode,
+                ),
+            )
 
         if self.default_sampling_params:
             logger.info(
@@ -325,12 +324,11 @@ class OpenAISpeechToText(OpenAIServing):
         text_parts = []
         try:
             assert list_result_generator is not None
-            if request.response_format == "verbose_json":
-                segment_class: type[SpeechToTextSegment] = (
-                    TranscriptionSegment
-                    if self.task_type == "transcribe"
-                    else TranslationSegment
-                )
+            segments_types: dict[str, type[SpeechToTextSegment]] = {
+                "transcribe": TranscriptionSegment,
+                "translate": TranslationSegment,
+            }
+            segment_class: type[SpeechToTextSegment] = segments_types[self.task_type]
             text = ""
             for idx, result_generator in enumerate(list_result_generator):
                 async for op in result_generator:
