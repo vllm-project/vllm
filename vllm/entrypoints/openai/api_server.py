@@ -648,10 +648,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        logger.debug(
-            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
-        )
-        return JSONResponse(content=generator.model_dump(exclude_none=True))
+        resp = generator.model_dump(exclude_none=True)
+        logger.debug("Anthropic Messages Response: %s", resp)
+        return JSONResponse(content=resp)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
