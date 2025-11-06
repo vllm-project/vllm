@@ -453,11 +453,11 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
-FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
+FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[str, dict[int, float]] = {
     "9.0": {
         2: 64,  # 64MB
         4: 2,  # 2MB
-        8: 1,  # 1MB
+        8: 0.5,  # 0.5MB
     },
     "10.0": {
         2: 64,  # 64MB
@@ -468,11 +468,12 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer one shot fused allreduce
-_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB = {
+# OneShot max size is at most 64MB / world size (FlashInfer restriction)
+_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[str, dict[int, float]] = {
     "9.0": {
         2: 32,  # 32MB
         4: 2,  # 2MB
-        8: 1,  # 1MB
+        8: 0.5,  # 0.5MB
     },
     "10.0": {
         2: 32,  # 32MB
@@ -1104,14 +1105,16 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             return
         element_size = 4 if use_fp32_lamport else 2
         self.max_token_num = max_size // (self.hidden_dim * element_size)
+        self.max_token_num = max_size // (self.hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways
         self.max_token_num = min(
             self.max_token_num, config.scheduler_config.max_num_batched_tokens
         )
         logger.debug_once(
-            f"Flashinfer max size: {max_size // (1024 * 1024)} MB"
-            f", Maximal number of tokens: {self.max_token_num}",
+            f"Flashinfer max size: {max_size // (1024 * 1024)} MB,"
+            "Maximal number of tokens used by "
+            f"Flashinfer Allreduce Fusion: {self.max_token_num}",
             scope="global",
         )
 

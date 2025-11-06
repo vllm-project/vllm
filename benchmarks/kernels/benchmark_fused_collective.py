@@ -331,10 +331,10 @@ class VllmFusedAllreduce:
 
 
 def create_test_tensors(
-    seq_len: int, hidden_dim: int, dtype: torch.dtype, use_residual: bool = True
+    num_tokens: int, hidden_dim: int, dtype: torch.dtype, use_residual: bool = True
 ):
     """Create test tensors for benchmarking."""
-    input_tensor = torch.randn(seq_len, hidden_dim, dtype=dtype)
+    input_tensor = torch.randn(num_tokens, hidden_dim, dtype=dtype)
     residual = (
         torch.randn_like(input_tensor)
         if use_residual
@@ -348,7 +348,7 @@ def create_test_tensors(
     scale_fp4 = torch.tensor(1.0, dtype=torch.float32)
     quant_out_fp8 = torch.empty_like(input_tensor, dtype=FP8_DTYPE)
     # Pre-allocate FP4 output tensors (to avoid allocation overhead in benchmarks)
-    fp4_quant_out = torch.empty((seq_len, hidden_dim // 2), dtype=torch.uint8)
+    fp4_quant_out = torch.empty((num_tokens, hidden_dim // 2), dtype=torch.uint8)
     fp4_output_scale = torch.empty((128, 4), dtype=torch.int32)
 
     return (
@@ -404,7 +404,7 @@ def benchmark_operation(
 
 
 def run_benchmarks(
-    seq_len: int,
+    num_tokens: int,
     hidden_dim: int,
     dtype: torch.dtype,
     use_residual: bool,
@@ -427,7 +427,7 @@ def run_benchmarks(
         scale_fp4,
         fp4_quant_out,
         fp4_output_scale,
-    ) = create_test_tensors(seq_len, hidden_dim, dtype, use_residual)
+    ) = create_test_tensors(num_tokens, hidden_dim, dtype, use_residual)
 
     rms_eps = 1e-6
     results = {}
@@ -806,12 +806,18 @@ def prepare_results_with_speedups(results_dict):
 
 
 def print_results(
-    results_dict, seq_len, hidden_dim, dtype, use_residual, quant_modes, input_size_mb
+    results_dict,
+    num_tokens,
+    hidden_dim,
+    dtype,
+    use_residual,
+    quant_modes,
+    input_size_mb,
 ):
     """Print benchmark results in a formatted table."""
     print(f"\n{'=' * 80}")
     print(
-        f"Results: seq_len={seq_len}, hidden_dim={hidden_dim} "
+        f"Results: num_tokens={num_tokens}, hidden_dim={hidden_dim} "
         f"(input size: {input_size_mb:.2f} MB)"
     )
     print(
@@ -854,7 +860,7 @@ def format_results_markdown(
     lines.append("")
 
     for entry in all_results:
-        seq_len = entry["seq_len"]
+        num_tokens = entry["num_tokens"]
         dtype = entry["dtype"]
         use_residual = entry["use_residual"]
         results_dict = entry["results"]
@@ -862,7 +868,7 @@ def format_results_markdown(
         residual_str = "with residual" if use_residual else "no residual"
 
         lines.append(
-            f"## Configuration: seq_len={seq_len}, dtype={dtype}, {residual_str}"
+            f"## Configuration: num_tokens={num_tokens}, dtype={dtype}, {residual_str}"
         )
         lines.append(f"**Input Size:** {input_size_mb:.2f} MB")
         lines.append("")
@@ -915,11 +921,11 @@ def main():
         description="Benchmark fused collective operations"
     )
     parser.add_argument(
-        "--seq-lens",
+        "--num-tokens",
         type=int,
         nargs="+",
         default=[128, 512, 1024, 2048],
-        help="Sequence lengths to test",
+        help="Numbers of tokens to test",
     )
     parser.add_argument(
         "--hidden-dim", type=int, default=8192, help="Hidden dimension size"
@@ -1031,7 +1037,7 @@ def main():
     # Test configurations
     residual_options = [True] if not args.no_residual else [False]
 
-    configs = list(itertools.product(args.seq_lens, dtypes, residual_options))
+    configs = list(itertools.product(args.num_tokens, dtypes, residual_options))
 
     # Setup FlashInfer workspace if available
     ipc_handles = None
@@ -1059,18 +1065,18 @@ def main():
 
     try:
         # Run benchmarks
-        for seq_len, dtype, use_residual in configs:
+        for num_tokens, dtype, use_residual in configs:
             if rank == 0:
                 logger.info(
-                    "\nTesting:  seq_len=%s, hidden_dim=%s, dtype=%s, residual=%s",
-                    seq_len,
+                    "\nTesting:  num_tokens=%s, hidden_dim=%s, dtype=%s, residual=%s",
+                    num_tokens,
                     args.hidden_dim,
                     dtype,
                     use_residual,
                 )
 
             results = run_benchmarks(
-                seq_len,
+                num_tokens,
                 args.hidden_dim,
                 dtype,
                 use_residual,
@@ -1083,11 +1089,11 @@ def main():
             if rank == 0:
                 # Calculate input size in MB
                 input_size_mb = (
-                    seq_len * args.hidden_dim * torch.finfo(dtype).bits
+                    num_tokens * args.hidden_dim * torch.finfo(dtype).bits
                 ) / (8 * 1024 * 1024)
                 all_results.append(
                     {
-                        "seq_len": seq_len,
+                        "num_tokens": num_tokens,
                         "hidden_dim": args.hidden_dim,
                         "dtype": str(dtype).replace("torch.", ""),
                         "use_residual": use_residual,
@@ -1099,7 +1105,7 @@ def main():
 
                 print_results(
                     results,
-                    seq_len,
+                    num_tokens,
                     args.hidden_dim,
                     dtype,
                     use_residual,
