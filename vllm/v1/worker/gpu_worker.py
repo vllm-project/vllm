@@ -509,6 +509,19 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
+    def annotate_profile(self, scheduler_output):
+        # add trace annotation so that we can easily distinguish
+        # new/cached request numbers in each iteration
+        if not self.profiler:
+            return nullcontext()
+
+        num_new = len(scheduler_output.scheduled_new_reqs)
+        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
+
+        return torch.profiler.record_function(
+            f"execute_new_{num_new}_cached_{num_cached}"
+        )
+
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -536,9 +549,12 @@ class Worker(WorkerBase):
                 )
             )
 
-        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
-        if isinstance(output, (ModelRunnerOutput, NoneType)):
-            return output
+        with self.annotate_profile(scheduler_output):
+            output = self.model_runner.execute_model(
+                scheduler_output, intermediate_tensors
+            )
+            if isinstance(output, (ModelRunnerOutput, NoneType)):
+                return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
