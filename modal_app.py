@@ -54,9 +54,9 @@ cpu_image = cpu_image._add_mount_layer_or_copy(repo_mount)
 
 gpu_image = (
     modal.Image.from_registry(
-        "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04", add_python="3.11"
+        "nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04", add_python="3.11"
     )
-    .apt_install("git", "curl", "build-essential")
+    .apt_install("git", "curl", "cmake", "ninja-build")
     .pip_install(
         "numpy>=1.26",
         "pytest>=8.0",
@@ -66,12 +66,12 @@ gpu_image = (
 gpu_image = gpu_image._add_mount_layer_or_copy(repo_mount)
 
 CPU_TORCH_SPEC = (
-    "torch==2.9.0",
-    None,
+    "torch==2.9.0+cpu",
+    "https://download.pytorch.org/whl/cpu",
 )
 
 GPU_TORCH_SPEC = (
-    "torch==2.8.0+cu121",
+    "torch==2.9.0+cu121",
     "https://download.pytorch.org/whl/cu121",
 )
 
