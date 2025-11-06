@@ -262,6 +262,10 @@ class OpenAISpeechToText(OpenAIServing):
                 f"Currently do not support verbose_json for {request.model}"
             )
 
+        if request.response_format == "verbose_json" and request.stream:
+            return self.create_error_response(
+                "verbose_json format doesn't support streaming case"
+            )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
