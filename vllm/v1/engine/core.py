@@ -308,10 +308,36 @@ class EngineCore:
         was executed.
         """
 
+        # Debug: Check parallel config
+        if hasattr(self.vllm_config, "parallel_config"):
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            indent = "    " if dp_rank == 1 else ""
+        else:
+            dp_rank = -1
+            indent = ""
+
+        in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
+        # IMPORTANT: In DP mode, we cannot early return when engines_running
+        # is True, because other ranks might still be processing requests.
+        # We need to stay synchronized by going through execute_model even
+        # with 0 tokens.
         if not self.scheduler.has_requests():
-            return {}, False
+            # In DP mode with engines running, we should not early return.
+            # We need to participate in the DP synchronization even with 0 tokens.
+            if in_dp_mode and hasattr(self, "engines_running") and self.engines_running:
+                print(
+                    f"{indent}[DP{dp_rank}] step() NO EARLY RETURN: no requests but "
+                    f"engines_running=True in DP mode, continuing to stay synchronized"
+                )
+            else:
+                print(
+                    f"{indent}[DP{dp_rank}] step() EARLY RETURN: no requests, "
+                    f"returning executed=False"
+                )
+                return {}, False
         scheduler_output = self.scheduler.schedule()
 
         with self.log_error_detail(scheduler_output):
@@ -321,7 +347,19 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+        # In DP mode, even if this rank has 0 tokens, it participated in DP
+        # synchronization during execute_model, so it should be considered as
+        # "executed" to avoid calling execute_dummy_batch() in a tight loop.
+        has_tokens = scheduler_output.total_num_scheduled_tokens > 0
+        in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
+        executed = has_tokens or in_dp_mode
+
+        print(
+            f"{indent}[DP{dp_rank}] step() RETURNING: "
+            f"has_tokens={has_tokens}, in_dp_mode={in_dp_mode}, executed={executed}"
+        )
+
+        return engine_core_outputs, executed
 
     def post_step(self, model_executed: bool) -> None:
         if self.use_spec_decode and model_executed:
@@ -360,7 +398,12 @@ class EngineCore:
             future = self.model_executor.execute_model(scheduler_output, non_block=True)
             batch_queue.appendleft((future, scheduler_output))
 
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            # In DP mode, even if this rank has 0 tokens, it participated in DP
+            # synchronization during execute_model, so it should be considered as
+            # "executed" to avoid calling execute_dummy_batch() in a tight loop.
+            has_tokens = scheduler_output.total_num_scheduled_tokens > 0
+            in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
+            model_executed = has_tokens or in_dp_mode
             if (
                 model_executed
                 and len(batch_queue) < self.batch_queue_size
@@ -1151,14 +1194,42 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
+            # Debug
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            indent = "    " if dp_rank == 1 else ""
+            print(
+                f"{indent}[DP{dp_rank}] run_busy_loop: "
+                f"executed={executed}, local_unfinished={local_unfinished_reqs}, "
+                f"engines_running={self.engines_running}"
+            )
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
+                    print(f"{indent}[DP{dp_rank}] run_busy_loop: ALL IDLE, continuing")
                     continue
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
+                print(
+                    f"{indent}[DP{dp_rank}] run_busy_loop: "
+                    f"CALLING execute_dummy_batch()"
+                )
                 self.execute_dummy_batch()
+
+                # After dummy batch, check if we should continue or wait
+                # If we have no local work, wait for next iteration
+                if not local_unfinished_reqs:
+                    print(
+                        f"{indent}[DP{dp_rank}] run_busy_loop: "
+                        f"After dummy batch, no local work - checking global state"
+                    )
+                    # Sync with other ranks before continuing
+                    self.engines_running = self._has_global_unfinished_reqs(
+                        local_unfinished_reqs
+                    )
+                    continue
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

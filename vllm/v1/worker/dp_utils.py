@@ -49,7 +49,34 @@ def _run_ar(
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = 1 if should_dp_pad else 0
+    indent = "    " if dp_rank == 1 else ""
+
+    # Add call stack trace for debugging
+    if dp_rank == 0 and orig_num_tokens_per_ubatch == 1:
+        import traceback
+
+        stack = traceback.extract_stack()
+        caller_chain = "\n    ".join(
+            [
+                f"{s.filename.split('/')[-1]}:{s.lineno} in {s.name}"
+                for s in stack[-8:-1]
+            ]
+        )
+        print(
+            f"{indent}[DP{dp_rank}] _run_ar CALL STACK (num_tokens=1):\n"
+            f"    {caller_chain}"
+        )
+
+    print(
+        f"{indent}[DP{dp_rank}] _run_ar ENTERING all_reduce: "
+        f"orig={orig_num_tokens_per_ubatch}, "
+        f"padded={padded_num_tokens_per_ubatch}"
+    )
     dist.all_reduce(tensor, group=group)
+    print(
+        f"{indent}[DP{dp_rank}] _run_ar EXITED all_reduce: "
+        f"orig={orig_num_tokens_per_ubatch}, padded={padded_num_tokens_per_ubatch}"
+    )
     return tensor
 
 

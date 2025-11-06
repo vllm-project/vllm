@@ -286,6 +286,12 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        indent = "    " if dp_rank == 1 else ""
+        print(
+            f"{indent}[DP{dp_rank}] DRAFTER (LINE 289) calling "
+            f"set_forward_context with num_tokens={num_input_tokens}"
+        )
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -448,6 +454,12 @@ class EagleProposer:
                 inputs_embeds = None
 
             # Run the model.
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            indent = "    " if dp_rank == 1 else ""
+            print(
+                f"{indent}[DP{dp_rank}] DRAFTER (LINE 451) calling "
+                f"set_forward_context with num_tokens={input_batch_size}"
+            )
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
@@ -764,6 +776,12 @@ class EagleProposer:
                 num_input_tokens = num_tokens
                 cudagraph_runtime_mode = CUDAGraphMode.NONE
             # Run the model.
+            dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+            indent = "    " if dp_rank == 1 else ""
+            print(
+                f"{indent}[DP{dp_rank}] DRAFTER (LINE 773) calling "
+                f"set_forward_context with num_tokens={num_input_tokens}"
+            )
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
@@ -1053,10 +1071,45 @@ class EagleProposer:
         if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        indent = "    " if dp_rank == 1 else ""
+
+        # Add traceback to see who called dummy_run
+        import traceback
+
+        stack = traceback.extract_stack()
+        caller_chain = "\n    ".join(
+            [
+                f"{s.filename.split('/')[-1]}:{s.lineno} in {s.name}"
+                for s in stack[-10:-1]
+            ]
+        )
+        print(
+            f"{indent}[DP{dp_rank}] !!!!! DRAFTER dummy_run CALLED with "
+            f"num_tokens={num_tokens} !!!!!"
+        )
+        print(f"{indent}[DP{dp_rank}] FULL CALL STACK:\n    {caller_chain}")
+
+        # For dummy_run, we should pass num_tokens_across_dp to avoid
+        # DP synchronization, which can cause hangs when different ranks
+        # have different numbers of tokens (e.g., one rank has 0 tokens).
+        # We use a tensor with all ranks having the same num_tokens.
+        num_tokens_across_dp = None
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            import torch
+
+            dp_size = self.vllm_config.parallel_config.data_parallel_size
+            # All ranks should use the same num_tokens for dummy_run
+            num_tokens_across_dp = torch.full(
+                (dp_size,), num_tokens, dtype=torch.int32, device="cpu"
+            )
+
+        print(f"{indent}[DP{dp_rank}] drafter.dummy_run: BEFORE model forward")
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
             if use_cudagraphs
             else CUDAGraphMode.NONE,
@@ -1074,6 +1127,7 @@ class EagleProposer:
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
+        print(f"{indent}[DP{dp_rank}] drafter.dummy_run: AFTER model forward, COMPLETE")
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
