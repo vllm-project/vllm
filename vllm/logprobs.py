@@ -65,15 +65,21 @@ class FlattenLogprobs(Sequence[LogprobsOnePosition]):
     ranks: list[int] = field(default_factory=list)
     decoded_tokens: list[str | None] = field(default_factory=list)
 
-    def append(self, logprobs_next_position: LogprobsOnePosition | None) -> None:
+    def append(self, logprobs_one_position: LogprobsOnePosition | None) -> None:
+        """Appends the container with logprobs for the next position"""
         self.start_indices.append(len(self.logprobs))
-        if logprobs_next_position:
-            for token_id, logprob in logprobs_next_position.items():
+        if logprobs_one_position:
+            for token_id, logprob in logprobs_one_position.items():
                 self.token_ids.append(token_id)
                 self.logprobs.append(logprob.logprob)
                 self.ranks.append(logprob.rank)
                 self.decoded_tokens.append(logprob.decoded_token)
         self.end_indices.append(len(self.logprobs))
+
+    def extend(self, logprobs_multi_positions) -> None:
+        """Extends the container with logprobs for the next multiple positions"""
+        for logprobs_one_position in logprobs_multi_positions:
+            self.append(logprobs_one_position)
 
     def __len__(self) -> int:
         """Gets number of positions stored in the container"""
@@ -114,7 +120,8 @@ class FlattenLogprobs(Sequence[LogprobsOnePosition]):
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
         """
-        Iterates the container and yields LogprobsOnePosition for each position.
+        Iterates the container and yields LogprobsOnePosition for
+        each position.
         """
         for i in range(0, len(self.start_indices)):
             yield self.__getitem__(i)
