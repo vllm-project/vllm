@@ -173,19 +173,17 @@ class EngineCoreGuard(threading.Thread):  # changed
                 logger.info("[EngineCoreGuard] Received cmd: %s", cmd_str)
                 self._execute_cmd(cmd_str)
 
-    def _stop_worker_execution(self, soft_pause: bool) -> bool:
+    def _stop_worker_execution(self, soft_pause: bool, timeout: int = 2) -> bool:
         if soft_pause:
             pause_method = "pause_by_signal"
         else:
             pause_method = "pause_by_abort_communicators"
             self.communicator_aborted = True
 
-        success = self._execute_worker_method(pause_method, need_response=False)
+        success = self._execute_worker_method(pause_method, timeout=timeout)
         return success
 
-    def _execute_worker_method(
-        self, method_name, need_response=False, timeout: int = 5, **kwargs
-    ) -> bool:
+    def _execute_worker_method(self, method_name, timeout: int = 5, **kwargs) -> bool:
         identities = set()
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
@@ -197,14 +195,13 @@ class EngineCoreGuard(threading.Thread):  # changed
         )
 
         all_success = True
-        if need_response:
-            worker_responses = wait_for_instruction_result(
-                self.worker_cmd_socket, identities, method_name, timeout, method_uuid
-            )
-            for identity in identities:
-                response = worker_responses.get(identity)
-                if response is None or not response.get("success", False):
-                    all_success = False
+        worker_responses = wait_for_instruction_result(
+            self.worker_cmd_socket, identities, method_name, timeout, method_uuid
+        )
+        for identity in identities:
+            response = worker_responses.get(identity)
+            if response is None or not response.get("success", False):
+                all_success = False
 
         return all_success
 
@@ -243,28 +240,35 @@ class EngineCoreGuard(threading.Thread):  # changed
             abort the communicator
         """
         logger.info("[EngineCoreGuard] Start pausing EngineCore")
+        start_time = time.monotonic()
         if self.engine_running:
             # Clear the flag to signal busy loop should pause
             self.busy_loop_active.clear()
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
             self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
-            self._stop_worker_execution(soft_pause=soft_pause)
-            try:
-                # Wait for engine to acknowledge the pause via fault_signal_q
-                exception = self.fault_signal_q.get(timeout=timeout)
-                self.fault_signal_q.put(exception)
-                success = True
-                self.engine_running = False
-            except queue.Empty:
-                # Timeout waiting for pause acknowledgment
-                success = False
+            success = self._stop_worker_execution(
+                soft_pause=soft_pause,
+                timeout=timeout,
+            )
+            elapsed = time.monotonic() - start_time
+            if success:
+                remaining_timeout = max(0, timeout - elapsed)
+                try:
+                    # Wait for engine to acknowledge the pause via fault_signal_q
+                    exception = self.fault_signal_q.get(timeout=remaining_timeout)
+                    self.fault_signal_q.put(exception)
+                    success = True
+                    self.engine_running = False
+                except queue.Empty:
+                    # Timeout waiting for pause acknowledgment
+                    success = False
         else:
             # already paused
             success = True
             if not soft_pause:
                 # abort the communicators
-                self._stop_worker_execution(soft_pause=False)
+                self._stop_worker_execution(soft_pause=False, timeout=timeout)
         return success
 
     def retry(self, timeout: int = 1):
@@ -275,9 +279,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         """
         start_time = time.monotonic()
 
-        success = self._execute_worker_method(
-            "restart_worker", need_response=True, timeout=timeout
-        )
+        success = self._execute_worker_method("restart_worker", timeout=timeout)
         if not success:
             return success
 
