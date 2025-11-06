@@ -716,6 +716,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+            if self.block_quant is not None:
+                assert self.weight_block_size == [128, 128], f"Only support weight_block_size == [128, 128], got {self.weight_block_size}"
             self.flashinfer_moe_fn = partial(
                 flashinfer_cutlass_moe_fp8,
                 moe=self.moe,
@@ -1105,6 +1107,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            if self.block_quant is not None:
+                assert self.weight_block_size == [128, 128], f"Only support weight_block_size == [128, 128], got {self.weight_block_size}"
             # Wire block-scale flag through prepare/finalize when using CUTLASS
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
                 self.moe,
