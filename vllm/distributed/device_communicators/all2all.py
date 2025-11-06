@@ -264,7 +264,7 @@ class PplxGardenAll2AllManager(All2AllManagerBase):
 
     def get_handle(self, kwargs, nvlink: bool = True):
         from pplx_garden.distributed.torch_group import TorchParallelGroup
-        from pplx_garden.kernels.efa_all_to_all import EfaAllToAll
+        from pplx_garden.kernels.p2p_all_to_all import P2PAllToAll
 
         ep_group = get_ep_group()
         dp_group = get_dp_group()
@@ -295,7 +295,7 @@ class PplxGardenAll2AllManager(All2AllManagerBase):
 
         return self.handle_cache.get_or_create(
             kwargs,
-            EfaAllToAll,
+            P2PAllToAll,
         )
 
     def dispatch(
