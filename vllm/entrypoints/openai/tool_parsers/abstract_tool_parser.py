@@ -6,10 +6,16 @@ import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
 
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
+)
+
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     DeltaMessage,
     ExtractedToolCallInformation,
+    ResponsesRequest,
+    ResponseTextConfig,
 )
 from vllm.entrypoints.openai.tool_parsers.utils import get_json_schema_from_tools
 from vllm.logger import init_logger
@@ -56,11 +62,21 @@ class ToolParser:
         )
         # Set structured output params for tool calling
         if json_schema_from_tool is not None:
-            if request.structured_outputs is None:
+            if isinstance(request, ChatCompletionRequest):
                 request.structured_outputs = StructuredOutputsParams()
-            # tool_choice: "Forced Function" or "required" will override
-            # structured output json settings to make tool calling work correctly
-            request.structured_outputs.json = json_schema_from_tool
+                # tool_choice: "Forced Function" or "required" will override
+                # structured output json settings to make tool calling work correctly
+                request.structured_outputs.json = json_schema_from_tool
+            if isinstance(request, ResponsesRequest):
+                request.text = ResponseTextConfig()
+                request.text.format = ResponseFormatTextJSONSchemaConfig(
+                    name="tool_calling_response",
+                    schema=json_schema_from_tool,
+                    type="json_schema",
+                    description="Response format for tool calling",
+                    strict=True,
+                )
+
         return request
 
     def extract_tool_calls(
