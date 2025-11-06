@@ -177,10 +177,9 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
             # and if an annotation refers to a type or
             # name that hasn’t been imported or defined, it will raise an error.
             # So we use __annotations__ to get the raw annotations directly.
-            processor_kwargs = set(
-                (get_args(call_kwargs_annotations)[0].__annotations__).keys()
+            return _collect_dynamic_keys_from_processing_kwargs(
+                get_args(call_kwargs_annotations)[0]
             )
-            return processor_kwargs
         # otherwise, try to get from ProcessingKwargs
         else:
             module_name = type(processor).__module__
