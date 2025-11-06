@@ -418,10 +418,10 @@ def has_pplx() -> bool:
     return _has_module("pplx_kernels")
 
 
-def has_rose() -> bool:
-    """Whether the optional `rose` package is available."""
+def has_pplx_garden() -> bool:
+    """Whether the optional `pplx_garden` package is available."""
 
-    return _has_module("rose")
+    return _has_module("pplx_garden")
 
 
 def has_deep_ep() -> bool:
