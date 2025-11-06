@@ -9,7 +9,7 @@ import pytest
 
 from vllm.entrypoints.openai.protocol import BatchRequestOutput
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 
 # ruff: noqa: E501
 INPUT_BATCH = (

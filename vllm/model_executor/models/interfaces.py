@@ -14,6 +14,7 @@ from typing import (
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch import Tensor
 from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
@@ -24,7 +25,7 @@ from vllm.inputs import TokensPrompt
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.utils.functools import supports_kw
+from vllm.utils.func_utils import supports_kw
 
 from .interfaces_base import VllmModel, is_pooling_model
 
@@ -641,6 +642,9 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
+    moe_layers: Iterable[nn.Module]
+    """List of MoE layers in this model."""
+
     def set_eplb_state(
         self,
         expert_load_view: Tensor,
@@ -663,7 +667,15 @@ class MixtureOfExperts(Protocol):
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
         """
-        ...
+        for layer_idx, layer in enumerate(self.moe_layers):
+            # Register the expert weights.
+            self.expert_weights.append(layer.get_expert_weights())
+            layer.set_eplb_state(
+                moe_layer_idx=layer_idx,
+                expert_load_view=expert_load_view,
+                logical_to_physical_map=logical_to_physical_map,
+                logical_replica_count=logical_replica_count,
+            )
 
     def update_physical_experts_metadata(
         self,
@@ -673,7 +685,9 @@ class MixtureOfExperts(Protocol):
 
 
 def is_mixture_of_experts(model: object) -> TypeIs[MixtureOfExperts]:
-    return isinstance(model, MixtureOfExperts)
+    return (
+        isinstance(model, MixtureOfExperts) and getattr(model, "num_moe_layers", 0) > 0
+    )
 
 
 @runtime_checkable
@@ -693,6 +707,34 @@ def has_noops(
     model: type[object] | object,
 ) -> TypeIs[type[HasNoOps]] | TypeIs[HasNoOps]:
     return getattr(model, "has_noops", False)
+
+
+@runtime_checkable
+class SupportsMambaPrefixCaching(Protocol):
+    """The interface for models whose mamba layers support prefix caching.
+
+    This is currently experimental.
+    """
+
+    supports_mamba_prefix_caching: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: object,
+) -> TypeIs[SupportsMambaPrefixCaching]: ...
+
+
+@overload
+def supports_mamba_prefix_caching(
+    model: type[object],
+) -> TypeIs[type[SupportsMambaPrefixCaching]]: ...
+
+
+def supports_mamba_prefix_caching(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsMambaPrefixCaching]] | TypeIs[SupportsMambaPrefixCaching]:
+    return getattr(model, "supports_mamba_prefix_caching", False)
 
 
 @runtime_checkable

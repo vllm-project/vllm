@@ -25,8 +25,8 @@ from typing_extensions import TypeVar, assert_never
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.tokenizer import AnyTokenizer, decode_tokens, encode_tokens
-from vllm.utils.collections import flatten_2d_lists, full_groupby
-from vllm.utils.functools import get_allowed_kwarg_only_overrides
+from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
 
 from .hasher import MultiModalHasher
@@ -332,8 +332,8 @@ class PromptInsertion(PromptUpdate):
 
     Example:
 
-    For each image, insert a number of ``<image>`` feature placeholders
-    equal to the feature size of the vision encoder after the ``<s>`` token:
+    For each image, insert a number of `<image>` feature placeholders
+    equal to the feature size of the vision encoder after the `<s>` token:
 
     ```python
     PromptInsertion(
@@ -353,7 +353,7 @@ class PromptInsertion(PromptUpdate):
     )
     ```
 
-    Insert these tokens after a prefix ``Images:``:
+    Insert these tokens after a prefix `Images:`:
 
     ```python
     PromptInsertion(
@@ -401,8 +401,8 @@ class PromptReplacement(PromptUpdate):
 
     Example:
 
-    For each image, replace one ``<image>`` input placeholder in the prompt
-    with a number of ``<image>`` feature placeholders
+    For each image, replace one `<image>` input placeholder in the prompt
+    with a number of `<image>` feature placeholders
     equal to the feature size of the vision encoder:
 
     ```python
@@ -413,8 +413,8 @@ class PromptReplacement(PromptUpdate):
     )
     ```
 
-    As above, but further pad the feature placeholders with ``<image_bos>``
-    and `<image_eos>``, which are not supposed to be passed to the vision
+    As above, but further pad the feature placeholders with `<image_bos>`
+    and `<image_eos>`, which are not supposed to be passed to the vision
     encoder:
 
     ```python
@@ -486,7 +486,7 @@ _M = TypeVar("_M", bound=_HasModalityAttr | _HasModalityProp)
 def full_groupby_modality(values: Iterable[_M]) -> ItemsView[str, list[_M]]:
     """
     Convenience function to apply
-    [`full_groupby`][vllm.utils.collections.full_groupby]
+    [`full_groupby`][vllm.utils.collection_utils.full_groupby]
     based on modality.
     """
     return full_groupby(values, key=lambda x: x.modality)
@@ -1308,6 +1308,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
         """
         mm_items = self.data_parser.parse_mm_data(mm_data)
+
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
+            for modality, items in mm_items.items():
+                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                    raise ValueError(
+                        f"You must set `--enable-mm-embeds` to input "
+                        f"`{modality}_embeds`"
+                    )
+
         for modality, items in mm_items.items():
             self.validate_num_items(modality, len(items))
 

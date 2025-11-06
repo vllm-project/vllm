@@ -20,7 +20,7 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.config.model import ModelDType
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -285,7 +285,17 @@ full_cg_backend_configs = {
         name="CutlassMLA",
         env_vars={
             "VLLM_ATTENTION_BACKEND": "CUTLASS_MLA",
-            "FORCE_NUM_KV_SPLITS": "1",  # TODO: remove this when hang issue is fixed
+        },
+        comp_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+        },
+        specific_gpu_arch=(10, 0),
+    ),
+    # FlashInfer MLA on Blackwell
+    "FlashInferMLA": BackendConfig(
+        name="FlashInferMLA",
+        env_vars={
+            "VLLM_ATTENTION_BACKEND": "FLASHINFER_MLA",
         },
         comp_config={
             "cudagraph_mode": "FULL_AND_PIECEWISE",
