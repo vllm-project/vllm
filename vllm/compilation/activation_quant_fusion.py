@@ -276,8 +276,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4.register(self.patterns)
 
         if check_aiter_fp8_linear_support():
-            pattern_silu_mul_aiter_block_fp8 = AiterSiluMulFp8BlockQuantPattern()
-            pattern_silu_mul_aiter_block_fp8.register(self.patterns)
+            AiterSiluMulFp8BlockQuantPattern().register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
