@@ -1023,6 +1023,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )
             else:
@@ -1259,7 +1260,6 @@ class Scheduler(SchedulerInterface):
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
             spec_decoding_stats=spec_decoding_stats,
-            num_corrupted_reqs=sum(req.is_output_corrupted for req in self.running),
             kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None,
         )
 
