@@ -80,6 +80,13 @@ def flash_attn_supports_fp8() -> bool:
     )
 
 
+def flash_attn_supports_sinks() -> bool:
+    if current_platform.is_xpu():
+        return True
+    else:
+        return get_flash_attn_version() == 3
+
+
 def flash_attn_supports_mla():
     from vllm.platforms import current_platform
 
