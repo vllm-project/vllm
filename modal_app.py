@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Iterable
 
 import modal
+from modal import Mount, Secret
 
 app = modal.App("eps-smoke")
 
@@ -28,7 +29,7 @@ def _include(path: str) -> bool:
     return not any(part in SKIP_DIRS for part in parts)
 
 
-repo_mount = modal.Mount.from_local_dir(
+repo_mount = Mount.from_local_dir(
     ".",
     remote_path="/workspace",
     condition=_include,
@@ -41,7 +42,7 @@ common_kwargs: dict[str, object] = {
 
 if os.environ.get("HF_TOKEN"):
     common_kwargs["secrets"] = [
-        modal.Secret.from_dict({"HF_TOKEN": os.environ["HF_TOKEN"]})
+        Secret.from_dict({"HF_TOKEN": os.environ["HF_TOKEN"]})
     ]
 
 
