@@ -29,7 +29,7 @@ To install the chart with the release name `test-vllm`:
 ```bash
 helm upgrade --install --create-namespace \
   --namespace=ns-vllm test-vllm . \
-  -f values.yaml \  # -f values.override.yaml \  # If you have another values file to override the default one.
+  -f values.yaml \  # If you have another values file to override the default one, add another '-f values.override-yaml' line.
   --set secrets.s3endpoint=$ACCESS_POINT \
   --set secrets.s3bucketname=$BUCKET \
   --set secrets.s3accesskeyid=$ACCESS_KEY \
