@@ -293,8 +293,6 @@ class Scheduler(SchedulerInterface):
                 preempted_req.num_computed_tokens = 0
                 preempted_req.num_output_placeholders = 0
                 preempted_req.num_preemptions += 1
-                # both sync and async scheduling don't use spec_token_ids
-                # in waiting queue, so we can just clear it here.
                 preempted_req.spec_token_ids.clear()
                 if self.log_stats:
                     preempted_req.record_event(
@@ -959,7 +957,17 @@ class Scheduler(SchedulerInterface):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_accepted = len(generated_token_ids) - 1
                 num_rejected = num_draft_tokens - num_accepted
-                self._update_computed_tokens_after_speculation(request, num_rejected)
+                # num_computed_tokens represents the number of tokens
+                # processed in the current step, considering scheduled
+                # tokens and rejections. If some tokens are rejected,
+                # num_computed_tokens is decreased by the number of rejected
+                # tokens.
+                if request.num_computed_tokens > 0:
+                    request.num_computed_tokens -= num_rejected
+                # If async scheduling, num_output_placeholders also includes
+                # the scheduled spec tokens count and so is similarly adjusted.
+                if request.num_output_placeholders > 0:
+                    request.num_output_placeholders -= num_rejected
                 spec_decoding_stats = self.make_spec_decoding_stats(
                     spec_decoding_stats,
                     num_draft_tokens=num_draft_tokens,
@@ -1093,22 +1101,6 @@ class Scheduler(SchedulerInterface):
             eco.scheduler_stats = stats
 
         return engine_core_outputs
-
-    def _update_computed_tokens_after_speculation(
-        self, request: Request, num_rejected: int
-    ):
-        """Update the computed tokens for each request, which is necessary
-        for spec decoding. In sync scheduler, we need to revert
-        num_computed_tokens by num_rejected tokens.
-        """
-        # num_computed_tokens represents the number of tokens
-        # processed in the current step, considering scheduled
-        # tokens and rejections. If some tokens are rejected,
-        # num_computed_tokens is decreased by the number of rejected
-        # tokens.because the request is shceduled at leaset once,
-        # so num_computed_tokens should be greater than 0.
-        if request.num_computed_tokens > 0:
-            request.num_computed_tokens -= num_rejected
 
     def _update_request_with_output(
         self,

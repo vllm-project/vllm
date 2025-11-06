@@ -149,6 +149,22 @@ class Processor:
             raise ValueError(
                 "vLLM V1 does not support per request user provided logits processors."
             )
+        # Async scheduling + spec decode currently incompatible with some
+        # sampling parameters.
+        if (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.scheduler_config.async_scheduling
+            and (
+                params.frequency_penalty != 0.0
+                or params.presence_penalty != 0.0
+                or params.repetition_penalty != 1.0
+                or params.bad_words_token_ids
+            )
+        ):
+            raise ValueError(
+                "async scheduling with spec decoding doesn't yet support "
+                "penalties or bad words in sampling parameters."
+            )
 
     def _validate_params(
         self,
