@@ -182,6 +182,7 @@ class LogprobsProcessor:
         num_logprobs: int,
     ) -> dict[int, Logprob]:
         """Make a Logprob dictionary for a position.
+
         Args:
           logprobs: list of log probabilities
           logprob_token_ids: list of top token ids
@@ -189,6 +190,7 @@ class LogprobsProcessor:
           rank: rank of the sampled token
           num_logprobs: number of logprobs requested
             by the user (in addition to sampled logprob)
+
         Returns:
           dict[token id, Logprob]
         """
