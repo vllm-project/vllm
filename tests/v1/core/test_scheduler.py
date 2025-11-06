@@ -1519,7 +1519,7 @@ def create_requests_with_priority(
     starting_idx: int = 0,
     same_prompt: bool = False,
     block_size: int = 16,
-    req_ids: list[int] | None = None,
+    req_ids: list[str] | None = None,
 ):
     """Create requests with specified priorities and arrival times."""
     assert len(priorities) == num_requests
@@ -2304,8 +2304,8 @@ def _assert_right_encoder_cache_allocated(
         assert not missed_hashes, (
             f"Miss hashes: {missed_hashes} "
             f"Existing encoder cache: {encoder_cache_manager.cached}"
-        )        
-        
+        )
+
     for req in requests if requests is not None else []:
         if req.mm_features:
             mm_hashes = [f.identifier for f in req.mm_features]
@@ -3105,7 +3105,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 
     Steps:
       1. Schedule Request A (locally uses 12 tokens).
-      2. Schedule Request B (remote cache — no local tokens used) - only schedule 1st and 2nd
+      2. Schedule Request B (remote cache) - only schedule 1st and 2nd
       3. Free A's cache, then schedule B again (continuation) - schedule 3rd image
     """
     scheduler = create_scheduler(
@@ -3120,7 +3120,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
         disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
-    # Limit the 
+    # Limit the number of availiable slots of EncoderCacheManager
     scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=32)
 
     # Create MM request1
@@ -3179,7 +3179,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
 
     # Encoder cache should contain mm item from request1
     _assert_right_encoder_cache_allocated(
-        scheduler, hashes_to_check=['hash1_1', 'hash2_1', 'hash2_2']
+        scheduler, hashes_to_check=["hash1_1", "hash2_1", "hash2_2"]
     )
 
     # request2's 2nd mm item is the last call of update_state_after_alloc
@@ -3216,8 +3216,8 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
     assert scheduler.get_num_unfinished_requests() == 1
 
-    # Schedule again
-    # Now request1's encoder cache should be freed -> hash2_3 can be scheduled and allocated
+    # Schedule again; Now request1's encoder cache should be freed
+    # -> hash2_3 can be scheduled and allocated
     output = scheduler.schedule()
 
     # Check

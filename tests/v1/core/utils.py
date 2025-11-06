@@ -163,7 +163,7 @@ def create_requests(
     prompt_logprobs: int | None = None,
     same_prompt: bool = False,
     block_size: int = 16,
-    req_ids: list[int] | None = None,
+    req_ids: list[str] | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
