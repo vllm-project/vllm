@@ -124,16 +124,19 @@ def test_flatten_logprobs_access() -> None:
 
     # Test __len__
     assert len(logprobs) == 3
+
     # Test __iter__
     for actual_logprobs, expected_logprobs in zip(
         logprobs,
         [LOGPROBS_ONE_POSITION_1, LOGPROBS_ONE_POSITION_2, LOGPROBS_ONE_POSITION_0],
     ):
         assert actual_logprobs == expected_logprobs
+
     # Test __getitem__ : single item
     assert logprobs[0] == LOGPROBS_ONE_POSITION_1
     assert logprobs[1] == LOGPROBS_ONE_POSITION_2
     assert logprobs[2] == LOGPROBS_ONE_POSITION_0
+
     # Test __getitem__ : slice
     logprobs02 = logprobs[:2]
     assert len(logprobs02) == 2
