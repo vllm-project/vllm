@@ -46,43 +46,19 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 // TODO replace 32 with WARP_SIZE
 __device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
                                           int64_t thread_in_warp,
-                                          int64_t reduced_elems,
-                                          int64_t warp_id) {
+                                          int64_t reduced_elems) {
   if (thread_in_warp + 32 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 32]);
-  if (warp_id == 0 && thread_in_warp < reduced_elems) {
-    printf("reduce 32: %f (%ld, %ld)\n", val[tid], thread_in_warp, tid);
-  }
-  // printf("s_max vals red 32: %f (%d)\n", val[tid], tid);
   if (thread_in_warp + 16 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 16]);
-  if (warp_id == 0 && thread_in_warp < reduced_elems) {
-    printf("reduce 16: %f (%ld, %ld)\n", val[tid], thread_in_warp, tid);
-  }
-  // printf("s_max vals red 16: %f (%d)\n", val[tid], tid);
   if (thread_in_warp + 8 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 8]);
-  if (warp_id == 0 && thread_in_warp < reduced_elems) {
-    printf("reduce 8: %f (%ld, %ld)\n", val[tid], thread_in_warp, tid);
-  }
-  // printf("s_max vals red 8: %f (%d)\n", val[tid], tid);
   if (thread_in_warp + 4 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 4]);
-  if (warp_id == 0 && thread_in_warp < reduced_elems) {
-    printf("reduce 4: %f (%ld, %ld)\n", val[tid], thread_in_warp, tid);
-  }
-  // printf("s_max vals red 4: %f (%d)\n", val[tid], tid);
   if (thread_in_warp + 2 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 2]);
-  if (warp_id == 0 && thread_in_warp < reduced_elems) {
-    printf("reduce 2: %f (%ld, %ld)\n", val[tid], thread_in_warp, tid);
-  }
-  // printf("s_max vals red 2: %f (%d)\n", val[tid], tid);
   if (thread_in_warp + 1 < reduced_elems)
     val[tid] = fmaxf(val[tid], val[tid + 1]);
-  if (warp_id == 0 && thread_in_warp < reduced_elems) {
-    printf("reduce 1: %f (%ld, %ld)\n", val[tid], thread_in_warp, tid);
-  }
   return val[tid];
 }
 
@@ -97,35 +73,15 @@ __device__ void compute_dynamic_per_token_scales(
   constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
   __syncthreads();
   if (group_size > 0) {
-    // if (threadIdx.x == 0) {
-    //   printf("block size: %d\n", blockDim.x);
-    // }
-
-    // if (threadIdx.x == 0 && blockIdx.x == 0) {
-    //   for (auto i = 0; i < blockDim.x; ++i) {
-    //     float x = static_cast<float>(input[i]);
-    //     if constexpr (has_residual) {
-    //       x += static_cast<float>(residual[i]);
-    //     }
-    //     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
-    //     printf("%f ", x);
-    //   }
-    //   printf("\n");
-    // }
-    // __syncthreads();
-
     __shared__ float s_max_vals[1024];
     int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
-    int64_t num_groups = hidden_size / group_size;              // 40
-    int64_t const threads_per_group = blockDim.x / num_groups;  // 25
+    int64_t num_groups = hidden_size / group_size;
+    int64_t const threads_per_group = blockDim.x / num_groups;
     int64_t const thread_in_group = threadIdx.x % threads_per_group;
     int64_t const group_offset = threadIdx.x / threads_per_group * group_size;
     int64_t const thread_offset = group_offset + thread_in_group;
     int64_t const thread_end =
         min(group_offset + group_size, static_cast<int64_t>(hidden_size));
-    // printf("%d %d %d %d\n", threadIdx.x, threads_per_group, thread_in_group,
-    // thread_offset); int64_t const hidden_element_offset = token_block_offset
-    // % hidden_size;
     for (auto i = thread_offset; i < thread_end; i += threads_per_group) {
       float x = static_cast<float>(input[token_offset + i]);
       if constexpr (has_residual) {
@@ -135,33 +91,14 @@ __device__ void compute_dynamic_per_token_scales(
       block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
     }
     s_max_vals[threadIdx.x] = block_absmax_val_maybe;
-    // printf("s_max_xvals 0: %f (%d)\n", block_absmax_val_maybe, threadIdx.x);
     __syncthreads();
-
-    // int step_size = threads_per_group;
-    // int ctr = 1;
-    // while (step_size > 32 * 2) {
-    //   step_size /= 2;
-    //   if (thread_in_group < step_size) {
-    //     s_max_vals[threadIdx.x] =
-    //         fmaxf(s_max_vals[threadIdx.x], s_max_vals[threadIdx.x +
-    //         step_size]);
-    //     // printf("s_max_vals %d: %f (%d)\n", ctr, s_max_vals[threadIdx.x],
-    //     // threadIdx.x);
-    //     ++ctr;
-    //   }
-    //   __syncthreads();
-    // }
 
     int64_t const warp_size = 32;
     int64_t const num_warps = blockDim.x / warp_size;
     int64_t const warp_id = threadIdx.x / warp_size;
     int64_t const thread_in_warp = threadIdx.x % warp_size;
-    int64_t const groups_per_warp =
-        (num_groups + num_warps - 1) / num_warps;  // 2
+    int64_t const groups_per_warp = (num_groups + num_warps - 1) / num_warps;
     int64_t const absmax_per_warp = groups_per_warp * threads_per_group;
-    // int64_t const start = warp_id * absmax_per_warp + thread_in_warp;
-    // int64_t const end = (warp_id + 1) * absmax_per_warp;
     for (auto i = 0; i < groups_per_warp; ++i) {
       int64_t const group_id = i * num_warps + warp_id;
       if (group_id < num_groups) {
@@ -173,39 +110,15 @@ __device__ void compute_dynamic_per_token_scales(
           s_max_vals[start] =
               fmaxf(s_max_vals[start], s_max_vals[j + warp_size]);
         }
-        // int64_t const idx = start + i * warp_size;
-        // int64_t const next_idx = idx + warp_size;
-        // if (next_idx < blockDim.x && next_idx < end) {
-        //     s_max_vals[idx] = fmaxf(s_max_vals[idx], s_max_vals[next_idx]);
-        // }
-        // if (thread_in_warp == 0) {
-        //   printf("do warp reduce for warp %ld, group_id %ld, start %ld, end
-        //   %ld, threads_per_group %ld\n",
-        //     warp_id, group_id, start, warp_end, min(warp_end - warp_start,
-        //     warp_size));
-        // }
         warpReduceMaxSpecialized(s_max_vals, start, thread_in_warp,
-                                 min(warp_end - warp_start, warp_size),
-                                 1 /*warp_start!=75*/);
+                                 min(warp_end - warp_start, warp_size));
       }
     }
     __syncthreads();
 
-    // float reduced_local = 0.0f;
-    // if (thread_in_group < warp_size) {
-    //   reduced_local = warpReduceMax(s_max_vals, threadIdx.x);
-    // }
-    // if (thread_in_group == 0) {
-    //   block_absmax_val_maybe = reduced_local;
-    //   // printf("s_max_vals end: %f (%d)\n", block_absmax_val_maybe,
-    //   // threadIdx.x);
-    // }
-    // __syncthreads();
-
     if (thread_in_group == 0 && thread_offset < thread_end) {
       block_absmax_val_maybe = s_max_vals[threadIdx.x];
-      // printf("block_absmax_val_maybe, %f, %d, %ld\n", block_absmax_val_maybe,
-      // threadIdx.x, threadIdx.x / threads_per_group);
+      float to_log = block_absmax_val_maybe;
       float scale = 0.0f;
       if (scale_ub) {
         scale = min(block_absmax_val_maybe, *scale_ub);
@@ -221,33 +134,6 @@ __device__ void compute_dynamic_per_token_scales(
           scale;
     }
     __syncthreads();
-
-    // using BlockReduce = cub::BlockReduce<float, 1024>;
-    // __shared__ typename BlockReduce::TempStorage reduceStore;
-    // block_absmax_val_maybe =
-    //     BlockReduce(reduceStore)
-    //         .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
-
-    // __shared__ float s_token_scale;
-    // if (threadIdx.x == 0) {
-    //   float scale = 0.0f;
-    //   if (scale_ub) {
-    //     scale = min(block_absmax_val_maybe, *scale_ub);
-    //   } else {
-    //     scale = block_absmax_val_maybe;
-    //   }
-    //   // token scale computation
-    //   scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-    //   s_token_scale = scale;                 // Shared memory store
-    //   all_token_scales[blockIdx.x] = scale;  // Global output store
-    // }
-    // __syncthreads();
-
-    // *token_scale = s_token_scale;
-
-    // for each first warp of the group, do the for-loop reduction
-    // then, call warpReduceMax and sync
-
   } else {
     int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
 
