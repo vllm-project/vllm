@@ -374,10 +374,10 @@ def flashinfer_sample(
         )
     else:
         # Both top-k and top-p.
-        next_token_ids = flashinfer.sampling.top_k_top_p_sampling_from_logits(
-            logits, k, p, deterministic=True
+        probs = logits.softmax(dim=-1, dtype=torch.float32)
+        next_token_ids = flashinfer.sampling.top_k_top_p_sampling_from_probs(
+            probs, k, p, deterministic=True
         )
-
     return next_token_ids.view(-1)
 
 
