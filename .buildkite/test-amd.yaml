@@ -165,6 +165,7 @@ steps:
       --ignore=entrypoints/openai/correctness/
       --ignore=entrypoints/openai/test_collective_rpc.py
       --ignore=entrypoints/openai/tool_parsers/
+      # Skip encoder models on ROCm: https://github.com/vllm-project/vllm/issues/27442
       --ignore=entrypoints/openai/test_vision.py
       --ignore=entrypoints/openai/test_optional_middleware.py
   - pytest -v -s entrypoints/test_chat_utils.py
@@ -182,8 +183,7 @@ steps:
   - tests/entrypoints/pooling
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  # Encoder-only models not supported on ROCm (all tests use encoder/cross-encoder models)
-  # See .buildkite/rocm_encoder_decoder_skip.md for details
+  # Skip encoder models on ROCm: https://github.com/vllm-project/vllm/issues/27442
   - >-
       pytest -v -s entrypoints/pooling
       --ignore=entrypoints/pooling/correctness/test_mteb_score.py
