@@ -55,7 +55,11 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is ReplicatedLinear
+        return (
+            type(source_layer) is ReplicatedLinear
+            or type(source_layer)
+            is ReplicatedLinear.op_registry_oot[ReplicatedLinear.__name__]
+        )
 
     def slice_lora_a(
         self, lora_a: torch.Tensor | list[torch.Tensor | None]
