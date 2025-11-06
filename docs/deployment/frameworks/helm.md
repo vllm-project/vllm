@@ -56,6 +56,8 @@ gpuModels: []  # leave blank, we use Radeon!
 extraInit: {}
 ```
 
+This assumes you have configured your Kubernetes cluster with the [AMD GPU Device Plugin](https://github.com/ROCm/k8s-device-plugin) helper first.
+
 ## Uninstalling the chart
 
 To uninstall the `test-vllm` deployment:
