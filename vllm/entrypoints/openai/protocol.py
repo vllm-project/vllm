@@ -3102,4 +3102,3 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
 
 TranslationResponseVariant: TypeAlias = TranslationResponse | TranslationResponseVerbose
-
