@@ -25,6 +25,7 @@ class Logprob:
     decoded_token: str | None = None
 
 
+# TODO(Jialin): Add more unit tests for the class and util functions
 class FlattenLogprobs:
     """
     Flatten logprobs of a request into multiple primitive type lists.
