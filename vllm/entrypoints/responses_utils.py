@@ -44,6 +44,12 @@ def construct_chat_message_with_tool_call(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
+    elif item.get("type") == "reasoning":
+        return {
+            "role": "system",
+            "content": item.get(""),
+        }
+
     return item  # type: ignore
 
 

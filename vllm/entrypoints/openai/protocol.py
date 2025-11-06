@@ -304,6 +304,7 @@ def get_logits_processors(
     return None
 
 
+# this is the type that is going in
 ResponseInputOutputItem: TypeAlias = (
     ResponseInputItemParam | ResponseReasoningItem | ResponseFunctionToolCall
 )
