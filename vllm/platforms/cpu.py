@@ -287,32 +287,17 @@ class CpuPlatform(Platform):
 
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
-            # Note: to avoid the error 'nthreads cannot be larger than environment
-            # variable "NUMEXPR_MAX_THREADS" (64)'.
-            os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
+        # Note: to avoid the error 'nthreads cannot be larger than environment
+        # variable "NUMEXPR_MAX_THREADS" (64)'.
+        os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
+        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
             # Set default threads num for OpenMP parallel
             os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
         else:
-            # Set these variables to defaults if not specified by user.
-            # Since no binding to processors in this case, user can override these
-            # to match number of threads wanted.
+            # In this case, setting the OpenMP configuration via
+            # OMP_NUM_THREADS is up to the user.
             logger.info("Disabling binding processes to CPU cores...")
-
-            if "NUMEXPR_MAX_THREADS" not in os.environ:
-                os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
-            logger.info(
-                "Using NUMEXPR_MAX_THREADS: %s",
-                os.environ["NUMEXPR_MAX_THREADS"],
-            )
-
-            if "OMP_NUM_THREADS" not in os.environ:
-                os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
-            logger.info(
-                "Using OMP_NUM_THREADS: %s",
-                os.environ["OMP_NUM_THREADS"],
-            )
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
