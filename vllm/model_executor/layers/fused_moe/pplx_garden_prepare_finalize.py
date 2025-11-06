@@ -25,7 +25,7 @@ def pplx_garden_hidden_dim_scale(
     quant_dtype: torch.dtype | str | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None,
-) -> int:
+) -> int | None:
     # For blocked per token: set to
     #   ceil_div(hidden_dim, block_size) * sizeof(float32)
     # For per-token: set to 4 * sizeof(float32) (x4 for alignment)
@@ -37,16 +37,16 @@ def pplx_garden_hidden_dim_scale(
         if per_act_token_quant:
             # per-token (M x 1)
             assert block_shape is None
-            hidden_dim_scale = 1
+            hidden_dim_scale = 16
         elif block_shape is not None:
             # per-group (M x K_tiles)
             block_size = block_shape[1]
             hidden_dim_scale = cdiv(hidden_dim, block_size)
         else:
             # per-tensor (1 x 1)
-            hidden_dim_scale = 1
+            hidden_dim_scale = 16
     else:
-        hidden_dim_scale = 0
+        hidden_dim_scale = None  # 1?
 
     return hidden_dim_scale
 
@@ -190,7 +190,7 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_x_scale_shape = (
                 self.num_local_experts,
                 expert_x.size(1),
-                round_up(final_dim, 4),  # round up for alignment
+                round_up(final_dim, 16),  # round up for alignment
             )
 
             expert_x_scale = torch.empty(
@@ -203,7 +203,11 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: torch.Tensor | None = None
 
-        logger.debug("PPLX_GARDEN dispatch send %s", expert_x.shape)
+        logger.debug(
+            "PPLX_GARDEN dispatch send %s, %s",
+            expert_x.shape,
+            expert_x_scale.shape if expert_x_scale is not None else None,
+        )
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -269,7 +273,8 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             "PPLX_GARDEN receive X_SCALE %s",
             expert_x_scale.shape if expert_x_scale is not None else None,
         )
-        logger.debug("PPLX_GARDEN receive META %s", expert_tokens_meta)
+        logger.debug("PPLX_GARDEN receive num_tokens %s", expert_num_tokens.shape)
+        # logger.debug("PPLX_GARDEN receive META %s", expert_tokens_meta)
 
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
@@ -332,11 +337,13 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         logger.debug("PPLX_GARDEN combine send")
 
+        hidden_dim = output.size(1)
+
         self.a2a.combine(
             out_tokens=output,
             indices=topk_ids_u32,
             weights=topk_weights,
-            expert_y=fused_expert_output,
+            expert_y=fused_expert_output.view(-1, hidden_dim),
             bound_m=bound_m,
             do_send=True,
             do_recv=False,
@@ -349,7 +356,7 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             out_tokens=output,
             indices=topk_ids_u32,
             weights=topk_weights,
-            expert_y=fused_expert_output,
+            expert_y=fused_expert_output.view(-1, hidden_dim),
             bound_m=bound_m,
             do_send=False,
             do_recv=True,
