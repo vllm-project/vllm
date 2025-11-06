@@ -82,11 +82,13 @@ def _ensure_project_install(torch_spec: tuple[str, str | None], *, tag: str) -> 
     import subprocess
     import sys
 
+    repo_dir = Path("/workspace/vllm")
+
     pkg, index_url = torch_spec
     cmd = [sys.executable, "-m", "pip", "install", pkg]
     if index_url:
         cmd.extend(["--index-url", index_url])
-    subprocess.check_call(cmd, cwd="/workspace")
+    subprocess.check_call(cmd, cwd=repo_dir)
     subprocess.check_call(
         [
             sys.executable,
@@ -94,9 +96,9 @@ def _ensure_project_install(torch_spec: tuple[str, str | None], *, tag: str) -> 
             "pip",
             "install",
             "-r",
-            "vllm/requirements/common.txt",
+            str((repo_dir / "requirements" / "common.txt").resolve()),
         ],
-        cwd="/workspace",
+        cwd=repo_dir,
     )
     subprocess.check_call(
         [
@@ -105,11 +107,11 @@ def _ensure_project_install(torch_spec: tuple[str, str | None], *, tag: str) -> 
             "pip",
             "install",
             "-e",
-            ".",
+            str(repo_dir),
             "--no-deps",
             "--no-build-isolation",
         ],
-        cwd="/workspace",
+        cwd=repo_dir,
     )
     marker.touch()
 
