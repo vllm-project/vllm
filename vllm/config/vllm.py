@@ -385,16 +385,16 @@ class VllmConfig:
                 or self.speculative_config is not None
             ):
                 logger.warning(
-                    "Async scheduling is not yet supported with pooling models, "
-                    "speculative decoding or pipeline_parallel_size > 1 "
-                    "and will be disabled."
+                    "Async scheduling is not yet supported with speculative decoding "
+                    " or pipeline_parallel_size > 1 and will be disabled."
                 )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
                 logger.warning(
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
-                    "`external_launcher` are supported)."
+                    "`external_launcher` are supported).",
+                    executor_backend,
                 )
                 self.scheduler_config.async_scheduling = False
             else:
