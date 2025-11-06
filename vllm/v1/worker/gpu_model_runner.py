@@ -2406,19 +2406,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if not all_eval:
                 raise ValueError("Mixed training and evaluation requests are not supported.")
 
-        # num_examples = 800
-        # batch_size = 4
-        # len_dataloader = num_examples / batch_size = 200
-        # gradient_accumulation_steps = 2
-        # num_updates_per_epoch = len_dataloader / gradient_accumulation_steps = 100
-        # max_steps = num_updates_per_epoch * num_epochs = 100 * 3 = 300
-        # num_training_examples = num_examples * num_epochs = 800 * 3 = 2400
-        # ==
-        # steps_in_epoch = len_dataloader = 200
-        # num_batches = gradient_accumulation_steps = 2
-        # ==
-        # step every batch, do_sync_step every gradient_accumulation_steps
-        # tr_loss is always accumulated and reset after eval
+        # Assert that all training requests have the same LoRA request
+        lora_request = scheduler_output.scheduled_new_reqs[0].lora_request
+        assert all(req.lora_request == lora_request for req in scheduler_output.scheduled_new_reqs if req.is_training)
+
+        if not is_eval_batch:
+            self.training_manager.lora_train(lora_request)
+        else:
+            # TODO(girfan): Freeze the LoRA adapter
+            self.training_manager.lora_eval(lora_request)
 
         # Run the model WITHOUT torch.inference_mode() to enable gradients
         with (set_forward_context(
@@ -2432,7 +2428,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ), record_function_or_nullcontext("Forward")):
             # Keep torch.enable_grad() active for ENTIRE forward + loss computation
             with torch.enable_grad():
-                self.model.train()
+                if not is_eval_batch:
+                    self.model.train()
+                else:
+                    self.model.eval()
 
                 model_kwargs["is_lora_training"] = True
 
@@ -2471,6 +2470,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 per_req_logits = {}
                 all_logits = []
                 all_labels = []
+                all_eval_losses = []
 
                 req_id_to_index = {}
                 req_ids_output = []
@@ -2547,34 +2547,44 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 end_time = time.time()
                 logger.info(f"loss computation time = {(end_time - start_time) * 1000:.6f} ms")
 
-                # Backward pass
+                if not is_eval_batch:
+                    # Backward pass
+                    start_time = time.time()
+                    loss.backward()
+                    end_time = time.time()
+                    logger.info(f"backward pass time = {(end_time - start_time) * 1000:.6f} ms")
+
+                    # Add loss and step the training manager
+                    start_time = time.time()
+                    self.training_manager.add_loss(loss.detach())
+                    self.training_manager.step()
+                    end_time = time.time()
+                    logger.info(f"training manager add loss and step time = {(end_time - start_time) * 1000:.6f} ms")
+                else:
+                    # Store eval loss
+                    all_eval_losses.append(loss.detach())
+
+            if not is_eval_batch:
+                # Run the optimizer step if it is time to do so
                 start_time = time.time()
-                loss.backward()
+                if self.training_manager.should_run_optimizer_step():
+                    self.training_manager.optimizer_step()
+                    self.training_manager.reset_steps()
+                    self.training_manager.model_zero_grad()
                 end_time = time.time()
-                logger.info(f"backward pass time = {(end_time - start_time) * 1000:.6f} ms")
+                logger.info(f"optimizer step time = {(end_time - start_time) * 1000:.6f} ms")
 
-                # Add loss to training manager
-                self.training_manager.add_loss(loss.detach())
+                # Log the training state if it is time to do so
+                if self.training_manager.should_log():
+                    self.training_manager.log()
+                    self.training_manager.reset_loss()
 
-                # Step the training manager
-                start_time = time.time()
-                self.training_manager.step()
-                end_time = time.time()
-                logger.info(f"training manager step time = {(end_time - start_time) * 1000:.6f} ms")
-
-            # Run the optimizer step if it is time to do so
-            start_time = time.time()
-            if self.training_manager.should_run_optimizer_step():
-                self.training_manager.optimizer_step()
-                self.training_manager.reset_steps()
-            end_time = time.time()
-            logger.info(f"optimizer step time = {(end_time - start_time) * 1000:.6f} ms")
-
-            # Log the training state if it is time to do so
-            if self.training_manager.should_log():
-                self.training_manager.log()
-                self.training_manager.reset_loss()
-                self.training_manager.model_zero_grad()
+        training_loss = self.training_manager.loss if not is_eval_batch else None
+        training_logits = per_req_logits if not is_eval_batch else None
+        eval_loss = loss if is_eval_batch else torch.stack(all_eval_losses, dim=0)
+        eval_logits = None
+        loss = training_loss if not is_eval_batch else eval_loss
+        logits = training_logits if not is_eval_batch else eval_logits
 
         return ModelRunnerOutput(
             req_ids=req_ids_output,
@@ -2585,8 +2595,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=None,
             num_nans_in_logits={},
-            training_loss=self.training_manager.loss,
-            training_logits=per_req_logits,
+            loss=loss,
+            logits=logits,
         )
 
     def take_draft_token_ids(self) -> Optional[DraftTokenIds]:

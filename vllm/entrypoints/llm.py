@@ -460,22 +460,33 @@ class LLM:
         total_steps = num_steps_per_epoch * num_epochs
         num_training_steps = math.ceil(total_steps / gradient_accumulation_steps)
 
-        # Make the LoRA trainable
-        # TODO(girfan): Make this cleaner.
-        training_manager = self.llm_engine.model_executor.driver_worker.model_runner.training_manager
-        training_manager.make_lora_trainable(
-            lora_request,
-            learning_rate=learning_rate,
-            num_training_steps=num_training_steps,
-            num_warmup_steps=warmup_steps,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-        )
+        # num_examples = 800
+        # batch_size = 4
+        # len_dataloader = num_examples / batch_size = 200
+        # gradient_accumulation_steps = 2
+        # num_updates_per_epoch = len_dataloader / gradient_accumulation_steps = 100
+        # max_steps = num_updates_per_epoch * num_epochs = 100 * 3 = 300
+        # num_training_examples = num_examples * num_epochs = 800 * 3 = 2400
+        # ==
+        # steps_in_epoch = len_dataloader = 200
+        # num_batches = gradient_accumulation_steps = 2
+        # ==
+        # step every batch, do_sync_step every gradient_accumulation_steps
+        # tr_loss is always accumulated and reset after eval
 
-        # Add the training requests to the LLM engine
-        request_ids = self._add_training_requests(tokenized_train_dataset, lora_request, use_tqdm)
+        def _run_batch(tokenized_dataset: Dataset, batch_size: int, lora_request: LoRARequest, use_tqdm: bool, is_eval: bool):
+            training_params = TrainingParams(is_eval=is_eval)
+            request_ids = self._add_training_requests(tokenized_dataset, batch_size, training_params, lora_request, use_tqdm)
+            outputs = self._run_engine(use_tqdm=use_tqdm)
 
-        # Run the engine
-        outputs = self._run_engine(use_tqdm=use_tqdm)
+        eval_batch_size = 8
+
+        for epoch in range(num_epochs):
+            for step in range(num_steps_per_epoch):
+                for batch in range(gradient_accumulation_steps):
+                    _run_batch(tokenized_train_dataset, batch_size, lora_request, use_tqdm, is_eval=False)
+            for _ in range(0, len(tokenized_eval_dataset), eval_batch_size):
+                _run_batch(tokenized_eval_dataset, eval_batch_size, lora_request, use_tqdm, is_eval=True)
 
         # TODO(girfan): Implement this.
         total_steps = 0
@@ -495,6 +506,8 @@ class LLM:
     def _add_training_requests(
         self,
         training_data: Dataset,
+        batch_size: int,
+        training_params: TrainingParams,
         lora_request: LoRARequest,
         use_tqdm: bool,
     ) -> list[str]:
@@ -503,14 +516,17 @@ class LLM:
             training_data_iter = tqdm(training_data_iter, desc="Adding training requests")
 
         request_ids = []
+        i = 0
         for sample in training_data_iter:
-            training_params = TrainingParams()
             request_id = self._add_training_request(
                 sample=sample,
                 training_params=training_params,
                 lora_request=lora_request,
             )
             request_ids.append(request_id)
+            i += 1
+            if i == batch_size:
+                break
         logger.info(f"Added {len(request_ids)} training requests")
         return request_ids
 

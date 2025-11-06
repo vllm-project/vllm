@@ -115,10 +115,10 @@ class ModelRunnerOutput:
     num_nans_in_logits: Optional[dict[str, int]] = None
 
     # loss (for batch of reqs)
-    training_loss: Optional[float] = None
+    loss: Optional[float] = None
 
     # req_id -> logits (for training reqs)
-    training_logits: Optional[dict[str, Optional[torch.Tensor]]] = None
+    logits: Optional[dict[str, Optional[torch.Tensor]]] = None
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

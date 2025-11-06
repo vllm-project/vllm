@@ -310,13 +310,26 @@ class TrainingManager:
             raise ValueError(f"LoRA index {index} not found in LoRA manager")
         return self.is_registered_by_id(lora_id)
 
-    def make_lora_trainable(
+    def optimizer_eval(self):
+        """Setup the optimizer for evaluation."""
+        self.optimizer.eval()
+        pass
+
+    def lora_eval(self, lora_request: LoRARequest):
+        """Evaluate the LoRA adapter."""
+        pass
+
+    def lora_train(self, lora_request: LoRARequest):
+        """Make the LoRA adapter trainable."""
+        _ = self._try_initialize_lora_for_training(lora_request)
+        pass
+
+    def _try_initialize_lora_for_training(
         self,
         lora_request: LoRARequest,
         learning_rate: float = 1e-4,
-        num_training_steps: Optional[int] = None,
+        num_training_steps: int = 300,
         num_warmup_steps: int = 0,
-        gradient_accumulation_steps: int = 1,
         weight_decay: float = 0.0,
         scheduler_type: str = "cosine",
     ):
@@ -333,6 +346,9 @@ class TrainingManager:
 
         # Get QKV indices for training
         indices = self.get_qkv_indices_for_training()
+
+        # Deactivate the LoRA adapter before adding it as a trainable adapter
+        self.lora_manager.remove_adapter(lora_id)
 
         # Add the LoRA adapter to the LoRAManager
         self.lora_manager.add_adapter(lora_request, is_trainable=True, trainable_slices=indices)
@@ -351,7 +367,6 @@ class TrainingManager:
 
         # Clear existing trainable parameters and make stacked tensors trainable
         trainable_params = []
-        trainable_count = 0
         self.trainable_lora_params.clear()
 
         # Make stacked tensors trainable
@@ -376,7 +391,6 @@ class TrainingManager:
             # Process lora_a_stacked
             for idx in a_indices:
                 stacked_tensor = module.lora_a_stacked[idx]
-
                 param_name = f"{module_name}.lora_a_stacked[{idx}]"
                 self.trainable_lora_params[param_name] = stacked_tensor
                 trainable_params.append(stacked_tensor)
@@ -384,13 +398,11 @@ class TrainingManager:
             # Process lora_b_stacked
             for idx in b_indices:
                 stacked_tensor = module.lora_b_stacked[idx]
-
                 param_name = f"{module_name}.lora_b_stacked[{idx}]"
                 self.trainable_lora_params[param_name] = stacked_tensor
                 trainable_params.append(stacked_tensor)
 
         # Setup optimizer
-        # self.optimizer = create_optimizer(self.model, lr=learning_rate, weight_decay=weight_decay)
         self.optimizer = torch.optim.AdamW(
             trainable_params,
             lr=learning_rate,
@@ -398,15 +410,12 @@ class TrainingManager:
         )
 
         # Setup scheduler
-        if num_training_steps is not None and num_training_steps > 0:
-            self.scheduler = self.setup_scheduler(
-                optimizer=self.optimizer,
-                num_training_steps=num_training_steps,
-                num_warmup_steps=num_warmup_steps,
-                scheduler_type=scheduler_type,
-            )
-        else:
-            self.scheduler = None
+        self.scheduler = self.setup_scheduler(
+            optimizer=self.optimizer,
+            num_training_steps=num_training_steps,
+            num_warmup_steps=num_warmup_steps,
+            scheduler_type=scheduler_type,
+        )
 
         # Mark the LoRA adapter as trainable
         self.trainable_lora_ids.add(lora_id)
@@ -423,16 +432,16 @@ class TrainingManager:
     def setup_scheduler(
         self,
         optimizer: torch.optim.Optimizer,
-        num_training_steps: int,
-        num_warmup_steps: int = 0,
+        num_training_steps: int = 300,
+        num_warmup_steps: int = 100,
         scheduler_type: str = "cosine",
     ):
         """Setup learning rate scheduler."""
         if scheduler_type == "cosine":
             lr_lambda = partial(
                 _get_cosine_schedule_with_warmup_lr_lambda,
-                num_warmup_steps=100, # TODO(girfan): variable
-                num_training_steps=300, # TODO(girfan): variable
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
                 num_cycles=0.5,
             )
             scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=-1)
