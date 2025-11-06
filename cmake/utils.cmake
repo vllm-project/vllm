@@ -453,15 +453,42 @@ macro(override_gpu_arches GPU_ARCHES GPU_LANG GPU_SUPPORTED_ARCHES)
 endmacro()
 
 #
-# Helper function to define a vLLM extension target. This is used by
-# define_gpu_extension_target and define_cpu_extension_target.
+# Define a target named `MOD_NAME` for a single extension. The
+# arguments are:
 #
-function(_define_device_extension_target MOD_NAME)
+# DESTINATION <dest>         - Module destination directory.
+# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
+#                              etc.
+# SOURCES <sources>          - List of source files relative to CMakeLists.txt
+#                              directory.
+#
+# Optional arguments:
+#
+# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
+#                              format.
+#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
+#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
+#                              ARCHITECTURES will use cmake's defaults if
+#                              not provided.
+# COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
+# INCLUDE_DIRECTORIES <dirs> - Extra include directories.
+# LIBRARIES <libraries>      - Extra link libraries.
+# WITH_SOABI                 - Generate library with python SOABI suffix name.
+# USE_SABI <version>         - Use python stable api <version>
+#
+# Note: optimization level/debug info is set via cmake build type.
+#
+function (define_extension_target MOD_NAME)
   cmake_parse_arguments(PARSE_ARGV 1
     ARG
     "WITH_SOABI"
     "DESTINATION;LANGUAGE;USE_SABI"
     "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
+
+  # Add hipify preprocessing step when building with HIP/ROCm.
+  if (ARG_LANGUAGE STREQUAL "HIP")
+    hipify_sources_target(ARG_SOURCES ${MOD_NAME} "${ARG_SOURCES}")
+  endif()
 
   if (ARG_WITH_SOABI)
     set(SOABI_KEYWORD WITH_SOABI)
@@ -497,104 +524,13 @@ function(_define_device_extension_target MOD_NAME)
   target_compile_definitions(${MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
 
-  target_link_libraries(${MOD_NAME} PRIVATE torch ${ARG_LIBRARIES})
-
-  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
-endfunction()
-
-#
-# Define a target named `GPU_MOD_NAME` for a single extension. The
-# arguments are:
-#
-# DESTINATION <dest>         - Module destination directory.
-# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
-#                              etc.
-# SOURCES <sources>          - List of source files relative to CMakeLists.txt
-#                              directory.
-#
-# Optional arguments:
-#
-# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
-#                              format.
-#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
-#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
-#                              ARCHITECTURES will use cmake's defaults if
-#                              not provided.
-# COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
-# INCLUDE_DIRECTORIES <dirs> - Extra include directories.
-# LIBRARIES <libraries>      - Extra link libraries.
-# WITH_SOABI                 - Generate library with python SOABI suffix name.
-# USE_SABI <version>         - Use python stable api <version>
-#
-# Note: optimization level/debug info is set via cmake build type.
-#
-function (define_gpu_extension_target GPU_MOD_NAME)
-  cmake_parse_arguments(PARSE_ARGV 1
-    GPU
-    "WITH_SOABI"
-    "DESTINATION;LANGUAGE;USE_SABI"
-    "SOURCES;ARCHITECTURES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
-
-  # Add hipify preprocessing step when building with HIP/ROCm.
-  if (GPU_LANGUAGE STREQUAL "HIP")
-    hipify_sources_target(GPU_SOURCES ${GPU_MOD_NAME} "${GPU_SOURCES}")
-  endif()
-
-  _define_device_extension_target(${GPU_MOD_NAME}
-    DESTINATION ${GPU_DESTINATION}
-    LANGUAGE ${GPU_LANGUAGE}
-    SOURCES ${GPU_SOURCES}
-    ARCHITECTURES "${GPU_ARCHITECTURES}"
-    COMPILE_FLAGS ${GPU_COMPILE_FLAGS}
-    INCLUDE_DIRECTORIES ${GPU_INCLUDE_DIRECTORIES}
-    LIBRARIES ${GPU_LIBRARIES}
-    WITH_SOABI ${GPU_WITH_SOABI}
-    USE_SABI ${GPU_USE_SABI})
-
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
-  if (GPU_LANGUAGE STREQUAL "CUDA")
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE CUDA::cudart CUDA::cuda_driver)
+  if (ARG_LANGUAGE STREQUAL "CUDA")
+    target_link_libraries(${MOD_NAME} PRIVATE torch CUDA::cudart CUDA::cuda_driver ${ARG_LIBRARIES})
   else()
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+    target_link_libraries(${MOD_NAME} PRIVATE torch ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
   endif()
-endfunction()
 
-#
-# Define a target named `CPU_MOD_NAME` for a single extension. The
-# arguments are:
-#
-# DESTINATION <dest>         - Module destination directory.
-# LANGUAGE <lang>            - The language for this module, e.g CXX.
-# SOURCES <sources>          - List of source files relative to CMakeLists.txt
-#                              directory.
-#
-# Optional arguments:
-#
-# COMPILE_FLAGS <flags>      - Extra compiler flags.
-# INCLUDE_DIRECTORIES <dirs> - Extra include directories.
-# LIBRARIES <libraries>      - Extra link libraries.
-# WITH_SOABI                 - Generate library with python SOABI suffix name.
-# USE_SABI <version>         - Use python stable api <version>
-#
-# Note: optimization level/debug info is set via cmake build type.
-#
-function (define_cpu_extension_target CPU_MOD_NAME)
-  cmake_parse_arguments(PARSE_ARGV 1
-    CPU
-    "WITH_SOABI"
-    "DESTINATION;LANGUAGE;USE_SABI"
-    "SOURCES;COMPILE_FLAGS;INCLUDE_DIRECTORIES;LIBRARIES")
-
-  _define_device_extension_target(${CPU_MOD_NAME}
-    DESTINATION ${CPU_DESTINATION}
-    LANGUAGE ${CPU_LANGUAGE}
-    SOURCES ${CPU_SOURCES}
-    COMPILE_FLAGS ${CPU_COMPILE_FLAGS}
-    INCLUDE_DIRECTORIES ${CPU_INCLUDE_DIRECTORIES}
-    LIBRARIES ${CPU_LIBRARIES}
-    WITH_SOABI ${CPU_WITH_SOABI}
-    USE_SABI ${CPU_USE_SABI})
-
-  target_link_libraries(${CPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
+  install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
 endfunction()
