@@ -110,6 +110,7 @@ class LoggingStatLogger(StatLoggerBase):
         self.last_generation_throughput: float = 0.0
         self.engine_is_idle = False
         self.aggregated = False
+        self.active_batch_size = 0
 
     def _reset(self, now):
         self.last_log_time = now
@@ -163,6 +164,7 @@ class LoggingStatLogger(StatLoggerBase):
                 self.last_scheduler_stats = scheduler_stats
         if mm_cache_stats:
             self.mm_caching_metrics.observe(mm_cache_stats)
+        self.active_batch_size = scheduler_stats.num_running_reqs if scheduler_stats else 0
 
     def _update_stats(self):
         now = time.monotonic()
@@ -308,6 +310,7 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
         per_engine_stat_logger_factory: PerEngineStatLoggerFactory,
     ) -> None:
         self.per_engine_stat_loggers = {}
+        self.active_batch_size = 0
         self.engine_indexes = engine_indexes
         for engine_index in engine_indexes:
             self.per_engine_stat_loggers[engine_index] = per_engine_stat_logger_factory(
@@ -330,6 +333,7 @@ class PerEngineStatLoggerAdapter(AggregateStatLoggerBase):
             mm_cache_stats=mm_cache_stats,
             engine_idx=engine_idx,
         )
+        self.active_batch_size = scheduler_stats.num_running_reqs if scheduler_stats else 0
 
     def log(self):
         for per_engine_stat_logger in self.per_engine_stat_loggers.values():
