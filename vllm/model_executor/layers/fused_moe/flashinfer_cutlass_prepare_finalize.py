@@ -112,6 +112,9 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
                     quant_config.block_shape,
                     is_fp4_scale_swizzled=not self.use_dp,
                 )
+            else:
+                a1q = a1
+                a1q_scale = None
         else:
             # DP case: use FlashInfer AllToAll
             global_num_tokens_cpu = get_local_sizes()
