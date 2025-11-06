@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from prometheus_client import make_asgi_app
 from prometheus_fastapi_instrumentator import Instrumentator
+from starlette.concurrency import iterate_in_threadpool
 from starlette.datastructures import URL, Headers, MutableHeaders, State
 from starlette.routing import Mount
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -1547,55 +1548,49 @@ class SSEDecoder:
         return "".join(self.content_buffer)
 
 
-def _log_streaming_response(
-    body_iterator: AsyncIterator[bytes],
-) -> AsyncIterator[bytes]:
-    """Wrap an async body iterator to log SSE content while streaming."""
+def _log_streaming_response(response, response_body: list) -> None:
+    """Log streaming response with robust SSE parsing."""
+    from starlette.concurrency import iterate_in_threadpool
 
     sse_decoder = SSEDecoder()
+    chunk_count = 0
 
-    def _log_final_content(content: str, count: int):
-        """Helper to log the final content."""
-        if content:
-            # Truncate if too long
-            if len(content) > 2048:
-                content = content[:2048]
-            logger.info(
-                "response_body={streaming_complete: content=%r, chunks=%d}",
-                content,
-                count,
-            )
-        else:
-            logger.info(
-                "response_body={streaming_complete: no_content, chunks=%d}",
-                count,
-            )
+    def buffered_iterator():
+        nonlocal chunk_count
 
-    async def generator():
-        chunk_count = 0
-        done_logged = False
-        async for section in body_iterator:
+        for chunk in response_body:
             chunk_count += 1
-            try:
-                events = sse_decoder.decode_chunk(section)
-                for event in events:
-                    if event["type"] == "data":
-                        content = sse_decoder.extract_content(event["data"])
-                        sse_decoder.add_content(content)
-                    elif event["type"] == "done" and not done_logged:
-                        _log_final_content(
-                            sse_decoder.get_complete_content(), chunk_count
-                        )
-                        done_logged = True
-            except Exception as e:
-                # Best-effort logging; never break streaming
-                logger.warning("Error parsing response stream for logging: %s", e)
-            yield section
-        # In case no explicit DONE was received, log buffered content once
-        if not done_logged:
-            _log_final_content(sse_decoder.get_complete_content(), chunk_count)
+            yield chunk
 
-    return generator()
+            # Parse SSE events from chunk
+            events = sse_decoder.decode_chunk(chunk)
+
+            for event in events:
+                if event["type"] == "data":
+                    content = sse_decoder.extract_content(event["data"])
+                    sse_decoder.add_content(content)
+                elif event["type"] == "done":
+                    # Log complete content when done
+                    full_content = sse_decoder.get_complete_content()
+                    if full_content:
+                        # Truncate if too long
+                        if len(full_content) > 2048:
+                            full_content = full_content[:2048] + ""
+                            "...[truncated]"
+                        logger.info(
+                            "response_body={streaming_complete: content=%r, chunks=%d}",
+                            full_content,
+                            chunk_count,
+                        )
+                    else:
+                        logger.info(
+                            "response_body={streaming_complete: no_content, chunks=%d}",
+                            chunk_count,
+                        )
+                    return
+
+    response.body_iterator = iterate_in_threadpool(buffered_iterator())
+    logger.info("response_body={streaming_started: chunks=%d}", len(response_body))
 
 
 def _log_non_streaming_response(response_body: list) -> None:
@@ -1677,27 +1672,19 @@ def build_app(args: Namespace) -> FastAPI:
         @app.middleware("http")
         async def log_response(request: Request, call_next):
             response = await call_next(request)
-            # Determine if this is SSE streaming; preserve streaming semantics
-            content_type = response.headers.get("content-type", "").lower()
-            is_streaming = content_type.startswith("text/event-stream")
+            response_body = [section async for section in response.body_iterator]
+            response.body_iterator = iterate_in_threadpool(iter(response_body))
+            # Check if this is a streaming response by looking at content-type
+            content_type = response.headers.get("content-type", "")
+            is_streaming = content_type == "text/event-stream; charset=utf-8"
 
-            original_iter = response.body_iterator
-
-            if is_streaming:
-                response.body_iterator = _log_streaming_response(original_iter)
+            # Log response body based on type
+            if not response_body:
+                logger.info("response_body={<empty>}")
+            elif is_streaming:
+                _log_streaming_response(response, response_body)
             else:
-
-                async def tee_non_streaming():
-                    body_chunks: list[bytes] = []
-                    async for section in original_iter:
-                        body_chunks.append(section)
-                        yield section
-                    if not body_chunks:
-                        logger.info("response_body={<empty>}")
-                    else:
-                        _log_non_streaming_response(body_chunks)
-
-                response.body_iterator = tee_non_streaming()
+                _log_non_streaming_response(response_body)
             return response
 
     for middleware in args.middleware:
