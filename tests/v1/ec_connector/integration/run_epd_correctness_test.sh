@@ -244,7 +244,6 @@ run_baseline_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
-        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -262,7 +261,6 @@ run_baseline_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
-        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
@@ -360,7 +358,6 @@ run_epd_1e_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
-        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
@@ -385,7 +382,6 @@ run_epd_1e_1p_1d() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
-        --disable-hybrid-kv-cache-manager \
         --max-num-seqs 128 \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",

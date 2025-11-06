@@ -81,7 +81,6 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     get_model_path,
     is_interleaved,
@@ -439,8 +438,6 @@ class EngineArgs:
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
-    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
-    rope_theta: float | None = ModelConfig.rope_theta
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
@@ -498,7 +495,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
-
+    reasoning_parser_plugin: str | None = None
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -620,8 +617,6 @@ class EngineArgs:
         )
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
-        model_group.add_argument("--rope-scaling", **model_kwargs["rope_scaling"])
-        model_group.add_argument("--rope-theta", **model_kwargs["rope_theta"])
         model_group.add_argument(
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
@@ -714,9 +709,12 @@ class EngineArgs:
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
-            # This choice is a special case because it's not static
-            choices=list(ReasoningParserManager.reasoning_parsers),
+            # Choices need to be validated after parsing to include plugins
             **structured_outputs_kwargs["reasoning_parser"],
+        )
+        structured_outputs_group.add_argument(
+            "--reasoning-parser-plugin",
+            **structured_outputs_kwargs["reasoning_parser_plugin"],
         )
         # Deprecated guided decoding arguments
         for arg, type in [
@@ -1190,8 +1188,6 @@ class EngineArgs:
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
-            rope_scaling=self.rope_scaling,
-            rope_theta=self.rope_theta,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
@@ -1640,6 +1636,11 @@ class EngineArgs:
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
 
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config

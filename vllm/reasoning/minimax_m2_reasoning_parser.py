@@ -9,14 +9,13 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("minimax_m2")
 class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for MiniMax M2 model.
@@ -33,7 +32,6 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
         return "</think>"
 
 
-@ReasoningParserManager.register_module("minimax_m2_append_think")
 class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
     """
     Reasoning parser for MiniMax M2 model.

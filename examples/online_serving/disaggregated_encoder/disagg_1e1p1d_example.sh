@@ -119,7 +119,6 @@ vllm serve "$MODEL" \
     --port "$PREFILL_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
-    --disable-hybrid-kv-cache-manager \
     --max-num-seqs 128 \
     --ec-transfer-config '{
         "ec_connector": "ECSharedStorageConnector",
@@ -147,7 +146,6 @@ vllm serve "$MODEL" \
     --port "$DECODE_PORT" \
     --enforce-eager \
     --enable-request-id-headers \
-    --disable-hybrid-kv-cache-manager \
     --max-num-seqs 128 \
     --kv-transfer-config '{
         "kv_connector": "NixlConnector",

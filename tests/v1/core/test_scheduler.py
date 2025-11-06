@@ -898,7 +898,6 @@ def test_kv_connector_basic():
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=True,
-        disable_hybrid_kv_cache_manager=True,
     )
     NUM_TOTAL_BLOCKS = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
     BLOCK_SIZE = scheduler.cache_config.block_size
@@ -1024,7 +1023,6 @@ def test_external_prefix_cache_metrics():
     scheduler = create_scheduler(
         enable_prefix_caching=False,
         use_kv_connector=True,
-        disable_hybrid_kv_cache_manager=True,
     )
 
     # Mock connector to simulate a partial external cache hit
@@ -1095,7 +1093,6 @@ def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
         # encoder connector should not affect test results
         use_ec_connector=use_ec_connector,
         ec_role=ec_role,
-        disable_hybrid_kv_cache_manager=True,
     )
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
@@ -1185,7 +1182,6 @@ def test_kv_connector_handles_preemption(use_ec_connector, ec_role):
         # encoder connector should not affect test results
         use_ec_connector=use_ec_connector,
         ec_role=ec_role,
-        disable_hybrid_kv_cache_manager=True,
     )
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
@@ -1404,7 +1400,6 @@ def create_scheduler_with_priority(
     num_speculative_tokens: int | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
-    disable_hybrid_kv_cache_manager: bool = False,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1429,7 +1424,6 @@ def create_scheduler_with_priority(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         policy="priority",  # Enable priority scheduling
-        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     model_config = ModelConfig(
         model=model,
@@ -2109,7 +2103,6 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
         # encoder connector should not affect test results
         use_ec_connector=use_ec_connector,
         ec_role=ec_role,
-        disable_hybrid_kv_cache_manager=True,
     )
 
     # Create a request and schedule it
@@ -2393,7 +2386,6 @@ def test_ec_connector_text_only_request(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     NUM_PROMPT_TOKENS = 100
@@ -2438,7 +2430,6 @@ def test_ec_connector_cache_hit_external_load(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Create MM request
@@ -2491,7 +2482,6 @@ def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Verify consumer role
@@ -2546,7 +2536,6 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Create MM request
@@ -2689,7 +2678,6 @@ def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
         use_kv_connector=use_kv_connector,
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
     mm_hashes_list = [[f"hash_{i}"] for i in range(10)]
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]
@@ -2781,7 +2769,6 @@ def test_ec_connector_unable_to_allocate(use_kv_connector):
         num_blocks=NUM_BLOCKS,
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Mock ec_connector load external cache behavior
@@ -2879,7 +2866,6 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         block_size=16,  # standard block size
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Mock cache hit: Both cache exist in connector (at E->PD initially)
@@ -3117,7 +3103,6 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
         num_blocks=11,  # Can hold 160 tokens (first block is null)
         use_ec_connector=True,
         ec_role="ec_consumer",
-        disable_hybrid_kv_cache_manager=use_kv_connector,
     )
 
     # Limit the number of availiable slots of EncoderCacheManager
