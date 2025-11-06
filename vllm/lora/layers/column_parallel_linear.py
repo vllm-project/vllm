@@ -196,8 +196,19 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         """
         self.lora_config = lora_config
 
-        lora_a_output_size_per_partition = lora_config.max_lora_rank if not (lora_config.fully_sharded_loras or lora_config.block_diagonal_sharded_loras) else divide(lora_config.max_lora_rank, self.tp_size)
-        lora_b_input_size_per_partition = lora_a_output_size_per_partition if lora_config.block_diagonal_sharded_loras else lora_config.max_lora_rank
+        lora_a_output_size_per_partition = (
+            lora_config.max_lora_rank
+            if not (
+                lora_config.fully_sharded_loras
+                or lora_config.block_diagonal_sharded_loras
+            )
+            else divide(lora_config.max_lora_rank, self.tp_size)
+        )
+        lora_b_input_size_per_partition = (
+            lora_a_output_size_per_partition
+            if lora_config.block_diagonal_sharded_loras
+            else lora_config.max_lora_rank
+        )
 
         self.lora_a_stacked = tuple(
             torch.zeros(
@@ -207,7 +218,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 self.input_size,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-            ) for _ in range(self.n_slices))
+            )
+            for _ in range(self.n_slices)
+        )
         self.lora_b_stacked = tuple(
             torch.zeros(
                 max_loras,
@@ -216,7 +229,9 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                 lora_b_input_size_per_partition,
                 dtype=lora_config.lora_dtype,
                 device=self.device,
-            ) for output_size in self.output_slices)
+            )
+            for output_size in self.output_slices
+        )
 
     def slice_lora_a(
         self, lora_a: list[torch.Tensor | None]
@@ -248,7 +263,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         if self.tp_size > 1:
             lora_a = self.slice_lora_a(lora_a)
             lora_b = self.slice_lora_b(lora_b)
-        
+
         for i in range(self.n_slices):
             if (lora_a_i := lora_a[i]) is not None:
                 self.lora_a_stacked[i][

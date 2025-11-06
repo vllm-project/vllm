@@ -72,7 +72,6 @@ class LoRAConfig:
     block_diagonal_sharded_loras: bool = False
     """Enables BD-LoRA"""
 
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

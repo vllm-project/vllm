@@ -51,8 +51,10 @@ class TestMergedColumnBDLoRA:
             input_size=1024, output_sizes=[2048, 2048], bias=False
         )
 
-        assert not MergedColumnParallelLinearWithBlockDiagonalShardedLoRA.can_replace_layer(
-            source_layer, regular_lora_config, ["gate_proj", "up_proj"], None
+        assert not (
+            MergedColumnParallelLinearWithBlockDiagonalShardedLoRA.can_replace_layer(
+                source_layer, regular_lora_config, ["gate_proj", "up_proj"], None
+            )
         )
 
     @pytest.mark.parametrize(
@@ -195,9 +197,10 @@ class TestRowParallelBDLoRA:
     ):
         """Test block-diagonal LoRA A slicing across TP configurations.
 
-        Slices along input dimension (columns) of block-diagonal LoRA A tensor (32, 2048).
-        Each TP rank gets input_shard_size = 2048 // tp_size columns.
-        Uses tp_rank * input_shard_size indexing for slice calculation.
+        Slices along input dimension (columns) of block-diagonal LoRA A
+        tensor (32, 2048).  Each TP rank gets input_shard_size = 2048 //
+        tp_size columns.  Uses tp_rank * input_shard_size indexing for
+        slice calculation.
         """
         base_layer = RowParallelLinear(input_size=2048, output_size=1024, bias=False)
 
