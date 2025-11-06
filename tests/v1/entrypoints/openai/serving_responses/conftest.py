@@ -15,8 +15,13 @@ def default_server_args():
         "--max-model-len",
         "8192",
         "--enforce-eager",  # For faster startup.
+        "--enable-auto-tool-choice",
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--tool-call-parser",
+        "hermes",
         "--reasoning-parser",
-        "deepseek_r1",
+        "qwen3",
     ]
 
 
