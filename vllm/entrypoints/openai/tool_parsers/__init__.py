@@ -72,7 +72,7 @@ _TOOL_PARSERS_TO_REGISTER = {
     ),
     "llama4_json": (
         "llama_tool_parser",
-        "Llama4JsonToolParser",
+        "Llama3JsonToolParser",
     ),
     "llama4_pythonic": (
         "llama4_pythonic_tool_parser",
@@ -116,11 +116,11 @@ _TOOL_PARSERS_TO_REGISTER = {
     ),
     "qwen3_xml": (
         "qwen3xml_tool_parser",
-        "Qwen3XmlToolParser",
+        "Qwen3XMLToolParser",
     ),
     "seed_oss": (
         "seed_oss_tool_parser",
-        "SeedOsSToolParser",
+        "SeedOssToolParser",
     ),
     "step3": (
         "step3_tool_parser",

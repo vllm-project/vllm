@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.reasoning import ReasoningParser
 
 logger = init_logger(__name__)
 
@@ -192,7 +192,6 @@ class Olmo3ReasoningBuffer:
         return delta_message
 
 
-@ReasoningParserManager.register_module("olmo3")
 class Olmo3ReasoningParser(ReasoningParser):
     """
     Reasoning parser for Olmo 3 model
