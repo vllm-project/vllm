@@ -25,6 +25,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe,
     try_get_optimal_moe_config,
 )
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEModularMethod
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -280,10 +281,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.base_layer, fused_experts.moe_sum
         )
 
-        self.base_layer.quant_method.old_fused_experts = (
-            self.base_layer.quant_method.fused_experts
+        self.base_layer.quant_method = FusedMoEModularMethod(
+            self.base_layer.quant_method, m_fused_moe_fn
         )
-        self.base_layer.quant_method.fused_experts = m_fused_moe_fn
 
     def create_lora_weights(
         self,
