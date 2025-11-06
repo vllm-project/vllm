@@ -299,7 +299,7 @@ class CpuPlatform(Platform):
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
         # Disable multi-stream for shared experts as no Stream on CPU
-        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
         # Intel OpenMP setting
         ld_preload_str = os.getenv("LD_PRELOAD", "")
