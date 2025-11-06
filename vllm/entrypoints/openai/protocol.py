@@ -2103,6 +2103,7 @@ class ChatMessage(OpenAIBaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
     # vLLM-specific fields that are not in OpenAI spec
+    # TODO: use this
     reasoning_content: str | None = None
 
 

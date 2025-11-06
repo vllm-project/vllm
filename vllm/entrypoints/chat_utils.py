@@ -1375,6 +1375,7 @@ def _parse_chat_message_content(
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
+    # TODO: get from reasoning_content?
 
     if content is None:
         content = []
