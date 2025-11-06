@@ -97,7 +97,12 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     && pip install -U -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && pip install *.whl
-
+# Install fastsafetensors-rocm
+RUN git clone https://github.com/EmbeddedLLM/fastsafetensors-rocm.git \
+    && cd fastsafetensors-rocm \
+    && python3 setup.py install \
+    && cd .. \
+    && rm -rf fastsafetensors-rocm
 ARG COMMON_WORKDIR
 
 # Copy over the benchmark scripts as well
