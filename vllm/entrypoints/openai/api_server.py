@@ -220,14 +220,8 @@ async def build_async_engine_client_from_engine_args(
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # V1 AsyncLLM.
-    assert envs.VLLM_USE_V1
-
     if disable_frontend_multiprocessing:
-        logger.warning(
-            "V1 is enabled, but got --disable-frontend-multiprocessing. "
-            "To disable frontend multiprocessing, set VLLM_USE_V1=0."
-        )
+        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -2030,13 +2024,13 @@ def validate_api_server_args(args):
             f"(chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
-    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
-    ) and reasoning_parser not in valid_reasoning_parses:
+    ) and reasoning_parser not in valid_reasoning_parsers:
         raise KeyError(
             f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
 
 
@@ -2049,6 +2043,9 @@ def setup_server(args):
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     validate_api_server_args(args)
 
@@ -2098,6 +2095,9 @@ async def run_server_worker(
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
