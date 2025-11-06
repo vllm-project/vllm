@@ -208,7 +208,6 @@ def flashinfer_fused_moe_bf16(
     routing_method_type: int = RoutingMethodType.Renormalize,
     tune_max_num_tokens: int = 8192,
 ) -> torch.Tensor:
-
     from vllm.utils.flashinfer import flashinfer_trtllm_bf16_moe
 
     return flashinfer_trtllm_bf16_moe(
@@ -230,7 +229,7 @@ def flashinfer_fused_moe_bf16(
 
 
 def flashinfer_fused_moe_bf16_fake(
-   routing_logits: torch.Tensor,
+    routing_logits: torch.Tensor,
     routing_bias: torch.Tensor | None,
     hidden_states: torch.Tensor,
     gemm1_weights: torch.Tensor,
