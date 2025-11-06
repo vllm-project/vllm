@@ -4,10 +4,12 @@ import pytest
 
 from vllm.compilation.counter import compilation_counter
 from vllm.config.compilation import CompilationMode
+from vllm.platforms import current_platform
 
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
 def test_qwen2_5_vl_compilation(vllm_runner, monkeypatch):
     """Test that Qwen2.5-VL vision submodules are compiled.
 
