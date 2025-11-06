@@ -2004,7 +2004,9 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.qfp8_mid_dynamic = QuantFP8(static=False, group_shape=group_shape)
 
         if not self.per_act_token_quant:
-            self.qfp8_mid_static = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+            self.qfp8_mid_static = QuantFP8(
+                static=True, group_shape=GroupShape.PER_TENSOR
+            )
 
     def quantize_mid(
         self, x: torch.Tensor, a_scale: torch.Tensor | None

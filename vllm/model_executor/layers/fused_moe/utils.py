@@ -6,7 +6,6 @@ from math import prod
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
     per_token_quant_int8,
@@ -20,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     mxfp8_e4m3_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 from vllm.utils.flashinfer import flashinfer_fp4_quantize
