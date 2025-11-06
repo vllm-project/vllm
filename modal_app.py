@@ -14,7 +14,6 @@ from modal.secret import Secret
 app = modal.App("eps-smoke")
 
 SKIP_DIRS: set[str] = {
-    ".git",
     ".hg",
     ".svn",
     ".venv",
