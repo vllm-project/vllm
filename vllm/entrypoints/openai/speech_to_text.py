@@ -185,6 +185,11 @@ class OpenAISpeechToText(OpenAIServing):
         """
         Convert tokens to verbose segments.
 
+        This method expects the model to produce
+        timestamps as tokens (similar to Whisper).
+        If the tokens do not include timestamp information,
+        the segments may not be generated correctly.
+
         Note: Fields like avg_logprob, compression_ratio,
         and no_speech_prob are not supported
         in this implementation and will be None. See docs for details.
