@@ -131,6 +131,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
                     top_k,
                     num_experts,
                     quant_config,
+                    use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
                 )
             )
 
@@ -198,12 +199,26 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             a1q_scale = None
 
         if self.use_dp:
-            topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
-                [topk_weights, topk_ids, a1q, a1q_scale],
-                dim=0,
-                sizes=get_local_sizes(),
-            )
-        if quant_config.quant_dtype == "nvfp4":
+            # Build gather list conditionally - omit a1q_scale if None (block-scale path)
+            gather_list = [topk_weights, topk_ids, a1q]
+            if a1q_scale is not None:
+                gather_list.append(a1q_scale)
+                gathered = get_dp_group().all_gatherv(
+                    gather_list,
+                    dim=0,
+                    sizes=get_local_sizes(),
+                )
+                topk_weights, topk_ids, a1q, a1q_scale = gathered
+            else:
+                gathered = get_dp_group().all_gatherv(
+                    gather_list,
+                    dim=0,
+                    sizes=get_local_sizes(),
+                )
+                topk_weights, topk_ids, a1q = gathered
+                a1q_scale = None
+
+        if quant_config.quant_dtype == "nvfp4" and a1q_scale is not None:
             a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
@@ -236,6 +251,7 @@ def flashinfer_alltoall_dispatch(
     top_k: int,
     num_experts: int,
     quant_config: FusedMoEQuantConfig,
+    use_deepseek_fp8_block_scale: bool = False,
 ):
     from flashinfer.comm.trtllm_alltoall import MnnvlMoe
 
@@ -265,30 +281,42 @@ def flashinfer_alltoall_dispatch(
     )
     topk_weights = topk_weights.view(dtype=orig_topk_weights_dtype)
 
-    x, x_sf = moe_kernel_quantize_input(
-        x,
-        gs,
-        quant_config.quant_dtype,
-        quant_config.per_act_token_quant,
-        quant_config.block_shape,
-        is_fp4_scale_swizzled=False,  # delay swizzle to after comm
-    )
-    x = MnnvlMoe.mnnvl_moe_alltoallv(
-        x,
-        alltoall_info,
-        all2all_manager.workspace_tensor,
-        ep_rank,
-        ep_size,
-    )
+    if not use_deepseek_fp8_block_scale:
+        x, x_sf = moe_kernel_quantize_input(
+            x,
+            gs,
+            quant_config.quant_dtype,
+            quant_config.per_act_token_quant,
+            quant_config.block_shape,
+            is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+        )
+        x = MnnvlMoe.mnnvl_moe_alltoallv(
+            x,
+            alltoall_info,
+            all2all_manager.workspace_tensor,
+            ep_rank,
+            ep_size,
+        )
 
-    x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
-        x_sf,
-        alltoall_info,
-        all2all_manager.workspace_tensor,
-        ep_rank,
-        ep_size,
-    )
-    x_sf = nvfp4_block_scale_interleave(x_sf)
+        x_sf = MnnvlMoe.mnnvl_moe_alltoallv(
+            x_sf,
+            alltoall_info,
+            all2all_manager.workspace_tensor,
+            ep_rank,
+            ep_size,
+        )
+        if quant_config.quant_dtype == "nvfp4":
+            x_sf = nvfp4_block_scale_interleave(x_sf)
+    else:
+        # Block-scale path: pass activations through without quantization
+        x_sf = None
+        x = MnnvlMoe.mnnvl_moe_alltoallv(
+            x,
+            alltoall_info,
+            all2all_manager.workspace_tensor,
+            ep_rank,
+            ep_size,
+        )
     return alltoall_info, topk_ids, topk_weights, x, x_sf
 
 
