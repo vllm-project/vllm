@@ -103,8 +103,9 @@ __global__ void rms_norm_per_block_quant_kernel(
       rms + blockIdx.x, input, hidden_size, var_epsilon, residual);
 
   // Compute Scale
-  // TODO: Vectorize this
-  vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
+  // Always able to vectorize due to constraints on hidden_size and group_size
+  vllm::vectorized::compute_dynamic_per_token_scales<scalar_t, scalar_out_t,
+                                                     has_residual>(
       token_scale, scales, input, weight, rms[blockIdx.x], scale_ub,
       hidden_size, residual, group_size);
 

@@ -273,8 +273,6 @@ __device__ void compute_dynamic_per_token_scales(
   constexpr scalar_out_t qmax{quant_type_max_v<scalar_out_t>};
 
   const int VEC_SIZE = 4;
-  int32_t const num_vec_elems =
-      (group_size > 0 ? group_size : hidden_size) >> 2;
   float block_absmax_val_maybe = 0.0f;
 
   // Vectorized input/weight/residual to better utilize memory bandwidth.
@@ -283,17 +281,95 @@ __device__ void compute_dynamic_per_token_scales(
   vec4_t<scalar_t> const* vec_residual = nullptr;
 
   if (group_size > 0) {
-    int64_t const token_block_offset =
-        blockIdx.x * static_cast<int64_t>(group_size);
-    int64_t const hidden_element_offset = token_block_offset % hidden_size;
-    vec_input =
-        reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_block_offset]);
-    vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(
-        &weight[hidden_element_offset]);
+    __shared__ float s_max_vals[1024];
+
+    int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
+    int64_t num_groups = hidden_size / group_size;
+    int64_t const threads_per_group = blockDim.x / num_groups;
+    int64_t const thread_in_group = threadIdx.x % threads_per_group;
+    int64_t const group_offset =
+        threadIdx.x / threads_per_group * (group_size >> 2);
+    int64_t const thread_offset = group_offset + thread_in_group;
+    int64_t const thread_end = min(group_offset + (group_size >> 2),
+                                   static_cast<int64_t>(hidden_size >> 2));
+    vec_input = reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
+    vec_weight = reinterpret_cast<vec4_t<scalar_t> const*>(weight);
     if constexpr (has_residual) {
-      vec_residual = reinterpret_cast<vec4_t<scalar_t> const*>(
-          &residual[token_block_offset]);
+      vec_residual =
+          reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
     }
+    int32_t const num_vec_elems = thread_end;
+
+#pragma unroll 4
+    for (auto i = thread_offset; i < num_vec_elems; i += threads_per_group) {
+      vec4_t<scalar_t> in = vec_input[i];
+      vec4_t<scalar_t> const w = vec_weight[i];
+
+      vec4_t<float> x;
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        x.val[j] = static_cast<float>(in.val[j]);
+      }
+
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> r = vec_residual[i];
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          x.val[j] += static_cast<float>(r.val[j]);
+        }
+      }
+
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        block_absmax_val_maybe =
+            fmaxf(block_absmax_val_maybe,
+                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+      }
+    }
+
+    s_max_vals[threadIdx.x] = block_absmax_val_maybe;
+    __syncthreads();
+
+    int64_t const warp_size = 32;
+    int64_t const num_warps = blockDim.x / warp_size;
+    int64_t const warp_id = threadIdx.x / warp_size;
+    int64_t const thread_in_warp = threadIdx.x % warp_size;
+    int64_t const groups_per_warp = (num_groups + num_warps - 1) / num_warps;
+    for (auto i = 0; i < groups_per_warp; ++i) {
+      int64_t const group_id = i * num_warps + warp_id;
+      if (group_id < num_groups) {
+        int64_t warp_start = group_id * threads_per_group;
+        int64_t const start = warp_start + thread_in_warp;
+        int64_t const warp_end = min(warp_start + threads_per_group,
+                                     static_cast<int64_t>(hidden_size));
+        for (auto j = start; j + warp_size < warp_end; j += warp_size) {
+          s_max_vals[start] =
+              fmaxf(s_max_vals[start], s_max_vals[j + warp_size]);
+        }
+        warpReduceMaxSpecialized(s_max_vals, start, thread_in_warp,
+                                 min(warp_end - warp_start, warp_size));
+      }
+    }
+    __syncthreads();
+
+    if (thread_in_group == 0 && thread_offset < thread_end) {
+      block_absmax_val_maybe = s_max_vals[threadIdx.x];
+      float scale = 0.0f;
+      if (scale_ub) {
+        scale = min(block_absmax_val_maybe, *scale_ub);
+      } else {
+        scale = block_absmax_val_maybe;
+      }
+      // token scale computation
+      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+      all_token_scales[blockIdx.x * num_groups +
+                       threadIdx.x / threads_per_group] =
+          scale;  // Global output store
+      token_scale[blockIdx.x * num_groups + threadIdx.x / threads_per_group] =
+          scale;
+    }
+    __syncthreads();
+
   } else {
     int64_t const token_offset = blockIdx.x * static_cast<int64_t>(hidden_size);
     vec_input = reinterpret_cast<vec4_t<scalar_t> const*>(&input[token_offset]);
@@ -302,57 +378,59 @@ __device__ void compute_dynamic_per_token_scales(
       vec_residual =
           reinterpret_cast<vec4_t<scalar_t> const*>(&residual[token_offset]);
     }
-  }
+
+    int32_t const num_vec_elems = (hidden_size >> 2);
 
 #pragma unroll 4
-  for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
-    vec4_t<scalar_t> in = vec_input[i];
-    vec4_t<scalar_t> const w = vec_weight[i];
+    for (auto i = threadIdx.x; i < num_vec_elems; i += blockDim.x) {
+      vec4_t<scalar_t> in = vec_input[i];
+      vec4_t<scalar_t> const w = vec_weight[i];
 
-    vec4_t<float> x;
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      x.val[j] = static_cast<float>(in.val[j]);
-    }
-
-    if constexpr (has_residual) {
-      vec4_t<scalar_t> r = vec_residual[i];
+      vec4_t<float> x;
 #pragma unroll
       for (int j = 0; j < VEC_SIZE; ++j) {
-        x.val[j] += static_cast<float>(r.val[j]);
+        x.val[j] = static_cast<float>(in.val[j]);
+      }
+
+      if constexpr (has_residual) {
+        vec4_t<scalar_t> r = vec_residual[i];
+#pragma unroll
+        for (int j = 0; j < VEC_SIZE; ++j) {
+          x.val[j] += static_cast<float>(r.val[j]);
+        }
+      }
+
+#pragma unroll
+      for (int j = 0; j < VEC_SIZE; ++j) {
+        block_absmax_val_maybe =
+            fmaxf(block_absmax_val_maybe,
+                  fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
       }
     }
 
-#pragma unroll
-    for (int j = 0; j < VEC_SIZE; ++j) {
-      block_absmax_val_maybe =
-          fmaxf(block_absmax_val_maybe,
-                fabs(static_cast<scalar_t>(x.val[j] * rms) * w.val[j]));
+    using BlockReduce = cub::BlockReduce<float, 1024>;
+    __shared__ typename BlockReduce::TempStorage reduceStore;
+    block_absmax_val_maybe =
+        BlockReduce(reduceStore)
+            .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
+
+    __shared__ float s_token_scale;
+    if (threadIdx.x == 0) {
+      float scale = 0.0f;
+      if (scale_ub) {
+        scale = min(block_absmax_val_maybe, *scale_ub);
+      } else {
+        scale = block_absmax_val_maybe;
+      }
+      // token scale computation
+      scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
+      s_token_scale = scale;                 // shared memory store
+      all_token_scales[blockIdx.x] = scale;  // global output store
     }
+    __syncthreads();
+
+    *token_scale = s_token_scale;
   }
-
-  using BlockReduce = cub::BlockReduce<float, 1024>;
-  __shared__ typename BlockReduce::TempStorage reduceStore;
-  block_absmax_val_maybe =
-      BlockReduce(reduceStore)
-          .Reduce(block_absmax_val_maybe, CubMaxOp{}, blockDim.x);
-
-  __shared__ float s_token_scale;
-  if (threadIdx.x == 0) {
-    float scale = 0.0f;
-    if (scale_ub) {
-      scale = min(block_absmax_val_maybe, *scale_ub);
-    } else {
-      scale = block_absmax_val_maybe;
-    }
-    // token scale computation
-    scale = max(scale / qmax, min_scaling_factor<scalar_out_t>::val());
-    s_token_scale = scale;                 // shared memory store
-    all_token_scales[blockIdx.x] = scale;  // global output store
-  }
-  __syncthreads();
-
-  *token_scale = s_token_scale;
 }
 
 // hidden_size must be a multiple of 4
