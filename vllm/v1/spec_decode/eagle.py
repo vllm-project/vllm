@@ -1053,25 +1053,10 @@ class EagleProposer:
         if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
-        # For dummy_run, we should pass num_tokens_across_dp to avoid
-        # DP synchronization, which can cause hangs when different ranks
-        # have different numbers of tokens (e.g., one rank has 0 tokens).
-        # We use a tensor with all ranks having the same num_tokens.
-        num_tokens_across_dp = None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
-            import torch
-
-            dp_size = self.vllm_config.parallel_config.data_parallel_size
-            # All ranks should use the same num_tokens for dummy_run
-            num_tokens_across_dp = torch.full(
-                (dp_size,), num_tokens, dtype=torch.int32, device="cpu"
-            )
-
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
-            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
             if use_cudagraphs
             else CUDAGraphMode.NONE,
