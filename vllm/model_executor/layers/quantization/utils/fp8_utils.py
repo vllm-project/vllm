@@ -68,43 +68,54 @@ def cutlass_scaled_mm(
     )
 
 
-def rocm_aiter_gemm_w8a8_blockscale_impl(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    block_size: list[int],
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    # MI300's fp8nuz should be enough to detect if we call ck vs triton
-    if current_platform.is_fp8_fnuz():
-        from aiter import gemm_a8w8_blockscale
-    else:
-        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
-    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    _gemm_a8w8_blockscale = None
+    try:
+        # MI300's fp8nuz should be enough to detect if we call ck vs triton
+        if current_platform.is_fp8_fnuz():
+            from aiter import gemm_a8w8_blockscale
+        else:
+            from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+        _gemm_a8w8_blockscale = gemm_a8w8_blockscale
+    except ImportError:
+        # aiter is not installed, which is fine.
+        # The error will be raised when the op is actually used.
+        pass
 
+    if _gemm_a8w8_blockscale is not None:
+        # Assign to local variable to help mypy with type narrowing
+        _gemm_impl = _gemm_a8w8_blockscale
 
-def rocm_aiter_gemm_w8a8_blockscale_fake(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    As: torch.Tensor,
-    Bs: torch.Tensor,
-    block_size: list[int],
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    m = A.shape[0]
-    n = B.shape[0]
-    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
-    return Y
+        def rocm_aiter_gemm_w8a8_blockscale_impl(
+            A: torch.Tensor,
+            B: torch.Tensor,
+            As: torch.Tensor,
+            Bs: torch.Tensor,
+            block_size: list[int],
+            output_dtype: torch.dtype = torch.float16,
+        ) -> torch.Tensor:
+            return _gemm_impl(A, B, As, Bs, dtype=output_dtype)
 
+        def rocm_aiter_gemm_w8a8_blockscale_fake(
+            A: torch.Tensor,
+            B: torch.Tensor,
+            As: torch.Tensor,
+            Bs: torch.Tensor,
+            block_size: list[int],
+            output_dtype: torch.dtype = torch.float16,
+        ) -> torch.Tensor:
+            m = A.shape[0]
+            n = B.shape[0]
+            Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+            return Y
 
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_gemm_w8a8_blockscale",
-        op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
-        fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
-    )
-    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
+        direct_register_custom_op(
+            op_name="rocm_aiter_gemm_w8a8_blockscale",
+            op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
+            fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
+        )
+
+    if envs.VLLM_ROCM_USE_AITER_LINEAR:
         import aiter as rocm_aiter
         from aiter import get_hip_quant
 

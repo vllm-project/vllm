@@ -58,9 +58,6 @@ class MatcherCustomOp(ABC):
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kws)
 
-    def empty_bf16(self, *args, **kws):
-        return torch.empty(*args, dtype=torch.bfloat16, device=self.device, **kws)
-
     def empty_f32(self, *args, **kws):
         return torch.empty(*args, dtype=torch.float32, device=self.device, **kws)
 
