@@ -136,6 +136,12 @@ def maybe_make_prepare_finalize(
             block_shape=quant_config.block_shape,
         )
 
+        in_dtype = (
+            quant_config.quant_dtype
+            if quant_config.quant_dtype is not None
+            else moe.in_dtype
+        )
+
         all_to_all_args = dict(
             max_num_tokens=moe.max_num_tokens,
             num_experts=moe.num_experts,
@@ -143,8 +149,8 @@ def maybe_make_prepare_finalize(
             expert_padding=1,  # TODO: tests use 1 or 16
             hidden_dim=moe.hidden_dim,
             hidden_dim_scale=hidden_dim_scale,
-            in_dtype=moe.in_dtype,
-            out_dtype=moe.in_dtype,  # or quant type?
+            in_dtype=in_dtype,
+            out_dtype=in_dtype,
             scale_dtype=torch.float32,
             max_private_tokens=None,  # For tuning
         )
