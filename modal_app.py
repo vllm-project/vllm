@@ -65,8 +65,13 @@ gpu_image = (
 )
 gpu_image = gpu_image._add_mount_layer_or_copy(repo_mount)
 
+CPU_TORCH_SPEC = (
+    "torch==2.8.0+cpu",
+    "https://download.pytorch.org/whl/cpu",
+)
+
 GPU_TORCH_SPEC = (
-    "torch==2.4.1+cu121",
+    "torch==2.8.0+cu121",
     "https://download.pytorch.org/whl/cu121",
 )
 
@@ -78,6 +83,11 @@ def _ensure_editable_install() -> None:
     import subprocess
     import sys
 
+    pkg, index_url = CPU_TORCH_SPEC
+    subprocess.check_call(
+        [sys.executable, "-m", "pip", "install", pkg, "--index-url", index_url],
+        cwd="/workspace",
+    )
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd="/workspace",
