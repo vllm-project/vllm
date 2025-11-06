@@ -462,7 +462,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
-        core_attn_out = torch.zeros(
+        core_attn_out = torch.empty(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -503,6 +503,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         if attn_metadata is None:
             # V1 profile run
+            core_attn_out.fill_(0)
             return
 
         assert isinstance(attn_metadata, dict)
