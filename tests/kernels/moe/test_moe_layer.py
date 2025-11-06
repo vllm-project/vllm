@@ -449,7 +449,7 @@ def _test_loop(
         w2 = chunk_by_rank(w2, tp_rank, tp_size, dim=2, device=device)
         # w1 = w1.to(device)
         # w2 = w2.to(device)
-        n = n // tp_size
+        # n = n // tp_size  # REMOVED: FusedMoE expects full intermediate_size and partitions internally
 
     print(f"AFTER W1 {w1.shape}")
     print(f"AFTER W2 {w2.shape}")
@@ -531,8 +531,6 @@ def _test_loop(
         atol = 3.5e-2
         rtol = 3.5e-2
 
-    # print(f"OUTPUT {output}")
-
     torch.testing.assert_close(baseline_output, output, atol=atol, rtol=rtol)
 
 
@@ -584,6 +582,7 @@ def test_moe_layer(
         data_parallel_size=dp_size,
         tensor_parallel_size=tp_size,
         enable_expert_parallel=use_ep,
+        all2all_backend=backend,
     )
 
     vllm_config = VllmConfig(parallel_config=parallel_config)
