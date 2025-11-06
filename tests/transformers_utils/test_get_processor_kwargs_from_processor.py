@@ -3,13 +3,12 @@
 
 import importlib
 
-from typing_extensions import TypedDict, Unpack
+from transformers.processing_utils import ProcessingKwargs
+from typing_extensions import Unpack
 
 from vllm.transformers_utils.processor import (
-    _collect_dynamic_keys_from_processing_kwargs,
     get_processor_kwargs_from_processor,
 )
-from transformers.processing_utils import ProcessingKwargs
 
 
 class _FakeProcessorKwargs(ProcessingKwargs, total=False):
@@ -35,6 +34,7 @@ def _assert_has_all_expected(keys: set[str]) -> None:
     for k in ("padding", "return_attention_mask"):
         assert k in keys
 
+
 # Path 1: __call__ method has kwargs: Unpack[*ProcessingKwargs]
 class _ProcWithUnpack:
     def __call__(self, *args, **kwargs: Unpack[_FakeProcessorKwargs]):
@@ -48,6 +48,7 @@ def test_get_processor_kwargs_from_processor_unpack_path_returns_full_union():
 
 
 # ---- Path 2: No Unpack, fallback to scanning *ProcessingKwargs in module ----
+
 
 class _ProcWithoutUnpack:
     def __call__(self, *args, **kwargs):
