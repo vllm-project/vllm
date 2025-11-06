@@ -62,7 +62,7 @@ async def generate(
     "model",
     [
         "ibm-research/PowerMoE-3b",
-        "meta-llama/Meta-Llama-3-8B-Instruct",
+        "meta-llama/Llama-3.2-1B-Instruct",
     ],
 )
 @pytest.mark.parametrize(
