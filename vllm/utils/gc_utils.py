@@ -89,7 +89,7 @@ class GCDebugger:
             )
 
 
-def freeze() -> None:
+def gc_freeze() -> None:
     """
     Freeze all objects tracked by the garbage collector. It should be invoked
     after server init / warmup, to reduce GC overhead from static objects
