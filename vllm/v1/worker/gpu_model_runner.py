@@ -2120,10 +2120,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         IntermediateTensors | None,
         dict[str, Any],
     ]:
-        dp_rank = self.parallel_config.data_parallel_rank
-        indent = "    " if dp_rank == 1 else ""
-        print(f"{indent}[DP{dp_rank}] _preprocess: ENTRY")
-
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
 
@@ -2196,20 +2192,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             positions = self.positions.gpu[:num_input_tokens]
 
-        print(
-            f"{indent}[DP{dp_rank}] _preprocess: before PP sync, is_first_rank={is_first_rank}"
-        )
         if is_first_rank:
             intermediate_tensors = None
         else:
-            print(
-                f"{indent}[DP{dp_rank}] _preprocess: calling sync_and_slice_intermediate_tensors"
-            )
             intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                 num_input_tokens, intermediate_tensors, True
-            )
-            print(
-                f"{indent}[DP{dp_rank}] _preprocess: sync_and_slice_intermediate_tensors complete"
             )
 
         if (
@@ -2219,7 +2206,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             encoder_inputs = self._extract_encoder_inputs(scheduler_output)
             model_kwargs.update(encoder_inputs)
 
-        print(f"{indent}[DP{dp_rank}] _preprocess: EXIT")
         return (
             num_scheduled_tokens,
             input_ids,
@@ -2440,26 +2426,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
-        dp_rank = self.parallel_config.data_parallel_rank
-        indent = "    " if dp_rank == 1 else ""
-
-        # Track iteration for debugging
-        if not hasattr(self, "_debug_iteration"):
-            self._debug_iteration = 0
-        self._debug_iteration += 1
-        print(
-            f"{indent}[DP{dp_rank}] ========== EXECUTE_MODEL START "
-            f"ITER={self._debug_iteration} "
-            f"num_tokens={scheduler_output.total_num_scheduled_tokens} =========="
-        )
-
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
                 has_tokens = bool(scheduler_output.total_num_scheduled_tokens)
-                print(f"{indent}[DP{dp_rank}] has_tokens={has_tokens}")
 
                 if has_tokens:
                     if self.cache_config.kv_sharing_fast_prefill:
@@ -2526,19 +2498,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # other ranks make in _prepare_inputs, even though this rank has
                     # 0 tokens. We don't early return here, because we need to sync
                     # should_run_drafter later.
-                    print(
-                        f"{indent}[DP{dp_rank}] ZERO-TOKEN RANK: "
-                        f"calling coordinate_batch_across_dp"
-                    )
                     _, num_tokens_across_dp = coordinate_batch_across_dp(
                         num_tokens_unpadded=0,
                         parallel_config=self.parallel_config,
                         allow_microbatching=False,
                         allow_dp_padding=False,
-                    )
-                    print(
-                        f"{indent}[DP{dp_rank}] ZERO-TOKEN RANK: "
-                        f"coordinate_batch_across_dp complete"
                     )
                     spec_decode_common_attn_metadata = None
                     # Set dummy values for 0-token case
@@ -2579,25 +2543,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             <= effective_drafter_max_model_len
                         )
                     )
-                    max_seq_len = (
-                        spec_decode_common_attn_metadata.max_seq_len
-                        if spec_decode_common_attn_metadata
-                        else None
-                    )
-                    print(
-                        f"{indent}[DP{dp_rank}] COMPUTED drafter flags: "
-                        f"use_padded={use_padded_batch_for_eagle}, "
-                        f"should_run={should_run_drafter}, "
-                        f"max_seq_len={max_seq_len}"
-                    )
                 else:
                     # This rank has 0 tokens, so it cannot run the drafter
                     should_run_drafter = False
-                    print(
-                        f"{indent}[DP{dp_rank}] COMPUTED drafter flags: "
-                        f"use_padded={use_padded_batch_for_eagle}, "
-                        f"should_run={should_run_drafter} (0-token rank)"
-                    )
 
                 # Sync across all DP ranks if DP > 1. Only run the drafter if all ranks
                 # agree to run it.
@@ -2612,10 +2560,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         device = "cpu"
                         group = get_dp_group().cpu_group
 
-                    print(
-                        f"{indent}[DP{dp_rank}] ENTERING should_run_drafter sync "
-                        f"(local={should_run_drafter})"
-                    )
                     drafter_flag = torch.tensor(
                         [1 if should_run_drafter else 0],
                         device=device,
@@ -2623,20 +2567,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                     dist.all_reduce(drafter_flag, op=dist.ReduceOp.MIN, group=group)
                     should_run_drafter = bool(drafter_flag.item())
-                    print(
-                        f"{indent}[DP{dp_rank}] EXITED should_run_drafter sync "
-                        f"(synced={should_run_drafter})"
-                    )
             else:
                 # No speculative decoding configured
                 should_run_drafter = False
 
             # Having participated in the sync, the 0-token rank can now return
             if not has_tokens:
-                print(
-                    f"{indent}[DP{dp_rank}] EARLY RETURN: has_tokens=False, "
-                    f"returning after sync"
-                )
                 if not has_kv_transfer_group():
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
@@ -2655,7 +2591,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        print(f"{indent}[DP{dp_rank}] ENTERING model forward")
         with (
             set_forward_context(
                 attn_metadata,
@@ -2676,7 +2611,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-        print(f"{indent}[DP{dp_rank}] EXITED model forward")
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2744,10 +2678,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            print(
-                f"{indent}[DP{dp_rank}] >>> DRAFTER START "
-                f"(from ITER={self._debug_iteration})"
-            )
             with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
@@ -2759,18 +2689,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
-            print(
-                f"{indent}[DP{dp_rank}] <<< DRAFTER END "
-                f"(from ITER={self._debug_iteration})"
-            )
 
         if should_run_drafter and use_padded_batch_for_eagle:
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
-            print(
-                f"{indent}[DP{dp_rank}] CALLING propose_draft_token_ids "
-                f"(padded EAGLE path)"
-            )
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
         with record_function_or_nullcontext("Bookkeep"):
@@ -2794,10 +2716,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if should_run_drafter and not use_padded_batch_for_eagle:
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
-            print(
-                f"{indent}[DP{dp_rank}] CALLING propose_draft_token_ids "
-                f"(non-padded path)"
-            )
             propose_draft_token_ids(valid_sampled_token_ids)
 
         with record_function_or_nullcontext("EPLB"):
@@ -2815,10 +2733,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         if not self.use_async_scheduling:
-            print(
-                f"{indent}[DP{dp_rank}] ========== EXECUTE_MODEL END "
-                f"ITER={self._debug_iteration} =========="
-            )
             return output
 
         async_output = AsyncGPUModelRunnerOutput(
@@ -2836,10 +2750,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             async_output.async_copy_ready_event,
         )
 
-        print(
-            f"{indent}[DP{dp_rank}] ========== EXECUTE_MODEL END "
-            f"ITER={self._debug_iteration} =========="
-        )
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
@@ -3614,10 +3524,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_after_padding
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            indent = "    " if dp_rank == 1 else ""
-            print(f"{indent}[DP{dp_rank}] _dummy_run: BEFORE model forward")
-
             with (
                 self.maybe_randomize_inputs(input_ids),
                 set_forward_context(
@@ -3638,8 +3544,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     **model_kwargs,
                 )
 
-            print(f"{indent}[DP{dp_rank}] _dummy_run: AFTER model forward")
-
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
             else:
@@ -3651,9 +3555,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                     and not self.speculative_config.enforce_eager
                 )
-                print(f"{indent}[DP{dp_rank}] _dummy_run: BEFORE drafter.dummy_run")
                 self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
-                print(f"{indent}[DP{dp_rank}] _dummy_run: AFTER drafter.dummy_run")
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
@@ -3662,16 +3564,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # not have any requests to process, so they're executing dummy batches.
         # In such cases, we still have to trigger EPLB to make sure
         # ranks execute the rearrangement in synchronization.
-        print(f"{indent}[DP{dp_rank}] _dummy_run: BEFORE eplb_step (skip={skip_eplb})")
         if not skip_eplb:
             self.eplb_step(is_dummy=True, is_profile=is_profile)
-        print(f"{indent}[DP{dp_rank}] _dummy_run: AFTER eplb_step")
 
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
         logit_indices_device = torch.from_numpy(logit_indices).to(
             self.device, non_blocking=True
         )
-        print(f"{indent}[DP{dp_rank}] _dummy_run: COMPLETE, returning")
         return hidden_states, hidden_states[logit_indices_device]
 
     @torch.inference_mode()

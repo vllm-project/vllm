@@ -285,43 +285,17 @@ def set_forward_context(
     if vllm_config.parallel_config.data_parallel_size > 1 and (
         attn_metadata is not None or num_tokens is not None
     ):
-        # Debug logging
-        import traceback
-
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
-        indent = "    " if dp_rank == 1 else ""
-        stack = traceback.extract_stack()
-        caller_info = (
-            f"{stack[-2].filename.split('/')[-1]}:{stack[-2].lineno} "
-            f"in {stack[-2].name}"
-        )
-        across_dp_status = "set" if num_tokens_across_dp is not None else "None"
-        print(
-            f"{indent}[DP{dp_rank}] set_forward_context ENTRY: "
-            f"num_tokens={num_tokens}, "
-            f"num_tokens_across_dp={across_dp_status}, "
-            f"caller={caller_info}"
-        )
-
         # If num_tokens_across_dp hasn't already been initialized, then
         # initialize it here. Both DP padding and Microbatching will be
         # disabled.
         if num_tokens_across_dp is None:
             assert ubatch_slices is None
             assert num_tokens is not None
-            print(
-                f"{indent}[DP{dp_rank}] set_forward_context: "
-                f"calling coordinate_batch_across_dp"
-            )
             _, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens,
                 parallel_config=vllm_config.parallel_config,
                 allow_microbatching=False,
                 allow_dp_padding=False,
-            )
-            print(
-                f"{indent}[DP{dp_rank}] set_forward_context: "
-                f"coordinate_batch_across_dp complete"
             )
             assert num_tokens_across_dp is not None
         dp_metadata = DPMetadata.make(
