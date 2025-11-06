@@ -1399,7 +1399,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         if getattr(self.config, "im_patch_id", None) is not None:
-            self.visual_token_mask = (input_ids == self.config.im_patch_id).reshape(
+            self.visual_token_mask = (input_ids >= self.config.im_patch_id).reshape(
                 -1, 1
             )
         else:
