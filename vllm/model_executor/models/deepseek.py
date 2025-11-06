@@ -292,6 +292,7 @@ class DeepseekDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        moe_layer_freq = getattr(config, "moe_layer_freq", 1)
         self.self_attn = DeepseekAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -306,7 +307,7 @@ class DeepseekDecoderLayer(nn.Module):
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
-            and layer_idx % config.moe_layer_freq == 0
+            and layer_idx % moe_layer_freq == 0
         ):
             self.mlp = DeepseekMoE(
                 config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"

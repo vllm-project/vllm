@@ -3,9 +3,7 @@
 
 import os
 
-from transformers import AutoConfig, PretrainedConfig
-
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
+from transformers import AutoConfig, DeepseekV2Config, PretrainedConfig
 
 
 class EAGLEConfig(PretrainedConfig):
@@ -20,13 +18,7 @@ class EAGLEConfig(PretrainedConfig):
     ):
         model_config: PretrainedConfig | DeepseekV2Config | None
         if isinstance(model, dict):
-            archs = model.get("architectures", [])
-            target_archs = ["DeepseekV2ForCausalLM", "DeepseekV3ForCausalLM"]
-            if any(target_arch in archs for target_arch in target_archs):
-                # AutoConfig does not support DeepSeek MoE models yet
-                model_config = DeepseekV2Config(**model)
-            else:
-                model_config = AutoConfig.for_model(**model)
+            model_config = AutoConfig.for_model(**model)
         else:
             model_config = model
 

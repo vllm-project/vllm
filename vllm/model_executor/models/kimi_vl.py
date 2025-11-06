@@ -50,7 +50,7 @@ from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, DeepseekV2Config
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
@@ -91,7 +91,6 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
