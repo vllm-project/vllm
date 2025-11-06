@@ -43,7 +43,7 @@ if os.environ.get("HF_TOKEN"):
 
 cpu_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "curl")
+    .apt_install("git", "curl", "build-essential")
     .pip_install(
         "numpy>=1.26",
         "pytest>=8.0",
@@ -56,7 +56,7 @@ gpu_image = (
     modal.Image.from_registry(
         "nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04", add_python="3.11"
     )
-    .apt_install("git", "curl")
+    .apt_install("git", "curl", "build-essential")
     .pip_install(
         "numpy>=1.26",
         "pytest>=8.0",
