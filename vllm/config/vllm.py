@@ -552,7 +552,7 @@ class VllmConfig:
                 if self.speculative_config.method not in get_args(EagleModelTypes):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decoding"
+                        "with EAGLE/MTP kind of speculative decoding."
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -570,15 +570,26 @@ class VllmConfig:
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
-            # NOTE: we won't reach here until async scheduling is enabled by default.
-            if (
-                self.parallel_config.pipeline_parallel_size > 1
-                or self.speculative_config is not None
-            ):
+            if self.parallel_config.pipeline_parallel_size > 1:
                 logger.warning(
-                    "Async scheduling is not yet supported with speculative decoding "
-                    " or pipeline_parallel_size > 1 and will be disabled."
+                    "Async scheduling is not yet supported with "
+                    "pipeline_parallel_size > 1 and will be disabled."
                 )
+                self.scheduler_config.async_scheduling = False
+            elif self.speculative_config is not None:
+                if self.speculative_config.method not in get_args(EagleModelTypes):
+                    logger.warning(
+                        "Async scheduling not supported with %s-based "
+                        "speculative decoding and will be disabled.",
+                        self.speculative_config.method,
+                    )
+                else:
+                    logger.warning(
+                        "Async scheduling will be disabled because some features do "
+                        "not currently work in conjunction with speculative decoding. "
+                        "To use async scheduling with spec decoding anyway, "
+                        "enable it explicitly via async_scheduling=True."
+                    )
                 self.scheduler_config.async_scheduling = False
             elif not executor_supports_async_sched:
                 logger.warning(
@@ -595,10 +606,15 @@ class VllmConfig:
             self.scheduler_config.async_scheduling
             and not self.parallel_config.disable_nccl_for_dp_synchronization
         ):
-            logger.info(
+            logger.info_once(
                 "Disabling NCCL for DP synchronization when using async scheduling."
             )
             self.parallel_config.disable_nccl_for_dp_synchronization = True
+
+        logger.info_once(
+            "Asynchronous scheduling is %s.",
+            "enabled" if self.scheduler_config.async_scheduling else "disabled",
+        )
 
         from vllm.platforms import current_platform
 
