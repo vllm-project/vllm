@@ -1152,6 +1152,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 quant_config=self.moe_quant_config,
             )
 
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
 
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
     def __init__(
