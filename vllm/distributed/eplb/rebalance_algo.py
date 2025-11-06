@@ -38,12 +38,12 @@ def balanced_packing(
         pack_index = torch.arange(
             weight.size(-1), dtype=torch.int64, device=weight.device
         ).expand(weight.shape)
-        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
+        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64, device=weight.device)
         return pack_index, rank_in_pack
 
-    indices = weight.float().sort(-1, descending=True).indices.cpu()
-    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
-    rank_in_pack = torch.full_like(pack_index, fill_value=-1)
+    indices = weight.float().sort(-1, descending=True).indices
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device=weight.device)
+    rank_in_pack = torch.full_like(pack_index, fill_value=-1, device=weight.device)
     for i in range(num_layers):
         pack_weights = [0] * num_packs
         pack_items = [0] * num_packs
@@ -212,7 +212,7 @@ def rebalance_experts(
             replicas for each logical expert
     """
     num_layers, num_logical_experts = weight.shape
-    weight = weight.float().cpu()
+    weight = weight.float()
     if num_groups % num_nodes == 0:
         # use hierarchical load-balance policy
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(

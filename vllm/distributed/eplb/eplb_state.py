@@ -446,14 +446,14 @@ class EplbState:
         """
 
         ep_group = get_ep_group().device_group
-        ep_rank = ep_group.rank()
+        # ep_rank = ep_group.rank()
 
-        time_start = None
-        is_main_rank = ep_rank == 0
-        if is_main_rank:
-            torch.cuda.synchronize()
-            time_start = time.perf_counter()
-            logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
+        # time_start = None
+        # is_main_rank = ep_rank == 0
+        # if is_main_rank:
+        #     torch.cuda.synchronize()
+        #     time_start = time.perf_counter()
+        #     logger.info("Rearranging experts %s...", "(profile)" if is_profile else "")
 
         if global_expert_load is None:
             # Map the physical expert load to global logical experts
@@ -569,15 +569,15 @@ class EplbState:
             self.logical_to_physical_map.copy_(new_logical_to_physical_map)
             self.logical_replica_count.copy_(new_logical_replica_count)
 
-        if is_main_rank:
-            assert time_start is not None
-            torch.cuda.synchronize()
-            time_end = time.perf_counter()
-            logger.info(
-                "Rearranged experts%sin %.2f seconds.",
-                " (profile) " if is_profile else " ",
-                time_end - time_start,
-            )
+        # if is_main_rank:
+        #     assert time_start is not None
+        #     torch.cuda.synchronize()
+        #     time_end = time.perf_counter()
+        #     logger.info(
+        #         "Rearranged experts%sin %.2f seconds.",
+        #         " (profile) " if is_profile else " ",
+        #         time_end - time_start,
+        #     )
         return None
 
     @staticmethod
