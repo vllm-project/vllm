@@ -207,7 +207,7 @@ class RequestState:
                 request_id,
                 [self._new_pooling_output(pooling_output)],
                 finished,
-                additional_outputs=additional_outputs
+                additional_outputs=additional_outputs,
             )
 
         output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
@@ -465,7 +465,9 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
-                additional_outputs=self.get_additional_outputs_from_engine_core(engine_core_output),
+                additional_outputs=self.get_additional_outputs_from_engine_core(
+                    engine_core_output
+                ),
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
@@ -498,7 +500,6 @@ class OutputProcessor:
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
-
 
     def get_additional_outputs_from_engine_core(
         self,

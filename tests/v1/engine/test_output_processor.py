@@ -1096,7 +1096,7 @@ def test_propagate_back_engine_core_additional_outputs(
     output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
-        additional_outputs={"foo": "bar"}
+        additional_outputs={"foo": "bar"},
     )
 
     # Make N requests.
