@@ -142,8 +142,3 @@ extra_javascript:
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js
   - mkdocs/javascript/slack_and_forum.js
-
-# Makes the url format end in .html rather than act as a dir
-# So index.md generates as index.html and is available under URL /index.html
-# https://www.mkdocs.org/user-guide/configuration/#use_directory_urls
-use_directory_urls: false
