@@ -1572,8 +1572,7 @@ def _log_streaming_response(response, response_body: list) -> None:
                             full_content = full_content[:2048] + ""
                             "...[truncated]"
                         logger.info(
-                            "response_body={streaming_complete: "
-                            "content='%s', chunks=%d}",
+                            "response_body={streaming_complete: content=%r, chunks=%d}",
                             full_content,
                             chunk_count,
                         )
