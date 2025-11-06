@@ -264,6 +264,13 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             expert_num_tokens=expert_num_tokens, expert_num_tokens_cpu=None
         )
 
+        logger.debug(
+            "PPLX_GARDEN receive %s, %s, %s",
+            expert_x.shape,
+            expert_x_scale.shape,
+            expert_tokens_meta,
+        )
+
         return expert_x, expert_x_scale, expert_tokens_meta, None, None
 
     def prepare(
