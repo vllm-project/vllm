@@ -65,46 +65,50 @@ gpu_image = (
 )
 gpu_image = gpu_image._add_mount_layer_or_copy(repo_mount)
 
-CPU_TORCH_SPEC = (
+CPU_TORCH_SPEC: tuple[str, str | None] = (
     "torch==2.9.0+cpu",
     "https://download.pytorch.org/whl/cpu",
 )
 
-GPU_TORCH_SPEC = (
+GPU_TORCH_SPEC: tuple[str, str | None] = (
     "torch==2.9.0+cu121",
     "https://download.pytorch.org/whl/cu121",
 )
 
-
-def _ensure_editable_install() -> None:
-    marker = Path("/tmp/.vllm_editable_installed")
+def _ensure_project_install(torch_spec: tuple[str, str | None], *, tag: str) -> None:
+    marker = Path(f"/tmp/.vllm_install_{tag}")
     if marker.exists():
         return
     import subprocess
     import sys
 
-    pkg, index_url = CPU_TORCH_SPEC
+    pkg, index_url = torch_spec
     cmd = [sys.executable, "-m", "pip", "install", pkg]
     if index_url:
         cmd.extend(["--index-url", index_url])
     subprocess.check_call(cmd, cwd="/workspace")
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "-e", "."],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            "vllm/requirements/common.txt",
+        ],
         cwd="/workspace",
     )
-    marker.touch()
-
-
-def _ensure_gpu_torch() -> None:
-    marker = Path("/tmp/.torch_cuda_installed")
-    if marker.exists():
-        return
-    import subprocess
-    import sys
-
-    pkg, index_url = GPU_TORCH_SPEC
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", pkg, "--index-url", index_url],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-e",
+            ".",
+            "--no-deps",
+            "--no-build-isolation",
+        ],
         cwd="/workspace",
     )
     marker.touch()
@@ -128,7 +132,7 @@ def _run(cmd: Iterable[str]) -> int:
 @app.function(image=cpu_image, **common_kwargs)
 def run_pytest(test_path: str = "tests/v1/eps/test_smoke_cpu.py") -> int:
     _prep_env()
-    _ensure_editable_install()
+    _ensure_project_install(CPU_TORCH_SPEC, tag="cpu")
     return _run(["pytest", "-q", test_path])
 
 
@@ -137,7 +141,7 @@ def run_cmd(*cmd: str) -> int:
     if not cmd:
         raise ValueError("run_cmd requires at least one argument")
     _prep_env()
-    _ensure_editable_install()
+    _ensure_project_install(CPU_TORCH_SPEC, tag="cpu")
     return _run(cmd)
 
 
@@ -146,6 +150,5 @@ def run_gpu_cmd(*cmd: str) -> int:
     if not cmd:
         raise ValueError("run_gpu_cmd requires at least one argument")
     _prep_env()
-    _ensure_editable_install()
-    _ensure_gpu_torch()
+    _ensure_project_install(GPU_TORCH_SPEC, tag="gpu")
     return _run(cmd)
