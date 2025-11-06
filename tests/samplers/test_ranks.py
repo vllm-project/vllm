@@ -4,31 +4,7 @@
 import pytest
 
 from vllm import SamplingParams
-from vllm.logprobs import (
-    FlattenLogprobs,
-    PromptLogprobs,
-    SampleLogprobs,
-)
-
-
-def all_ranks_per_position(
-    logprobs: PromptLogprobs | SampleLogprobs, position: int
-) -> set[int]:
-    """Gets all ranks of a given position"""
-    if isinstance(logprobs, FlattenLogprobs):
-        return set(
-            logprobs.ranks[
-                logprobs.start_indices_per_position[
-                    position
-                ] : logprobs.start_indices_per_position[position + 1]
-            ]
-        )
-    return (
-        {logprob.rank for logprob in logprobs[position].values()}
-        if logprobs[position] is not None
-        else set()
-    )
-
+from vllm.logprobs import FlattenLogprobs
 
 MODELS = ["distilbert/distilgpt2"]
 MAX_TOKENS = 5
