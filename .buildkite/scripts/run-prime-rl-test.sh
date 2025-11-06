@@ -191,104 +191,6 @@ echo ""
 echo "Prime-RL integration test environment setup complete!"
 
 # ==========================================
-# Pre-flight vLLM Server Health Check
-# ==========================================
-echo ""
-echo "=========================================="
-echo "=== Pre-flight vLLM Server Test ==="
-echo "=========================================="
-echo "Starting vLLM server manually to verify it can start..."
-echo "This helps diagnose server startup issues before running pytest"
-
-# Use a small model for quick testing
-TEST_MODEL="Qwen/Qwen2.5-0.5B-Instruct"
-echo "Test model: ${TEST_MODEL}"
-
-# Start server in background with full logging
-export VLLM_LOGGING_LEVEL=DEBUG
-echo "Starting vLLM server with DEBUG logging..."
-
-vllm serve "${TEST_MODEL}" \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --tensor-parallel-size 1 \
-  --max-model-len 1024 \
-  2>&1 | tee /tmp/vllm_preflight.log &
-
-VLLM_PID=$!
-echo "vLLM server started with PID: ${VLLM_PID}"
-
-# Wait for health check with detailed status
-HEALTH_URL="http://localhost:8000/health"
-MAX_WAIT=180
-elapsed=0
-echo "Checking health endpoint: ${HEALTH_URL}"
-echo "Maximum wait time: ${MAX_WAIT} seconds"
-
-while [ $elapsed -lt $MAX_WAIT ]; do
-  if curl -f -s "${HEALTH_URL}" > /dev/null 2>&1; then
-    echo "✓ vLLM server is healthy after ${elapsed}s"
-    
-    # Server is healthy, now shut it down gracefully
-    echo "Shutting down pre-flight vLLM server..."
-    kill "${VLLM_PID}" 2>/dev/null || true
-    
-    # Wait a bit for graceful shutdown
-    sleep 2
-    
-    # Force kill if still running
-    if kill -0 "${VLLM_PID}" 2>/dev/null; then
-      echo "Force killing pre-flight server..."
-      kill -9 "${VLLM_PID}" 2>/dev/null || true
-    fi
-    
-    wait "${VLLM_PID}" 2>/dev/null || true
-    echo "Pre-flight vLLM server shutdown complete"
-    break
-  fi
-  
-  # Check if process is still running
-  if ! kill -0 "${VLLM_PID}" 2>/dev/null; then
-    echo "✗ vLLM server process died after ${elapsed}s"
-    echo ""
-    echo "=== Last 100 lines of server log ==="
-    tail -100 /tmp/vllm_preflight.log
-    echo ""
-    echo "=== Full server log (first 500 lines) ==="
-    head -500 /tmp/vllm_preflight.log
-    exit 1
-  fi
-  
-  # Show progress every 10 seconds
-  if [ $((elapsed % 10)) -eq 0 ] && [ $elapsed -gt 0 ]; then
-    echo "  Still waiting for server... (${elapsed}/${MAX_WAIT}s)"
-    echo "  Process status: $(ps -p ${VLLM_PID} -o stat= 2>/dev/null || echo 'unknown')"
-  fi
-  
-  sleep 5
-  elapsed=$((elapsed + 5))
-done
-
-if [ $elapsed -ge $MAX_WAIT ]; then
-  echo "✗ vLLM server did not become healthy within ${MAX_WAIT}s"
-  echo ""
-  echo "=== Full server log ==="
-  cat /tmp/vllm_preflight.log
-  echo ""
-  echo "=== Process information ==="
-  ps -p "${VLLM_PID}" -f 2>/dev/null || echo "Process not found"
-  kill "${VLLM_PID}" 2>/dev/null || true
-  exit 1
-fi
-
-echo ""
-echo "✓ Pre-flight check passed!"
-echo "vLLM server can start successfully"
-
-# Give the system a moment to fully release resources
-sleep 3
-
-# ==========================================
 # Run Prime-RL Integration Tests
 # ==========================================
 echo ""
@@ -301,7 +203,7 @@ echo "Test command: pytest -v -s tests/integration/test_rl.py -m gpu"
 echo "Test timeout: 600 seconds (10 minutes)"
 echo ""
 echo "Note: Prime-RL's conftest.py redirects vLLM server logs to DEVNULL"
-echo "      If tests fail, check pre-flight diagnostics above"
+echo "      Server startup diagnostics will be limited - check installation verification above"
 echo ""
 
 export WANDB_MODE=offline
