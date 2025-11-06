@@ -118,7 +118,7 @@ def yarn_find_correction_range(
     base: float = 10000,
     max_position_embeddings: int = 2048,
     truncate: bool = True,
-) -> tuple[int, int]:
+) -> tuple[float, float]:
     low = yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
     high = yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
     if truncate:
