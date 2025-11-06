@@ -587,8 +587,8 @@ def _has_sm90_or_higher() -> bool:
             if torch.cuda.is_available():
                 capability = torch.cuda.get_device_capability(0)
                 return capability[0] >= 9
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to get device capability: %s", e)
         return False
 
     archs = arch_list.split()
