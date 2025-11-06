@@ -24,7 +24,7 @@ outlines_core == 0.2.11
 # required for outlines backend disk cache
 diskcache == 5.6.3
 lark == 1.2.2
-xgrammar == 0.1.25; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64" or platform_machine == "s390x"
+xgrammar == 0.1.27; platform_machine == "x86_64" or platform_machine == "aarch64" or platform_machine == "arm64" or platform_machine == "s390x"
 typing_extensions >= 4.10
 filelock >= 3.16.1 # need to contain https://github.com/tox-dev/filelock/pull/317
 partial-json-parser # used for parsing partial JSON outputs
