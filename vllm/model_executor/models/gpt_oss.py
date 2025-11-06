@@ -77,6 +77,7 @@ class OAIAttention(nn.Module):
                 ],
                 "beta_fast": config.rope_scaling["beta_fast"],
                 "beta_slow": config.rope_scaling["beta_slow"],
+                "truncate": config.rope_scaling["truncate"],
             },
             is_neox_style=True,
         )
