@@ -30,11 +30,7 @@ def _include(path: str) -> bool:
     return not any(part in SKIP_DIRS for part in parts)
 
 
-repo_mount = Mount._new().add_local_dir(
-    ".",
-    remote_path="/workspace",
-    condition=_include,
-)
+repo_mount = Mount._from_local_dir(".", remote_path="/workspace", condition=_include)
 
 common_kwargs: dict[str, object] = {
     "mounts": [repo_mount],
