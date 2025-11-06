@@ -187,7 +187,6 @@ async def maybe_prefill(
         kv_transfer_params = prefill_response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
-            # logger.info("[%s] Received kv_transfer_params from prefill: %s", req_id, kv_transfer_params)
 
         return req_data
     else:
@@ -284,13 +283,12 @@ async def log_requests(request: Request, call_next):
         return response
     except Exception as e:
         # Log errors
-        logger.error(
+        logger.exception(
             "!!! [%s] %s %s failed with error: %s",
             req_id,
             request.method,
             request.url.path,
             str(e),
-            exc_info=True,
         )
         raise
 
@@ -352,9 +350,7 @@ async def forward_non_stream(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(
-            "[%s] Error in forward_non_stream: %s", req_id, str(e), exc_info=True
-        )
+        logger.exception("[%s] Error in forward_non_stream: %s", req_id, str(e))
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}") from e
 
 
@@ -386,10 +382,10 @@ async def forward_stream(
         logger.info("[%s] Streaming completed", req_id)
 
     except HTTPException:
-        logger.error("[%s] HTTPException in forward_stream", req_id, exc_info=True)
+        logger.exception("[%s] HTTPException in forward_stream", req_id)
         raise
     except Exception as e:
-        logger.error("[%s] Error in forward_stream: %s", req_id, str(e), exc_info=True)
+        logger.exception("[%s] Error in forward_stream: %s", req_id, str(e))
         raise HTTPException(
             status_code=500, detail=f"Proxy streaming error: {str(e)}"
         ) from e
@@ -423,7 +419,7 @@ async def chat_completions(request: Request):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error in chat_completions endpoint: %s", str(e), exc_info=True)
+        logger.exception("Error in chat_completions endpoint: %s", str(e))
         raise HTTPException(
             status_code=500, detail=f"Request processing error: {str(e)}"
         ) from e
