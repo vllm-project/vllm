@@ -52,6 +52,7 @@ cpu_image = (
         "Pillow>=10.0",
     )
 )
+cpu_image = cpu_image._add_mount_layer_or_copy(repo_mount)
 
 gpu_image = (
     modal.Image.from_registry(
@@ -64,6 +65,7 @@ gpu_image = (
         "Pillow>=10.0",
     )
 )
+gpu_image = gpu_image._add_mount_layer_or_copy(repo_mount)
 
 GPU_TORCH_SPEC = (
     "torch==2.4.1+cu121",
