@@ -89,13 +89,14 @@ class GCDebugger:
             )
 
 
-def gc_freeze() -> None:
+def freeze_gc_heap() -> None:
     """
     Freeze all objects tracked by the garbage collector. It should be invoked
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
     # Move objects in permanent generation back to the oldest generation
+    # in case the heap is already frozen.
     # NOTE: This prevents cyclic references stay in the system when there're
     # multiple freeze invocations.
     gc.unfreeze()
