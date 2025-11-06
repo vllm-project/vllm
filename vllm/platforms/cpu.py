@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -151,7 +152,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import vllm.envs as envs
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
@@ -289,11 +289,16 @@ class CpuPlatform(Platform):
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Note: to avoid the error 'nthreads cannot be larger than environment
-        #  variable "NUMEXPR_MAX_THREADS" (64)'.
+        # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
-        # Set default threads num for OpenMP parallel
-        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
+            # Set default threads num for OpenMP parallel
+            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        else:
+            # In this case, setting the OpenMP configuration via
+            # OMP_NUM_THREADS is up to the user.
+            logger.info("Disabling binding processes to CPU cores...")
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
