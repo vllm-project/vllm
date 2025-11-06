@@ -316,6 +316,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
@@ -459,6 +460,7 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/test_basic_correctness.py
+  - pytest -v -s compile/test_multimodal_compile.py
   - pytest -v -s compile/piecewise/
 
 - label: PyTorch Fullgraph Test # 22min
