@@ -1,7 +1,7 @@
 # ABOUTME: EPS telemetry containers for per-step counters.
 # ABOUTME: Aggregates unique-block statistics for EigenPage Summaries.
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from typing import Iterable, Sequence
 
 
@@ -58,6 +58,15 @@ class EpsStepCounters:
     @property
     def kv_bytes_saved(self) -> int:
         return self.kv_bytes_total - self.kv_bytes_kept
+
+
+    def add_from(self, other: "EpsStepCounters") -> None:
+        if other is None:
+            return
+        for field in fields(EpsStepCounters):
+            name = field.name
+            value = getattr(other, name)
+            setattr(self, name, getattr(self, name) + value)
 
     def as_dict(self) -> dict[str, int]:
         return asdict(self)

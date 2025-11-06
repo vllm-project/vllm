@@ -15,6 +15,7 @@ from vllm.v1.eps.context import (
     EpsRequestRuntime,
 )
 from vllm.v1.eps.state import EpsJLState
+from vllm.v1.eps.telemetry import EpsStepCounters
 
 
 LayerLookup = Dict[str, Tuple[int, int]]
@@ -88,6 +89,7 @@ def build_eps_forward_context(
         group_runtimes=list(group_runtimes),
         token_request_indices=token_request_indices.clone(),
         cudagraph_capture=cudagraph_capture,
+        device_counters=EpsStepCounters(),
     )
 
 

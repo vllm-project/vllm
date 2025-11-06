@@ -24,6 +24,8 @@ from vllm.attention.utils.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
+from vllm.v1.eps import apply_eps_prefill_updates, get_eps_context, EpsStepCounters
+from vllm.v1.eps.device_union import union_select_for_request
 
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (
@@ -506,8 +508,120 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
+    def supports_eps_union(self) -> bool:
+        return True
+
     def supports_quant_query_input(self) -> bool:
         return True
+
+    def _apply_eps_union(
+        self,
+        layer: torch.nn.Module,
+        query_tokens: torch.Tensor,
+        attn_metadata: "FlashAttentionMetadata",
+    ) -> None:
+        ctx = get_eps_context()
+        if ctx is None or not ctx.enabled or ctx.cudagraph_capture:
+            return
+        if attn_metadata.use_cascade or self.dcp_world_size > 1:
+            return
+        layer_name = getattr(layer, "_eps_layer_name", None)
+        if layer_name is None or layer_name not in ctx.layer_map:
+            return
+        layer_info = ctx.layer_map[layer_name]
+        device_groups = ctx.device_union_groups or set()
+        if device_groups and layer_info.group_id not in device_groups:
+            return
+        group_runtime = ctx.group_runtimes[layer_info.group_id]
+        request_runtimes = group_runtime.request_runtimes
+        seq_lens = attn_metadata.seq_lens
+        if seq_lens.numel() == 0:
+            return
+        num_reqs = min(len(request_runtimes), seq_lens.shape[0])
+        if num_reqs == 0:
+            return
+        block_table = attn_metadata.block_table
+        device = block_table.device
+        block_size = group_runtime.block_size
+        cfg = ctx.cfg
+        counters = ctx.device_counters or EpsStepCounters()
+        sentinel_value = block_table.new_full((), cfg.sentinel, dtype=block_table.dtype)
+        ctx.device_counters = counters
+        counters.layers += 1
+        query_start_loc = attn_metadata.query_start_loc.to(device=device, dtype=torch.long)
+        last_token_indices = (query_start_loc[1:num_reqs + 1] - 1).clamp_min_(0)
+        query_heads = query_tokens.index_select(0, last_token_indices)
+        before_unique: set[int] = set()
+        after_unique: set[int] = set()
+        total_groups = 0
+        total_groups_kept = 0
+        total_blocks = 0
+        total_blocks_kept = 0
+        for req_idx in range(num_reqs):
+            runtime = request_runtimes[req_idx]
+            seq_len = int(seq_lens[req_idx].item())
+            if seq_len <= 0:
+                continue
+            num_blocks = (seq_len + block_size - 1) // block_size
+            if num_blocks <= 0:
+                continue
+            block_ids = block_table[req_idx, :num_blocks].to(device=device, dtype=torch.int64)
+            before_unique.update(int(b) for b in block_ids.detach().cpu().tolist())
+            state = runtime.state
+            if state is None:
+                kept_ids = block_ids
+                keep_groups = (num_blocks + cfg.group_blocks - 1) // cfg.group_blocks
+                total_groups += keep_groups
+                total_groups_kept += keep_groups
+                total_blocks += num_blocks
+                total_blocks_kept += num_blocks
+                after_unique.update(int(b) for b in kept_ids.detach().cpu().tolist())
+                continue
+            decision = union_select_for_request(
+                cfg=cfg,
+                layer_index=layer_info.layer_index,
+                q_attn=query_heads[req_idx],
+                state=state,
+                block_ids=block_ids,
+                block_mapping=runtime.block_mapping,
+                seq_len=seq_len,
+                block_size=block_size,
+                num_attn_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                alpha_coarse=cfg.alpha,
+            )
+            kept_ids = decision.kept_block_ids.to(device=device, dtype=block_table.dtype)
+            kept_count = kept_ids.numel()
+            if kept_count < num_blocks:
+                block_table[req_idx, kept_count:num_blocks] = sentinel_value
+            block_table[req_idx, :kept_count] = kept_ids
+            seq_lens[req_idx] = decision.new_seq_len
+            total_blocks += num_blocks
+            total_blocks_kept += kept_count if kept_count > 0 else num_blocks
+            groups_total = decision.groups_total or ((num_blocks + cfg.group_blocks - 1) // cfg.group_blocks)
+            groups_kept = (
+                int(decision.group_keep_mask.sum().item())
+                if decision.group_keep_mask.numel() > 0
+                else groups_total
+            )
+            total_groups += groups_total
+            total_groups_kept += groups_kept
+            after_unique.update(int(b) for b in kept_ids.detach().cpu().tolist())
+        if total_blocks:
+            counters.blocks_total += total_blocks
+            counters.blocks_kept += total_blocks_kept
+        if total_groups:
+            counters.groups_total += total_groups
+            counters.groups_kept += total_groups_kept
+        counters.unique_blocks_total += len(before_unique)
+        counters.unique_blocks_kept += len(after_unique)
+        counters.pages_total = counters.groups_total
+        counters.pages_visited = counters.groups_kept
+        counters.pages_skipped = counters.groups_total - counters.groups_kept
+        counters.pages_unique_total = counters.groups_total
+        counters.pages_unique_kept = counters.groups_kept
+        if seq_lens.numel() > 0:
+            attn_metadata.max_seq_len = int(seq_lens.max().item())
 
     def forward(
         self,
@@ -617,6 +731,8 @@ class FlashAttentionImpl(AttentionImpl):
             )
             key_cache = key_cache.view(dtype)
             value_cache = value_cache.view(dtype)
+
+        self._apply_eps_union(layer, query[:num_actual_tokens], attn_metadata)
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc

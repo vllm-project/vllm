@@ -12,6 +12,7 @@ import torch
 
 from vllm.v1.eps.config import EpsRuntimeConfig
 from vllm.v1.eps.state import EpsJLState
+from vllm.v1.eps.telemetry import EpsStepCounters
 
 
 @dataclass
@@ -42,6 +43,8 @@ class EpsForwardContext:
     group_runtimes: List[EpsGroupRuntime]
     token_request_indices: torch.Tensor
     cudagraph_capture: bool = False
+    device_counters: EpsStepCounters | None = None
+    device_union_groups: set[int] | None = None
 
 
 _CTX: ContextVar[EpsForwardContext | None] = ContextVar("eps_ctx", default=None)

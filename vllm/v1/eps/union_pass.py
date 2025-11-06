@@ -76,6 +76,9 @@ def run_union_prepass(
         return counters
 
     for group_idx, (block_table, kv_spec) in enumerate(zip(block_tables, kv_specs)):
+        if eps_ctx is not None and getattr(eps_ctx, "device_union_groups", None):
+            if group_idx in eps_ctx.device_union_groups:
+                continue
         if isinstance(kv_spec, EncoderOnlyAttentionSpec):
             continue
         counters.layers += 1

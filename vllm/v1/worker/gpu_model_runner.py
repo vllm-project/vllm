@@ -1148,7 +1148,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not self._eps_union_enabled or num_reqs <= 0:
             return None
         request_ids, request_states, request_block_ids, block_sizes = self._gather_eps_request_data(num_reqs)
-        return build_eps_forward_context(
+        ctx = build_eps_forward_context(
             cfg=self.eps_runtime_config,
             layer_lookup=self._eps_layer_lookup,
             group_block_sizes=block_sizes,
@@ -1158,6 +1158,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             token_request_indices=None,
             cudagraph_capture=False,
         )
+        ctx.device_union_groups = set(getattr(self, '_eps_backend_union_groups', set()))
+        return ctx
 
     def _maybe_build_eps_context(
         self,
@@ -1172,7 +1174,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         request_ids, request_states, request_block_ids, block_sizes = self._gather_eps_request_data(num_reqs)
         token_indices = torch.as_tensor(req_indices, dtype=torch.int32, device="cpu")
 
-        return build_eps_forward_context(
+        ctx = build_eps_forward_context(
             cfg=self.eps_runtime_config,
             layer_lookup=self._eps_layer_lookup,
             group_block_sizes=block_sizes,
@@ -1182,6 +1184,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             token_request_indices=token_indices,
             cudagraph_capture=cudagraph_runtime_mode != CUDAGraphMode.NONE,
         )
+        ctx.device_union_groups = set(getattr(self, '_eps_backend_union_groups', set()))
+        return ctx
 
 
     def get_eps_metrics(self) -> dict[str, float]:
@@ -1197,6 +1201,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_reqs = self.input_batch.num_reqs
         if num_reqs <= 0:
             self.latest_eps_counters = None
+            return
+
+        backend_groups = getattr(self, "_eps_backend_union_groups", set())
+        if backend_groups and len(backend_groups) == len(self.kv_cache_config.kv_cache_groups):
+            self.latest_eps_counters = EpsStepCounters()
             return
 
         block_tables = self.input_batch.block_table.block_tables
@@ -1224,8 +1233,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         counters.eps_prepass_ms = (time.perf_counter() - start) * 1000.0
         self.latest_eps_counters = counters
-        if self.eps_reporter is not None:
-            self.eps_reporter.add_step(scheduler_output.req_ids, counters)
 
     def _prepare_inputs(
         self, scheduler_output: "SchedulerOutput"
@@ -2733,9 +2740,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         decode_elapsed = (time.perf_counter() - decode_start) * 1000.0
+        device_union_groups = set(getattr(eps_ctx, 'device_union_groups', set())) if eps_ctx is not None else set()
+        use_device_counters = bool(device_union_groups)
+        if use_device_counters:
+            device_counts = eps_ctx.device_counters or EpsStepCounters()
+            eps_ctx.device_counters = device_counts
+            if self.latest_eps_counters is None:
+                self.latest_eps_counters = device_counts
+            elif self.latest_eps_counters is not device_counts:
+                self.latest_eps_counters.add_from(device_counts)
         if self.latest_eps_counters is not None:
             self.latest_eps_counters.decode_ms = decode_elapsed
             self.eps_aggregator.ingest(self.latest_eps_counters)
+            if self.eps_reporter is not None:
+                self.eps_reporter.add_step(scheduler_output.req_ids, self.latest_eps_counters)
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4262,14 +4280,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        self._eps_backend_union_groups: set[int] = set()
         mapping: dict[str, tuple[int, int]] = {}
         for group_idx, attn_group in enumerate(self.attn_groups):
+            group_supports_device = True
             for layer_idx, layer_name in enumerate(attn_group.layer_names):
                 mapping[layer_name] = (group_idx, layer_idx)
                 layer = layers[layer_name]
                 setattr(layer, "_eps_layer_name", layer_name)
                 setattr(layer, "_eps_layer_index", layer_idx)
                 setattr(layer, "_eps_kv_group_id", group_idx)
+                impl = getattr(layer, "impl", None)
+                supports = getattr(impl, "supports_eps_union", None)
+                if not callable(supports) or not supports():
+                    group_supports_device = False
+            if group_supports_device:
+                self._eps_backend_union_groups.add(group_idx)
         self._eps_layer_lookup = mapping
 
     def initialize_metadata_builders(
