@@ -65,8 +65,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         # Replace base-layer quant_method with ModularKernel
         if not isinstance(self.base_layer.quant_method, FusedMoEModularMethod):
-            FusedMoEWithLoRA._use_modular_kernel(self.base_layer)
-        assert isinstance(self.base_layer.quant_method, FusedMoEModularKernel)
+            self.base_layer.quant_method = FusedMoEWithLoRA._use_modular_kernel(
+                self.base_layer
+            )
+        assert isinstance(self.base_layer.quant_method, FusedMoEModularMethod)
 
         assert isinstance(
             self.base_layer.quant_method.fused_experts, FusedMoEModularKernel
