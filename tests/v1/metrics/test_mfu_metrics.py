@@ -114,6 +114,7 @@ async def test_detailed(engine_args):
             self,
             scheduler_stats: SchedulerStats | None,
             iteration_stats: IterationStats | None,
+            mm_cache_stats=None,
             engine_idx: int = 0,
         ):
             if iteration_stats:
