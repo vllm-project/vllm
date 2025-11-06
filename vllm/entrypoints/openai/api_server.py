@@ -81,11 +81,9 @@ from vllm.entrypoints.openai.protocol import (
     TokenizeRequest,
     TokenizeResponse,
     TranscriptionRequest,
-    TranscriptionResponse,
-    TranscriptionResponseVerbose,
+    TranscriptionResponseVariant,
     TranslationRequest,
-    TranslationResponse,
-    TranslationResponseVerbose,
+    TranslationResponseVariant,
     UnloadLoRAAdapterRequest,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
@@ -938,7 +936,7 @@ async def create_transcriptions(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, TranscriptionResponse | TranscriptionResponseVerbose):
+    elif isinstance(generator, TranscriptionResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
@@ -977,7 +975,7 @@ async def create_translations(
             content=generator.model_dump(), status_code=generator.error.code
         )
 
-    elif isinstance(generator, TranslationResponse | TranslationResponseVerbose):
+    elif isinstance(generator, TranslationResponseVariant):
         return JSONResponse(content=generator.model_dump())
 
     return StreamingResponse(content=generator, media_type="text/event-stream")

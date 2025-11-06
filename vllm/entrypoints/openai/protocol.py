@@ -2897,6 +2897,11 @@ class TranscriptionResponseVerbose(OpenAIBaseModel):
     """Extracted words and their corresponding timestamps."""
 
 
+TranscriptionResponseVariant: TypeAlias = (
+    TranscriptionResponse | TranscriptionResponseVerbose
+)
+
+
 class TranslationResponseStreamChoice(OpenAIBaseModel):
     delta: DeltaMessage
     finish_reason: str | None = None
@@ -3094,3 +3099,7 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+TranslationResponseVariant: TypeAlias = TranslationResponse | TranslationResponseVerbose
+
