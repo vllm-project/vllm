@@ -18,10 +18,6 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
-# Use offline mode for HuggingFace models
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
 DP_SIZE = 1
 
 engine_args_user_spec = AsyncEngineArgs(
