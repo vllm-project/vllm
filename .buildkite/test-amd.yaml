@@ -165,9 +165,9 @@ steps:
       --ignore=entrypoints/openai/correctness/
       --ignore=entrypoints/openai/test_collective_rpc.py
       --ignore=entrypoints/openai/tool_parsers/
-      # Skip encoder models on ROCm: https://github.com/vllm-project/vllm/issues/27442
       --ignore=entrypoints/openai/test_vision.py
       --ignore=entrypoints/openai/test_optional_middleware.py
+  # ^ Skip encoder models (test_vision.py, test_optional_middleware.py) on ROCm: https://github.com/vllm-project/vllm/issues/27442
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (Pooling)
