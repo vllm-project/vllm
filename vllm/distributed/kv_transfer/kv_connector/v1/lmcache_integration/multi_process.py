@@ -9,7 +9,7 @@ from typing import Any, Literal, cast
 
 import torch
 import zmq
-from lmcache.utils import init_logger
+from lmcache.utils import _lmcache_nvtx_annotate, init_logger
 from lmcache.v1.multiprocess.custom_types import (
     CudaIPCWrapper,
     IPCCacheEngineKey,
@@ -102,6 +102,10 @@ class LMCacheMPRequestTracker:
     # during the generation
     allocated_block_ids: list[int] = field(default_factory=list)
 
+    # Number of scheduled tokens in this request. We keep tracking this to
+    # avoid saving half-full blocks.
+    num_scheduled_tokens: int = 0
+
     # Number of blocks stored will be initialized when lookup the external
     # hit tokens and will be updated when processing new requests and cached
     # requests.
@@ -146,6 +150,9 @@ class LMCacheMPRequestTracker:
     ####
     # Update internal states
     ####
+    def increase_num_scheduled_tokens(self, num_new_tokens: int):
+        self.num_scheduled_tokens += num_new_tokens
+
     def increase_num_stored_blocks(self, num_new_blocks: int):
         """Increase the number of stored blocks for the current request
         This function will be called when processing the cached requests.
@@ -208,7 +215,10 @@ class LMCacheMPRequestMetadata:
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
         min_available_blocks = min(
-            len(tracker.block_hashes), len(tracker.allocated_block_ids)
+            len(tracker.block_hashes),
+            len(tracker.allocated_block_ids),
+            # TODO: remove the hard-code 16 here (num tokens per block)
+            tracker.num_scheduled_tokens // 16,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -301,6 +311,7 @@ class LMCacheMPSchedulerAdapter:
 
         pass
 
+    @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(self, request_id: str, block_hashes: list[bytes]):
         if request_id in self.lookup_futures:
             # Skip if there is already a lookup request
@@ -315,6 +326,7 @@ class LMCacheMPSchedulerAdapter:
         )
         self.lookup_futures[request_id] = future
 
+    @_lmcache_nvtx_annotate
     def check_lookup_result(self, request_id: str) -> int | None:
         assert request_id in self.lookup_futures, (
             f"Lookup request for request_id={request_id} has not been submitted"
@@ -374,6 +386,7 @@ class LMCacheMPWorkerAdapter:
         )
         future.result()
 
+    @_lmcache_nvtx_annotate
     def submit_store_request(
         self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
     ):
@@ -385,13 +398,19 @@ class LMCacheMPWorkerAdapter:
         )
         self.store_futures[request_id] = future
 
-    def submit_retrieve_request(self, request_id: str, op: LoadStoreOp):
+    @_lmcache_nvtx_annotate
+    def submit_retrieve_request(
+        self, request_id: str, op: LoadStoreOp, event: torch.cuda.Event
+    ):
         keys = self._block_hashes_to_keys(op.block_hashes)
         future = send_lmcache_request(
-            self.mq_client, RequestType.RETRIEVE, [keys, self.instance_id, op.block_ids]
+            self.mq_client,
+            RequestType.RETRIEVE,
+            [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         )
         self.retrieve_futures[request_id] = future
 
+    @_lmcache_nvtx_annotate
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[set[str] | None, set[str] | None]:

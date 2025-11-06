@@ -161,11 +161,15 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
+
+        with torch.cuda.stream(torch.cuda.current_stream()):
+            event = torch.cuda.Event(interprocess=True)
+            event.record()
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
             logger.info("HERE! SUBMITTING THE RETRIEVE REQUEST %s", meta.request_id)
-            self.worker_adapter.submit_retrieve_request(meta.request_id, meta.op)
+            self.worker_adapter.submit_retrieve_request(meta.request_id, meta.op, event)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -533,6 +537,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ) -> None:
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
+
+            num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
+            request_tracker.increase_num_scheduled_tokens(num_new_tokens)
+
             # TODO: change the hard-coded 16 to a configurable parameter
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(request_tracker, 16)
             if r_meta is not None:
@@ -546,8 +554,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._get_request_tracker(request_id)
+
+            # Update block ids
             new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
             request_tracker.update_block_ids(new_block_ids)
+
+            # Update new scheduled tokens
+            num_new_tokens = cached_reqs.num_computed_tokens[idx]
+            request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(request_tracker, 16)
 
