@@ -22,6 +22,15 @@ Please refer to [Disaggregated Encoder Feature](../../../docs/features/disagg_en
 
 ## Usage
 
+### Multimodal Prompts (Default)
+
+```bash
+cd vllm
+./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+```
+
+This runs the test with actual multimodal (image) prompts.
+
 ### Text-Only Prompts
 
 ```bash
@@ -30,15 +39,6 @@ USE_MM_PROMPTS=0 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 ```
 
 This runs a quick test with text-only prompts to verify the setup works.
-
-### Full Test (With Multimodal Prompts)
-
-```bash
-cd vllm
-./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
-```
-
-This runs the full test with actual multimodal (image) prompts.
 
 ### Custom Configuration
 
@@ -158,12 +158,14 @@ python test_epd_correctness.py \
     --service_url http://localhost:8000 \
     --model_name Qwen/Qwen2.5-VL-3B-Instruct \
     --mode baseline \
-    --baseline_file test_output.txt
+    --baseline_file test_output.txt \
+    --use_mm_prompts
 
-# Disagg only (requires baseline output file)
+# Disagg only (requires baseline output file!)
 python test_epd_correctness.py \
     --service_url http://localhost:8000 \
     --model_name Qwen/Qwen2.5-VL-3B-Instruct \
     --mode disagg \
-    --baseline_file test_output.txt
+    --baseline_file test_output.txt \
+    --use_mm_prompts
 ```

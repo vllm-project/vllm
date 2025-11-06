@@ -289,15 +289,16 @@ def main():
 
             disagg_output = output_strs[key]
             if baseline_output == disagg_output:
-                print(f"✓ {key}: MATCH")
+                print(f"✅ {key}: MATCH")
             else:
-                print(f"✗ {key}: MISMATCH")
+                print(f"❌ {key}: MISMATCH")
                 print(f"  Baseline: {baseline_output}")
                 print(f"  Disagg:   {disagg_output}")
                 all_match = False
 
-        assert all_match, "Disagg outputs do not match baseline!"
-        print("\n✅ All outputs match! Test PASSED")
+        assert all_match, "❌❌Disagg outputs do not match baseline!❌❌"
+        if all_match:
+            print("\n✅ All outputs match! Test PASSED")
 
 
 if __name__ == "__main__":

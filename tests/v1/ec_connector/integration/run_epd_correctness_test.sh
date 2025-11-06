@@ -32,7 +32,7 @@ fi
 GPU_E="${GPU_E:-0}"
 GPU_P="${GPU_P:-1}"
 GPU_D="${GPU_D:-2}"
-GPU_SINGLE="${GPU_SINGLE:-$GPU_E}"
+GPU_SINGLE="${GPU_SINGLE:-$GPU_P}"
 GPU_PD="${GPU_PD:-$GPU_P}"
 
 # Port
@@ -210,7 +210,7 @@ run_epd_1e_1pd() {
         $MM_FLAG
     
     # Cleanup
-    echo "✅✅ 1E+1PD Correctness Test PASSED"
+    echo "✓✓ 1E+1PD Correctness Test finished"
     echo "Stopping EPD (1E+1PD) instances..."
     for pid in "${PIDS[@]}"; do
         kill $pid 2>/dev/null || true
@@ -434,7 +434,7 @@ run_epd_1e_1p_1d() {
         $MM_FLAG
     
     # Cleanup
-    echo "✅✅ 1E+1P+1D Correctness Test PASSED"
+    echo "✓✓ 1E+1P+1D Correctness Test finished"
     echo "Stopping EPD (1E+1P+1D) instances..."
     for pid in "${PIDS[@]}"; do
         kill $pid 2>/dev/null || true
@@ -466,5 +466,5 @@ rm -f "$BASELINE_FILE"
 rm -f "$BASELINE_PD_FILE"
 
 echo "================================"
-echo "✅✅✅ All EPD correctness tests passed!"
+echo "✓✓ All EPD correctness tests finished!"
 echo "================================"
