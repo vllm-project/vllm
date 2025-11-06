@@ -131,14 +131,14 @@ if check_aiter_fp8_linear_support():
 
     class AiterSiluMulFp8BlockQuantPattern(ActivationQuantPattern):
         def __init__(self):
-            pass
+            self.silu_and_mul_matcher = MatcherSiluAndMul()
 
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
             ):
                 at1 = self.silu_and_mul_matcher.forward_custom(input)
-                at2 = AITER_BLOCK_QUANT_OP(x=at1[1])
+                at2 = AITER_BLOCK_QUANT_OP(x=at1)
                 return at2[0], at2[1]
 
             def replacement(
@@ -278,6 +278,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
         self.matched_count = self.patterns.apply(graph)
+        print(self.matched_count)
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self):
