@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused MoE utilities for GPTQ."""
 
-from collections.abc import Callable
-
 import torch
 
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.mk_fused_experts_lora_support import (
+    MkFusedExpertsSupportsLoRA,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
@@ -29,9 +30,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.scalar_type import ScalarType, scalar_types
 
 
-def default_activation_func(
-    activation: str, output: torch.Tensor, input: torch.Tensor
-) -> None:
+def activation_func(activation: str, output: torch.Tensor, input: torch.Tensor) -> None:
     if activation == "silu":
         torch.ops._C.silu_and_mul(output, input)
     elif activation == "swigluoai":
@@ -62,9 +61,6 @@ def _fused_marlin_moe(
     expert_ids: torch.Tensor,
     num_tokens_post_padded: torch.Tensor,
     activation: str = "silu",
-    activation_func: Callable[
-        [str, torch.Tensor, torch.Tensor], None
-    ] = default_activation_func,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
     g_idx1: torch.Tensor | None = None,
@@ -78,6 +74,7 @@ def _fused_marlin_moe(
     intermediate_cache2: torch.Tensor | None = None,
     output: torch.Tensor | None = None,
     is_k_full: bool = True,
+    mk_experts: MkFusedExpertsSupportsLoRA | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -141,9 +138,14 @@ def _fused_marlin_moe(
         is_zp_float=False,
     )
 
-    activation_func(
-        activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
-    )
+    mk_experts = mk_experts or MkFusedExpertsSupportsLoRA()
+    with mk_experts.maybe_activation_with_lora_hook(
+        gateup_proj_output=intermediate_cache1.view(-1, num_topk, 2 * N),
+        activation_output=intermediate_cache2,
+    ):
+        activation_func(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, 2 * N)
+        )
 
     if output is None:
         output = intermediate_cache3
@@ -198,10 +200,6 @@ def fused_marlin_moe(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     activation: str = "silu",
-    activation_func: Callable[
-        [str, torch.Tensor, torch.Tensor], None
-    ] = default_activation_func,
-    moe_sum: Callable[[torch.Tensor, torch.Tensor], None] | None = None,
     expert_map: torch.Tensor | None = None,
     global_scale1: torch.Tensor | None = None,
     global_scale2: torch.Tensor | None = None,
@@ -217,6 +215,7 @@ def fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     inplace: bool = False,
+    mk_experts: MkFusedExpertsSupportsLoRA | None = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -312,7 +311,6 @@ def fused_marlin_moe(
         expert_ids=expert_ids,
         num_tokens_post_padded=num_tokens_post_padded,
         activation=activation,
-        activation_func=activation_func,
         global_scale1=global_scale1,
         global_scale2=global_scale2,
         g_idx1=g_idx1,
@@ -326,6 +324,7 @@ def fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=None,
         is_k_full=is_k_full,
+        mk_experts=mk_experts,
     ).view(-1, topk, K)
 
     if output is None:
@@ -334,10 +333,7 @@ def fused_marlin_moe(
         else:
             output = torch.empty_like(hidden_states)
 
-    if moe_sum is None:
-        return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
-    else:
-        return moe_sum(moe_output, output)
+    return torch.sum(moe_output.view(-1, topk, K), dim=1, out=output)
 
 
 def batched_fused_marlin_moe(
@@ -532,7 +528,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         return E, M, N, K, topk
 
 
-class MarlinExperts(MarlinExpertsBase):
+class MarlinExperts(MarlinExpertsBase, MkFusedExpertsSupportsLoRA):
     def __init__(self, quant_config: FusedMoEQuantConfig):
         super().__init__(quant_config)
 
@@ -620,18 +616,14 @@ class MarlinExperts(MarlinExpertsBase):
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
-            activation_func=self.activation,
-            moe_sum=self.moe_sum,
             expert_map=expert_map,
             output=output,
             # Workspaces are swapped in workspace_shapes() to account for proper
             # output buffer allocation. Please refer to workspace_shapes().
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
+            mk_experts=self,  # for LoRA
         )
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
 
 
 def modular_marlin_fused_moe(

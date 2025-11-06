@@ -459,6 +459,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
         adapter_enabled: torch.Tensor,
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
+        lora_token_mapping_offset: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based

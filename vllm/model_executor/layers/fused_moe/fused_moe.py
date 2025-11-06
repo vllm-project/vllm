@@ -31,6 +31,9 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm,
     deep_gemm_moe_fp8,
 )
+from vllm.model_executor.layers.fused_moe.mk_fused_experts_lora_support import (
+    MkFusedExpertsSupportsLoRA,
+)
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     moe_align_block_size,
 )
@@ -1969,7 +1972,7 @@ def fused_experts_impl(
     return out_hidden_states
 
 
-class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
+class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute, MkFusedExpertsSupportsLoRA):
     def __init__(
         self,
         quant_config: FusedMoEQuantConfig,
@@ -2108,9 +2111,13 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=self.w1_bias,
         )
 
-        self.activation(
-            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
-        )
+        with self.maybe_activation_with_lora_hook(
+            gateup_proj_output=intermediate_cache1,
+            activation_output=intermediate_cache2,
+        ):
+            self.activation(
+                activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+            )
 
         a2q_scale: torch.Tensor | None = None
 
@@ -2146,11 +2153,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             B_bias=self.w2_bias,
         )
 
-        # separate function is required for MoE + LoRA
-        self.moe_sum(intermediate_cache3, output)
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        ops.moe_sum(input, output)
+        ops.moe_sum(intermediate_cache3, output)
 
 
 def modular_triton_fused_moe(

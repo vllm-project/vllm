@@ -11,6 +11,10 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.mk_fused_experts_lora_support import (
+    MkFusedExpertsSupportsLoRA,
+    mk_fused_experts_supports_lora,
+)
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
     count_expert_num_tokens,
@@ -550,7 +554,10 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
     def activation(
-        self, activation: str, output: torch.Tensor, input: torch.Tensor
+        self,
+        activation: str,
+        output: torch.Tensor,
+        input: torch.Tensor,
     ) -> None:
         assert output.size(-1) * 2 == input.size(-1)
         if activation == "silu":
@@ -1011,6 +1018,10 @@ class FusedMoEModularKernel(torch.nn.Module):
 
         for chunk_idx in range(num_chunks):
             s, e = input_chunk_range(chunk_idx)
+
+            if mk_fused_experts_supports_lora(self.fused_experts):
+                assert isinstance(self.fused_experts, MkFusedExpertsSupportsLoRA)
+                self.fused_experts.set_lora_token_mapping_offset(s)
 
             c_expert_tokens_meta = self._slice_expert_tokens_metadata(
                 num_chunks,
