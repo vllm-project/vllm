@@ -334,20 +334,20 @@ class TestMistralTokenizer:
 
     def test_encode(self, mistral_tokenizer: MistralTokenizer):
         token_ids = (
-            [1, 22177, 4304, 2662, 2]
+            [1, 22177, 4304, 2662]
             if mistral_tokenizer.is_tekken
-            else [1, 23325, 2294, 1686, 2]
+            else [1, 23325, 2294, 1686]
         )
 
-        assert mistral_tokenizer.encode("Hello world !") == token_ids[:-1]
-        assert mistral_tokenizer.encode("Hello world !", max_length=3) == token_ids[:-2]
+        assert mistral_tokenizer.encode("Hello world !") == token_ids
+        assert mistral_tokenizer.encode("Hello world !", max_length=3) == token_ids[:-1]
         assert (
             mistral_tokenizer.encode("Hello world !", truncation=True, max_length=3)
-            == token_ids[:-2]
+            == token_ids[:-1]
         )
         assert (
             mistral_tokenizer.encode("Hello world !", truncation=False, max_length=3)
-            == token_ids[:-1]
+            == token_ids
         )
 
         assert (
@@ -358,7 +358,7 @@ class TestMistralTokenizer:
             mistral_tokenizer.encode(
                 "Hello world !", add_special_tokens=True, max_length=3
             )
-            == token_ids[:-2]
+            == token_ids[:-1]
         )
         assert (
             mistral_tokenizer.encode(
@@ -368,7 +368,7 @@ class TestMistralTokenizer:
         )
         assert (
             mistral_tokenizer.encode("Hello world !", add_special_tokens=False)
-            == token_ids[1:-1]
+            == token_ids[1:]
         )
 
     @pytest.mark.parametrize(
@@ -1086,6 +1086,19 @@ class TestMistralTokenizer:
                 skip_special_tokens=skip_special_tokens,
             )
             == expected_tokens[mistral_tokenizer.is_tekken]
+        )
+
+    def test_decode_int(
+        self,
+        mistral_tokenizer: MistralTokenizer,
+    ):
+        ids = 1
+        assert (
+            mistral_tokenizer.decode(
+                ids,
+                skip_special_tokens=False,
+            )
+            == "<s>"
         )
 
     def test_convert_tokens_to_string(self, mistral_tokenizer: MistralTokenizer):
