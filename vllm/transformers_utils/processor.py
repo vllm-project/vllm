@@ -185,7 +185,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
             module_name = type(processor).__module__
             mod = importlib.import_module(module_name)
             # find *ProcessingKwargs in the module
-            processor_kwargs = set()
+            processor_kwargs: set[str] = set()
             for name, obj in vars(mod).items():
                 if name.endswith("ProcessingKwargs"):
                     processor_kwargs = (
