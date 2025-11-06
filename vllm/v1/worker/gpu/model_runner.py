@@ -294,7 +294,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return cuda_graph_size
 
     def warmup_for_prefill(self) -> None:
-        # For FlashInfer, we would like to execute a dummy prefill run to trigger JIT compilation.
+        # For FlashInfer, we would like to execute a dummy prefill run
+        # to trigger JIT compilation.
         if all("FLASHINFER" in b.get_name() for b in self.attn_backends.values()):
             self._dummy_run(self.max_num_tokens, skip_attn=False)
             torch.cuda.synchronize()
@@ -310,7 +311,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cu_num_new_blocks = tuple(
             [0] for _ in range(self.block_tables.num_kv_cache_groups)
         )
-        new_block_ids = tuple([] for _ in range(self.block_tables.num_kv_cache_groups))
+        new_block_ids: tuple[list[int], ...] = tuple(
+            [] for _ in range(self.block_tables.num_kv_cache_groups)
+        )
         overwrite: list[bool] = []
 
         # Add new requests.
@@ -660,17 +663,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self._set_active_loras(*lora_inputs)
 
         # Run model.
-        if use_cudagraph:
-            # Run CUDA graph.
-            # NOTE(woosuk): Here, we don't need to pass the input tensors,
-            # because they are already copied to the CUDA graph input buffers.
-            hidden_states = self.cudagraph_manager.run(padded_num_tokens)
-        else:
-            with set_forward_context(
-                input_batch.attn_metadata,
-                self.vllm_config,
-                num_tokens=input_batch.num_tokens_after_padding,
-            ):
+        with set_forward_context(
+            input_batch.attn_metadata,
+            self.vllm_config,
+            num_tokens=input_batch.num_tokens_after_padding,
+        ):
+            if use_cudagraph:
+                # Run CUDA graph.
+                # NOTE(woosuk): Here, we don't need to pass the input tensors,
+                # because they are already copied to the CUDA graph input buffers.
+                hidden_states = self.cudagraph_manager.run(
+                    input_batch.num_tokens_after_padding
+                )
+            else:
                 # Run PyTorch model in eager mode.
                 hidden_states = self.model(
                     input_ids=input_batch.input_ids,

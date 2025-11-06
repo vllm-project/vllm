@@ -120,16 +120,18 @@ class CudaGraphManager:
 
         # Capture the graph.
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, self.pool):
-            with set_forward_context(
+        with (
+            set_forward_context(
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=batch_size,
-            ):
-                hidden_states = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                )
+            ),
+            torch.cuda.graph(graph, self.pool),
+        ):
+            hidden_states = model(
+                input_ids=input_ids,
+                positions=positions,
+            )
             self.hidden_states[:batch_size] = hidden_states
         self.graphs[batch_size] = graph
 
@@ -162,6 +164,7 @@ class CudaGraphManager:
     def run(self, batch_size: int) -> torch.Tensor:
         assert batch_size in self.graphs
         self.graphs[batch_size].replay()
+        assert self.hidden_states is not None
         return self.hidden_states[:batch_size]
 
 
