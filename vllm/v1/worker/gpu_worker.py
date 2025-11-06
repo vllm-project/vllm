@@ -8,6 +8,7 @@ import json
 import os
 import threading
 import time
+import traceback
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from contextlib import AbstractContextManager, nullcontext
@@ -134,16 +135,18 @@ class WorkerGuard:
                     success = run_method(self, method, args=(), kwargs=params)
                 except Exception as e:
                     self.logger(
-                        " Error executing method %s: %s %s",
+                        "Error executing method %s: %s %s\n Call Stack:\n %s",
                         method,
                         type(e).__name__,
                         e,
+                        "".join(traceback.format_tb(e.__traceback__)),
                         level="error",
                     )
                     success = False
                 self._send_execution_result(success, method_uuid)
 
     def pause_by_signal(self):
+        self._set_device_communicator_status(False)
         self.pause_event.set()
         self.logger("Pause signal sent.")
         return True
@@ -154,17 +157,15 @@ class WorkerGuard:
         """
         if self.communicator_aborted:
             return True
+        self._set_device_communicator_status(False)
         torch.cuda.set_device(self.device)
         model_groups = get_all_model_groups()
         futures = []
-
         start_time = time.time()
 
         def _abort_nccl_comm(group: GroupCoordinator):
             if group.device_communicator is not None:
                 nccl_comm = group.device_communicator.pynccl_comm
-                nccl_comm.available = False
-                nccl_comm.disabled = True
                 nccl_comm.nccl_abort_comm()
 
         def _abort_process_group(group: GroupCoordinator):
@@ -215,13 +216,21 @@ class WorkerGuard:
             self.logger("Communicators did not abort in time.", level="warning")
         return success
 
+    def _set_device_communicator_status(self, active: bool):
+        model_groups = get_all_model_groups()
+        for group in model_groups:
+            if group.device_communicator is not None:
+                nccl_comm = group.device_communicator.pynccl_comm
+                nccl_comm.available = active
+                nccl_comm.disabled = not active
+
     def restart_worker(self):
         if self.communicator_aborted:
             torch.cuda.set_device(self.device)
-            torch.cuda.synchronize()
             with set_current_vllm_config(self.vllm_config):
                 self.init_distributed_env_callback()
                 self.communicator_aborted = False
+            torch.cuda.synchronize()
         self.pause_event.clear()
         return True
 

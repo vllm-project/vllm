@@ -1397,6 +1397,15 @@ class FaultHandler:
             return False
 
         if instruction == "pause":
+            logger.warning(
+                "Pause operation is best-effort only. Due to the complexity of "
+                "collective communications (e.g., timing dependencies and "
+                "synchronization barriers), pausing may not always succeed. If "
+                "the process remains unresponsive or collective operations "
+                "cannot be interrupted, consider shutting down and restarting "
+                "the instance."
+            )
+
             dead_engine_indices = {
                 index
                 for index, status in self.engine_status_dict.items()
