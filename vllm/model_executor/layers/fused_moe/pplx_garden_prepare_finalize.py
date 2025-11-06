@@ -203,12 +203,14 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: torch.Tensor | None = None
 
-        logger.debug("PPLX_GARDEN dispatch send")
+        logger.debug("PPLX_GARDEN dispatch send %s", expert_x.shape)
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
-            out_expert_x=expert_x,
-            out_expert_x_scale=expert_x_scale,
+            out_expert_x=expert_x.view(-1, hidden_dim),
+            out_expert_x_scale=expert_x_scale.view(-1, hidden_dim)
+            if expert_x_scale is not None
+            else None,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
             indices=topk_ids,
@@ -222,8 +224,10 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         hook = lambda: self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
-            out_expert_x=expert_x,
-            out_expert_x_scale=expert_x_scale,
+            out_expert_x=expert_x.view(-1, hidden_dim),
+            out_expert_x_scale=expert_x_scale.view(-1, hidden_dim)
+            if expert_x_scale is not None
+            else None,
             dp_x=a1q,
             dp_x_scale=a1q_scale,
             indices=topk_ids,
