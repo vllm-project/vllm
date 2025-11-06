@@ -254,14 +254,9 @@ class RocmPlatform(Platform):
                     f"does not support block size {block_size}."
                 )
             if selected_backend == AttentionBackendEnum.ROCM_AITER_MLA:
-                if block_size == 1:
-                    logger.info("Using AITER MLA backend.")
-                    return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
-                raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
-                    f"does not support block size {block_size}."
-                    "(currently only supports block size 1)"
-                )
+                logger.info("Using AITER MLA backend.")
+                return AttentionBackendEnum.ROCM_AITER_MLA.get_path()
+
             raise ValueError(
                 f" The selected backend, {selected_backend.name},"
                 f"is not MLA type while requested for MLA backend."
