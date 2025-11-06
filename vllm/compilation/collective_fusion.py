@@ -466,6 +466,7 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[str, dict[int, float]] = {
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer one shot fused allreduce
+# OneShot max size is at most 64MB / world size (FlashInfer restriction)
 _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[str, dict[int, float]] = {
     "9.0": {
         2: 32,  # 32MB
