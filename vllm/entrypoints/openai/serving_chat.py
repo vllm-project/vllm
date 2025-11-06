@@ -780,7 +780,10 @@ class OpenAIServingChat(OpenAIServing):
                             base_index = 0
                             for msg in harmony_parser.messages:
                                 if (
-                                    (msg.channel == "commentary" or msg.channel == "analysis")
+                                    (
+                                        msg.channel == "commentary"
+                                        or msg.channel == "analysis"
+                                    )
                                     and msg.recipient
                                     and msg.recipient.startswith("functions.")
                                 ):
