@@ -105,6 +105,9 @@ def _lazy_import_wrapper(
 
 
 # Create lazy wrappers for each function
+flashinfer_trtllm_bf16_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "trtllm_bf16_moe"
+)
 flashinfer_trtllm_fp8_block_scale_moe = _lazy_import_wrapper(
     "flashinfer.fused_moe", "trtllm_fp8_block_scale_moe"
 )
