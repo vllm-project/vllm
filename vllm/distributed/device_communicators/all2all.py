@@ -12,7 +12,7 @@ from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.utils.flashinfer import has_flashinfer_all2all
-from vllm.utils.import_utils import has_deep_ep, has_pplx, has_rose
+from vllm.utils.import_utils import has_deep_ep, has_pplx, has_pplx_garden
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -247,14 +247,14 @@ def _nets_per_gpu() -> int:
     return num_efa // num_cuda
 
 
-class RoseAll2AllManager(All2AllManagerBase):
+class PplxGardenAll2AllManager(All2AllManagerBase):
     """
-    All2All communication based on PPLX EFA Rose kernels.
+    All2All communication based on PPLX Garden kernels.
     """
 
     def __init__(self, cpu_group, device):
         # TODO: update README.md
-        assert has_rose(), (
+        assert has_pplx_garden(), (
             "pplx_kernels not found. Please follow https://github.com/vllm-project/vllm/blob/main/tools/ep_kernels/README.md"
             " to install pplx_kernels."
         )
@@ -263,8 +263,8 @@ class RoseAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
     def get_handle(self, kwargs, nvlink: bool = True):
-        from rose.distributed.torch_group import TorchParallelGroup
-        from rose.kernels.efa_all_to_all import EfaAllToAll
+        from pplx_garden.distributed.torch_group import TorchParallelGroup
+        from pplx_garden.kernels.efa_all_to_all import EfaAllToAll
 
         ep_group = get_ep_group()
         dp_group = get_dp_group()
@@ -291,7 +291,7 @@ class RoseAll2AllManager(All2AllManagerBase):
         kwargs["global_group"] = global_group
         kwargs["device"] = self.device
 
-        logger.debug("ROSE args = %s", kwargs)
+        logger.debug("PPLX_GARDEN args = %s", kwargs)
 
         return self.handle_cache.get_or_create(
             kwargs,

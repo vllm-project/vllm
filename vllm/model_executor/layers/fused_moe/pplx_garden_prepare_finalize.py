@@ -3,7 +3,7 @@
 from collections.abc import Callable
 
 import torch
-from rose.kernels.all_to_all import AllToAllKernel
+from pplx_garden.kernels.all_to_all import AllToAllKernel
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
@@ -20,7 +20,7 @@ from vllm.utils import cdiv, round_up
 logger = init_logger(__name__)
 
 
-def rose_hidden_dim_scale(
+def pplx_garden_hidden_dim_scale(
     hidden_dim: int,
     quant_dtype: torch.dtype | str | None,
     per_act_token_quant: bool,
@@ -51,7 +51,7 @@ def rose_hidden_dim_scale(
     return hidden_dim_scale
 
 
-class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def __init__(
         self,
         a2a: AllToAllKernel,
@@ -106,7 +106,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         #
         if expert_map is not None:
             logger.warning_once(
-                "The PPLX Rose backend does not support expert mapping. "
+                "The PPLX Garden backend does not support expert mapping. "
                 "The provided `expert_map` will be ignored."
             )
         expert_map = None  # noqa: F841
@@ -142,7 +142,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         if a1q_scale is not None:
             scalar_scales = a1q_scale.numel() == 1
 
-            # Rose requires 2-d scales even for scalar scales
+            # Pplx Garden requires 2-d scales even for scalar scales
             if a1q_scale.dim() <= 1:
                 assert scalar_scales
                 a1q_scale = a1q_scale.view(1, 1)
@@ -203,7 +203,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != indices.size(0)
         bound_m: torch.Tensor | None = None
 
-        logger.debug("ROSE dispatch send")
+        logger.debug("PPLX_GARDEN dispatch send")
 
         self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -217,7 +217,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=False,
         )
 
-        logger.debug("ROSE dispatch recv")
+        logger.debug("PPLX_GARDEN dispatch recv")
 
         hook = lambda: self.a2a.dispatch(
             out_expert_num_tokens=expert_num_tokens,
@@ -231,7 +231,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             do_recv=True,
         )
 
-        logger.debug("ROSE dispatch end")
+        logger.debug("PPLX_GARDEN dispatch end")
 
         return (
             hook,
@@ -299,7 +299,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # There's not much point setting this unless it is != topk_ids.size(0)
         bound_m: torch.Tensor | None = None
 
-        # TODO (bnell): fails in test_rose_moe.py, figure out what's going on
+        # TODO (bnell): fails in test_pplx_garden_moe.py, figure out what's going on
         # num_tokens = output.size(0)  # M
         # assert topk_ids.size(0) == num_tokens, (
         #    f"{topk_ids.size(0)} == {num_tokens}")
@@ -317,7 +317,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         topk_ids_u32 = topk_ids.view(dtype=torch.uint32)
 
-        logger.debug("ROSE combine send")
+        logger.debug("PPLX_GARDEN combine send")
 
         self.a2a.combine(
             out_tokens=output,
@@ -330,7 +330,7 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # Note: new kernels allow accumulate.
         )
 
-        logger.debug("ROSE combine recv")
+        logger.debug("PPLX_GARDEN combine recv")
 
         return lambda: self.a2a.combine(
             out_tokens=output,
@@ -361,4 +361,4 @@ class RosePrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             weight_and_reduce_impl,
         )
         receiver()
-        logger.debug("ROSE combine end")
+        logger.debug("PPLX_GARDEN combine end")
