@@ -280,10 +280,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.base_layer, fused_experts.moe_sum
         )
 
-        self.base_layer.quant_method.old_fused_experts = (
-            self.base_layer.quant_method.fused_experts
-        )
-        self.base_layer.quant_method.fused_experts = m_fused_moe_fn
+        # Save the original method-level entrypoint if present, then replace it.
+        qmethod = self.base_layer.quant_method
+        qmethod.old_fused_experts = getattr(qmethod, "fused_experts", None)
+        qmethod.fused_experts = m_fused_moe_fn
 
     def create_lora_weights(
         self,

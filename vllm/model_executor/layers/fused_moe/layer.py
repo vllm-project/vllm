@@ -513,6 +513,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 )
             self.flashinfer_cutlass_moe = None  # type: ignore
 
+            # Expose a per-method handle to the fused experts entrypoint so that
+            # higher-level components (e.g., LoRA injection) can swap it reliably.
+            # Many unquantized call sites historically used the module-level
+            # `fused_experts`; we keep that as the default but prefer this attribute.
+            self.fused_experts = fused_experts
+
     @property
     def supports_eplb(self) -> bool:
         return True
@@ -814,19 +820,40 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
         else:
-            result = fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                inplace=True,
-                activation=activation,
-                quant_config=self.moe_quant_config,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-            )
+            # Prefer the per-layer quant_method handle (LoRA overrides this)
+            # so we don't rely on a separate attribute on `self`.
+            fused_impl = getattr(layer.quant_method, "fused_experts", fused_experts)
+
+            # If we're still pointing to the module-level function, pass quant_config
+            # explicitly. Otherwise (LoRA modular kernel object), it already captures
+            # the quantization config and generally does not accept it as a kwarg.
+            if fused_impl is fused_experts:
+                result = fused_impl(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=True,
+                    activation=activation,
+                    quant_config=self.moe_quant_config,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                )
+            else:
+                result = fused_impl(
+                    hidden_states=x,
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=True,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                    global_num_experts=global_num_experts,
+                    expert_map=expert_map,
+                )
 
         if zero_expert_num != 0 and zero_expert_type is not None:
             assert not isinstance(result, tuple), (
