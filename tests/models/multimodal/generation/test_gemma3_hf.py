@@ -3,13 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Gemma3 GGUF multimodal generation tests.
+"""Gemma3 HF multimodal generation tests.
 
-Tests GGUF quantized multimodal model via vLLM runner to ensure correct
-loading and inference for the 4B Gemma3 model with mmproj support.
+Tests HuggingFace safetensors multimodal model via vLLM runner to ensure
+correct loading and inference for the 4B Gemma3 model.
 """
-
-from huggingface_hub import hf_hub_download
 
 from vllm.assets.image import ImageAsset
 
@@ -17,29 +15,16 @@ from vllm.assets.image import ImageAsset
 PROMPT = "Describe this image in detail:"
 
 
-def test_gemma3_4b_gguf_multimodal(vllm_runner):
-    """Test Gemma3 4B GGUF multimodal generation."""
-    # Download GGUF model
-    gguf_file = hf_hub_download(
-        repo_id="google/gemma-3-4b-it-qat-q4_0-gguf",
-        filename="gemma-3-4b-it-q4_0.gguf",
-    )
-
-    # Download mmproj file
-    mmproj_file = hf_hub_download(
-        repo_id="google/gemma-3-4b-it-qat-q4_0-gguf",
-        filename="mmproj-model-f16-4B.gguf",
-    )
-
+def test_gemma3_4b_hf_multimodal(vllm_runner):
+    """Test Gemma3 4B HF multimodal generation."""
     # Get test image
     image = ImageAsset("stop_sign").pil_image
 
     with vllm_runner(
-        gguf_file,
+        "google/gemma-3-4b-it",
         max_model_len=4096,
         limit_mm_per_prompt={"image": 1},
         tensor_parallel_size=1,
-        mm_processor_kwargs={"mmproj": mmproj_file},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(
             [PROMPT],
