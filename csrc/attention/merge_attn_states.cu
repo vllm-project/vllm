@@ -35,7 +35,7 @@ __global__ void merge_attn_states_kernel(
   const uint head_idx = token_head_idx % num_heads;
 
   const uint pack_offset = pack_idx * pack_size;  // (0~15)*8, etc.
-  const uint src_head_offset = token_idx * num_heads * predix_head_stride +
+  const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
                                head_idx * prefix_head_stride;
   const uint dst_head_offset = token_idx * num_heads * output_head_stride +
                                head_idx * output_head_stride;
