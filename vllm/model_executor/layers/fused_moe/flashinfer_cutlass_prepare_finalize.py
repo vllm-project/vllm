@@ -199,7 +199,8 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             a1q_scale = None
 
         if self.use_dp:
-            # Build gather list conditionally - omit a1q_scale if None (block-scale path)
+            # Build gather list conditionally - omit a1q_scale if None
+            # (block-scale path)
             gather_list = [topk_weights, topk_ids, a1q]
             if a1q_scale is not None:
                 gather_list.append(a1q_scale)
