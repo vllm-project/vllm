@@ -660,7 +660,7 @@ package_data = {
 if envs.VLLM_USE_PRECOMPILED:
     assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
     wheel_location = os.getenv("VLLM_PRECOMPILED_WHEEL_LOCATION", None)
-    if wheel_location is not None:
+    if wheel_location:
         wheel_url = wheel_location
     else:
         import platform
