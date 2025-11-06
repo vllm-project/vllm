@@ -6,7 +6,7 @@ import json
 import openai  # use the official client for correctness check
 import pytest
 
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = "Qwen/Qwen3-1.7B"
 tools = [
     {
         "type": "function",
