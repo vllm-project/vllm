@@ -100,6 +100,7 @@ def _ensure_project_install(torch_spec: tuple[str, str | None], *, tag: str) -> 
             "wheel",
             "packaging>=24.2",
             "jinja2",
+            "cmake>=3.26.1",
         ],
         cwd=repo_dir,
     )
