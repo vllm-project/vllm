@@ -136,24 +136,19 @@ if check_aiter_fp8_linear_support():
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
-                result_silu_mul: torch.Tensor,
             ):
-                at1 = auto_functionalized(
-                    SILU_MUL_OP, result=result_silu_mul, input=input
-                )
+                at1 = self.silu_and_mul_matcher.forward_custom(input)
                 at2 = AITER_BLOCK_QUANT_OP(x=at1[1])
                 return at2[0], at2[1]
 
             def replacement(
                 input: torch.Tensor,
-                result_silu_mul: torch.Tensor,
             ):
                 at = FUSED_SILU_MUL_QUANT_OP(x=input)
                 return at[0], at[1]
 
             inputs = [
-                empty_bf16(5, 4),  # input
-                empty_bf16(5, 4),  # result_silu_mul
+                self.silu_and_mul_matcher.inputs()[0],
             ]
 
             register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
