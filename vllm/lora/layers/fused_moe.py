@@ -280,8 +280,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             self.base_layer, fused_experts.moe_sum
         )
 
-        self.base_layer.quant_method.old_fused_experts = (
-            self.base_layer.quant_method.fused_experts
+        self.base_layer.quant_method.old_fused_experts = getattr(
+            self.base_layer.quant_method, "fused_experts", None
         )
         self.base_layer.quant_method.fused_experts = m_fused_moe_fn
 
