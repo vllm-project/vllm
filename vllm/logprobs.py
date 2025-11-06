@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, MutableSequence
 from dataclasses import dataclass, field
+from io import UnsupportedOperation
 from typing import overload
 
 import vllm.envs as envs
@@ -28,9 +29,8 @@ class Logprob:
 LogprobsOnePosition = dict[int, Logprob]
 
 
-# TODO(Jialin): Add more unit tests for the class and util functions
 @dataclass
-class FlattenLogprobs(Sequence[LogprobsOnePosition]):
+class FlattenLogprobs(MutableSequence[LogprobsOnePosition]):
     """
     Flatten logprobs of a request into multiple primitive type lists.
 
@@ -62,7 +62,7 @@ class FlattenLogprobs(Sequence[LogprobsOnePosition]):
     # from self.start_indices[i] to self.end_indices[i] (exclusive).
     token_ids: list[int] = field(default_factory=list)
     logprobs: list[float] = field(default_factory=list)
-    ranks: list[int] = field(default_factory=list)
+    ranks: list[int | None] = field(default_factory=list)
     decoded_tokens: list[str | None] = field(default_factory=list)
 
     def append(self, logprobs_one_position: LogprobsOnePosition | None) -> None:
@@ -117,6 +117,15 @@ class FlattenLogprobs(Sequence[LogprobsOnePosition]):
             )
         else:
             raise TypeError(f"Invalid index type: {type(index)}")
+
+    def __setitem__(self, item, value) -> None:
+        raise UnsupportedOperation("Cannot set logprobs in FlattenLogprobs")
+
+    def __delitem__(self, item) -> None:
+        raise UnsupportedOperation("Cannot delete logprobs from FlattenLogprobs")
+
+    def insert(self, item) -> None:
+        raise UnsupportedOperation("Cannot insert logprobs to FlattenLogprobs")
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
         """
