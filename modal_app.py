@@ -43,7 +43,7 @@ if os.environ.get("HF_TOKEN"):
 
 cpu_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("git", "curl", "build-essential")
+    .apt_install("git", "curl", "build-essential", "cmake", "ninja-build")
     .pip_install(
         "numpy>=1.26",
         "pytest>=8.0",
@@ -66,8 +66,8 @@ gpu_image = (
 gpu_image = gpu_image._add_mount_layer_or_copy(repo_mount)
 
 CPU_TORCH_SPEC = (
-    "torch==2.8.0+cpu",
-    "https://download.pytorch.org/whl/cpu",
+    "torch==2.9.0",
+    None,
 )
 
 GPU_TORCH_SPEC = (
@@ -84,10 +84,10 @@ def _ensure_editable_install() -> None:
     import sys
 
     pkg, index_url = CPU_TORCH_SPEC
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", pkg, "--index-url", index_url],
-        cwd="/workspace",
-    )
+    cmd = [sys.executable, "-m", "pip", "install", pkg]
+    if index_url:
+        cmd.extend(["--index-url", index_url])
+    subprocess.check_call(cmd, cwd="/workspace")
     subprocess.check_call(
         [sys.executable, "-m", "pip", "install", "-e", "."],
         cwd="/workspace",
