@@ -58,7 +58,6 @@ from .interfaces import (
     SupportsPP,
 )
 from .qwen import QWenBaseModel, QWenModel
-from .utils import flatten_bn
 
 
 class QwenImagePixelInputs(TensorSchema):
@@ -703,6 +702,8 @@ class QwenVLMultiModalProcessor(BaseMultiModalProcessor[QwenVLProcessingInfo]):
 class QwenVLForConditionalGeneration(
     QWenBaseModel, SupportsPP, SupportsLoRA, SupportsMultiModal
 ):
+    merge_by_field_config = True
+
     packed_modules_mapping = {
         "c_attn": ["c_attn"],
         "gate_up_proj": [
@@ -750,30 +751,19 @@ class QwenVLForConditionalGeneration(
         image_embeds = kwargs.pop("image_embeds", None)
 
         if pixel_values is not None:
-            if not isinstance(pixel_values, (torch.Tensor, list)):
-                raise ValueError(
-                    f"Incorrect type of pixel values. Got type: {type(pixel_values)}"
-                )
-
             expected_h = expected_w = self.config.visual["image_size"]
             resolve_bindings = {"h": expected_h, "w": expected_w}
 
             return QwenImagePixelInputs(
                 type="pixel_values",
-                data=flatten_bn(pixel_values, concat=True),
+                data=pixel_values,
                 resolve_bindings=resolve_bindings,
             )
 
         if image_embeds is not None:
-            if not isinstance(image_embeds, (torch.Tensor, list)):
-                raise ValueError(
-                    "Incorrect type of image embeddings. "
-                    f"Got type: {type(image_embeds)}"
-                )
-
             return QwenImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds, concat=True),
+                data=image_embeds,
             )
 
         return None
