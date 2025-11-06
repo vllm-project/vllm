@@ -2386,10 +2386,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # TODO(girfan): No CUDA graphs being used for now.
             # Will look for PyTorch's training-compatible CUDA graphs later.
-            # cudagraph_runtime_mode, batch_descriptor = \
-            #     self.cudagraph_dispatcher.dispatch(batch_descriptor)
+            cudagraph_runtime_mode, batch_descriptor = \
+                self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
-            cudagraph_runtime_mode = CUDAGraphMode.NONE
+            # cudagraph_runtime_mode = CUDAGraphMode.NONE
 
         # TODO(girfan): Use a field from input_batch to check?
         # Check if this is a LoRA training request
@@ -2579,9 +2579,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.training_manager.log()
                     self.training_manager.reset_loss()
 
-        training_loss = self.training_manager.loss if not is_eval_batch else None
-        training_logits = per_req_logits if not is_eval_batch else None
-        eval_loss = loss if is_eval_batch else torch.stack(all_eval_losses, dim=0)
+        training_loss = self.training_manager.loss
+        training_logits = per_req_logits
+        eval_loss = None if len(all_eval_losses) == 0 else torch.stack(all_eval_losses, dim=0)
         eval_logits = None
         loss = training_loss if not is_eval_batch else eval_loss
         logits = training_logits if not is_eval_batch else eval_logits

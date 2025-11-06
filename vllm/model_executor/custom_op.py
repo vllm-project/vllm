@@ -43,18 +43,23 @@ class CustomOp(nn.Module):
 
     def __init__(self):
         super().__init__()
+        self._forward_method = self.dispatch_forward()
         if self.__class__.name in DYNAMIC_DISPATCH_CUSTOM_OPS:
-            # Dynamically dispatch.
-            self._forward_method = None
+            self._supports_dynamic_dispatch = True
+            self._forward_method_training = self.dispatch_forward(force_native=True)
         else:
-            self._forward_method = self.dispatch_forward()
+            self._supports_dynamic_dispatch = False
+            self._forward_method_training = None
 
     def forward(self, *args, **kwargs):
-        if self._forward_method is not None:
+        if not self._supports_dynamic_dispatch:
             return self._forward_method(*args, **kwargs)
         # Dynamic dispatch.
         is_training = torch.is_grad_enabled()
-        return self.dispatch_forward(force_native=is_training)(*args, **kwargs)
+        if is_training:
+            return self._forward_method_training(*args, **kwargs)
+        else:
+            return self._forward_method(*args, **kwargs)
 
     def forward_native(self, *args, **kwargs):
         """PyTorch-native implementation of the forward method.

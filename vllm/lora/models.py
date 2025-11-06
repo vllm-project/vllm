@@ -183,8 +183,12 @@ class LoRAModel:
         # Skip applying optimize to the LoRA if it will be used for training
         # We will apply scaling in the LoRA computation itself in base_linear.py
         from vllm.lora.training_manager import TrainingManager
-        training_manager = TrainingManager.get_instance()
-        if not training_manager.is_registered_by_id(lora_model_id):
+        if TrainingManager.is_enabled():
+            training_manager = TrainingManager.get_instance()
+            is_training_lora = training_manager.is_registered_by_id(lora_model_id)
+        else:
+            is_training_lora = False
+        if not is_training_lora:
             for lora in loras.values():
                 lora.optimize()
 
@@ -557,8 +561,11 @@ class LoRAModelManager:
         """Create zero-initialized LoRAModel for warmup."""
         model = LoRAModel(lora_id, rank, {})
         from vllm.lora.training_manager import TrainingManager
-        training_manager = TrainingManager.get_instance()
-        is_training_lora = training_manager.is_registered_by_id(lora_id)
+        if TrainingManager.is_enabled():
+            training_manager = TrainingManager.get_instance()
+            is_training_lora = training_manager.is_registered_by_id(lora_id)
+        else:
+            is_training_lora = False
         for module_name, module in self.model.named_modules():
             bias_enabled = self.lora_config.bias_enabled
             if (not self._match_target_modules(module_name)

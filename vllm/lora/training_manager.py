@@ -163,6 +163,10 @@ class TrainingManager:
         self._initialized = True
 
     @classmethod
+    def is_enabled(cls) -> bool:
+        return cls._instance is not None and cls._initialized
+
+    @classmethod
     def get_instance(cls):
         """
         Get the singleton instance of TrainingManager.
@@ -174,8 +178,7 @@ class TrainingManager:
             RuntimeError: If the instance has not been initialized yet
         """
         if cls._instance is None:
-            raise RuntimeError("TrainingManager has not been initialized yet. "
-                             "Create an instance first with TrainingManager(...)")
+            raise RuntimeError("TrainingManager has not been initialized yet.")
         return cls._instance
 
     @classmethod
