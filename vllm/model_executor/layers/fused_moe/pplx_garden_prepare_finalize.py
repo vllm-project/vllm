@@ -231,6 +231,7 @@ class PplxGardenPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             dp_x=a1q,
             dp_x_scale=a1q_scale,
             indices=topk_ids,
+            weights=topk_weights,
             bound_m=bound_m,
             do_send=False,
             do_recv=True,
