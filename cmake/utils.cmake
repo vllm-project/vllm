@@ -457,17 +457,16 @@ endmacro()
 # arguments are:
 #
 # DESTINATION <dest>         - Module destination directory.
-# LANGUAGE <lang>            - The GPU language for this module, e.g CUDA, HIP,
-#                              etc.
+# LANGUAGE <lang>            - The language for this module, e.g. CUDA, HIP,
+#                              CXX, etc.
 # SOURCES <sources>          - List of source files relative to CMakeLists.txt
 #                              directory.
 #
 # Optional arguments:
 #
-# ARCHITECTURES <arches>     - A list of target GPU architectures in cmake
-#                              format.
-#                              Refer `CMAKE_CUDA_ARCHITECTURES` documentation
-#                              and `CMAKE_HIP_ARCHITECTURES` for more info.
+# ARCHITECTURES <arches>     - A list of target architectures in cmake format.
+#                              For GPU, refer to CMAKE_CUDA_ARCHITECTURES and
+#                              CMAKE_HIP_ARCHITECTURES for more info.
 #                              ARCHITECTURES will use cmake's defaults if
 #                              not provided.
 # COMPILE_FLAGS <flags>      - Extra compiler flags passed to NVCC/hip.
