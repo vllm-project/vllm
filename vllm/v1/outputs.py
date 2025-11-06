@@ -128,6 +128,15 @@ class KVConnectorOutput:
         )
 
 
+@dataclass
+class MFUInfo:
+    flops: float = 0
+    read_bytes: float = 0
+    write_bytes: float = 0
+    # latency in seconds
+    latency_s: float = -1
+
+
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
 @dataclass
@@ -161,6 +170,8 @@ class ModelRunnerOutput:
 
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
+
+    mfu_info: MFUInfo | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

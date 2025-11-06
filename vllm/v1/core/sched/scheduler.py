@@ -31,7 +31,12 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    MFUOutput,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -900,6 +905,7 @@ class Scheduler(SchedulerInterface):
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
+        mfu_info = model_runner_output.mfu_info
         kv_connector_output = model_runner_output.kv_connector_output
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
@@ -1060,8 +1066,16 @@ class Scheduler(SchedulerInterface):
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
+        mfu_output = None
+        if mfu_info:
+            mfu_output = MFUOutput(
+                flops=mfu_info.flops,
+                read_bytes=mfu_info.read_bytes,
+                write_bytes=mfu_info.write_bytes,
+                latency_sec=mfu_info.latency_s,
+            )
         engine_core_outputs = {
-            client_index: EngineCoreOutputs(outputs=outs)
+            client_index: EngineCoreOutputs(outputs=outs, mfu_output=mfu_output)
             for client_index, outs in outputs.items()
         }
 

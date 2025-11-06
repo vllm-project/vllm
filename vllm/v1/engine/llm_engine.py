@@ -36,6 +36,7 @@ from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.outputs import MFUInfo
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -283,7 +284,15 @@ class LLMEngine:
         outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        iteration_stats = IterationStats() if self.log_stats else None
+        mfu_info = None
+        if outputs.mfu_output:
+            mfu_info = MFUInfo(
+                flops=outputs.mfu_output.flops,
+                read_bytes=outputs.mfu_output.read_bytes,
+                write_bytes=outputs.mfu_output.write_bytes,
+                latency_s=outputs.mfu_output.latency_sec,
+            )
+        iteration_stats = IterationStats(mfu_info=mfu_info) if self.log_stats else None
         processed_outputs = self.output_processor.process_outputs(
             outputs.outputs,
             engine_core_timestamp=outputs.timestamp,

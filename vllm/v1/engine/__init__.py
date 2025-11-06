@@ -150,6 +150,18 @@ class UtilityOutput(
     result: UtilityResult | None = None
 
 
+class MFUOutput(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    gc=False,
+):  # type: ignore[call-arg]
+    # Info to calculate MFU
+    flops: float = 0.0
+    read_bytes: float = 0.0
+    write_bytes: float = 0.0
+    latency_sec: float = 0.0
+
+
 class EngineCoreOutputs(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]
@@ -168,6 +180,7 @@ class EngineCoreOutputs(
 
     utility_output: UtilityOutput | None = None
     finished_requests: set[str] | None = None
+    mfu_output: MFUOutput | None = None
 
     # In DP case, used to signal that the current wave of requests
     # has finished and the engines are paused.

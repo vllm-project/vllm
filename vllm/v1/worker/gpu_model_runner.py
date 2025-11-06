@@ -133,6 +133,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.mfu_analyzer_mixin import MFUAnalyzerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlice,
     UBatchSlices,
@@ -234,7 +235,9 @@ class ExecuteModelState(NamedTuple):
     kv_connector_output: KVConnectorOutput | None
 
 
-class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+class GPUModelRunner(
+    LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, MFUAnalyzerMixin
+):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -312,6 +315,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
+
+        # MFU is calculated every N steps, stored in `self.mfu_info`
+        self.init_mfu_analysis(self.observability_config)
 
         self.eplb_state: EplbState | None = None
         """
@@ -2531,6 +2537,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ):
                 cudagraph_runtime_mode = CUDAGraphMode.NONE
 
+        wrapped_model = self.maybe_wrap_with_mfu_analyzer(
+            self.model, self.observability_config
+        )
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         with (
@@ -2546,7 +2555,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             record_function_or_nullcontext("Forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
-            model_output = self._model_forward(
+            # Call wrapped model (may be original if MFU is disabled)
+            model_output = wrapped_model(
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -2733,6 +2743,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=[],
             kv_connector_output=kv_connector_output,
             num_nans_in_logits=num_nans_in_logits,
+            mfu_info=self.mfu_info,
         )
 
         if not self.use_async_scheduling:
