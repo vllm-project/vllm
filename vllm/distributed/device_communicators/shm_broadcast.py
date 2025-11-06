@@ -53,9 +53,9 @@ def long_wait_time_msg(threshold: int) -> str:
     return (
         "No available shared memory broadcast block found "
         f"in {threshold} seconds. This typically happens "
-        "when some processes are hanging or doing some"
-        "time-consuming work (e.g. compilation,"
-        "weight/kv cache quantization)"
+        "when some processes are hanging or doing some "
+        "time-consuming work (e.g. compilation, "
+        "weight/kv cache quantization)."
     )
 
 
