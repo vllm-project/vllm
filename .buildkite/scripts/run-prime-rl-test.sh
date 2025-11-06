@@ -128,35 +128,31 @@ echo "Git status:"
 git status --short
 
 echo ""
-echo "Installing Prime-RL as a package..."
-echo ""
-echo "NOTE: Following CI pattern - using 'pip install' instead of 'uv sync'"
-echo "      This preserves the Docker image's PyTorch version to maintain vLLM binary compatibility"
+echo "Installing Prime-RL using system packages..."
+echo "NOTE: Using 'uv pip install --system' to preserve Docker's PyTorch 2.9.0+cu129"
+echo "      'uv sync' would downgrade PyTorch to 2.8 and break vLLM binary compatibility"
 
 # Remove vllm pin from pyproject.toml to use pre-installed vLLM
 echo ""
 echo "Removing vllm pin from pyproject.toml..."
 sed -i '/vllm==/d' pyproject.toml
-echo "Modified pyproject.toml (vllm entry):"
-grep -i vllm pyproject.toml || echo "No vllm entry found (expected after removal)"
+echo "Modified pyproject.toml (vllm entry removed)"
 
-# Install Prime-RL dependencies using pip install --system
-# This follows the same pattern as other integration tests in test-pipeline.yaml
+# Install Prime-RL dependencies
 echo ""
 echo "=========================================="
 echo "=== Installing Prime-RL Dependencies ==="
 echo "=========================================="
 echo "This may take several minutes..."
 
-# Install Prime-RL in editable mode with its dependencies
-# Constrain NumPy to be compatible with vLLM's numba dependency (requires NumPy <= 2.2)
-echo "Installing Prime-RL package and dependencies..."
-echo "Constraining NumPy version to maintain numba compatibility (numba requires NumPy <= 2.2)"
+# Install Prime-RL with NumPy constraint to prevent incompatible upgrades
+# Use --system to install into Docker's Python (preserves PyTorch 2.9)
+echo "Installing Prime-RL with NumPy<2.3 constraint (for numba compatibility)..."
 uv pip install --system -e . --prerelease=allow 'numpy<2.3'
 
 echo ""
 echo "Prime-RL installation complete!"
-echo "Using PyTorch and vLLM from Docker image (preserves binary compatibility)"
+echo "Preserved Docker's PyTorch and vLLM to maintain binary compatibility"
 
 # ==========================================
 # Verify Installation
@@ -191,6 +187,83 @@ echo ""
 echo "Prime-RL integration test environment setup complete!"
 
 # ==========================================
+# Patch Prime-RL conftest.py for debugging
+# ==========================================
+echo ""
+echo "=========================================="
+echo "=== Patching Prime-RL for Diagnostics ==="
+echo "=========================================="
+echo "Modifying conftest.py to capture vLLM server logs instead of redirecting to DEVNULL"
+
+CONFTEST_PATH="tests/conftest.py"
+if [ -f "${CONFTEST_PATH}" ]; then
+  echo "Found conftest.py at: ${CONFTEST_PATH}"
+  echo "Original conftest.py size: $(wc -l < ${CONFTEST_PATH}) lines"
+  
+  # Backup original
+  cp "${CONFTEST_PATH}" "${CONFTEST_PATH}.backup"
+  
+  # Show the original Popen line before patching
+  echo ""
+  echo "Original Popen line:"
+  grep -n "subprocess.Popen.*VLLM_SERVER_CMD" "${CONFTEST_PATH}" || echo "Pattern not found"
+  
+  # Replace stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL with file outputs
+  # Also replace just stderr=subprocess.DEVNULL in case stdout is separate
+  sed -i 's/stdout=subprocess\.DEVNULL, stderr=subprocess\.DEVNULL/stdout=open("\/tmp\/vllm_server_stdout.log", "w"), stderr=open("\/tmp\/vllm_server_stderr.log", "w")/g' "${CONFTEST_PATH}"
+  sed -i 's/stderr=subprocess\.DEVNULL/stderr=open("\/tmp\/vllm_server_stderr.log", "w")/g' "${CONFTEST_PATH}"
+  sed -i 's/stdout=subprocess\.DEVNULL/stdout=open("\/tmp\/vllm_server_stdout.log", "w")/g' "${CONFTEST_PATH}"
+  
+  echo ""
+  echo "After patching - Popen line:"
+  grep -n "subprocess.Popen.*VLLM_SERVER_CMD" "${CONFTEST_PATH}" || echo "Pattern not found"
+  
+  echo ""
+  echo "Patched conftest.py to log server output to:"
+  echo "  - /tmp/vllm_server_stdout.log"
+  echo "  - /tmp/vllm_server_stderr.log"
+  
+  # Pre-create log files to ensure they're writable
+  touch /tmp/vllm_server_stdout.log /tmp/vllm_server_stderr.log
+  chmod 666 /tmp/vllm_server_stdout.log /tmp/vllm_server_stderr.log
+  echo "Pre-created log files:"
+  ls -lh /tmp/vllm_server_*.log
+  
+  # Show what command will be used
+  echo ""
+  echo "Extracting vLLM server configuration from conftest.py:"
+  echo ""
+  grep -B 2 -A 8 "VLLM_SERVER_CMD\|VLLM_SERVER_ENV" "${CONFTEST_PATH}" | head -40 || echo "Not found in conftest.py"
+  
+  # Patch VLLM_SERVER_CMD to use system Python instead of 'uv run'
+  echo ""
+  echo "=== Patching VLLM_SERVER_CMD for system Python ==="
+  echo "Original command uses 'uv run' which requires UV environment"
+  echo "Changing to use system Python directly since we installed with --system"
+  
+  # Replace ["uv", "run", "inference", ... with ["python3", "-m", "prime_rl.inference.server", ...
+  # or just ["inference", ... since it's installed in system PATH
+  sed -i 's/VLLM_SERVER_CMD = \["uv", "run", "inference"/VLLM_SERVER_CMD = ["inference"/' "${CONFTEST_PATH}"
+  
+  echo ""
+  echo "Patched VLLM_SERVER_CMD:"
+  grep "VLLM_SERVER_CMD" "${CONFTEST_PATH}"
+  
+  # Test that the inference command exists
+  echo ""
+  echo "=== Testing Prime-RL inference command ==="
+  if inference --help > /tmp/inference_help.log 2>&1; then
+    echo "✓ 'inference' command is available in system PATH"
+    head -20 /tmp/inference_help.log
+  else
+    echo "✗ 'inference' command failed"
+    cat /tmp/inference_help.log
+  fi
+else
+  echo "Warning: ${CONFTEST_PATH} not found"
+fi
+
+# ==========================================
 # Run Prime-RL Integration Tests
 # ==========================================
 echo ""
@@ -209,11 +282,50 @@ echo ""
 export WANDB_MODE=offline
 export VLLM_LOGGING_LEVEL=DEBUG
 
-# Run with timeout and capture output
-echo "Starting tests..."
-timeout 600 pytest -v -s tests/integration/test_rl.py -m gpu 2>&1 | tee /tmp/pytest_output.log
+echo "Environment variables for test run:"
+echo "  WANDB_MODE=${WANDB_MODE}"
+echo "  VLLM_LOGGING_LEVEL=${VLLM_LOGGING_LEVEL}"
+echo ""
 
+# Start a background monitor to show log file growth
+echo "Starting background log monitor..."
+(
+  while true; do
+    sleep 10
+    if [ -f "/tmp/vllm_server_stdout.log" ] || [ -f "/tmp/vllm_server_stderr.log" ]; then
+      echo "[$(date -u +"%Y-%m-%dT%H:%M:%SZ")] Log file status:"
+      ls -lh /tmp/vllm_server_*.log 2>/dev/null || true
+      if [ -f "/tmp/vllm_server_stderr.log" ] && [ -s "/tmp/vllm_server_stderr.log" ]; then
+        echo "  [STDERR LAST 5 LINES]:"
+        tail -5 /tmp/vllm_server_stderr.log | sed 's/^/    /'
+      fi
+    fi
+  done
+) &
+MONITOR_PID=$!
+echo "Background monitor started with PID: ${MONITOR_PID}"
+
+# Run with timeout and capture output
+echo ""
+echo "Starting tests..."
+set +e  # Temporarily disable exit on error to capture exit code
+timeout 600 pytest -v -s tests/integration/test_rl.py -m gpu 2>&1 | tee /tmp/pytest_output.log
 TEST_EXIT_CODE=${PIPESTATUS[0]}
+set -e  # Re-enable exit on error
+
+# Stop background monitor
+kill ${MONITOR_PID} 2>/dev/null || true
+echo ""
+echo "Background monitor stopped"
+
+# Immediately check log files after test completion
+echo ""
+echo "=== Immediate Post-Test Log Check ==="
+echo "Checking if vLLM server logs were created:"
+ls -lh /tmp/vllm_server_*.log 2>/dev/null || echo "No log files found"
+echo ""
+echo "All files in /tmp:"
+ls -lh /tmp/ | head -50
 
 echo ""
 echo "=========================================="
@@ -233,10 +345,48 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
   echo "=== Post-Failure Diagnostics ==="
   echo "=========================================="
   
+  # Check for log files first
+  echo ""
+  echo "=== Checking ALL /tmp files ==="
+  ls -lh /tmp/ | grep -E "vllm|pytest|inference" || echo "No relevant files in /tmp"
+  
+  echo ""
+  echo "=== Checking for vLLM server log files specifically ==="
+  ls -lh /tmp/vllm_server_*.log 2>/dev/null || echo "No vLLM server log files found in /tmp"
+  
+  # Show vLLM server logs if they exist (from our conftest.py patch)
+  echo ""
+  echo "=========================================="
+  echo "=== vLLM Server Logs (from pytest fixture) ==="
+  echo "=========================================="
+  
+  if [ -f "/tmp/vllm_server_stdout.log" ]; then
+    STDOUT_SIZE=$(wc -l < /tmp/vllm_server_stdout.log)
+    echo ""
+    echo "Server stdout (${STDOUT_SIZE} lines):"
+    echo "----------------------------------------"
+    cat /tmp/vllm_server_stdout.log
+    echo "----------------------------------------"
+  else
+    echo "✗ No stdout log found at /tmp/vllm_server_stdout.log"
+  fi
+  
+  echo ""
+  if [ -f "/tmp/vllm_server_stderr.log" ]; then
+    STDERR_SIZE=$(wc -l < /tmp/vllm_server_stderr.log)
+    echo ""
+    echo "Server stderr (${STDERR_SIZE} lines):"
+    echo "----------------------------------------"
+    cat /tmp/vllm_server_stderr.log
+    echo "----------------------------------------"
+  else
+    echo "✗ No stderr log found at /tmp/vllm_server_stderr.log"
+  fi
+  
   # Check for any vLLM processes
   echo ""
-  echo "=== Active vLLM processes ==="
-  ps aux | grep -i vllm | grep -v grep || echo "No vLLM processes found"
+  echo "=== Active vLLM/inference processes ==="
+  ps aux | grep -E "vllm|inference" | grep -v grep || echo "No vLLM/inference processes found"
   
   # Check port usage
   echo ""
@@ -259,8 +409,8 @@ if [ $TEST_EXIT_CODE -ne 0 ]; then
   
   # Last lines of pytest output
   echo ""
-  echo "=== Last 50 lines of pytest output ==="
-  tail -50 /tmp/pytest_output.log || echo "Could not read pytest output log"
+  echo "=== Last 100 lines of pytest output ==="
+  tail -100 /tmp/pytest_output.log || echo "Could not read pytest output log"
   
   exit $TEST_EXIT_CODE
 fi
