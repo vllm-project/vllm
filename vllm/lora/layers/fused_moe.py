@@ -16,6 +16,7 @@ from vllm.lora.layers.fused_moe_permute_experts_unpermute import (
     FusedMoEPermuteExpertsUnpermuteWithLoRA,
 )
 from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe.layer import FusedMoEModularMethod
 from vllm.model_executor.layers.fused_moe.mk_fused_experts_lora_support import (
     mk_fused_experts_supports_lora,
 )
@@ -41,29 +42,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.device = base_layer.w2_weight.device
         self._inject_lora_into_fused_moe()
 
-        assert isinstance(
-            self.base_layer.quant_method.fused_experts, FusedMoEModularKernel
-        )
+        assert isinstance(self.base_layer.quant_method, FusedMoEModularMethod)
         self.fused_experts: FusedMoEPermuteExpertsUnpermuteWithLoRA = (
             self.base_layer.quant_method.fused_experts.fused_experts
         )
         assert isinstance(self.fused_experts, FusedMoEPermuteExpertsUnpermuteWithLoRA)
 
     @staticmethod
-    def _use_modular_kernel(layer: FusedMoE) -> None:
-        assert not layer.quant_method.using_modular_kernel
+    def _use_modular_kernel(layer: FusedMoE) -> FusedMoEModularMethod:
+        assert not isinstance(layer.quant_method, FusedMoEModularMethod)
         qm = layer.quant_method
-        if not qm.using_modular_kernel:
-            assert qm.topk_indices_dtype is None
-            assert qm.fused_experts is None
-
-            prepare_finalize = MoEPrepareAndFinalizeNoEP()
-            mk_experts = qm.select_gemm_impl(prepare_finalize, layer)
-
-            qm.topk_indices_dtype = prepare_finalize.topk_indices_dtype()
-            qm.fused_experts = FusedMoEModularKernel(
-                prepare_finalize, mk_experts, layer.shared_experts
-            )
+        prepare_finalize = MoEPrepareAndFinalizeNoEP()
+        mk_experts = qm.select_gemm_impl(prepare_finalize, layer)
+        mk = FusedMoEModularKernel(prepare_finalize, mk_experts, layer.shared_experts)
+        return FusedMoEModularMethod(layer.quant_method, mk)
 
     def _inject_lora_into_fused_moe(self):
         # TODO: Support EP
@@ -72,9 +64,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
 
         # Replace base-layer quant_method with ModularKernel
-        if not self.base_layer.quant_method.using_modular_kernel:
+        if not isinstance(self.base_layer.quant_method, FusedMoEModularMethod):
             FusedMoEWithLoRA._use_modular_kernel(self.base_layer)
-        assert self.base_layer.quant_method.using_modular_kernel
+        assert isinstance(self.base_layer.quant_method, FusedMoEModularKernel)
 
         assert isinstance(
             self.base_layer.quant_method.fused_experts, FusedMoEModularKernel
@@ -99,10 +91,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
-
-        self.adapter_enabled = torch.tensor(
-            [0] * (max_loras + 1), dtype=torch.int, device=self.device
-        )
 
         self.w1_lora_a_stacked = torch.zeros(
             (
@@ -199,7 +187,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.w3_lora_b_stacked[index] = 0
         self.w2_lora_a_stacked[index] = 0
         self.w2_lora_b_stacked[index] = 0
-        self.adapter_enabled[index] = 0
+        self.fused_experts.set_adapter_enabled(index, 0)
 
     def set_lora(
         self,
@@ -211,7 +199,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ):
         """Overwrites lora tensors at index."""
         self.reset_lora(index)
-        self.adapter_enabled[index] = 1
+        self.fused_experts.set_adapter_enabled(index, 1)
         for eid in range(len(lora_a) // 3):
             w1_lora_a = lora_a[eid * 3]
             w2_lora_a = lora_a[eid * 3 + 1]

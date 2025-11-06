@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from contextlib import contextmanager
 from dataclasses import dataclass
 from math import prod
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
 from vllm.lora.punica_wrapper import PunicaWrapperBase
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
@@ -26,6 +29,75 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     TopKWeightAndReduce,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+
+
+def _normalize_keys(config: dict[str, int | None]) -> dict[str, int | None]:
+    normalized_config = {}
+    for key, value in config.items():
+        if key.islower():
+            if key.startswith("block_"):
+                normalized_key = "BLOCK_SIZE_" + key.split("_")[-1].upper()
+            else:
+                normalized_key = key.upper()
+        else:
+            normalized_key = key
+        normalized_config[normalized_key] = value
+    return normalized_config
+
+
+def _get_lora_moe_configs(
+    op_prefix: str,
+    lora_a_stacked: torch.Tensor,
+    lora_b_stacked: torch.Tensor,
+    num_slices: int,
+    M: int,
+    top_k: int,
+    config_dtype: str | None,
+    base_layer_w13_weight: torch.Tensor,
+    base_layer_w2_weight: torch.Tensor,
+    quant_block_shape: list[int] | None,
+) -> tuple[dict[str, int | None], dict[str, int | None]]:
+    if envs.VLLM_TUNED_CONFIG_FOLDER:
+        shrink_config = get_lora_op_configs(
+            op_type=f"fused_moe_lora_{op_prefix}_shrink",
+            max_loras=lora_a_stacked.shape[0],
+            batch=M,
+            hidden_size=lora_a_stacked.shape[-1],
+            rank=lora_a_stacked.shape[-2],
+            num_slices=num_slices,
+            moe_intermediate_size=lora_b_stacked.shape[-2],
+        )
+        expand_config = get_lora_op_configs(
+            op_type=f"fused_moe_lora_{op_prefix}_expand",
+            max_loras=lora_a_stacked.shape[0],
+            batch=M,
+            hidden_size=lora_a_stacked.shape[-1],
+            rank=lora_a_stacked.shape[-2],
+            num_slices=num_slices,
+            moe_intermediate_size=lora_b_stacked.shape[-2],
+        )
+    else:  # fall back to the default config
+        get_config_func = functools.partial(
+            try_get_optimal_moe_config,
+            base_layer_w13_weight.size(),
+            base_layer_w2_weight.size(),
+            top_k,
+            config_dtype,
+            block_shape=quant_block_shape,
+        )
+        shrink_config = get_config_func(M)
+        expand_config = get_config_func(M)
+    shrink_config = _normalize_keys(shrink_config)
+    expand_config = _normalize_keys(expand_config)
+    return shrink_config, expand_config
+
+
+@dataclass
+class FusedMoELoRAConfigs:
+    gateup_shrink_config: dict[str, int | None]
+    gateup_expand_config: dict[str, int | None]
+    down_shrink_config: dict[str, int | None]
+    down_expand_config: dict[str, int | None]
 
 
 @dataclass
@@ -48,7 +120,7 @@ class ExpertsForwardState:
     expert_ids_lora: torch.Tensor
     num_tokens_post_padded_lora: torch.Tensor
     # LoRA kernel configs
-    config: dict[str, int]
+    configs: FusedMoELoRAConfigs
 
 
 class FusedMoEPermuteExpertsUnpermuteWithLoRA(
@@ -66,6 +138,7 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
         self.w3_lora_b_stacked: torch.Tensor | None = None
         self.w2_lora_a_stacked: torch.Tensor | None = None
         self.w2_lora_b_stacked: torch.Tensor | None = None
+
         self._inject_matmul_prologue_epilogue()
 
         # state recording
@@ -129,7 +202,9 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
             self.experts_forward_state.num_tokens_post_padded_lora,
             max_lora_rank,
             num_topk,
-            self.experts_forward_state.config,
+            self.experts_forward_state.configs.gateup_shrink_config,
+            self.experts_forward_state.configs.gateup_expand_config,
+            self.adapter_enabled,
         )
 
     def gateup_proj_lora_add(self, base_output: torch.Tensor):
@@ -149,6 +224,8 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
         self._ensure_weights()
         assert self.experts_forward_state is not None
         assert self.w1_lora_a_stacked is not None
+        assert self.w2_lora_a_stacked is not None
+        assert self.w2_lora_b_stacked is not None
 
         topk_weights = self.experts_forward_state.topk_weights
         topk_ids = self.experts_forward_state.topk_ids
@@ -170,7 +247,9 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
             self.experts_forward_state.num_tokens_post_padded_lora,
             max_lora_rank,
             num_topk,
-            self.experts_forward_state.config,
+            self.experts_forward_state.configs.down_shrink_config,
+            self.experts_forward_state.configs.down_expand_config,
+            self.adapter_enabled,
             True,
         )
 
@@ -202,12 +281,20 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
         w2_lora_a_stacked: torch.Tensor,
         w2_lora_b_stacked: torch.Tensor,
     ):
+        max_loras = w1_lora_a_stacked.size(0)
+        self.adapter_enabled = torch.tensor(
+            [0] * (max_loras + 1), dtype=torch.int, device=w1_lora_a_stacked.device
+        )
+
         self.w1_lora_a_stacked = w1_lora_a_stacked
         self.w1_lora_b_stacked = w1_lora_b_stacked
         self.w3_lora_a_stacked = w3_lora_a_stacked
         self.w3_lora_b_stacked = w3_lora_b_stacked
         self.w2_lora_a_stacked = w2_lora_a_stacked
         self.w2_lora_b_stacked = w2_lora_b_stacked
+
+    def set_adapter_enabled(self, index: int, value: int):
+        self.adapter_enabled[index] = value
 
     def _ensure_weights(self):
         assert all(
@@ -223,7 +310,7 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
         )
 
     def _allocate_lora_output_buffers(
-        self, M: int, num_topk: int, device: str, dtype: torch.dtype
+        self, M: int, num_topk: int, device: torch.device, dtype: torch.dtype
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         assert self.w1_lora_b_stacked is not None
         assert self.w3_lora_b_stacked is not None
@@ -252,31 +339,55 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
 
         return gateup_output, down_output, reduction_output
 
-    def _lora_moe_config(
+    def make_lora_configs(
         self,
         hidden_states: torch.Tensor,
         num_topk: int,
-        base_w1: torch.Tensor,
+        base_w13: torch.Tensor,
         base_w2: torch.Tensor,
-        quant_block_shape: list[int] | None = None,
-    ) -> dict[str, int]:
-        dtype = hidden_states.dtype
-        num_tokens = hidden_states.size(0)
+    ) -> FusedMoELoRAConfigs:
+        assert self.w1_lora_a_stacked is not None
+        assert self.w1_lora_b_stacked is not None
+        assert self.w2_lora_a_stacked is not None
+        assert self.w2_lora_b_stacked is not None
 
+        M = hidden_states.size(0)
+
+        # MoE kernel configs
         config_dtype = _get_config_dtype_str(
-            dtype=dtype,
+            dtype=hidden_states.dtype,
             use_fp8_w8a8=False,
             use_int8_w8a16=False,
             use_int4_w4a16=False,
         )
-
-        return try_get_optimal_moe_config(
-            w1_shape=base_w1.size(),
-            w2_shape=base_w2.size(),
+        shrink_config, expand_config = _get_lora_moe_configs(
+            op_prefix="w13",
+            lora_a_stacked=self.w1_lora_a_stacked,
+            lora_b_stacked=self.w1_lora_b_stacked,
+            num_slices=2,
+            M=M,
             top_k=num_topk,
-            dtype=config_dtype,
-            M=num_tokens,
-            block_shape=quant_block_shape,
+            config_dtype=config_dtype,
+            base_layer_w13_weight=base_w13,
+            base_layer_w2_weight=base_w2,
+            quant_block_shape=self.base_experts.quant_config.block_shape,
+        )
+
+        down_shrink_config, down_expand_config = _get_lora_moe_configs(
+            op_prefix="w2",
+            lora_a_stacked=self.w2_lora_a_stacked,
+            lora_b_stacked=self.w2_lora_b_stacked,
+            num_slices=1,
+            M=M,
+            top_k=num_topk,
+            config_dtype=config_dtype,
+            base_layer_w13_weight=base_w13,
+            base_layer_w2_weight=base_w2,
+            quant_block_shape=self.base_experts.quant_config.block_shape,
+        )
+
+        return FusedMoELoRAConfigs(
+            shrink_config, expand_config, down_shrink_config, down_expand_config
         )
 
     @contextmanager
@@ -293,20 +404,19 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
         apply_router_weight_on_input: bool,
     ):
         assert self.w1_lora_a_stacked is not None
+        assert self.w1_lora_b_stacked is not None
+        assert self.w2_lora_a_stacked is not None
+        assert self.w2_lora_b_stacked is not None
         M = hidden_states.size(0)
         num_topk = topk_ids.size(1)
         max_loras = self.w1_lora_a_stacked.size(0)
 
-        # MoE kernel config
-        lora_moe_kernel_config = self._lora_moe_config(
-            hidden_states,
-            num_topk,
-            base_w13,
-            base_w2,
-            self.base_experts.quant_config.block_shape,
-        )
+        # MoE LoRA kernel configs
+        configs = self.make_lora_configs(hidden_states, num_topk, base_w13, base_w2)
 
         # MoE LoRA align block size.
+        block_m = configs.gateup_shrink_config["BLOCK_SIZE_M"]
+        assert block_m is not None
         assert self.punica_wrapper is not None
         (
             sorted_token_ids_lora,
@@ -315,9 +425,10 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
         ) = self.punica_wrapper.moe_lora_align_block_size(
             topk_ids,
             M,
-            lora_moe_kernel_config["BLOCK_SIZE_M"],
+            block_m,
             num_experts,
             max_loras,
+            self.adapter_enabled,
             expert_map,
             lora_token_mapping_offset=self.get_lora_token_mapping_offset(),
         )
@@ -351,7 +462,7 @@ class FusedMoEPermuteExpertsUnpermuteWithLoRA(
             expert_ids_lora=expert_ids_lora,
             num_tokens_post_padded_lora=num_tokens_post_padded_lora,
             # LoRA kernel configs.
-            config=lora_moe_kernel_config,
+            configs=configs,
         )
 
         # Trigger LoRA gateup
