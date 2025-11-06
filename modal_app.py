@@ -95,6 +95,20 @@ def _ensure_project_install(torch_spec: tuple[str, str | None], *, tag: str) -> 
             "-m",
             "pip",
             "install",
+            "setuptools>=77.0.3,<80.0.0",
+            "setuptools-scm>=8.0",
+            "wheel",
+            "packaging>=24.2",
+            "jinja2",
+        ],
+        cwd=repo_dir,
+    )
+    subprocess.check_call(
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
             "-r",
             str((repo_dir / "requirements" / "common.txt").resolve()),
         ],
