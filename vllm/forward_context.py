@@ -185,7 +185,6 @@ class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[str, Any]
     """
-    Type AttentionMetadata for v0, 
     Type Dict[str, AttentionMetadata] for v1, map from layer_name of each 
     attention layer to its attention metadata
     Type List[Dict[str, AttentionMetadata]] for DBO. List of size two, one
@@ -193,7 +192,6 @@ class ForwardContext:
     Set dynamically for each forward pass
     """
     attn_metadata: Union[
-        "AttentionMetadata",
         dict[str, "AttentionMetadata"],
         list[dict[str, "AttentionMetadata"]],
     ]
@@ -324,14 +322,7 @@ def set_forward_context(
     finally:
         global last_logging_time, batchsize_logging_interval
         if need_to_track_batchsize:
-            if hasattr(attn_metadata, "num_prefill_tokens"):
-                # for v0 attention backends
-                batchsize = (
-                    attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
-                )
-            else:
-                # for v1 attention backends
-                batchsize = num_tokens
+            batchsize = num_tokens
             # we use synchronous scheduling right now,
             # adding a sync point here should not affect
             # scheduling of the next batch
