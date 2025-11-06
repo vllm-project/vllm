@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Iterable
 
 import modal
-from modal import Mount, Secret
+from modal.mount import Mount
+from modal.secret import Secret
 
 app = modal.App("eps-smoke")
 
