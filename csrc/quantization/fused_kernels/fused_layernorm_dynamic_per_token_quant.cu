@@ -88,48 +88,26 @@ __global__ void rms_norm_dynamic_per_token_quant_kernel(
 
 // RMS norm + quant kernel
 template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
-__global__ void rms_norm_per_block_quant_kernel_1(
+__global__ void rms_norm_per_block_quant_kernel(
     float* __restrict__ rms,
     scalar_out_t* __restrict__ out,  // [..., hidden_size]
     float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
-    float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
+    float* __restrict__ token_scale, float const* scale_ub,
+    float const var_epsilon, int32_t const hidden_size,
     scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
   vllm::vectorized::compute_rms<scalar_t, has_residual>(
       rms + blockIdx.x, input, hidden_size, var_epsilon, residual);
-}
 
-// RMS norm + quant kernel
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
-__global__ void rms_norm_per_block_quant_kernel_2(
-    float* rms, float* token_scale,
-    scalar_out_t* __restrict__ out,  // [..., hidden_size]
-    float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
-    scalar_t const* __restrict__ input,   // [..., hidden_size]
-    scalar_t const* __restrict__ weight,  // [hidden_size]
-    float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // Compute Scale
-  // Always able to vectorize due to constraints on hidden_size
+  // TODO: Vectorize this
   vllm::compute_dynamic_per_token_scales<scalar_t, scalar_out_t, has_residual>(
-      token_scale, scales, input, weight,
-      rms[blockIdx.x / (hidden_size / group_size)], scale_ub, hidden_size,
-      residual, group_size);
-}
+      token_scale, scales, input, weight, rms[blockIdx.x], scale_ub,
+      hidden_size, residual, group_size);
 
-// RMS norm + quant kernel
-template <typename scalar_t, typename scalar_out_t, bool has_residual = false>
-__global__ void rms_norm_per_block_quant_kernel_3(
-    float* rms, float* token_scale,
-    scalar_out_t* __restrict__ out,  // [..., hidden_size]
-    float* __restrict__ scales,      // [num_tokens, hidden_size / group_size]
-    scalar_t const* __restrict__ input,   // [..., hidden_size]
-    scalar_t const* __restrict__ weight,  // [hidden_size]
-    float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    scalar_t* __restrict__ residual = nullptr, int32_t const group_size = 0) {
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
   int token_idx = blockIdx.x * hidden_size / group_size;
@@ -236,8 +214,6 @@ void rms_norm_per_block_quant_dispatch(
 
   dim3 grid13(num_tokens);
   dim3 block13(std::min(hidden_size, 1024));
-  dim3 grid2(num_tokens * hidden_size / group_size);
-  dim3 block2(std::min(group_size, 1024l));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
@@ -249,66 +225,24 @@ void rms_norm_per_block_quant_dispatch(
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_per_block_quant_kernel_1", [&] {
-          vllm::rms_norm_per_block_quant_kernel_1<scalar_in_t, scalar_t, true>
+        out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
+          vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, true>
               <<<grid13, block13, 0, stream>>>(
                   rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                   scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
-                  weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>(),
-                  group_size);
-        });
-    VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_per_block_quant_kernel_2", [&] {
-          vllm::rms_norm_per_block_quant_kernel_2<scalar_in_t, scalar_t, true>
-              <<<grid13, block13, 0, stream>>>(
-                  rms.data_ptr<float>(), token_scale.data_ptr<float>(),
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>(),
-                  group_size);
-        });
-    VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_per_block_quant_kernel_3", [&] {
-          vllm::rms_norm_per_block_quant_kernel_3<scalar_in_t, scalar_t, true>
-              <<<grid13, block13, 0, stream>>>(
-                  rms.data_ptr<float>(), token_scale.data_ptr<float>(),
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
+                  weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                   var_epsilon, hidden_size, residual->data_ptr<scalar_in_t>(),
                   group_size);
         });
   } else {
     VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_per_block_quant_kernel_1", [&] {
-          vllm::rms_norm_per_block_quant_kernel_1<scalar_in_t, scalar_t, false>
+        out.scalar_type(), "rms_norm_per_block_quant_kernel", [&] {
+          vllm::rms_norm_per_block_quant_kernel<scalar_in_t, scalar_t, false>
               <<<grid13, block13, 0, stream>>>(
                   rms.data_ptr<float>(), out.data_ptr<scalar_t>(),
                   scales.data_ptr<float>(), input.data_ptr<scalar_in_t>(),
-                  weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, nullptr, group_size);
-        });
-    VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_per_block_quant_kernel_2", [&] {
-          vllm::rms_norm_per_block_quant_kernel_2<scalar_in_t, scalar_t, false>
-              <<<grid13, block13, 0, stream>>>(
-                  rms.data_ptr<float>(), token_scale.data_ptr<float>(),
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
-                  scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
-                  var_epsilon, hidden_size, nullptr, group_size);
-        });
-    VLLM_DISPATCH_QUANT_TYPES(
-        out.scalar_type(), "rms_norm_per_block_quant_kernel_3", [&] {
-          vllm::rms_norm_per_block_quant_kernel_3<scalar_in_t, scalar_t, false>
-              <<<grid13, block13, 0, stream>>>(
-                  rms.data_ptr<float>(), token_scale.data_ptr<float>(),
-                  out.data_ptr<scalar_t>(), scales.data_ptr<float>(),
-                  input.data_ptr<scalar_in_t>(), weight.data_ptr<scalar_in_t>(),
+                  weight.data_ptr<scalar_in_t>(), token_scale.data_ptr<float>(),
                   scale_ub.has_value() ? scale_ub->data_ptr<float>() : nullptr,
                   var_epsilon, hidden_size, nullptr, group_size);
         });

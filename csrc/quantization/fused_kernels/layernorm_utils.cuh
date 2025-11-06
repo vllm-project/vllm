@@ -98,7 +98,6 @@ __device__ void compute_dynamic_per_token_scales(
     int64_t const warp_id = threadIdx.x / warp_size;
     int64_t const thread_in_warp = threadIdx.x % warp_size;
     int64_t const groups_per_warp = (num_groups + num_warps - 1) / num_warps;
-    int64_t const absmax_per_warp = groups_per_warp * threads_per_group;
     for (auto i = 0; i < groups_per_warp; ++i) {
       int64_t const group_id = i * num_warps + warp_id;
       if (group_id < num_groups) {
@@ -118,7 +117,6 @@ __device__ void compute_dynamic_per_token_scales(
 
     if (thread_in_group == 0 && thread_offset < thread_end) {
       block_absmax_val_maybe = s_max_vals[threadIdx.x];
-      float to_log = block_absmax_val_maybe;
       float scale = 0.0f;
       if (scale_ub) {
         scale = min(block_absmax_val_maybe, *scale_ub);
