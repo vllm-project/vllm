@@ -1353,7 +1353,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs + 1]
         seq_lens = self.seq_lens.gpu[:num_reqs]
         seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
-        max_seq_len = self.seq_lens.np[:num_reqs].max().item()
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs
         ]
@@ -1361,6 +1360,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.dcp_local_seq_lens.gpu[:num_reqs] if self.dcp_world_size > 1 else None
         )
         spec_decode_common_attn_metadata = None
+
+        if for_cudagraph_capture:
+            # For some attention backends (e.g. FA) with sliding window models we need
+            # to make sure the backend see a max_seq_len that is larger to the sliding
+            # window size when capturing to make sure the correct kernel is selected.
+            max_seq_len = self.max_model_len
+        else:
+            max_seq_len = self.seq_lens.np[:num_reqs].max().item()
 
         if use_spec_decode:
             self.num_accepted_tokens.np[:num_reqs] = (
