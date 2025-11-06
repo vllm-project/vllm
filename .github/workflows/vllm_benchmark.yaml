@@ -77,7 +77,7 @@ jobs:
         if: ${{ matrix.enabled }}
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.vllm_branch }}
+          ref: dev/perf
           fetch-depth: 0  # ensure getting the latest full code history
 
       - name: Show disk usage
