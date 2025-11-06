@@ -10,8 +10,6 @@ import torch.nn.functional as F
 from vllm import LLM, PoolingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 
-pytestmark = pytest.mark.encoder_decoder
-
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
 prompts = ["The chef prepared a delicious meal."]

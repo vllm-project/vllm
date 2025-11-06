@@ -14,7 +14,6 @@ import soundfile as sf
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "openai/whisper-large-v3-turbo"
 SERVER_ARGS = ["--enforce-eager"]
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
@@ -26,16 +25,17 @@ MISTRAL_FORMAT_ARGS = [
 ]
 
 
-@pytest.fixture(scope="module")
-def server():
-    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
-        yield remote_server
+@pytest.fixture(scope="module", params=["openai/whisper-large-v3-turbo"])
+def server(request):
+    with RemoteOpenAIServer(request.param, SERVER_ARGS) as remote_server:
+        yield remote_server, request.param
 
 
 @pytest_asyncio.fixture
-async def client(server):
+async def client_and_model(server):
+    server, model_name = server
     async with server.get_async_client() as async_client:
-        yield async_client
+        yield async_client, model_name
 
 
 @pytest.mark.asyncio
@@ -140,17 +140,19 @@ async def test_non_asr_model(winning_call):
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_bad_requests(mary_had_lamb, client):
+async def test_bad_requests(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
     # invalid language
     with pytest.raises(openai.BadRequestError):
         await client.audio.transcriptions.create(
-            model=MODEL_NAME, file=mary_had_lamb, language="hh", temperature=0.0
+            model=model_name, file=mary_had_lamb, language="hh", temperature=0.0
         )
 
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_long_audio_request(mary_had_lamb, client):
+async def test_long_audio_request(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
     mary_had_lamb.seek(0)
     audio, sr = librosa.load(mary_had_lamb)
     # Add small silence after each audio for repeatability in the split process
@@ -161,7 +163,7 @@ async def test_long_audio_request(mary_had_lamb, client):
     sf.write(buffer, repeated_audio, sr, format="WAV")
     buffer.seek(0)
     transcription = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=buffer,
         language="en",
         response_format="text",
@@ -177,17 +179,18 @@ async def test_long_audio_request(mary_had_lamb, client):
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_completion_endpoints(client):
+async def test_completion_endpoints(client_and_model):
+    client, model_name = client_and_model
     # text to text model
     res = await client.chat.completions.create(
-        model=MODEL_NAME,
+        model=model_name,
         messages=[{"role": "system", "content": "You are a helpful assistant."}],
     )
     err = res.error
     assert err["code"] == 400
     assert err["message"] == "The model does not support Chat Completions API"
 
-    res = await client.completions.create(model=MODEL_NAME, prompt="Hello")
+    res = await client.completions.create(model=model_name, prompt="Hello")
     err = res.error
     assert err["code"] == 400
     assert err["message"] == "The model does not support Completions API"
@@ -195,17 +198,18 @@ async def test_completion_endpoints(client):
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_streaming_response(winning_call, client):
+async def test_streaming_response(winning_call, client_and_model):
+    client, model_name = client_and_model
     transcription = ""
     res_no_stream = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=winning_call,
         response_format="json",
         language="en",
         temperature=0.0,
     )
     res = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=winning_call,
         language="en",
         temperature=0.0,
@@ -222,9 +226,10 @@ async def test_streaming_response(winning_call, client):
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_stream_options(winning_call, client):
+async def test_stream_options(winning_call, client_and_model):
+    client, model_name = client_and_model
     res = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=winning_call,
         language="en",
         temperature=0.0,
@@ -245,13 +250,14 @@ async def test_stream_options(winning_call, client):
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_sampling_params(mary_had_lamb, client):
+async def test_sampling_params(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
     """
     Compare sampling with params and greedy sampling to assert results
     are different when extreme sampling parameters values are picked.
     """
     transcription = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=mary_had_lamb,
         language="en",
         temperature=0.8,
@@ -267,7 +273,7 @@ async def test_sampling_params(mary_had_lamb, client):
     )
 
     greedy_transcription = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=mary_had_lamb,
         language="en",
         temperature=0.0,
@@ -279,12 +285,13 @@ async def test_sampling_params(mary_had_lamb, client):
 
 @pytest.mark.asyncio
 @pytest.mark.encoder_decoder
-async def test_audio_prompt(mary_had_lamb, client):
+async def test_audio_prompt(mary_had_lamb, client_and_model):
+    client, model_name = client_and_model
     prompt = "This is a speech, recorded in a phonograph."
     # Prompts should not omit the part of original prompt while transcribing.
     prefix = "The first words I spoke in the original phonograph"
     transcription = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=mary_had_lamb,
         language="en",
         response_format="text",
@@ -293,7 +300,7 @@ async def test_audio_prompt(mary_had_lamb, client):
     out = json.loads(transcription)["text"]
     assert prefix in out
     transcription_wprompt = await client.audio.transcriptions.create(
-        model=MODEL_NAME,
+        model=model_name,
         file=mary_had_lamb,
         language="en",
         response_format="text",

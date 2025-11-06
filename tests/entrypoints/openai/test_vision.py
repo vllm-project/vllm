@@ -122,7 +122,6 @@ def get_hf_prompt_tokens(model_name, content, image_url):
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_single_chat_session_image(
@@ -170,7 +169,6 @@ async def test_single_chat_session_image(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_error_on_invalid_image_url_type(
@@ -198,7 +196,6 @@ async def test_error_on_invalid_image_url_type(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_single_chat_session_image_beamsearch(
@@ -224,7 +221,6 @@ async def test_single_chat_session_image_beamsearch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
@@ -281,7 +277,6 @@ async def test_single_chat_session_image_base64encoded(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_idx", list(range(len(TEST_IMAGE_ASSETS))))
 async def test_single_chat_session_image_base64encoded_beamsearch(
@@ -312,7 +307,6 @@ async def test_single_chat_session_image_base64encoded_beamsearch(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize("image_url", TEST_IMAGE_ASSETS, indirect=True)
 async def test_chat_streaming_image(
@@ -356,7 +350,6 @@ async def test_chat_streaming_image(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",
@@ -398,7 +391,6 @@ async def test_multi_image_input(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",
@@ -438,7 +430,6 @@ async def test_completions_with_image(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",
@@ -502,7 +493,6 @@ async def test_completions_with_image_with_uuid(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_completions_with_empty_image_with_uuid_without_cache_hit(
     client: openai.AsyncOpenAI,
@@ -532,7 +522,6 @@ async def test_completions_with_empty_image_with_uuid_without_cache_hit(
 
 
 @pytest.mark.asyncio
-@pytest.mark.encoder_decoder
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "image_urls",

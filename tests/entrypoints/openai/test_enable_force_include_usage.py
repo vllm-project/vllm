@@ -71,8 +71,8 @@ async def test_chat_with_enable_force_include_usage(
             assert chunk.usage is None
 
 
-@pytest.fixture(scope="module")
-def transcription_server_with_force_include_usage():
+@pytest.fixture(scope="module", params=["openai/whisper-large-v3-turbo"])
+def transcription_server_with_force_include_usage(request):
     args = [
         # use half precision for speed and memory savings in CI environment
         "--dtype",
@@ -85,7 +85,7 @@ def transcription_server_with_force_include_usage():
         "0.2",
     ]
 
-    with RemoteOpenAIServer("openai/whisper-large-v3-turbo", args) as remote_server:
+    with RemoteOpenAIServer(request.param, args) as remote_server:
         yield remote_server
 
 
@@ -100,6 +100,7 @@ async def transcription_client_with_force_include_usage(
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_transcription_with_enable_force_include_usage(
     transcription_client_with_force_include_usage, winning_call
 ):

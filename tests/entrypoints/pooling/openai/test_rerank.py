@@ -9,8 +9,6 @@ import torch.nn.functional as F
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import PoolingResponse, RerankResponse
 
-pytestmark = pytest.mark.encoder_decoder
-
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "bfloat16"
 

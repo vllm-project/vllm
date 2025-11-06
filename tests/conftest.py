@@ -1267,10 +1267,13 @@ def pytest_collection_modifyitems(config, items):
         "microsoft/Phi-3.5-vision-instruct",
         # Encoder-only models (cross-encoders, embedding models)
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "intfloat/e5-small",
         "intfloat/multilingual-e5-small",
         "BAAI/bge-reranker-base",
+        "BAAI/bge-reranker-v2-m3",
         "BAAI/bge-base-en-v1.5",
         "TIGER-Lab/VLM2Vec-Full",
+        "Snowflake/snowflake-arctic-embed-m-v1.5",
         "sentence-transformers/all-MiniLM-L12-v2",
         "sentence-transformers/stsb-roberta-base-v2",
     ]
@@ -1281,10 +1284,11 @@ def pytest_collection_modifyitems(config, items):
         )
         for item in items:
             if "encoder_decoder" in item.keywords:
-                for encoder_model in ENCODER_DECODER_MODELS:
-                    if encoder_model in item.nodeid:
-                        item.add_marker(skip_encoder_decoder)
-                        break
+                if any(
+                    encoder_model in item.nodeid
+                    for encoder_model in ENCODER_DECODER_MODELS
+                ):
+                    item.add_marker(skip_encoder_decoder)
 
 
 @pytest.fixture(scope="session")

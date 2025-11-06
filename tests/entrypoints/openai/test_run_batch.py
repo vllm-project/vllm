@@ -44,6 +44,13 @@ INPUT_REASONING_BATCH = """{"custom_id": "request-1", "method": "POST", "url": "
 
 
 def test_empty_file():
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        pytest.skip(
+            "intfloat/multilingual-e5-small is encoder-only, not supported on ROCm"
+        )
+
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -128,6 +135,13 @@ def test_completions_invalid_input():
 
 
 def test_embeddings():
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        pytest.skip(
+            "intfloat/multilingual-e5-small is encoder-only, not supported on ROCm"
+        )
+
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
@@ -159,6 +173,11 @@ def test_embeddings():
 
 @pytest.mark.parametrize("input_batch", [INPUT_SCORE_BATCH, INPUT_RERANK_BATCH])
 def test_score(input_batch):
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        pytest.skip("BAAI/bge-reranker-v2-m3 is encoder-only, not supported on ROCm")
+
     with (
         tempfile.NamedTemporaryFile("w") as input_file,
         tempfile.NamedTemporaryFile("r") as output_file,
