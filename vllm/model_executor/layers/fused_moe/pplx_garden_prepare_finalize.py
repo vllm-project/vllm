@@ -15,7 +15,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     _validate_scale_shape,
     moe_kernel_quantize_input,
 )
-from vllm.utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
