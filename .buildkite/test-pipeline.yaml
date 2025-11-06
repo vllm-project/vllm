@@ -460,6 +460,7 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/test_basic_correctness.py
+  - pytest -v -s compile/test_multimodal_compile.py
   - pytest -v -s compile/piecewise/
 
 - label: PyTorch Fullgraph Test # 22min
