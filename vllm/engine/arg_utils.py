@@ -993,11 +993,6 @@ class EngineArgs:
                 "Enabling this will use the fully block-diagonal sharded layers. "
             ),
         )
-        lora_group.add_argument(
-            "--load-block-diagonal-format-loras",
-            action="store_true",
-            help=("Load the format in BD-LoRA "),
-        )
 
         lora_group.add_argument("--max-cpu-loras", **lora_kwargs["max_cpu_loras"])
         lora_group.add_argument(
