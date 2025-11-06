@@ -190,3 +190,67 @@ direct_register_custom_op(
     fake_impl=flashinfer_fused_moe_per_tensor_scale_fp8_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+def flashinfer_fused_moe_bf16(
+    routing_logits: torch.Tensor,
+    routing_bias: torch.Tensor | None,
+    hidden_states: torch.Tensor,
+    gemm1_weights: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    num_experts: int,
+    top_k: int,
+    n_group: int | None,
+    topk_group: int | None,
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    routing_method_type: int = RoutingMethodType.Renormalize,
+    tune_max_num_tokens: int = 8192,
+) -> torch.Tensor:
+
+    from vllm.utils.flashinfer import flashinfer_trtllm_bf16_moe
+
+    return flashinfer_trtllm_bf16_moe(
+        routing_logits=routing_logits,
+        routing_bias=routing_bias,
+        hidden_states=hidden_states,
+        gemm1_weights=gemm1_weights,
+        gemm2_weights=gemm2_weights,
+        num_experts=num_experts,
+        top_k=top_k,
+        n_group=n_group,
+        topk_group=topk_group,
+        intermediate_size=intermediate_size,
+        local_expert_offset=local_expert_offset,
+        local_num_experts=local_num_experts,
+        routing_method_type=routing_method_type,
+        tune_max_num_tokens=tune_max_num_tokens,
+    )
+
+
+def flashinfer_fused_moe_bf16_fake(
+   routing_logits: torch.Tensor,
+    routing_bias: torch.Tensor | None,
+    hidden_states: torch.Tensor,
+    gemm1_weights: torch.Tensor,
+    gemm2_weights: torch.Tensor,
+    num_experts: int,
+    top_k: int,
+    n_group: int | None,
+    topk_group: int | None,
+    intermediate_size: int,
+    local_expert_offset: int,
+    local_num_experts: int,
+    routing_method_type: int = RoutingMethodType.Renormalize,
+    tune_max_num_tokens: int = 8192,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="flashinfer_fused_moe_bf16",
+    op_func=flashinfer_fused_moe_bf16,
+    fake_impl=flashinfer_fused_moe_bf16_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
