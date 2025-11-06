@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterator, MutableSequence
 from dataclasses import dataclass, field
-from io import UnsupportedOperation
 from typing import overload
 
 import vllm.envs as envs
@@ -119,13 +118,13 @@ class FlattenLogprobs(MutableSequence[LogprobsOnePosition]):
             raise TypeError(f"Invalid index type: {type(index)}")
 
     def __setitem__(self, item, value) -> None:
-        raise UnsupportedOperation("Cannot set logprobs in FlattenLogprobs")
+        raise TypeError("Cannot set logprobs in FlattenLogprobs")
 
     def __delitem__(self, item) -> None:
-        raise UnsupportedOperation("Cannot delete logprobs from FlattenLogprobs")
+        raise TypeError("Cannot delete logprobs from FlattenLogprobs")
 
     def insert(self, item) -> None:
-        raise UnsupportedOperation("Cannot insert logprobs to FlattenLogprobs")
+        raise TypeError("Cannot insert logprobs to FlattenLogprobs")
 
     def __iter__(self) -> Iterator[LogprobsOnePosition]:
         """
