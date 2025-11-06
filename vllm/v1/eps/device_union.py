@@ -9,7 +9,9 @@ from typing import Dict
 import torch
 
 from vllm.v1.eps.config import EpsRuntimeConfig
+from vllm.v1.eps.context import get_eps_context
 from vllm.v1.eps.state import EpsJLState
+from vllm.v1.eps.telemetry import EpsStepCounters
 
 
 @dataclass
@@ -216,8 +218,157 @@ def union_select_for_request(
     )
 
 
+def apply_device_union(
+    *,
+    layer: torch.nn.Module,
+    query_tokens: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    attn_metadata,
+) -> bool:
+    ctx = get_eps_context()
+    if ctx is None or not ctx.enabled or ctx.cudagraph_capture:
+        return False
+
+    layer_name = getattr(layer, "_eps_layer_name", None)
+    if layer_name is None or layer_name not in ctx.layer_map:
+        return False
+
+    layer_info = ctx.layer_map[layer_name]
+    device_groups = ctx.device_union_groups or set()
+    if device_groups and layer_info.group_id not in device_groups:
+        return False
+
+    group_runtime = ctx.group_runtimes[layer_info.group_id]
+    request_runtimes = group_runtime.request_runtimes
+
+    seq_lens = attn_metadata.seq_lens
+    if seq_lens is None or seq_lens.numel() == 0:
+        return False
+
+    num_reqs = min(len(request_runtimes), seq_lens.shape[0])
+    if num_reqs == 0:
+        return False
+
+    block_table = attn_metadata.block_table
+    if block_table is None or block_table.shape[0] < num_reqs:
+        return False
+
+    query_start_loc = attn_metadata.query_start_loc.to(
+        device=query_tokens.device, dtype=torch.long
+    )
+    if query_start_loc.numel() < num_reqs + 1:
+        return False
+
+    last_token_indices = (query_start_loc[1 : num_reqs + 1] - 1).clamp_min_(0)
+    query_heads = query_tokens.index_select(0, last_token_indices)
+
+    cfg = ctx.cfg
+    counters = ctx.device_counters or EpsStepCounters()
+    ctx.device_counters = counters
+
+    block_size = group_runtime.block_size
+    device = block_table.device
+    sentinel_value = block_table.new_full((), cfg.sentinel, dtype=block_table.dtype)
+
+    before_unique: set[int] = set()
+    after_unique: set[int] = set()
+    total_groups = 0
+    total_groups_kept = 0
+    total_blocks = 0
+    total_blocks_kept = 0
+
+    seq_lens_device = seq_lens.to(device)
+
+    for req_idx in range(num_reqs):
+        runtime = request_runtimes[req_idx]
+        state = runtime.state
+        seq_len = int(seq_lens_device[req_idx].item())
+        if seq_len <= 0:
+            continue
+
+        num_blocks = (seq_len + block_size - 1) // block_size
+        if num_blocks <= 0:
+            continue
+
+        block_ids = block_table[req_idx, :num_blocks].to(device=device, dtype=torch.int64)
+        before_unique.update(int(b) for b in block_ids.detach().cpu().tolist())
+
+        if state is None:
+            keep_groups = (num_blocks + cfg.group_blocks - 1) // cfg.group_blocks
+            total_groups += keep_groups
+            total_groups_kept += keep_groups
+            total_blocks += num_blocks
+            total_blocks_kept += num_blocks
+            after_unique.update(int(b) for b in block_ids.detach().cpu().tolist())
+            continue
+
+        decision = union_select_for_request(
+            cfg=cfg,
+            layer_index=layer_info.layer_index,
+            q_attn=query_heads[req_idx],
+            state=state,
+            block_ids=block_ids,
+            block_mapping=runtime.block_mapping,
+            seq_len=seq_len,
+            block_size=block_size,
+            num_attn_heads=num_heads,
+            num_kv_heads=num_kv_heads,
+        )
+
+        kept_ids = decision.kept_block_ids.to(device=device, dtype=block_table.dtype)
+        kept_count = kept_ids.numel()
+        if kept_count < num_blocks:
+            block_table[req_idx, kept_count:num_blocks] = sentinel_value
+        block_table[req_idx, :kept_count] = kept_ids
+
+        seq_lens_device[req_idx] = torch.tensor(
+            decision.new_seq_len, device=device, dtype=seq_lens_device.dtype
+        )
+
+        total_blocks += num_blocks
+        total_blocks_kept += kept_count if kept_count > 0 else num_blocks
+
+        groups_total = decision.groups_total or (
+            (num_blocks + cfg.group_blocks - 1) // cfg.group_blocks
+        )
+        if decision.group_keep_mask.numel() > 0:
+            groups_kept = int(decision.group_keep_mask.sum().item())
+        else:
+            groups_kept = groups_total
+
+        total_groups += groups_total
+        total_groups_kept += groups_kept
+        after_unique.update(int(b) for b in kept_ids.detach().cpu().tolist())
+
+    seq_lens.copy_(seq_lens_device)
+
+    counters.layers += 1
+    if total_blocks:
+        counters.blocks_total += total_blocks
+        counters.blocks_kept += total_blocks_kept
+    if total_groups:
+        counters.groups_total += total_groups
+        counters.groups_kept += total_groups_kept
+
+    counters.unique_blocks_total += len(before_unique)
+    counters.unique_blocks_kept += len(after_unique)
+
+    counters.pages_total = counters.groups_total
+    counters.pages_visited = counters.groups_kept
+    counters.pages_skipped = counters.groups_total - counters.groups_kept
+    counters.pages_unique_total = counters.groups_total
+    counters.pages_unique_kept = counters.groups_kept
+
+    if seq_lens_device.numel() > 0:
+        attn_metadata.max_seq_len = int(seq_lens_device.max().item())
+
+    return True
+
+
 __all__ = [
     "UnionDecision",
     "UnionSelectionError",
     "union_select_for_request",
+    "apply_device_union",
 ]

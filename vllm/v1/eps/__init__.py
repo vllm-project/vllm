@@ -18,7 +18,7 @@ from .summarizer import jl_update_block, jl_update_once
 from .telemetry import EpsStepCounters
 from .writer import apply_eps_prefill_updates
 from .runtime import build_eps_forward_context
-from .device_union import union_select_for_request
+from .device_union import apply_device_union, union_select_for_request
 from .union_pass import run_union_prepass
 
 __all__ = [
@@ -41,5 +41,6 @@ __all__ = [
     "jl_update_block",
     "jl_update_once",
     "run_union_prepass",
+    "apply_device_union",
     "union_select_for_request",
 ]

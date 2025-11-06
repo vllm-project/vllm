@@ -30,6 +30,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
+from vllm.v1.eps.device_union import apply_device_union
 logger = init_logger(__name__)
 
 
@@ -211,6 +212,9 @@ class RocmAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
+    def supports_eps_union(self) -> bool:
+        return True
+
     def __init__(
         self,
         num_heads: int,
@@ -313,6 +317,14 @@ class RocmAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+
+        apply_device_union(
+            layer=layer,
+            query_tokens=query[:num_actual_tokens],
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            attn_metadata=attn_metadata,
+        )
 
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache, self.num_kv_heads, self.head_size

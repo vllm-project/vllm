@@ -20,6 +20,7 @@ from vllm.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.attention.ops.triton_unified_attention import unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.v1.eps.device_union import apply_device_union
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
@@ -205,6 +206,9 @@ class TritonAttentionImpl(AttentionImpl):
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
+    def supports_eps_union(self) -> bool:
+        return True
+
     def supports_quant_query_input(self) -> bool:
         return current_platform.is_cuda()
 
@@ -310,6 +314,13 @@ class TritonAttentionImpl(AttentionImpl):
         # performance to make sure it does not introduce any overhead.
 
         num_actual_tokens = attn_metadata.num_actual_tokens
+        apply_device_union(
+            layer=layer,
+            query_tokens=query[:num_actual_tokens],
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+            attn_metadata=attn_metadata,
+        )
         key_cache, value_cache = kv_cache.unbind(1)
 
         if self.kv_sharing_target_layer_name is None:
