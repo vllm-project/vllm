@@ -1359,11 +1359,10 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "'--dataset-path' if required."
         )
 
-    # when using an explicit output length, default to ignoring EOS
+    # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length
     if (
         args.dataset_name in ("random", "random-mm")
-        and getattr(args, "random_output_len", None) is not None
         and args.backend in OPENAI_COMPATIBLE_BACKENDS
     ):
         args.ignore_eos = True
