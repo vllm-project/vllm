@@ -37,10 +37,7 @@ def _assert_has_all_expected(keys: set[str]) -> None:
 
 # Path 1: __call__ method has kwargs: Unpack[*ProcessingKwargs]
 class _ProcWithUnpack:
-    def __call__(
-            self,
-            *args,
-            **kwargs: Unpack[_FakeProcessorKwargs]):  # type: ignore
+    def __call__(self, *args, **kwargs: Unpack[_FakeProcessorKwargs]):  # type: ignore
         return None
 
 
