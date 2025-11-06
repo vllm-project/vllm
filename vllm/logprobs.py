@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field
+from typing import overload
 
 import vllm.envs as envs
 
@@ -25,8 +25,12 @@ class Logprob:
     decoded_token: str | None = None
 
 
+LogprobsOnePosition = dict[int, Logprob]
+
+
 # TODO(Jialin): Add more unit tests for the class and util functions
-class FlattenLogprobs:
+@dataclass
+class FlattenLogprobs(Sequence[LogprobsOnePosition]):
     """
     Flatten logprobs of a request into multiple primitive type lists.
 
@@ -40,175 +44,97 @@ class FlattenLogprobs:
     As each position might contains different amount of ranks,
     start_indices_per_position would be used to access the logprob ranges
     for different positions.
+
+    NOTE: To reduce the migration overhead and improve backward compatibility,
+    we support the key Sequence APIs of list, so it could act as
+    list[LogprobsOnePosition]
     """
 
-    def __init__(self, for_prompt: bool) -> None:
-        # The start indices of logprobs for each position.
-        # NOTE: There's no logprob of first prompt token, so if the
-        # FlattenLogprobs is for prompt, we directly set
-        # the start index for the second prompt token.
-        self.start_indices_per_position: list[int] = [0, 0] if for_prompt else [0]
+    # Start / end indices to indicate the range of logprobs for each position.
+    # NOTE: There's no logprob of first prompt token, so if the
+    # FlattenLogprobs is for prompt, we directly set
+    # the start index for the second prompt token.
+    start_indices: list[int] = field(default_factory=list)
+    end_indices: list[int] = field(default_factory=list)
 
-        # Flatten Logprob information for (each position, rank).
-        # For position <i>, the logprobs are ranged
-        # from self.start_indices_per_position[i]
-        # to self.start_indices_per_position[i+1] (exclusive).
-        self.logprobs: list[float] = []
-        self.token_ids: list[int] = []
-        self.ranks: list[int] = []
-        self.decoded_tokens: list[str | None] = []
+    # Flatten Logprob information for (each position, rank).
+    # For position <i>, the logprobs are ranged
+    # from self.start_indices[i] to self.end_indices[i] (exclusive).
+    token_ids: list[int] = field(default_factory=list)
+    logprobs: list[float] = field(default_factory=list)
+    ranks: list[int] = field(default_factory=list)
+    decoded_tokens: list[str | None] = field(default_factory=list)
 
-    def num_positions(self) -> None:
+    def append(self, logprobs_next_position: LogprobsOnePosition | None) -> None:
+        self.start_indices.append(len(self.logprobs))
+        if logprobs_next_position:
+            for token_id, logprob in logprobs_next_position.items():
+                self.token_ids.append(token_id)
+                self.logprobs.append(logprob.logprob)
+                self.ranks.append(logprob.rank)
+                self.decoded_tokens.append(logprob.decoded_token)
+        self.end_indices.append(len(self.logprobs))
+
+    def __len__(self) -> int:
         """Gets number of positions stored in the container"""
-        return len(self.start_indices_per_position) - 1
+        return len(self.start_indices)
 
-    def num_logprobs_per_position(self, position: int) -> int:
-        """Gets the number of logprobs of a given position"""
-        return (
-            self.start_indices_per_position[position + 1]
-            - self.start_indices_per_position[position]
-        )
+    @overload
+    def __getitem__(self, position: int) -> LogprobsOnePosition: ...
 
-    def logprob(self, position: int, token_id: int) -> float | None:
-        """Gets logprob value of a given position and token ID."""
-        idx = self._idx(position, token_id)
-        if idx is not None:
-            return self.logprobs[idx]
-        return None
+    @overload
+    def __getitem__(self, s: slice, /) -> "FlattenLogprobs": ...
 
-    def rank(self, position: int, token_id: int) -> int | None:
-        """Gets rank of a given position and token ID."""
-        idx = self._idx(position, token_id)
-        if idx is not None:
-            return self.ranks[idx]
-        return None
-
-    def _idx(self, position: int, token_id: int) -> int | None:
-        """Locates the index of a given position and token ID."""
-        return next(
-            (
-                idx
-                for idx in range(
-                    self.start_indices_per_position[position],
-                    self.start_indices_per_position[position + 1],
+    def __getitem__(self, index: int | slice):
+        """Extracts logprobs of a given position or slice"""
+        if isinstance(index, int):
+            return {
+                self.token_ids[i]: Logprob(
+                    logprob=self.logprobs[i],
+                    rank=self.ranks[i],
+                    decoded_token=self.decoded_tokens[i],
                 )
-                if self.token_ids[idx] == token_id
-            ),
-            None,
-        )
+                for i in range(self.start_indices[index], self.end_indices[index])
+            }
+        elif isinstance(index, slice):
+            min_index = self.start_indices[index][0]
+            max_index = self.end_indices[index][-1]
+            return FlattenLogprobs(
+                # Shift updated start_indices and end_indices to
+                # be 0-indexed
+                start_indices=[i - min_index for i in self.start_indices[index]],
+                end_indices=[i - min_index for i in self.end_indices[index]],
+                token_ids=self.token_ids[min_index:max_index],
+                logprobs=self.logprobs[min_index:max_index],
+                ranks=self.ranks[min_index:max_index],
+                decoded_tokens=self.decoded_tokens[min_index:max_index],
+            )
+        else:
+            raise TypeError(f"Invalid index type: {type(index)}")
+
+    def __iter__(self) -> Iterator[LogprobsOnePosition]:
+        """
+        Iterates the container and yields LogprobsOnePosition for each position.
+        """
+        for i in range(0, len(self.start_indices)):
+            yield self.__getitem__(i)
 
 
 # {token_id -> logprob} per each sequence group. None if the corresponding
 # sequence group doesn't require prompt logprob.
-PromptLogprobs = FlattenLogprobs | list[dict[int, Logprob] | None]
+PromptLogprobs = FlattenLogprobs | list[LogprobsOnePosition | None]
 # {token_id -> logprob} for each sequence group.
-SampleLogprobs = FlattenLogprobs | list[dict[int, Logprob]]
+SampleLogprobs = FlattenLogprobs | list[LogprobsOnePosition]
 
 
 def create_prompt_logprobs() -> PromptLogprobs:
     """Creates a container to store prompt logprobs for a request"""
+    logprobs = FlattenLogprobs() if envs.VLLM_FLATTEN_LOGPROBS else []
     # NOTE: logprob of first prompt token is None.
-    return FlattenLogprobs(for_prompt=True) if envs.VLLM_FLATTEN_LOGPROBS else [None]
+    logprobs.append(None)
+    return logprobs
 
 
 def create_sample_logprobs() -> SampleLogprobs:
     """Creates a container to store decode logprobs for a request"""
-    return FlattenLogprobs(for_prompt=False) if envs.VLLM_FLATTEN_LOGPROBS else []
-
-
-def num_positions(logprobs: PromptLogprobs | SampleLogprobs) -> int:
-    """Gets the number of positions stored in the logprobs"""
-    return (
-        logprobs.num_positions()
-        if isinstance(logprobs, FlattenLogprobs)
-        else len(logprobs)
-    )
-
-
-def num_logprobs_per_position(
-    logprobs: PromptLogprobs | SampleLogprobs, position: int
-) -> int:
-    """Gets the number of logprobs of a given position"""
-    if isinstance(logprobs, FlattenLogprobs):
-        return logprobs.num_logprobs_per_position(position)
-    return len(logprobs[position]) if logprobs[position] is not None else 0
-
-
-def get_logprob(
-    logprobs: PromptLogprobs | SampleLogprobs, position: int, token_id: int
-) -> int | None:
-    """Gets the logprob value of a given position and token ID"""
-    if isinstance(logprobs, FlattenLogprobs):
-        return logprobs.logprob(position, token_id)
-    if (single_position_logprobs := logprobs[position]) and (
-        logprob := single_position_logprobs.get(token_id)
-    ):
-        return logprob.logprob
-    return None
-
-
-def get_rank(
-    logprobs: PromptLogprobs | SampleLogprobs, position: int, token_id: int
-) -> int | None:
-    """Gets the rank of a given position and token ID"""
-    if isinstance(logprobs, FlattenLogprobs):
-        return logprobs.rank(position, token_id)
-    if (single_position_logprobs := logprobs[position]) and (
-        logprob := single_position_logprobs.get(token_id)
-    ):
-        return logprob.rank
-    return None
-
-
-def append_logprobs_for_next_position(
-    request_logprobs: PromptLogprobs | SampleLogprobs,
-    logprobs: list[float],
-    logprob_token_ids: list[int],
-    decoded_tokens: Iterable[str | None],
-    rank: int,
-    num_logprobs: int,
-) -> None:
-    """Appends logprobs for the next position.
-
-    Args:
-        request_logprobs: target request-level logprobs container
-        logprobs: list of log probabilities
-        logprob_token_ids: list of top token ids
-        decoded_tokens: list of decoded top tokens
-        rank: rank of the sampled token
-        num_logprobs: number of logprobs requested by the user
-                      (in addition to sampled logprob)
-    """
-    if num_logprobs == -1:
-        num_logprobs = len(logprobs)
-    # We do not need a special case for the sampled token
-    # being in the topk, since inserting duplicated data
-    # into a dictionary twice is the same as doing it once.
-    topk_ranks = range(1, num_logprobs + 1)
-    ranks = itertools.chain((rank,), topk_ranks)
-
-    if isinstance(request_logprobs, FlattenLogprobs):
-        for token_id, logprob, rank, token in zip(
-            logprob_token_ids, logprobs, ranks, decoded_tokens
-        ):
-            request_logprobs.logprobs.append(logprob)
-            request_logprobs.token_ids.append(token_id)
-            request_logprobs.ranks.append(rank)
-            request_logprobs.decoded_tokens.append(token)
-
-        request_logprobs.start_indices_per_position.append(
-            len(request_logprobs.logprobs)
-        )
-    else:
-        request_logprobs.append(
-            {
-                token_id: Logprob(
-                    logprob=logprob,
-                    rank=rank,
-                    decoded_token=token,
-                )
-                for token_id, logprob, rank, token in zip(
-                    logprob_token_ids, logprobs, ranks, decoded_tokens
-                )
-            }
-        )
+    return FlattenLogprobs() if envs.VLLM_FLATTEN_LOGPROBS else []

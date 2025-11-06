@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from vllm.logger import init_logger
 from vllm.logprobs import (
+    Logprob,
     PromptLogprobs,
     SampleLogprobs,
-    append_logprobs_for_next_position,
     create_prompt_logprobs,
     create_sample_logprobs,
 )
@@ -87,13 +88,14 @@ class LogprobsProcessor:
             self.cumulative_logprob += sampled_token_logprob
 
             # Update with the Logprob container for this pos.
-            append_logprobs_for_next_position(
-                self.logprobs,
-                logprobs,
-                token_ids,
-                decoded_tokens,
-                rank,
-                self.num_logprobs,
+            self.logprobs.append(
+                self._make_logprob_dict(
+                    logprobs,
+                    token_ids,
+                    decoded_tokens,
+                    rank,
+                    self.num_logprobs,
+                )
             )
 
     def _update_prompt_logprobs(
@@ -142,13 +144,14 @@ class LogprobsProcessor:
             )
 
             # Update with the Logprob container for this pos.
-            append_logprobs_for_next_position(
-                self.prompt_logprobs,
-                prompt_logprobs[pos],
-                token_ids[pos],
-                decoded_tokens_for_pos,
-                prompt_token_ranks[pos],
-                self.num_prompt_logprobs,
+            self.prompt_logprobs.append(
+                self._make_logprob_dict(
+                    prompt_logprobs[pos],
+                    token_ids[pos],
+                    decoded_tokens_for_pos,
+                    prompt_token_ranks[pos],
+                    self.num_prompt_logprobs,
+                )
             )
 
     def pop_prompt_logprobs(self) -> PromptLogprobs | None:
@@ -169,6 +172,44 @@ class LogprobsProcessor:
         if plp:
             self.prompt_logprobs = []
         return plp
+
+    @staticmethod
+    def _make_logprob_dict(
+        logprobs: list[float],
+        logprob_token_ids: list[int],
+        decoded_tokens: Iterable[str | None],
+        rank: int,
+        num_logprobs: int,
+    ) -> dict[int, Logprob]:
+        """Make a Logprob dictionary for a position.
+        Args:
+          logprobs: list of log probabilities
+          logprob_token_ids: list of top token ids
+          decoded_tokens: list of decoded top tokens
+          rank: rank of the sampled token
+          num_logprobs: number of logprobs requested
+            by the user (in addition to sampled logprob)
+        Returns:
+          dict[token id, Logprob]
+        """
+        if num_logprobs == -1:
+            num_logprobs = len(logprobs)
+        # We do not need a special case for the sampled token
+        # being in the topk, since inserting duplicated data
+        # into a dictionary twice is the same as doing it once.
+        topk_ranks = range(1, num_logprobs + 1)
+        ranks = itertools.chain((rank,), topk_ranks)
+
+        return {
+            token_id: Logprob(
+                logprob=logprob,
+                rank=rank,
+                decoded_token=token,
+            )
+            for token_id, logprob, rank, token in zip(
+                logprob_token_ids, logprobs, ranks, decoded_tokens
+            )
+        }
 
     def update_from_output(self, output: EngineCoreOutput) -> None:
         if output.new_logprobs is not None:

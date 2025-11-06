@@ -8,9 +8,6 @@ from vllm.logprobs import (
     FlattenLogprobs,
     PromptLogprobs,
     SampleLogprobs,
-    get_rank,
-    num_logprobs_per_position,
-    num_positions,
 )
 
 
@@ -81,55 +78,43 @@ def test_ranks(
         ########################
         # Check prompt logprobs
         ########################
-        assert len(prompt_tokens) == num_positions(prompt_logprobs)
+        assert len(prompt_tokens) == len(prompt_logprobs)
         # No logprob for first prompt token
-        assert num_logprobs_per_position(prompt_logprobs, 0) == 0
-        for position, token in enumerate(prompt_tokens[1:], start=1):
+        assert not prompt_logprobs[0]
+        for position, (token, logprobs) in enumerate(
+            zip(prompt_tokens[1:], prompt_logprobs[1:]), start=1
+        ):
             # Ensure logprobs of prompt token is always returned
-            rank = get_rank(prompt_logprobs, position, token)
-            assert rank is not None
-            assert rank >= 1
+            logprob = logprobs.get(token)
+            assert logprob is not None
+            assert logprob.rank >= 1
             # Ensure # of returned logprobs should be
             # either NUM_PROMPT_LOGPROBS or NUM_PROMPT_LOGPROBS+1
-            assert (
-                NUM_PROMPT_LOGPROBS
-                <= num_logprobs_per_position(prompt_logprobs, position)
-                <= NUM_PROMPT_LOGPROBS + 1
-            )
+            assert NUM_PROMPT_LOGPROBS <= len(logprobs) <= NUM_PROMPT_LOGPROBS + 1
             # Ensure top NUM_PROMPT_LOGPROBS is always extracted
-            assert (
-                len(
-                    all_ranks_per_position(prompt_logprobs, position)
-                    & set(range(1, NUM_PROMPT_LOGPROBS + 1))
-                )
-                == NUM_PROMPT_LOGPROBS
+            assert set(range(1, NUM_PROMPT_LOGPROBS + 1)).issubset(
+                {logprob.rank for logprob in logprobs.values()}
             )
 
         ########################
         # Check sample logprobs
         ########################
-        assert len(decode_tokens) == num_positions(decode_logprobs)
-        for position, token in enumerate(decode_tokens):
+        assert len(decode_tokens) == len(decode_logprobs)
+        for position, (token, logprobs) in enumerate(
+            zip(decode_tokens, decode_logprobs)
+        ):
             # Ensure logprobs of chosen token is always returned
-            rank = get_rank(decode_logprobs, position, token)
-            assert rank is not None
+            logprob = logprobs.get(token)
+            assert logprob is not None
             if greedy:
                 # For greedy sampling, all chosen logprob should be top ranked
-                assert rank == 1
+                assert logprob.rank == 1
             else:
-                assert rank >= 1
+                assert logprob.rank >= 1
             # Ensure # of returned logprobs should be
             # either NUM_TOP_LOGPROBS or NUM_TOP_LOGPROBS+1
-            assert (
-                NUM_TOP_LOGPROBS
-                <= num_logprobs_per_position(decode_logprobs, position)
-                <= NUM_TOP_LOGPROBS + 1
-            )
+            assert NUM_TOP_LOGPROBS <= len(logprobs) <= NUM_TOP_LOGPROBS + 1
             # Ensure top NUM_TOP_LOGPROBS logprobs is always extracted
-            assert (
-                len(
-                    all_ranks_per_position(decode_logprobs, position)
-                    & set(range(1, NUM_TOP_LOGPROBS + 1))
-                )
-                == NUM_TOP_LOGPROBS
+            assert set(range(1, NUM_TOP_LOGPROBS + 1)).issubset(
+                {logprob.rank for logprob in logprobs.values()}
             )
