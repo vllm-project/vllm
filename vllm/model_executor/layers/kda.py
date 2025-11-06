@@ -274,7 +274,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
         g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
 
-        core_attn_out = torch.empty(
+        core_attn_out = torch.zeros(
             (1, num_tokens, self.local_num_heads, self.head_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
@@ -307,8 +307,7 @@ class KimiDeltaAttention(nn.Module, MambaBase):
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
 
         if attn_metadata is None:
-            # V1 profile run
-            core_attn_out.fill_(0)
+            #     # V1 profile run
             return
 
         assert isinstance(attn_metadata, dict)
