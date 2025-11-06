@@ -122,6 +122,9 @@ class EngineCoreOutput(
     # The number of tokens with prefix cache hits.
     num_cached_tokens: int = 0
 
+    # Additional outputs from EngineCore that can be propagated back to client.
+    additional_outputs: dict[str, Any] | None = None
+
     @property
     def finished(self) -> bool:
         return self.finish_reason is not None
