@@ -1339,7 +1339,7 @@ def fused_grouped_topk(
             topk,
             renormalize,
             routed_scaling_factor,
-            e_score_correction_bias,
+            e_score_correction_bias.to(gating_output.dtype),
             1,  # scoring_func=1 for sigmoid
         )
     elif scoring_func == "softmax":
@@ -1353,7 +1353,7 @@ def fused_grouped_topk(
             topk,
             renormalize,
             routed_scaling_factor,
-            e_score_correction_bias,
+            e_score_correction_bias.to(gating_output.dtype),
             0,  # scoring_func=0 (no activation, scores already computed)
         )
     else:
