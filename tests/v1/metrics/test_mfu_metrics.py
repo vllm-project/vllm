@@ -18,6 +18,10 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
+# Use offline mode for HuggingFace models
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 DP_SIZE = 1
 
 engine_args_user_spec = AsyncEngineArgs(
@@ -48,7 +52,11 @@ engine_args_detailed = AsyncEngineArgs(
     disable_log_stats=False,
 )
 
-if not current_platform.supports_v1(engine_args_user_spec.create_model_config()):
+# Check if platform supports v1, handling None case
+supports_v1_fn = getattr(current_platform, "supports_v1", None)
+if supports_v1_fn is not None and not supports_v1_fn(
+    engine_args_user_spec.create_model_config()
+):
     pytest.skip(reason="Requires V1-supporting platform.", allow_module_level=True)
 
 
