@@ -100,6 +100,7 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 # Install fastsafetensors-rocm
 RUN git clone https://github.com/EmbeddedLLM/fastsafetensors-rocm.git \
     && cd fastsafetensors-rocm \
+    && git checkout f9c20349d5750df9ad48a6850c3dfad5a2d6b1e9 \
     && python3 setup.py install \
     && cd .. \
     && rm -rf fastsafetensors-rocm
