@@ -446,7 +446,7 @@ def init_kv_sharing(
     )
 
 
-def get_attn_backend_cls(
+def get_attn_backend_classes(
     vllm_config: VllmConfig,
     kv_sharing_fast_prefill_eligible_layers: set[str],
     layer_names: list[str] | None = None,

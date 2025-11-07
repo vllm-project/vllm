@@ -150,7 +150,7 @@ from .utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     gather_mm_placeholders,
-    get_attn_backend_cls,
+    get_attn_backend_classes,
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
@@ -4155,7 +4155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_mode.
         """
         attention_backends = set(
-            get_attn_backend_cls(
+            get_attn_backend_classes(
                 self.vllm_config, self.kv_sharing_fast_prefill_eligible_layers
             ).values()
         )
