@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
+import numpy as np
 import torch
 
 if TYPE_CHECKING:
@@ -148,7 +149,7 @@ class ModelRunnerOutput:
     # num_generated_tokens is the number of tokens
     # generated in the current step. It can be different for
     # each request due to speculative/jump decoding.
-    sampled_token_ids: list[list[int]]
+    sampled_token_ids: list[np.ndarray]
 
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]

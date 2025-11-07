@@ -2344,7 +2344,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
-        list[list[int]],
+        list[np.ndarray],
         dict[str, LogprobsTensors | None],
         list[str],
         dict[str, int],
@@ -2370,6 +2370,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         invalid_req_indices = []
+        valid_sampled_token_ids: list[np.ndarray]
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -2384,7 +2385,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[int(i)].clear()
+                valid_sampled_token_ids[int(i)] = np.array((0,))
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -2413,11 +2414,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         for req_idx in range(num_sampled_tokens):
             if self.use_async_scheduling:
-                sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
+                sampled_ids = (
+                    np.array([-1]) if req_idx not in invalid_req_indices_set else None
+                )
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
-            num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
+            num_sampled_ids: int = sampled_ids.shape[0] if sampled_ids else 0
 
             if cu_num_accepted_tokens is not None:
                 cu_num_accepted_tokens.append(
@@ -2759,7 +2762,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with record_function_or_nullcontext("Sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        def propose_draft_token_ids(sampled_token_ids):
+        def propose_draft_token_ids(
+            sampled_token_ids: torch.Tensor | list[np.ndarray],
+        ) -> None:
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
@@ -2874,14 +2879,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
-        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampled_token_ids: torch.Tensor | list[np.ndarray],
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[list[int]] | torch.Tensor:
+    ) -> torch.Tensor | list[np.ndarray]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(sampled_token_ids, list)
@@ -2913,7 +2918,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 for num_draft, tokens in zip(
                     spec_decode_metadata.num_draft_tokens, sampled_token_ids
                 ):
-                    indices.append(offset + len(tokens) - 1)
+                    indices.append(offset + tokens.shape[0] - 1)
                     offset += num_draft + 1
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
@@ -4841,7 +4846,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return kv_cache_spec
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[np.ndarray]:
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which
@@ -4854,4 +4859,4 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pinned.copy_(sampled_token_ids, non_blocking=True)
         self.transfer_event.record()
         self.transfer_event.synchronize()
-        return pinned.tolist()
+        return [row for row in pinned]

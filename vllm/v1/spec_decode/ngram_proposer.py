@@ -131,7 +131,7 @@ class NgramProposer:
 
     def propose(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         req_ids: list[str],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
@@ -140,7 +140,7 @@ class NgramProposer:
         # find which requests need ngram proposals
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            num_sampled_ids = len(sampled_ids)
+            num_sampled_ids = sampled_ids.shape[0]
             if not num_sampled_ids:
                 # Skip speculative decoding.
                 continue
