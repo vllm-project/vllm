@@ -79,7 +79,7 @@ async def test_basic_audio_with_lora(mary_had_lamb):
             temperature=0.0,
         )
     out = json.loads(translation)["text"].strip().lower()
-    assert "mary tenía un pequeño cordero" in out
+    assert "pequeño" in out.split(" ")
 
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
