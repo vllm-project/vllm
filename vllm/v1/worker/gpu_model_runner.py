@@ -1510,7 +1510,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         for kv_cache_gid in range(num_kv_cache_groups):
             for attn_group in self.attn_groups[kv_cache_gid]:
                 if isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec):
-                    prefix_len = 0
+                    cascade_attn_prefix_len = 0
                 else:
                     # 0 if cascade attention should not be used
                     cascade_attn_prefix_len = self._compute_cascade_attn_prefix_len(
@@ -1520,7 +1520,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         attn_group.get_metadata_builder(),
                     )
                 cascade_attn_prefix_lens[kv_cache_gid].append(cascade_attn_prefix_len)
-                use_cascade_attn |= prefix_len > 0
+                use_cascade_attn |= cascade_attn_prefix_len > 0
 
         return cascade_attn_prefix_lens if use_cascade_attn else None
 
