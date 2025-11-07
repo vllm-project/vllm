@@ -91,6 +91,7 @@ run_baseline() {
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         > $LOG_PATH/baseline.log 2>&1 &
     
     local BASELINE_PID=$!
@@ -140,10 +141,12 @@ run_epd_1e_1pd() {
     CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
         --port $ENCODE_PORT \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
+        --max-num-batched-tokens 65536 \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_producer",
@@ -162,6 +165,7 @@ run_epd_1e_1pd() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_consumer",
@@ -245,6 +249,7 @@ run_baseline_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_producer"
@@ -262,6 +267,7 @@ run_baseline_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
@@ -335,10 +341,12 @@ run_epd_1e_1p_1d() {
     CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
         --port $ENCODE_PORT \
         --enforce-eager \
-        --gpu-memory-utilization 0.7 \
+        --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
+        --max-num-batched-tokens 65536 \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_producer",
@@ -359,6 +367,7 @@ run_epd_1e_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECSharedStorageConnector",
             "ec_role": "ec_consumer",
@@ -383,6 +392,7 @@ run_epd_1e_1p_1d() {
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
+        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"

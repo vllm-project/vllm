@@ -479,6 +479,30 @@ class Scheduler(SchedulerInterface):
                         not self.scheduler_config.chunked_prefill_enabled
                         and num_new_tokens > token_budget
                     ):
+                        enable_prefix_caching = self.cache_config.enable_prefix_caching
+                        kv_role = getattr(self.connector, "kv_role", None)
+
+                        can_reduce_token: bool = enable_prefix_caching or kv_role in (
+                            "kv_consumer",
+                            "kv_both",
+                        )
+
+                        # If no prefix caching or external load
+                        # then impossible to further reduce num_new_tokens:
+                        if (
+                            num_new_tokens > self.max_num_scheduled_tokens
+                            and not can_reduce_token
+                        ):
+                            logger.warning(
+                                "enable_prefix_caching is %s", enable_prefix_caching
+                            )
+                            logger.warning("kv_role is %s", kv_role)
+                            raise RuntimeError(
+                                f"num_new_tokens ({num_new_tokens}) exceeds "
+                                f"self.max_num_scheduled_tokens "
+                                f"({self.max_num_scheduled_tokens}), and cannot be "
+                                f"further reduced. Request impossible to be scheduled!"
+                            )
                         self.waiting.pop_request()
                         skipped_waiting_requests.prepend_request(request)
                         continue
