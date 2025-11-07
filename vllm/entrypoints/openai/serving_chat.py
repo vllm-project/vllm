@@ -946,7 +946,15 @@ class OpenAIServingChat(OpenAIServing):
                         assert added_content_delta_arr is not None
                         assert reasoning_end_arr is not None
                         output_token_ids = as_list(output.token_ids)
-                        if not reasoning_end_arr[i]:
+
+                        # Process reasoning only if tool call tokens are not present
+                        # This handles cases where models output tool calls without
+                        # reasoning content (e.g., Qwen3-VL with hermes tool parser)
+                        if not reasoning_end_arr[i] and (
+                            not tool_parser
+                            or not hasattr(tool_parser, "tool_call_start_token")
+                            or tool_parser.tool_call_start_token not in current_text
+                        ):
                             delta_message = (
                                 reasoning_parser.extract_reasoning_content_streaming(
                                     previous_text,
@@ -992,8 +1000,18 @@ class OpenAIServingChat(OpenAIServing):
                                 else:
                                     current_text = ""
 
-                        # handle tool calls only after reasoning is done,
+                        # handle tool calls after reasoning is done or when tool call
+                        # tokens are detected
                         else:
+                            # If entering here due to tool call detection, mark
+                            # reasoning as ended and prepare state for tool parsing
+                            if not reasoning_end_arr[i]:
+                                reasoning_end_arr[i] = True
+                                if not added_content_delta_arr[i]:
+                                    added_content_delta_arr[i] = True
+                                    previous_text = ""
+                                    previous_token_ids = []
+
                             delta_token_ids = output_token_ids
                             # First time to tool call,
                             # add the remaining text and token ids
