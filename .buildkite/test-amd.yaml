@@ -169,8 +169,8 @@ steps:
   # Skip test_optional_middleware.py since encoder models are supported on ROCm: https://github.com/vllm-project/vllm/issues/27442
   - pytest -v -s entrypoints/test_chat_utils.py
 
-- label: Entrypoints Integration Test (Pooling)
-  timeout_in_minutes: 50
+- label: Entrypoints Integration Test (Pooling) # 10min
+  timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   # grade: Blocking
@@ -748,7 +748,7 @@ steps:
 
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
   # grade: Blocking
   torch_nightly: true
