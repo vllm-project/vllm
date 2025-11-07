@@ -415,7 +415,6 @@ class KeyeSiglipAttention(nn.Module):
 
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
-            _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -442,7 +441,6 @@ class KeyeSiglipAttention(nn.Module):
         )
 
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         batch_size = q.shape[0]
 
         if rope_emb is None:
@@ -489,16 +487,9 @@ class KeyeSiglipAttention(nn.Module):
                 softmax_scale=self.scale,
             )
             context_layer = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
-            )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
+        else:
+            raise RuntimeError(
+                f"Keye-VL does not support {self.attn_backend} backend now."
             )
 
         context_layer = rearrange(context_layer, "b s h d -> b s (h d)").contiguous()

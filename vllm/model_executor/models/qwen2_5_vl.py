@@ -47,7 +47,6 @@ from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
     vit_torch_sdpa_wrapper,
-    vit_xformers_attn_wrapper,
 )
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
@@ -407,7 +406,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
+        seqlens: torch.Tensor,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -450,8 +449,10 @@ class Qwen2_5_VisionAttention(nn.Module):
                 v,
                 cu_seqlens,
             )
-        elif self.attn_backend == _Backend.XFORMERS:
-            context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
+        else:
+            raise RuntimeError(
+                f"Unsupported attention backend {self.attn_backend} for Qwen2.5 vision."
+            )
 
         output, _ = self.proj(context_layer)
         return output
@@ -514,7 +515,7 @@ class Qwen2_5_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
+        seqlens: torch.Tensor,
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),
@@ -710,7 +711,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
             _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -849,11 +849,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        seqlens = torch.zeros(1, device=cu_seqlens.device)
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         if self.attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seqlens.max()
         return max_seqlen, seqlens
 
     @staticmethod

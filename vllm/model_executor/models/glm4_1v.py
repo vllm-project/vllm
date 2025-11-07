@@ -308,7 +308,6 @@ class Glm4vVisionAttention(nn.Module):
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
             _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -343,7 +342,7 @@ class Glm4vVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
-        seqlens: list[int] | None = None,  # Only used for xFormers
+        seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -396,20 +395,10 @@ class Glm4vVisionAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
+        else:
+            raise RuntimeError(
+                f"GLM-4V does not support {self.attn_backend} backend now."
             )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -456,7 +445,7 @@ class Glm4vVisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
-        seqlens: list[int] | None = None,  # Only used for xFormers
+        seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         x_attn = self.attn(
             self.norm1(x),

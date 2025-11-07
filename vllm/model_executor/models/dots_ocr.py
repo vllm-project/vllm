@@ -305,7 +305,6 @@ class DotsVisionAttention(nn.Module):
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
             _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -373,18 +372,10 @@ class DotsVisionAttention(nn.Module):
                 out_i = out_i.permute(0, 2, 1, 3)
                 outputs.append(out_i)
             context_layer = torch.cat(outputs, dim=1) if outputs else q[:, :0]
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
-            )
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
         else:
-            raise RuntimeError("Unsupported attention backend")
+            raise RuntimeError(
+                f"DotsOCR vision attention does not support {self.attn_backend}."
+            )
 
         # [B,S,H,D] -> [S,B,H*D] -> [S, C]
         context_layer = context_layer.permute(1, 0, 2, 3).contiguous()
@@ -664,14 +655,13 @@ class DotsVisionTransformer(nn.Module):
     def compute_attn_mask_seqlen(
         self, cu_seqlens: torch.Tensor
     ) -> tuple[int | None, list[int] | None]:
-        max_seqlen, seqlens = None, None
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        max_seqlen = None
         if (
             self.attn_backend == _Backend.FLASH_ATTN
             or self.attn_backend == _Backend.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
     def forward(

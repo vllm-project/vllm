@@ -213,7 +213,6 @@ class Ernie4_5_VisionAttention(nn.Module):
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
             _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -258,7 +257,7 @@ class Ernie4_5_VisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
-        seqlens: list[int] | None = None,  # Only used for xFormers
+        seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -310,20 +309,10 @@ class Ernie4_5_VisionAttention(nn.Module):
             context_layer = rearrange(
                 context_layer, "b s h d -> s b (h d)"
             ).contiguous()
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-            from xformers.ops.fmha.attn_bias import BlockDiagonalMask
-
-            attn_bias = BlockDiagonalMask.from_seqlens(
-                q_seqlen=seqlens, kv_seqlen=None, device=q.device
+        else:
+            raise RuntimeError(
+                f"ERNIE 4.5-VL does not support {self.attn_backend} backend now."
             )
-
-            context_layer = xops.memory_efficient_attention_forward(
-                q, k, v, attn_bias=attn_bias, p=0, scale=None
-            )
-            context_layer = rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
 
         output, _ = self.proj(context_layer)
         return output
@@ -403,7 +392,7 @@ class Ernie4_5_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: int | None = None,  # Only used for Flash Attention
-        seqlens: list[int] | None = None,  # Only used for xFormers
+        seqlens: list[int] | None = None,
     ) -> torch.Tensor:
         hidden_states = hidden_states + self.attn(
             self.norm1(hidden_states),
@@ -563,14 +552,13 @@ class Ernie4_5_VisionTransformer(nn.Module):
     def compute_attn_mask_seqlen(
         self, cu_seqlens: torch.Tensor
     ) -> tuple[int | None, list[int] | None]:
-        max_seqlen, seqlens = None, None
+        seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+        max_seqlen = None
         if (
             self.attn_backend == _Backend.FLASH_ATTN
             or self.attn_backend == _Backend.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
     def forward(

@@ -23,6 +23,7 @@ from transformers.models.pixtral.image_processing_pixtral import (
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding,
     apply_rotary_pos_emb,
+    generate_block_attention_mask,
     position_ids_in_meshgrid,
 )
 from transformers.tokenization_utils_base import TextInput
@@ -56,7 +57,6 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.tokenizer import (
     MistralTokenizer,
@@ -71,17 +71,6 @@ from .vision import (
     VisionFeatureSelectStrategy,
     resolve_visual_encoder_outputs,
 )
-
-try:
-    from xformers import ops as xops
-
-    if current_platform.is_cuda() and current_platform.has_device_capability(100):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        USE_XFORMERS_OPS = True
-except ImportError:
-    USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
 
@@ -670,14 +659,11 @@ class Attention(nn.Module):
 
         q, k = apply_rotary_emb_vit(q, k, freqs_cis=freqs_cis)
 
-        if USE_XFORMERS_OPS:
-            out = xops.memory_efficient_attention(q, k, v, attn_bias=mask)
-        else:
-            q = q.transpose(1, 2)
-            k = k.transpose(1, 2)
-            v = v.transpose(1, 2)
-            out = nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-            out = out.transpose(1, 2)
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
+        out = nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = out.transpose(1, 2)
 
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
         return self.wo(out)
@@ -817,18 +803,9 @@ class VisionTransformer(nn.Module):
         freqs_cis = self.freqs_cis[positions[:, 0], positions[:, 1]]
 
         # pass through Transformer with a block diagonal mask delimiting images
-        if USE_XFORMERS_OPS:
-            mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
-            )
-        else:
-            from transformers.models.pixtral.modeling_pixtral import (
-                generate_block_attention_mask,
-            )
-
-            mask = generate_block_attention_mask(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
-            )
+        mask = generate_block_attention_mask(
+            [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
+        )
         out = self.transformer(patch_embeds, mask=mask, freqs_cis=freqs_cis)
 
         # squeeze dim 0 and split into separate tensors for each image
@@ -1097,17 +1074,11 @@ class PixtralHFAttention(nn.Module):
         cos, sin = position_embeddings
         q, k = apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=0)
 
-        if USE_XFORMERS_OPS:
-            # Transpose q and k back for attention
-            q = q.transpose(1, 2).contiguous()
-            k = k.transpose(1, 2).contiguous()
-            out = xops.memory_efficient_attention(q, k, v, attn_bias=attention_mask)
-        else:
-            v = v.transpose(1, 2)
-            out = nn.functional.scaled_dot_product_attention(
-                q, k, v, attn_mask=attention_mask
-            )
-            out = out.transpose(1, 2)
+        v = v.transpose(1, 2)
+        out = nn.functional.scaled_dot_product_attention(
+            q, k, v, attn_mask=attention_mask
+        )
+        out = out.transpose(1, 2)
 
         out = out.view(batch, patches, self.n_heads * self.head_dim)
         attn_output, _ = self.o_proj(out)
@@ -1283,18 +1254,9 @@ class PixtralHFVisionModel(nn.Module):
         ).to(self.device)
         position_embedding = self.patch_positional_embedding(patch_embeds, position_ids)
 
-        if USE_XFORMERS_OPS:
-            attention_mask = xops.fmha.attn_bias.BlockDiagonalMask.from_seqlens(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
-            )
-        else:
-            from transformers.models.pixtral.modeling_pixtral import (
-                generate_block_attention_mask,
-            )
-
-            attention_mask = generate_block_attention_mask(
-                [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
-            )
+        attention_mask = generate_block_attention_mask(
+            [p.shape[-2] * p.shape[-1] for p in patch_embeds_list], patch_embeds
+        )
 
         out = self.transformer(
             patch_embeds,

@@ -220,12 +220,12 @@ class CudaPlatformBase(Platform):
         from vllm.attention.backends.registry import _Backend
 
         # For Blackwell GPUs, force TORCH_SDPA for now.
-        # See https://github.com/facebookresearch/xformers/issues/1317#issuecomment-3199392579 # noqa: E501
+        # See facebookresearch issue #1317 for additional context.
         if cls.has_device_capability(100):
             return _Backend.TORCH_SDPA
 
         if dtype not in (torch.float16, torch.bfloat16):
-            return _Backend.XFORMERS
+            return _Backend.TORCH_SDPA
 
         if cls.has_device_capability(80):
             FLASH_ATTN_V1 = (
@@ -239,11 +239,11 @@ class CudaPlatformBase(Platform):
             if is_default_fa_supported:
                 return _Backend.FLASH_ATTN
             else:
-                # Fallback to XFORMERS
-                return _Backend.XFORMERS
+                # Fallback to SDPA
+                return _Backend.TORCH_SDPA
         else:
             # Fallback for Volta/Turing GPUs or FA not supported
-            return _Backend.XFORMERS
+            return _Backend.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(
@@ -268,7 +268,6 @@ class CudaPlatformBase(Platform):
                 _Backend.FLASH_ATTN,
                 _Backend.TRITON_ATTN,
                 _Backend.TREE_ATTN,
-                _Backend.XFORMERS,
             }:
                 raise ValueError(
                     f"Attention backend {selected_backend} incompatible with MLA. "
@@ -344,7 +343,6 @@ class CudaPlatformBase(Platform):
         TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"  # noqa: E501
         FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
         TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
-        XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
 
         use_fp8_kv_cache = kv_cache_dtype is not None and kv_cache_dtype.startswith(
             "fp8"
@@ -369,9 +367,6 @@ class CudaPlatformBase(Platform):
         elif selected_backend == _Backend.TREE_ATTN:
             logger.info_once("Using Tree Attention backend.")
             return TREE_ATTN_V1
-        elif selected_backend == _Backend.XFORMERS:
-            logger.info_once("Using XFormers backend.")
-            return XFORMERS_V1
 
         from vllm.attention.selector import is_attn_backend_supported
 

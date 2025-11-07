@@ -232,7 +232,7 @@ class Qwen3_VisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
-        seqlens: torch.Tensor,  # Only used for xFormers
+        seqlens: torch.Tensor,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -382,7 +382,6 @@ class Qwen3_VisionTransformer(nn.Module):
         if self.attn_backend not in {
             _Backend.FLASH_ATTN,
             _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
             _Backend.ROCM_AITER_FA,
         }:
             raise RuntimeError(
@@ -514,14 +513,12 @@ class Qwen3_VisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
-        seqlens = torch.zeros(1, device=cu_seqlens.device)
+        seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
         if (
             self.attn_backend == _Backend.FLASH_ATTN
             or self.attn_backend == _Backend.ROCM_AITER_FA
         ):
-            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
-        elif self.attn_backend == _Backend.XFORMERS:
-            seqlens = cu_seqlens[1:] - cu_seqlens[:-1]
+            max_seqlen = seqlens.max()
         return max_seqlen, seqlens
 
     def forward(

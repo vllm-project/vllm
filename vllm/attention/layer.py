@@ -55,31 +55,6 @@ else:
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
-USE_XFORMERS_OPS = None
-
-
-def check_xformers_availability():
-    global USE_XFORMERS_OPS
-    if USE_XFORMERS_OPS is not None:
-        return USE_XFORMERS_OPS
-
-    if current_platform.is_cuda() and current_platform.has_device_capability(100):
-        # Xformers FA is not compatible with B200
-        USE_XFORMERS_OPS = False
-    else:
-        try:
-            from importlib.util import find_spec
-
-            find_spec("xformers.ops")
-            USE_XFORMERS_OPS = True
-        except ImportError:
-            USE_XFORMERS_OPS = False
-
-    # the warning only needs to be shown once
-    if not USE_XFORMERS_OPS:
-        logger.warning("Xformers is not available, falling back.")
-
-    return USE_XFORMERS_OPS
 
 
 def check_upstream_fa_availability(dtype: torch.dtype):
@@ -531,7 +506,6 @@ class MultiHeadAttention(nn.Module):
             if backend
             in {
                 _Backend.TORCH_SDPA,
-                _Backend.XFORMERS,
                 _Backend.PALLAS,
                 _Backend.ROCM_AITER_FA,
                 _Backend.FLASH_ATTN,
@@ -546,9 +520,6 @@ class MultiHeadAttention(nn.Module):
                 attn_backend_override=attn_backend_override,
             )
         )
-
-        if self.attn_backend == _Backend.XFORMERS and not check_xformers_availability():
-            self.attn_backend = _Backend.TORCH_SDPA
 
         self.is_flash_attn_backend = self.attn_backend in {
             _Backend.FLASH_ATTN,
@@ -605,12 +576,6 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_q=q_len,
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
-            )
-        elif self.attn_backend == _Backend.XFORMERS:
-            from xformers import ops as xops
-
-            out = xops.memory_efficient_attention_forward(
-                query, key, value, scale=self.scale
             )
         elif self.attn_backend == _Backend.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))

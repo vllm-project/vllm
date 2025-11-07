@@ -23,9 +23,6 @@ MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "intfloat/multilingual-e5-base
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 
-@pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
-)
 def test_model_loading_with_params(vllm_runner, monkeypatch):
     """
     Test parameter weight loading with tp>1.
@@ -68,7 +65,8 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
+    current_platform.is_rocm(),
+    reason="Embedding model loading test not supported on ROCm.",
 )
 def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
     """
@@ -112,7 +110,8 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
 
 
 @pytest.mark.skipif(
-    current_platform.is_rocm(), reason="Xformers backend is not supported on ROCm."
+    current_platform.is_rocm(),
+    reason="Embedding model loading test not supported on ROCm.",
 )
 def test_facebook_roberta_model_loading_with_params(vllm_runner, monkeypatch):
     """
