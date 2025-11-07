@@ -49,7 +49,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent
+    from vllm.distributed.kv_events import KVCacheEvent, KVEventBatch
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -376,6 +376,12 @@ class KVConnectorBase_V1(ABC):
     def get_kv_connector_stats(self) -> Optional["KVConnectorStats"]:
         """
         Get the KV connector stats collected during the last interval.
+        """
+        return None
+
+    def get_kv_connector_kv_cache_events(self) -> Optional["KVEventBatch"]:
+        """
+        Get the KV connector kv cache events collected during the last interval.
         """
         return None
 
