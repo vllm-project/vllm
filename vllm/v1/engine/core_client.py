@@ -805,7 +805,7 @@ class MPClient(EngineCoreClient):
 
             _self = self_ref()
             if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                while engine_processes:
+                while sentinels:
                     died = multiprocessing.connection.wait(sentinels)
                     for sentinel in died:
                         died_proc = next(
