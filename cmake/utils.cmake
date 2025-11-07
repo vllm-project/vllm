@@ -523,6 +523,8 @@ function (define_extension_target MOD_NAME)
   target_compile_definitions(${MOD_NAME} PRIVATE
     "-DTORCH_EXTENSION_NAME=${MOD_NAME}")
 
+  target_link_libraries(${MOD_NAME} PRIVATE torch ${ARG_LIBRARIES})
+
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
   if (ARG_LANGUAGE STREQUAL "CUDA")
