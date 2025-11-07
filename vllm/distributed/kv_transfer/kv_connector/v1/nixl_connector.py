@@ -1669,7 +1669,11 @@ class NixlConnectorWorker:
             block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
                 meta.remote_engine_id
             )
-            if block_size_ratio != 1 and self.kv_cache_layout == "HND":
+            if (
+                not self.use_mla
+                and block_size_ratio != 1
+                and self.kv_cache_layout == "HND"
+            ):
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
                     meta.local_block_ids
                 )
