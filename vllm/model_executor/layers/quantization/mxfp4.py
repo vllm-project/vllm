@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
+    get_padding_alignment,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
@@ -282,10 +283,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             hidden_size = round_up(hidden_size, 128)
         elif current_platform.is_rocm():
+            pad_align = get_padding_alignment()
             intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 256
+                intermediate_size_per_partition, pad_align
             )
-            hidden_size = round_up(hidden_size, 256)
+            hidden_size = round_up(hidden_size, pad_align)
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64
