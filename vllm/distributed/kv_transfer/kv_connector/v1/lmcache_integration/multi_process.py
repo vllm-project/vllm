@@ -43,6 +43,14 @@ def send_lmcache_request(
     return future
 
 
+def get_lmcache_chunk_size(
+    mq_client: MessageQueueClient,
+) -> int:
+    future = send_lmcache_request(mq_client, RequestType.GET_CHUNK_SIZE, [])
+    chunk_size = future.result()
+    return chunk_size
+
+
 def striding_block_hashes(
     block_hashes: list[bytes],
     blocks_in_chunk,
@@ -202,6 +210,7 @@ class LMCacheMPRequestMetadata:
     def GetStoreMetadata(
         tracker: LMCacheMPRequestTracker,
         blocks_in_chunk: int,
+        vllm_block_size: int,
     ) -> "LMCacheMPRequestMetadata | None":
         """
         Generate the store metadata for the current request tracker.
@@ -217,8 +226,7 @@ class LMCacheMPRequestMetadata:
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
-            # TODO: remove the hard-code 16 here (num tokens per block)
-            tracker.num_scheduled_tokens // 16,
+            tracker.num_scheduled_tokens // vllm_block_size,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -295,21 +303,40 @@ LookupResult = list[bool]
 
 
 class LMCacheMPSchedulerAdapter:
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self,
+        server_url: str,
+        context: zmq.Context,
+        model_name: str,
+        world_size: int,
+        kv_rank: int,
+        vllm_block_size: int,
+    ):
+        """
+        Args:
+            server_url: The server URL for the LMCache message queue
+            context: The ZMQ context
+
+            model_name: The model name used for LMCache keys
+            world_size: The world size used for LMCache keys
+            kv_rank: The kv rank used for LMCache keys
+            vllm_block_size: The block size used in vLLM
+        """
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Request futures
         self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
 
-        # TODO: metadata is hard-coded for now, please remove
-        self.model_name = "Qwen/Qwen3-0.6B"
-        self.world_size = 1
-        self.worker_id = 0
+        self.model_name = model_name
+        self.world_size = world_size
+        self.worker_id = kv_rank
 
-        self.blocks_in_chunk = 16
-        self.chunk_size = 256  # Chunk size in tokens
-
-        pass
+        # Read chunk size from lmcache
+        self.chunk_size = get_lmcache_chunk_size(self.mq_client)
+        assert self.chunk_size % vllm_block_size == 0, (
+            "LMCache chunk size should be a multiple of vLLM block size"
+        )
+        self.blocks_in_chunk = self.chunk_size // vllm_block_size
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(self, request_id: str, block_hashes: list[bytes]):
@@ -340,6 +367,13 @@ class LMCacheMPSchedulerAdapter:
         num_chunks = sum(result)
         return num_chunks * self.chunk_size
 
+    def num_blocks_per_chunk(self) -> int:
+        """
+        Returns:
+            The number of vllm blocks in a LMCache data chunk
+        """
+        return self.blocks_in_chunk
+
     # Helper functions
     def _create_key(self, block_hash: bytes) -> IPCCacheEngineKey:
         """Convert a block hash to an IPC cache engine key"""
@@ -352,7 +386,15 @@ class LMCacheMPSchedulerAdapter:
 
 
 class LMCacheMPWorkerAdapter:
-    def __init__(self, server_url: str, context: zmq.Context):
+    def __init__(
+        self,
+        server_url: str,
+        context: zmq.Context,
+        model_name: str,
+        world_size: int,
+        kv_rank: int,
+        vllm_block_size: int,
+    ):
         self.mq_client = MessageQueueClient(server_url, context)
 
         # Instance id for GPU worker
@@ -368,12 +410,16 @@ class LMCacheMPWorkerAdapter:
         self.finished_stores: set[str] = set()
         self.previously_finished: set[str] = set()
 
-        # TODO: metadata is hard-coded for now, please remove
-        self.model_name = "Qwen/Qwen3-0.6B"
-        self.world_size = 1
-        self.worker_id = 0
+        self.model_name = model_name
+        self.world_size = world_size
+        self.worker_id = kv_rank
 
-        self.blocks_in_chunk = 16
+        # Read chunk size from lmcache
+        chunk_size = get_lmcache_chunk_size(self.mq_client)
+        assert chunk_size % vllm_block_size == 0, (
+            "LMCache chunk size should be a multiple of vLLM block size"
+        )
+        self.blocks_in_chunk = chunk_size // vllm_block_size
 
     def register_kv_caches(self, kv_caches: dict[str, KVCache]):
         # Register kv cache and send the request
@@ -466,6 +512,13 @@ class LMCacheMPWorkerAdapter:
         ret_stores.update(self._update_and_get_finished_store())
 
         return ret_stores, finished_retrieves
+
+    def num_blocks_per_chunk(self) -> int:
+        """
+        Returns:
+            The number of vllm blocks in a LMCache data chunk
+        """
+        return self.blocks_in_chunk
 
     def shutdown(self):
         # Unregister kv cache

@@ -58,6 +58,36 @@ def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     return block_ids[0]
 
 
+def create_scheduler_adapter(
+    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
+) -> LMCacheMPSchedulerAdapter:
+    # TODO: have a helper function to calculate the correct rank and
+    # world size for the MLA and other models
+    return LMCacheMPSchedulerAdapter(
+        server_url,
+        zmq_context,
+        vllm_config.model_config.model,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.cache_config.block_size,
+    )
+
+
+def create_worker_adapter(
+    server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
+) -> LMCacheMPSchedulerAdapter:
+    # TODO: have a helper function to calculate the correct rank and
+    # world size for the MLA and other models
+    return LMCacheMPWorkerAdapter(
+        server_url,
+        zmq_context,
+        vllm_config.model_config.model,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.cache_config.block_size,
+    )
+
+
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
     def __init__(self):
         super().__init__()
@@ -88,24 +118,18 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 class LMCacheMPConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
         super().__init__(vllm_config, role)
-        # logger.warning(
-        #    "Initializing KVConnectorBase_V1. This API is experimental and "
-        #    "subject to change in the future as we iterate the design."
-        # )
-        # self._connector_metadata: KVConnectorMetadata | None = None
-        # self._vllm_config = vllm_config
-        # if vllm_config.kv_transfer_config is not None:
-        #    self._kv_transfer_config = vllm_config.kv_transfer_config
-        # else:
-        #    raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
-        # self._role = role
+
         server_url = "tcp://localhost:5555"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
-            self.scheduler_adapter = LMCacheMPSchedulerAdapter(server_url, zmq_context)
+            self.scheduler_adapter = create_scheduler_adapter(
+                server_url, zmq_context, vllm_config
+            )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
-            self.worker_adapter = LMCacheMPWorkerAdapter(server_url, zmq_context)
+            self.worker_adapter = create_worker_adapter(
+                server_url, zmq_context, vllm_config
+            )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
 
@@ -213,7 +237,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
-        # TODO:
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -264,7 +287,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             - Sync loading: failed blocks should be reported in the forward
               pass in which they are detected.
         """
-        # TODO:
+        # TODO: add error tracking
         return set()
 
     def shutdown(self):
@@ -334,8 +357,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         # logger.warning("Got %d matched tokens for request %s!",
         #               ret, request.request_id)
-        # TODO: remove this hard-coded value
-        assert ret % 256 == 0
+        assert (
+            ret % (self.scheduler_adapter.num_blocks_per_chunk() * self.vllm_block_size)
+            == 0
+        )
 
         # Update num stored blocks for the tracker
         num_vllm_blocks = num_computed_tokens // self.vllm_block_size
@@ -520,11 +545,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
+        blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
+
         for request_tracker in self.request_trackers.values():
             if request_tracker.state != LMCacheMPRequestState.WAITING_FOR_LOAD:
                 continue
             r_metadata = LMCacheMPRequestMetadata.GetRetrieveMetadata(
-                request_tracker, 16
+                request_tracker, blocks_per_chunk
             )
             if r_metadata is not None:
                 metadata.add_request_metadata(r_metadata)
@@ -535,14 +562,17 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
+        blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
+
         for new_request in scheduler_output.scheduled_new_reqs:
             request_tracker = self._get_request_tracker(new_request.req_id)
 
             num_new_tokens = scheduler_output.num_scheduled_tokens[new_request.req_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
-            # TODO: change the hard-coded 16 to a configurable parameter
-            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(request_tracker, 16)
+            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+                request_tracker, blocks_per_chunk, self.vllm_block_size
+            )
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
 
@@ -551,6 +581,8 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         scheduler_output: SchedulerOutput,
         metadata: LMCacheMPConnectorMetadata,
     ) -> None:
+        blocks_per_chunk = self.scheduler_adapter.num_blocks_per_chunk()
+
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for idx, request_id in enumerate(cached_reqs.req_ids):
             request_tracker = self._get_request_tracker(request_id)
@@ -563,7 +595,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             num_new_tokens = cached_reqs.num_computed_tokens[idx]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
-            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(request_tracker, 16)
+            r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
+                request_tracker, blocks_per_chunk, self.vllm_block_size
+            )
 
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
