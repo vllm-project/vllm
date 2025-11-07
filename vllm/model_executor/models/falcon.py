@@ -137,6 +137,7 @@ class FalconAttention(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -153,6 +154,7 @@ class FalconAttention(nn.Module):
             skip_bias_add=True,
             quant_config=quant_config,
             reduce_results=self.reduce_row_parallel_results,
+            prefix=f"{prefix}.dense",
         )
 
         self.use_rotary = config.rotary
@@ -227,6 +229,7 @@ class FalconMLP(nn.Module):
         self,
         config: FalconConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -237,6 +240,7 @@ class FalconMLP(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.act = get_act_fn("gelu")
         self.reduce_row_parallel_results = not (
@@ -249,6 +253,7 @@ class FalconMLP(nn.Module):
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -275,7 +280,7 @@ class FalconDecoderLayer(nn.Module):
         self.self_attention = FalconAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.self_attention"
         )
-        self.mlp = FalconMLP(config, quant_config)
+        self.mlp = FalconMLP(config, quant_config, prefix=f"{prefix}.mlp")
         self.config = config
 
         if not hasattr(config, "num_ln_in_parallel_attn"):

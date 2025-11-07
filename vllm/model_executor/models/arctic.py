@@ -75,7 +75,11 @@ class ArcticMLP(nn.Module):
         )
 
         self.w13 = MergedColumnParallelLinear(
-            self.hidden_size, [self.ffn_dim] * 2, bias=False, quant_config=quant_config
+            self.hidden_size,
+            [self.ffn_dim] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w13",
         )
         self.w2 = RowParallelLinear(
             self.ffn_dim,
@@ -83,6 +87,7 @@ class ArcticMLP(nn.Module):
             bias=False,
             reduce_results=reduce_results,
             quant_config=quant_config,
+            prefix=f"{prefix}.w2",
         )
         if config.hidden_act != "silu":
             raise ValueError(
@@ -297,6 +302,7 @@ class ArcticAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -304,6 +310,7 @@ class ArcticAttention(nn.Module):
             bias=False,
             reduce_results=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
