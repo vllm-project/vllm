@@ -271,7 +271,7 @@ class StructuredOutputManager:
                     ):
                         assert structured_output_request.grammar.accept_tokens(
                             req_id, [token]
-                        )
+                        ), (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
