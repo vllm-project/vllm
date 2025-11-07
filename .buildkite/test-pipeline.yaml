@@ -599,6 +599,7 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
+  - export VLLM_DISABLE_SHARED_EXPERTS_STREAM=1
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
 - label: OpenAI API correctness # 22min
@@ -1224,7 +1225,7 @@ steps:
     - pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm
     - pytest -v -s tests/distributed/test_context_parallel.py
     - CUDA_VISIBLE_DEVICES=1,2 VLLM_ALL2ALL_BACKEND=deepep_high_throughput VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model Qwen/Qwen1.5-MoE-A2.7B --tp-size=1  --dp-size=2 --max-model-len 2048
-    - pytest -v -s tests/v1/distributed/test_dbo.py  
+    - pytest -v -s tests/v1/distributed/test_dbo.py
 
 ##### B200 test #####
 - label: Distributed Tests (B200) # optional
