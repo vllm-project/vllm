@@ -1031,7 +1031,8 @@ class NixlConnectorWorker:
                 metadata: NixlAgentMetadata = decoder.decode(metadata_bytes)
                 got_metadata_time = time.perf_counter()
                 logger.debug(
-                    "NIXL handshake: get metadata took: %s", got_metadata_time - start_time
+                    "NIXL handshake: get metadata took: %s",
+                    got_metadata_time - start_time,
                 )
                 # FIXME move to _validate
                 assert metadata.block_size <= self.block_size, (
@@ -1621,9 +1622,6 @@ class NixlConnectorWorker:
                     == nixl_agent_meta.block_lens[i]
                 ), "KV cache sizes must match between P and D when replicated"
         else:
-            if tp_ratio != 1 and self.device_type == "xpu":
-                # XPU uses NHD, hence it does not support splitting on H
-                raise ValueError("Heterogeneous TP is not supported on XPU")
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
                 assert block_len == remote_block_len, (
