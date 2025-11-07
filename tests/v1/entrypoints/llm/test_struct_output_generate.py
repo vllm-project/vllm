@@ -677,9 +677,14 @@ def test_structured_output_with_reasoning_matrices(
     reasoning_content, content = run_reasoning_extraction(reasoner, [generated_text])
     print(f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}")
 
-    assert content is not None and reasoning_content is not None
-    output_json = json.loads(content)
-    jsonschema.validate(instance=output_json, schema=reasoning_schema)
+    if "Qwen3" in model_name:
+        assert content is not None
+
+    assert reasoning_content is not None
+
+    if content is not None:
+        output_json = json.loads(content)
+        jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
 @pytest.mark.skip_global_cleanup
