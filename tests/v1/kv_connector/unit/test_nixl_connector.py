@@ -391,6 +391,8 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         super().__init__(*args, **kwargs)
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
+        # Mock register_kv_caches attribute needed for tests that do not call it.
+        self.src_xfer_handles_by_block_size = {self.block_size: 1}
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
@@ -431,7 +433,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                     engine_id=self.REMOTE_ENGINE_ID,
                     agent_metadata=FakeNixlWrapper.AGENT_METADATA,
                     kv_caches_base_addr=[0],
-                    device_id=0,
+                    device_id=remote_tp_rank,
                     num_blocks=1,
                     block_lens=remote_block_lens,
                     # `self.kv_cache_layout` is only forced to HND when vllm engine
@@ -480,6 +482,7 @@ class TestNixlHandshake:
         worker.dst_xfer_side_handles = {
             FakeNixlConnectorWorker.REMOTE_ENGINE_ID: {0: 1}
         }
+        # worker.src_xfer_handles_by_block_size = {worker.block_size: 1}
         worker.kv_cache_layout = "HND"
         num_xfers = 4
         while True:
@@ -558,6 +561,9 @@ class TestNixlHandshake:
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id
         )
+        # worker = connector.connector_worker
+        # worker.src_xfer_handles_by_block_size = {worker.block_size: 1}
+
         metadata = NixlConnectorMetadata()
         metadata.add_new_req_to_recv(
             request_id="id",
@@ -631,9 +637,9 @@ class TestNixlHandshake:
             remote_engine_id = worker.REMOTE_ENGINE_ID
             assert worker._tp_size[remote_engine_id] == remote_tp_size
             assert -tp_ratio == worker.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
-            # ensure src_xfer_side_chunked_handles is populated with tpratio chunks
-            assert -tp_ratio in worker.src_xfer_side_chunked_handles
-            assert len(worker.src_xfer_side_chunked_handles[-tp_ratio]) == tp_ratio
+            # ensure src_xfer_handles_by_tp_ratio is populated with tpratio chunks
+            assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
+            assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
             assert remote_engine_id in worker.dst_xfer_side_handles
             assert set(worker.dst_xfer_side_handles[remote_engine_id].keys()) == set(
                 range(tp_ratio)
@@ -691,7 +697,7 @@ class TestNixlHandshake:
             (conn_p0.connector_worker, conn_p1.connector_worker)
         ):
             worker.world_size = p_tp_size
-            worker.kv_topo.tp_size = p_tp_size
+            worker.kv_topo.remote_tp_size = {worker.engine_id: p_tp_size}
             worker.tp_rank = rank
             worker.use_mla = True
 
@@ -777,6 +783,9 @@ class TestNixlHandshake:
         connector.connector_worker = FakeNixlConnectorWorker(
             vllm_config, connector.engine_id
         )
+        # Register (mocked) local xfer handler
+        # worker = connector.connector_worker
+        # worker.src_xfer_handles_by_block_size = {worker.block_size: 1}
         metadata = NixlConnectorMetadata()
         total_reqs = 5
         for i in range(total_reqs):
@@ -1552,6 +1561,10 @@ def test_shutdown_cleans_up_resources(dist_init):
         worker._recving_transfers = {"req1": [123]}
         worker.src_xfer_side_handle = 456
         worker.src_xfer_side_chunked_handles = {-2: [456]}
+        # Mock register_kv_cache which registers local handle
+        # worker.src_xfer_handles_by_block_size = {worker.block_size: 455}
+        # P TP = 2 * D TP case, we should register 2 local handles
+        worker.src_xfer_handles_by_tp_ratio = {-2: [456, 457]}
         worker.dst_xfer_side_handles = {"engine1": {0: 789}}
         worker._remote_agents = {"engine1": {0: "agent1"}}
         worker._registered_descs = ["desc1", "desc2"]
@@ -1573,8 +1586,10 @@ def test_shutdown_cleans_up_resources(dist_init):
         mock_listener.join.assert_called_once()
 
         mock_rel_xfer.assert_called_once_with(123)
-        assert mock_rel_dlist.call_count == 3
-        mock_rel_dlist.assert_any_call(456)  # src handle
+        assert mock_rel_dlist.call_count == 4
+        mock_rel_dlist.assert_any_call(455)  # src handle (whole region)
+        mock_rel_dlist.assert_any_call(456)  # src handle (1st chunk)
+        mock_rel_dlist.assert_any_call(457)  # src handle (2nd chunk)
         mock_rel_dlist.assert_any_call(789)  # dst handle
         mock_rem_agent.assert_called_once_with("agent1")
         assert mock_dereg.call_count == 2

@@ -280,7 +280,7 @@ class TpKVTopology:
     def block_size_ratio(
         self,
         remote_block_size: int,
-    ) -> float:
+    ) -> int:
         """
         Calculate the block size ratio between local and remote TP.
         """
@@ -300,7 +300,7 @@ class TpKVTopology:
     def block_size_ratio_from_engine_id(
         self,
         remote_engine_id: EngineId,
-    ) -> float:
+    ) -> int:
         remote_block_size = self.remote_block_size[remote_engine_id]
         return self.block_size_ratio(remote_block_size)
 
