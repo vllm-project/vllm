@@ -648,10 +648,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        logger.debug(
-            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
-        )
-        return JSONResponse(content=generator.model_dump(exclude_none=True))
+        resp = generator.model_dump(exclude_none=True)
+        logger.debug("Anthropic Messages Response: %s", resp)
+        return JSONResponse(content=resp)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -1572,8 +1571,7 @@ def _log_streaming_response(response, response_body: list) -> None:
                             full_content = full_content[:2048] + ""
                             "...[truncated]"
                         logger.info(
-                            "response_body={streaming_complete: "
-                            "content='%s', chunks=%d}",
+                            "response_body={streaming_complete: content=%r, chunks=%d}",
                             full_content,
                             chunk_count,
                         )
