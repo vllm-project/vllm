@@ -12,7 +12,7 @@ from vllm.config.utils import config
 @config
 @dataclass
 class FaultToleranceConfig:
-    """Configuration for distributed KV cache transfer."""
+    """Configuration for fault tolerance."""
 
     enable_fault_tolerance: bool = False
     """Enable fault tolerance for detailed error recovery,
