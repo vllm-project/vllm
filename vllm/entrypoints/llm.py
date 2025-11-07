@@ -383,8 +383,9 @@ class LLM:
         prompts = self.io_processor.pre_process(
             prompt=validated_prompt,
             params=params,
-            llm_instance=self,
             lora_request=lora_request,
+            llm_engine=self.llm_engine,
+            processor=self.processor,
         )
 
         # reset the lora request unless it's one the user explicitly gave,
