@@ -1222,7 +1222,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
-        os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", "268435456")
+        os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(256 * 1024 * 1024))
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
