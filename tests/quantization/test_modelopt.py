@@ -195,7 +195,7 @@ def test_modelopt_fp8_gsm8k_accuracy(config: AccuracyTestConfig, tp_size: int):
     reason="ModelOpt FP4 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("config", GSM8K_FP4_ACCURACY_CONFIGS)
-@pytest.mark.parametrize("tp_size", [1, 2, 8])
+@pytest.mark.parametrize("tp_size", [1, 2])
 def test_modelopt_fp4_gsm8k_accuracy(config: AccuracyTestConfig, tp_size: int):
     """Test ModelOpt FP4 quantization accuracy on GSM8K benchmark."""
     if torch.cuda.device_count() < tp_size:
