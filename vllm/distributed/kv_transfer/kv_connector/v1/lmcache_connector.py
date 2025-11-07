@@ -244,7 +244,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             or not kv_events.events
         ):
             return
-        self._kv_events = kv_events.events
+        self._kv_events.extend(kv_events.events)
         return
 
     def request_finished(
