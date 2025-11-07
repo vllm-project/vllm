@@ -359,11 +359,11 @@ def busy_loop_wrapper(busy_loop_func):
                         "Suspended and waiting for fault tolerance "
                         "instructions."
                     )
-                    # Put running requests into waiting list.
-                    # todo Changed to non-preemptive mode
 
-                    self.engine_finish_requests()
-                    # After pausing, discard the request
+                    # Put running requests into waiting list.
+                    for req in list(self.scheduler.running):
+                        self.scheduler.preempt_request(preempted_req=req)
+                    self.scheduler.prev_step_scheduled_req_ids.clear()
 
                     try:
                         # Block until recovery command received

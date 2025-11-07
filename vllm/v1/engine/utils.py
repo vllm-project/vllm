@@ -1477,7 +1477,7 @@ class FaultHandler:
 
     def submit_fault(self, instruction: str, timeout: int, **kwargs) -> None:
         """
-        hread-safe fire-and-forget submission of a fault handling task.
+        thread-safe fire-and-forget submission of a fault handling task.
         This method can be called from **any thread**
         """
 

@@ -80,6 +80,7 @@ class WorkerGuard:
         vllm_config: VllmConfig,
         pause_event: threading.Event,
         init_distributed_env_callback: Callable,
+        clear_input_batch_callback: Callable,
         device: torch.cuda.device,
     ):
         self.vllm_config = vllm_config
@@ -88,6 +89,7 @@ class WorkerGuard:
         self.tp_rank = get_tp_group().rank_in_group
         self.pp_rank = get_pp_group().rank_in_group
         self.init_distributed_env_callback = init_distributed_env_callback
+        self.clear_input_batch_callback = clear_input_batch_callback
         self.device = device
         identity = f"{self.tp_rank}_{self.pp_rank}".encode()
         worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
@@ -231,6 +233,7 @@ class WorkerGuard:
                 self.init_distributed_env_callback()
                 self.communicator_aborted = False
             torch.cuda.synchronize()
+        self.clear_input_batch_callback()
         self.pause_event.clear()
         return True
 
@@ -458,10 +461,18 @@ class Worker(WorkerBase):
                     self.distributed_init_method,
                     self.local_rank,
                 )
+
+            def clear_input_batch_callback():
+                input_batch = self.model_runner.input_batch
+                cached_req_ids = input_batch.req_id_to_index.keys()
+                for req_id in list(cached_req_ids):
+                    input_batch.remove_request(req_id)
+
             self.worker_guard = WorkerGuard(
                 self.vllm_config,
                 self.model_runner.pause_event,
                 init_distributed_env_callback,
+                clear_input_batch_callback,
                 self.device,
             )
 
