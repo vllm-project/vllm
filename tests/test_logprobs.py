@@ -8,6 +8,7 @@ from vllm.logprobs import (
     FlattenLogprobs,
     Logprob,
     LogprobsOnePosition,
+    append_logprobs_for_next_position,
     create_prompt_logprobs,
     create_sample_logprobs,
 )
@@ -51,6 +52,67 @@ def test_create_logprobs_flatten(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(sample_logprobs.ranks) == 0
     assert len(sample_logprobs.decoded_tokens) == 0
     assert len(sample_logprobs) == 0
+
+
+def test_append_logprobs_for_next_position_none_flatten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_FLATTEN_LOGPROBS", "0")
+    logprobs = create_sample_logprobs()
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[1],
+        logprobs=[0.1],
+        decoded_tokens=["1"],
+        rank=10,
+        num_logprobs=-1,
+    )
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[2, 3],
+        logprobs=[0.2, 0.3],
+        decoded_tokens=["2", "3"],
+        rank=11,
+        num_logprobs=-1,
+    )
+    assert isinstance(logprobs, list)
+    assert logprobs == [
+        {1: Logprob(logprob=0.1, rank=10, decoded_token="1")},
+        {
+            2: Logprob(logprob=0.2, rank=11, decoded_token="2"),
+            3: Logprob(logprob=0.3, rank=1, decoded_token="3"),
+        },
+    ]
+
+
+def test_append_logprobs_for_next_position_flatten(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VLLM_FLATTEN_LOGPROBS", "1")
+    logprobs = create_sample_logprobs()
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[1],
+        logprobs=[0.1],
+        decoded_tokens=["1"],
+        rank=10,
+        num_logprobs=-1,
+    )
+    append_logprobs_for_next_position(
+        logprobs,
+        token_ids=[2, 3],
+        logprobs=[0.2, 0.3],
+        decoded_tokens=["2", "3"],
+        rank=11,
+        num_logprobs=-1,
+    )
+    assert isinstance(logprobs, FlattenLogprobs)
+    assert logprobs.start_indices == [0, 1]
+    assert logprobs.end_indices == [1, 3]
+    assert logprobs.token_ids == [1, 2, 3]
+    assert logprobs.logprobs == [0.1, 0.2, 0.3]
+    assert logprobs.ranks == [10, 11, 1]
+    assert logprobs.decoded_tokens == ["1", "2", "3"]
 
 
 LOGPROBS_ONE_POSITION_0: LogprobsOnePosition = {

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterator, MutableSequence
+import itertools
+from collections.abc import Iterable, Iterator, MutableSequence
 from dataclasses import dataclass, field
 from typing import overload
 
@@ -50,9 +51,6 @@ class FlattenLogprobs(MutableSequence[LogprobsOnePosition]):
     """
 
     # Start / end indices to indicate the range of logprobs for each position.
-    # NOTE: There's no logprob of first prompt token, so if the
-    # FlattenLogprobs is for prompt, we directly set
-    # the start index for the second prompt token.
     start_indices: list[int] = field(default_factory=list)
     end_indices: list[int] = field(default_factory=list)
 
@@ -73,6 +71,27 @@ class FlattenLogprobs(MutableSequence[LogprobsOnePosition]):
                 self.logprobs.append(logprob.logprob)
                 self.ranks.append(logprob.rank)
                 self.decoded_tokens.append(logprob.decoded_token)
+        self.end_indices.append(len(self.logprobs))
+
+    def append_fast(
+        self,
+        token_ids: list[int],
+        logprobs: list[float],
+        ranks: itertools.chain[int],
+        decoded_tokens: Iterable[str | None],
+    ) -> None:
+        """
+        Appends logprobs for the next position without creating
+        the intermediate logprob dictionary.
+        """
+        self.start_indices.append(len(self.logprobs))
+        for token_id, logprob, rank, decoded_token in zip(
+            token_ids, logprobs, ranks, decoded_tokens
+        ):
+            self.token_ids.append(token_id)
+            self.logprobs.append(logprob)
+            self.ranks.append(rank)
+            self.decoded_tokens.append(decoded_token)
         self.end_indices.append(len(self.logprobs))
 
     def extend(self, logprobs_multi_positions) -> None:
@@ -153,3 +172,37 @@ def create_prompt_logprobs() -> PromptLogprobs:
 def create_sample_logprobs() -> SampleLogprobs:
     """Creates a container to store decode logprobs for a request"""
     return FlattenLogprobs() if envs.VLLM_FLATTEN_LOGPROBS else []
+
+
+def append_logprobs_for_next_position(
+    request_logprobs: PromptLogprobs | SampleLogprobs,
+    token_ids: list[int],
+    logprobs: list[float],
+    decoded_tokens: Iterable[str | None],
+    rank: int,
+    num_logprobs: int,
+) -> None:
+    """Appends logprobs for the next position"""
+    if num_logprobs == -1:
+        num_logprobs = len(logprobs)
+    # We do not need a special case for the sampled token
+    # being in the topk, since inserting duplicated data
+    # into a dictionary twice is the same as doing it once.
+    topk_ranks = range(1, num_logprobs + 1)
+    ranks = itertools.chain((rank,), topk_ranks)
+
+    if isinstance(request_logprobs, FlattenLogprobs):
+        request_logprobs.append_fast(token_ids, logprobs, ranks, decoded_tokens)
+    else:
+        request_logprobs.append(
+            {
+                token_id: Logprob(
+                    logprob=logprob,
+                    rank=rank,
+                    decoded_token=token,
+                )
+                for token_id, logprob, rank, token in zip(
+                    token_ids, logprobs, ranks, decoded_tokens
+                )
+            }
+        )
