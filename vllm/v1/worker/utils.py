@@ -14,6 +14,7 @@ from vllm.config import (
     VllmConfig,
     get_layers_from_vllm_config,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
@@ -454,7 +455,9 @@ def get_attn_backend_classes(
     """
     Get the attention backend classes for the given VllmConfig.
     """
-    attn_layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    attn_layers = get_layers_from_vllm_config(
+        vllm_config, AttentionLayerBase, layer_names
+    )
     attn_backend_cls_dict = {}
     for layer_name, attn_module in attn_layers.items():
         attn_backend = attn_module.get_attn_backend()
