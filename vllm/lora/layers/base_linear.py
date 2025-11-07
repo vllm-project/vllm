@@ -178,35 +178,41 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     # TODO(girfan): Add tests to verify if this is functionally correct and matches punica.
     def _training_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
-        # Get active LoRA indices from the current batch
         lora_indices = self.punica_wrapper.token_lora_indices
 
-        # Apply LoRA for each token using its assigned LoRA index
-        for token_idx, lora_idx in enumerate(lora_indices):
-            if lora_idx == -1:  # No LoRA for this token
+        # Group tokens by LoRA index
+        unique_lora_ids = set(lora_indices.tolist())
+
+        for lora_idx in unique_lora_ids:
+            if lora_idx == -1:
                 continue
 
-            # Apply LoRA for each slice (Q, K, V for QKV layers)
+            # Get all tokens using this LoRA
+            token_mask = (lora_indices == lora_idx)
+            token_indices = torch.where(token_mask)[0]
+
+            if len(token_indices) == 0:
+                continue
+
+            # Process all tokens for this LoRA as a batch
+            x_batch = x[token_indices]  # [num_tokens, hidden_dim]
+
             output_offset = 0
             for slice_idx in range(len(self.lora_a_stacked)):
-                # Get LoRA weights for this slice
-                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :] # [rank, input_size]
-                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :] # [output_size, rank]
+                lora_a = self.lora_a_stacked[slice_idx][lora_idx, 0, :, :]  # [rank, input_size]
+                lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :]  # [output_size, rank]
 
-                # Apply LoRA: x @ A^T @ B^T
-                # lora_hidden = x[token_idx:token_idx+1] @ lora_a.T
-                lora_hidden = torch.matmul(x[token_idx:token_idx+1], lora_a.T)
-                lora_output = lora_hidden @ lora_b.T
+                # Batch operation: [num_tokens, hidden_dim] @ [hidden_dim, rank] @ [rank, output_size]
+                lora_hidden = x_batch @ lora_a.T  # [num_tokens, rank]
+                lora_output = lora_hidden @ lora_b.T  # [num_tokens, output_size]
 
-                # Add to correct output slice
                 slice_size = self.output_slices[slice_idx]
-                output[token_idx:token_idx+1, output_offset:output_offset + slice_size] += lora_output
+                output[token_indices, output_offset:output_offset + slice_size] += lora_output
                 output_offset += slice_size
 
-                # Apply bias if present
                 if self.lora_bias_stacked is not None and self.lora_bias_stacked[slice_idx] is not None:
                     bias = self.lora_bias_stacked[slice_idx][lora_idx, 0, :]
-                    output[token_idx:token_idx+1, output_offset-slice_size:output_offset] += bias
+                    output[token_indices, output_offset-slice_size:output_offset] += bias
 
         return output
 
