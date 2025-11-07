@@ -422,7 +422,7 @@ def rms_norm_per_block_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
-    scales = torch.zeros(
+    scales = torch.empty(
         (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
         device=input.device,
         dtype=torch.float32,
