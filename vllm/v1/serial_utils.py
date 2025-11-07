@@ -3,7 +3,9 @@
 
 import dataclasses
 import importlib
+import json
 import pickle
+import uuid
 from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
@@ -430,6 +432,54 @@ class MsgpackDecoder:
                 return cloudpickle.loads(data)
 
         raise NotImplementedError(f"Extension type code {code} is not supported")
+
+
+def deserialize_method_call(json_str: str) -> tuple[str, str, dict[str, Any]]:
+    """
+    Deserialize an encoded method call.
+
+    Args:
+        json_str (str): JSON string representing a serialized method call.
+
+    Returns:
+        tuple[str, dict[str, Any]]:
+            - method (str): The method name.
+            - method_uuid (str): The UUID identifying the method call.
+            - params (dict[str, Any]): Additional method parameters.
+    """
+    try:
+        payload = json.loads(json_str)
+        if not isinstance(payload, dict):
+            raise ValueError("Top-level JSON must be an object")
+    except Exception as e:
+        logger.error("Invalid JSON input: %s", e)
+        raise ValueError(f"Invalid JSON: {e}") from e
+
+    try:
+        method = payload.pop("method")
+        method_uuid = payload.pop("method_uuid")
+    except KeyError as e:
+        logger.error(
+            "Missing required field: %s (payload=%s)", e.args[0], json_str[:200]
+        )
+        raise ValueError(f"Missing required field: {e.args[0]}") from e
+
+    # Remaining fields are treated as parameters
+    params = payload
+
+    return method, method_uuid, params
+
+
+def serialize_method_call(
+    method: str, method_uuid: str | None = None, **params: Any
+) -> str:
+    """
+    Serialize a method invocation into a JSON string.
+    """
+    if method_uuid is None:
+        method_uuid = str(uuid.uuid4())
+    payload = {"method": method, "method_uuid": method_uuid, **params}
+    return json.dumps(payload)
 
 
 def run_method(

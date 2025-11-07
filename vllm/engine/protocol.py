@@ -216,6 +216,16 @@ class EngineClient(ABC):
         """Perform a collective RPC call to the given path."""
         raise NotImplementedError
 
+    async def handle_fault(
+        self, instruction: str, timeout: int = 300, **kwargs
+    ) -> bool:
+        """send fault tolerance instruction to the engine"""
+        raise NotImplementedError
+
+    async def exception_reporter(self):
+        """report exception from engine_core"""
+        raise NotImplementedError
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
         raise NotImplementedError
@@ -228,4 +238,7 @@ class EngineClient(ABC):
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
+        raise NotImplementedError
+
+    def shutdown(self) -> None:
         raise NotImplementedError

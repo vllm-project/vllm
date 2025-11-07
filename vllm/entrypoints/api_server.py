@@ -56,6 +56,34 @@ async def generate(request: Request) -> Response:
     return await _generate(request_dict, raw_request=request)
 
 
+@app.post("/fault_tolerance/apply")
+async def send_fault_tolerance_instruction(request: Request) -> Response:
+    """Generate completion for the request.
+
+    The request should be a JSON object with the following fields:
+    - prompt: the prompt to use for the generation.
+    - stream: whether to stream the results or not.
+    - other fields: the sampling parameters (See `SamplingParams` for details).
+    """
+    request_dict = await request.json()
+
+    fault_tolerance_instruction = request_dict.get("fault_tolerance_instruction")
+    fault_tolerance_timeout = request_dict.get("fault_tolerance_timeout")
+    kwargs = request_dict.get("kwargs", {})
+    assert engine is not None
+    return await engine.handle_fault(
+        fault_tolerance_instruction, fault_tolerance_timeout, **kwargs
+    )
+
+
+@app.get("/fault_tolerance/status")
+async def get_fault_info() -> Response:
+    """Health check."""
+    assert engine is not None
+    engine_exception_dict = await engine.exception_reporter()
+    return Response(json.dumps(engine_exception_dict), status_code=200)
+
+
 @with_cancellation
 async def _generate(request_dict: dict, raw_request: Request) -> Response:
     prompt = request_dict.pop("prompt")

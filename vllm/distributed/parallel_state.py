@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -318,6 +319,8 @@ class GroupCoordinator:
         use_device_communicator: bool,  # whether to use device communicator
         use_message_queue_broadcaster: bool = False,
         group_name: str | None = None,
+        enable_fault_tolerance: bool = False,
+        gloo_comm_timeout: timedelta | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -329,14 +332,33 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        if torch_distributed_backend == "nccl":
+            options = torch._C._distributed_c10d.ProcessGroupNCCL.Options()
+            if enable_fault_tolerance:
+                # need to set communicators as nonblocking to abort safely
+                options.config.blocking = 0
+                os.environ["NCCL_COMM_BLOCKING"] = "0"
+
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
-            )
+            if torch_distributed_backend == "nccl":
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend, pg_options=options
+                )
+            else:
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend
+                )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             with suppress_stdout():
-                cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+                if not enable_fault_tolerance:
+                    cpu_group = torch.distributed.new_group(
+                        ranks, backend="gloo"
+                    )
+                else:
+                    cpu_group = torch.distributed.new_group(
+                        ranks, backend="gloo", timeout=gloo_comm_timeout
+                    )
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1128,7 +1150,11 @@ def get_inner_dp_world_group() -> GroupCoordinator:
 
 
 def init_world_group(
-    ranks: list[int], local_rank: int, backend: str
+    ranks: list[int],
+    local_rank: int,
+    backend: str,
+    enable_fault_tolerance: bool = False,
+    gloo_comm_timeout: timedelta | None = None,
 ) -> GroupCoordinator:
     return GroupCoordinator(
         group_ranks=[ranks],
@@ -1136,6 +1162,8 @@ def init_world_group(
         torch_distributed_backend=backend,
         use_device_communicator=False,
         group_name="world",
+        enable_fault_tolerance=enable_fault_tolerance,
+        gloo_comm_timeout=gloo_comm_timeout,
     )
 
 
@@ -1143,6 +1171,8 @@ def init_model_parallel_group(
     group_ranks: list[list[int]],
     local_rank: int,
     backend: str,
+    enable_fault_tolerance: bool = False,
+    gloo_comm_timeout: timedelta | None = None,
     use_message_queue_broadcaster: bool = False,
     group_name: str | None = None,
     use_device_communicator: bool = True,
@@ -1154,6 +1184,8 @@ def init_model_parallel_group(
         use_device_communicator=use_device_communicator,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
+        enable_fault_tolerance=enable_fault_tolerance,
+        gloo_comm_timeout=gloo_comm_timeout,
     )
 
 
@@ -1223,6 +1255,33 @@ def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
 
+def get_all_model_groups() -> list[GroupCoordinator]:
+    group_list = []
+    global _TP
+    if _TP:
+        group_list.append(_TP)
+
+    global _PP
+    if _PP:
+        group_list.append(_PP)
+
+    global _DCP
+    if _DCP:
+        group_list.append(_DCP)
+
+    global _DP
+    if _DP:
+        group_list.append(_DP)
+
+    global _EP
+    if _EP:
+        group_list.append(_EP)
+
+    global _PCP
+    if _PCP:
+        group_list.append(_PCP)
+
+    return group_list
 
 @contextmanager
 def graph_capture(device: torch.device):
@@ -1260,6 +1319,7 @@ def init_distributed_environment(
     distributed_init_method: str = "env://",
     local_rank: int = -1,
     backend: str = "nccl",
+    enable_fault_tolerance: bool = False,
     timeout: timedelta | None = None,
 ):
     logger.debug(
@@ -1343,7 +1403,9 @@ def init_distributed_environment(
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
-        _WORLD = init_world_group(ranks, local_rank, backend)
+        _WORLD = init_world_group(
+            ranks, local_rank, backend, enable_fault_tolerance, timeout
+        )
         if config is not None and config.parallel_config.nnodes > 1:
             _NODE_COUNT = config.parallel_config.nnodes
         else:
@@ -1378,6 +1440,8 @@ def initialize_model_parallel(
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
     backend: str | None = None,
+    enable_fault_tolerance: bool = False,
+    gloo_comm_timeout: timedelta | None = None,
 ) -> None:
     """
     Initialize model parallel groups.
@@ -1443,6 +1507,8 @@ def initialize_model_parallel(
         group_ranks,
         get_world_group().local_rank,
         backend,
+        enable_fault_tolerance,
+        gloo_comm_timeout,
         use_message_queue_broadcaster=True,
         group_name="tp",
     )
@@ -1460,6 +1526,8 @@ def initialize_model_parallel(
         group_ranks,
         get_world_group().local_rank,
         backend,
+        enable_fault_tolerance,
+        gloo_comm_timeout,
         use_message_queue_broadcaster=True,
         group_name="dcp",
     )
@@ -1484,7 +1552,12 @@ def initialize_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
     _PP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="pp"
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        enable_fault_tolerance,
+        gloo_comm_timeout,
+        group_name="pp",
     )
 
     global _DP
@@ -1492,7 +1565,12 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     _DP = init_model_parallel_group(
-        group_ranks, get_world_group().local_rank, backend, group_name="dp"
+        group_ranks,
+        get_world_group().local_rank,
+        backend,
+        enable_fault_tolerance,
+        gloo_comm_timeout,
+        group_name="dp",
     )
 
     global _EP
@@ -1511,7 +1589,12 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
         _EP = init_model_parallel_group(
-            group_ranks, get_world_group().local_rank, backend, group_name="ep"
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            enable_fault_tolerance,
+            gloo_comm_timeout,
+            group_name="ep"
         )
 
         # Create EPLB group with the same ranks as EP if EPLB is enabled.
@@ -1552,6 +1635,8 @@ def ensure_model_parallel_initialized(
     pipeline_model_parallel_size: int,
     prefill_context_model_parallel_size: int = 1,
     decode_context_model_parallel_size: int | None = 1,
+    enable_fault_tolerance: bool = False,
+    gloo_comm_timeout: timedelta | None = None,
     backend: str | None = None,
 ) -> None:
     """Helper to initialize model parallel groups if they are not initialized,
@@ -1566,6 +1651,8 @@ def ensure_model_parallel_initialized(
             prefill_context_model_parallel_size,
             decode_context_model_parallel_size,
             backend,
+            enable_fault_tolerance,
+            gloo_comm_timeout,
         )
         return
 
