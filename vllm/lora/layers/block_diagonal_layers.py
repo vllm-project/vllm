@@ -11,7 +11,7 @@ linear layers (e.g. down, out projections) have a block-diagonal LoRA A and
 vanilla LoRA B adapter.
 
 In order to save memory, block-diagonal matrices are saved by stacking their
-blocks along the non-rank dimension.
+blocks first dimension.
 
 For example, assume the following setup:
   - Up projection linear layer with shape (out_features, in_features) = (2048, 1024)
@@ -22,7 +22,7 @@ Then:
   - In Vanilla LoRA, we would have adapters LoRA A (64, 1024) and LoRA B (2048, 64)
   - In BD-LoRA, the LoRA B matrix will be block-diagonal (each block having
     shape (out_features / TP, rank / TP) = (1024, 32))
-  - The blocks are stacked along the non-rank dimension, so the actual BD-LoRA
+  - The blocks are stacked along the first dimension, so the actual BD-LoRA
     adapter for LoRA B will be saved with shape (2048, 32)
   - To serve, we slice LoRA B along the out-features dimension, and LoRA A
     along the rank dimension
@@ -142,6 +142,13 @@ class RowParallelLinearWithBlockDiagonalShardedLoRA(
 
     Uses a block-diagonal LoRA A adapter.
     """
+
+    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
+        shard_size = self.lora_config.max_lora_rank // self.tp_size
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+        lora_a = lora_a[start_idx:end_idx, :]
+        return lora_a
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
         # Lora B has shape [out_size, rank]
