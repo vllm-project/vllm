@@ -55,6 +55,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
+    CustomChatCompletionMessageParam,
 )
 from vllm.entrypoints.context import (
     ConversationContext,
@@ -76,7 +77,6 @@ from vllm.entrypoints.harmony_utils import (
     render_for_completion,
 )
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.parser.sentence import Sentence
 from vllm.entrypoints.openai.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -271,7 +271,9 @@ class OpenAIServingResponses(OpenAIServing):
         | ErrorResponse
     ):
         error_check_ret = await self._check_model(request)
-        import fbvscode; fbvscode.set_trace()
+        import fbvscode
+
+        fbvscode.set_trace()
         if error_check_ret is not None:
             logger.error("Error with model %s", error_check_ret)
             return error_check_ret
@@ -611,9 +613,9 @@ class OpenAIServingResponses(OpenAIServing):
             else:
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
-            sentences = context.parser.sentences
+            chat_completion_messages = context.parser.chat_completion_messages
             output = self._make_response_output_items_from_parsable_context(
-                request, sentences
+                request, chat_completion_messages
             )
 
             # TODO: context for non-gptoss models doesn't use messages
@@ -784,7 +786,9 @@ class OpenAIServingResponses(OpenAIServing):
         ]
 
     def _make_response_output_items_from_parsable_context(
-        self, request: ResponsesRequest, sentences: list[Sentence]
+        self,
+        request: ResponsesRequest,
+        chat_completion_messages: list[CustomChatCompletionMessageParam],
     ) -> list[ResponseOutputItem]:
         """Given a list of sentences, construct ResponseOutput Items.
 
@@ -795,29 +799,25 @@ class OpenAIServingResponses(OpenAIServing):
         """
         output_items: list[ResponseOutputItem] = []
 
-        for sentence in sentences:
-            for text_content in sentence.content:
-                channel = text_content.channel
-                text = text_content.text
-
-                if channel == "think" or channel == "analysis":
+        for sentence in chat_completion_messages:
+            for text_content in sentence["content"]:
+                if isinstance(text_content, ResponseReasoningTextContent):
                     # Reasoning content
                     reasoning_item = ResponseReasoningItem(
                         id=f"rs_{random_uuid()}",
                         summary=[],
                         type="reasoning",
-                        content=[
-                            ResponseReasoningTextContent(
-                                text=text, type="reasoning_text"
-                            )
-                        ],
+                        content=[text_content],
                         status="completed",
                     )
                     output_items.append(reasoning_item)
-                elif channel == "final":
+                elif (
+                    isinstance(text_content, dict)
+                    and text_content.get("type") == "text"
+                ):
                     # Final output content
                     output_text = ResponseOutputText(
-                        text=text,
+                        text=text_content["text"],
                         annotations=[],
                         type="output_text",
                         logprobs=None,  # Not available from parser

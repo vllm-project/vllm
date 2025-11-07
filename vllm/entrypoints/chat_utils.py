@@ -36,6 +36,9 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion_content_part_input_audio_param import InputAudio
 from openai.types.responses import ResponseInputImageParam
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
 from openai_harmony import Message as OpenAIHarmonyMessage
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
@@ -216,6 +219,7 @@ ChatCompletionContentPartParam: TypeAlias = (
     | CustomChatCompletionContentSimpleVideoParam
     | str
     | CustomThinkCompletionContentParam
+    | ResponseReasoningTextContent
 )
 
 

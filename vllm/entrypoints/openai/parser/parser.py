@@ -2,7 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 
-from vllm.entrypoints.openai.parser.sentence import Author, Role, Sentence, TextContent
+from openai.types.chat.chat_completion_content_part_text_param import (
+    ChatCompletionContentPartTextParam,
+)
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
+
+from vllm.entrypoints.chat_utils import CustomChatCompletionMessageParam
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 
 logger = logging.getLogger(__name__)
@@ -12,7 +19,7 @@ class StreamableParser:
     """Incremental parser over completion tokens with reasoning support."""
 
     def __init__(self, *, tokenizer, reasoning_parser: ReasoningParser):
-        self.sentences: list[Sentence] = []
+        self.chat_completion_messages: list[CustomChatCompletionMessageParam] = []
         self.tokens: list[int] = []
         self.tokenizer = tokenizer
 
@@ -20,9 +27,12 @@ class StreamableParser:
         self.reasoning_parser_instance = reasoning_parser(tokenizer)
 
         # start like this
-        self.current_role = Role.ASSISTANT
-        self.current_sentence = Sentence(
-            author=Author(role=self.current_role), content=[]
+        self.current_role = "assistant"
+        # self.current_sentence = Sentence(
+        #     author=Author(role=self.current_role), content=[]
+        # )
+        self.current_chat_completion_message = CustomChatCompletionMessageParam(
+            role=self.current_role, content=[]
         )
         self.current_channel = "think"
         self.current_text = ""
@@ -38,20 +48,27 @@ class StreamableParser:
         self.tokens.append(token)
         decoded = self.tokenizer.decode(token)
         if self.reasoning_parser_instance.is_reasoning_end([token]):
-            new_content = TextContent(
-                text=self.current_text, channel=self.current_channel
+            # TODO: how to capture reasoning?
+            # new_content = {
+            #     "role": "assistant",
+            #     "reasoning_content": self.current_text
+            # }
+
+            new_content = ResponseReasoningTextContent(
+                text=self.current_text, type="reasoning_text"
             )
-            self.current_sentence.content.append(new_content)
+
+            self.current_chat_completion_message["content"].append(new_content)
 
             self.current_text = ""
             self.current_channel = "final"
         elif token == self.tokenizer.eos_token_id:
             # end of sentence
-            new_content = TextContent(
-                text=self.current_text, channel=self.current_channel
+            new_content = ChatCompletionContentPartTextParam(
+                text=self.current_text, type="text"
             )
-            self.current_sentence.content.append(new_content)
-            self.sentences.append(self.current_sentence)
+            self.current_chat_completion_message["content"].append(new_content)
+            self.chat_completion_messages.append(self.current_chat_completion_message)
 
             self.current_text = ""
             self.current_channel = None

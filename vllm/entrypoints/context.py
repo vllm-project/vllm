@@ -223,6 +223,9 @@ class ParsableContext(ConversationContext):
         for token_id in output_token_ids:
             self.parser.process(token_id)
 
+    def append_tool_output(self, output) -> None:
+        raise NotImplementedError("Should not be called.")
+
     def need_builtin_tool_call(self) -> bool:
         return False
 
