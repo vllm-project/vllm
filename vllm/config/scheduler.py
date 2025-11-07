@@ -143,6 +143,12 @@ class SchedulerConfig:
     structured outputs, speculative decoding, and pipeline parallelism.
     """
 
+    enable_schedule_capacity_profiling: bool = False
+    """If set to True, profile the maximum schedulable tokens at each step.
+    This tracks both the token demand (from running and waiting requests) and
+    the memory capacity limit (based on available KV cache memory). Statistics
+    will be logged at shutdown showing the distribution of bottlenecks."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
