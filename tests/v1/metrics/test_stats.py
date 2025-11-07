@@ -18,6 +18,7 @@ def test_iteration_stats_repr():
         "time_to_first_tokens_iter=[], "
         "inter_token_latencies_iter=[], "
         "waiting_lora_adapters={}, "
-        "running_lora_adapters={})"
+        "running_lora_adapters={}, "
+        "num_corrupted_reqs=0)"
     )
     assert repr(iteration_stats) == expected_repr

@@ -6,7 +6,7 @@ import logging
 from vllm.config import VllmConfig
 from vllm.plugins import IO_PROCESSOR_PLUGINS_GROUP, load_plugins_by_group
 from vllm.plugins.io_processors.interface import IOProcessor
-from vllm.utils import resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = logging.getLogger(__name__)
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -42,10 +42,10 @@ class MultiModalBudget:
 
         self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
 
-        max_tokens_by_modality = (
-            mm_registry.get_max_tokens_per_item_by_nonzero_modality(
-                model_config, cache=cache
-            )
+        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
+            model_config,
+            cache=cache,
+            profiler_limits=self.mm_limits,
         )
 
         encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
@@ -134,27 +134,37 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
+    layer_names: list[str]
+    kv_cache_spec: KVCacheSpec
+    kv_cache_group_id: int
     # When ubatching is enabled we will have a metadata builder for each ubatch
     # so that if they use internal persistant buffers for cudagraphs, and they
     # won't have to worry about conflicting with the other ubatches.
-    metadata_builders: list[AttentionMetadataBuilder]
-    layer_names: list[str]
-    kv_cache_spec: KVCacheSpec
+    metadata_builders: list[AttentionMetadataBuilder] = field(
+        default_factory=lambda: []
+    )
 
-    @staticmethod
-    def create_with_metadata_builders(
-        backend: type[AttentionBackend],
-        layer_names: list[str],
-        kv_cache_spec: KVCacheSpec,
-        vllm_config: VllmConfig,
-        device: torch.device,
+    def create_metadata_builders(
+        self,
+        vllm_config,
+        device,
+        kernel_block_size: int | None,
         num_metadata_builders: int = 1,
-    ) -> "AttentionGroup":
-        metadata_builders = [
-            backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config, device)
+    ):
+        kv_cache_spec_builder = (
+            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else self.kv_cache_spec
+        )
+        self.metadata_builders = [
+            self.backend.get_builder_cls()(
+                kv_cache_spec_builder,
+                self.layer_names,
+                vllm_config,
+                device,
+            )
             for _ in range(num_metadata_builders)
         ]
-        return AttentionGroup(backend, metadata_builders, layer_names, kv_cache_spec)
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -328,8 +338,12 @@ def is_residual_scattered_for_sp(
     """Check if the residual tensor is scattered for sequence parallelism.
 
     The residual tensor is scattered across tensor parallel ranks when sequence
-    parallelism and tensor parallelism is enabled, and the number of
-    input tokens is one of the compilation sizes.
+    parallelism and tensor parallelism is enabled.
+
+    This follows the same logic as SequenceParallelismPass.is_applicable():
+    - In full-graph compilation mode (no splitting ops or using inductor graph
+      partition), SP is always applied
+    - Otherwise, SP is only applied for specific shapes in compile_sizes
     """
     if not vllm_config.compilation_config.pass_config.enable_sequence_parallelism:
         return False
@@ -343,5 +357,10 @@ def is_residual_scattered_for_sp(
     # to be a multiple of tensor_parallel_size (tp) earlier.
     assert num_input_tokens % tp == 0
 
-    # Currently, SP is only enabled for static size fx graphs.
+    if (
+        not vllm_config.compilation_config.splitting_ops
+        or vllm_config.compilation_config.use_inductor_graph_partition
+    ):
+        return True
+
     return num_input_tokens in vllm_config.compilation_config.compile_sizes

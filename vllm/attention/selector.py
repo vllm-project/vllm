@@ -13,7 +13,8 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.backends.registry import _Backend, backend_name_to_enum
 from vllm.logger import init_logger
-from vllm.utils import STR_BACKEND_ENV_VAR, resolve_obj_by_qualname
+from vllm.utils import STR_BACKEND_ENV_VAR
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -133,16 +134,11 @@ def get_attn_backend(
     use_sparse: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-    # Accessing envs.* behind an @lru_cache decorator can cause the wrong
-    # value to be returned from the cache if the value changes between calls.
-    # To avoid this, we read envs.VLLM_USE_V1 here and pass it explicitly to the
-    # private function.
     return _cached_get_attn_backend(
         head_size=head_size,
         dtype=dtype,
         kv_cache_dtype=kv_cache_dtype,
         block_size=block_size,
-        use_v1=envs.VLLM_USE_V1,
         use_mla=use_mla,
         has_sink=has_sink,
         use_sparse=use_sparse,
@@ -155,7 +151,6 @@ def _cached_get_attn_backend(
     dtype: torch.dtype,
     kv_cache_dtype: str | None,
     block_size: int,
-    use_v1: bool = False,
     use_mla: bool = False,
     has_sink: bool = False,
     use_sparse: bool = False,
@@ -198,7 +193,7 @@ def _cached_get_attn_backend(
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
+        True,
         use_mla,
         has_sink,
         use_sparse,

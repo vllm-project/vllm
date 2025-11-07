@@ -12,10 +12,11 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.executor.abstract import Executor, UniProcExecutor
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -24,9 +25,11 @@ from ...utils import create_new_process_for_each_test, multi_gpu_test
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
-PROMPT = "Hello my name is Robert and I love quantization kernels"
+# test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
+# Adjust prompt if changing model to maintain 12-token length.
+PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
@@ -245,7 +248,7 @@ def test_engine_core_concurrent_batches():
             self,
             scheduler_output,
             non_block=False,
-        ) -> Future[ModelRunnerOutput]:
+        ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
 
             # DummyExecutor used only for testing async case.
@@ -253,6 +256,23 @@ def test_engine_core_concurrent_batches():
 
             def _execute():
                 output = self.collective_rpc("execute_model", args=(scheduler_output,))
+                # Make a copy because output[0] may be reused
+                # by the next batch.
+                return copy.deepcopy(output[0])
+
+            # Use the thread pool instead of creating a new thread
+            return self.thread_pool.submit(_execute)
+
+        def sample_tokens(
+            self, grammar_output, non_block=False
+        ) -> Future[ModelRunnerOutput]:
+            """Make sample_tokens non-blocking."""
+
+            # DummyExecutor used only for testing async case.
+            assert non_block
+
+            def _execute():
+                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
                 # Make a copy because output[0] may be reused
                 # by the next batch.
                 return copy.deepcopy(output[0])

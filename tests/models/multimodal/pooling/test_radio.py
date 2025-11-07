@@ -9,7 +9,7 @@ from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.model_executor.models.radio import RadioModel
 from vllm.transformers_utils.configs.radio import RadioConfig
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
 
@@ -42,13 +42,24 @@ def run_radio_test(
 
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
 
+    # RADIO model on HF does not properly handle torch_dtype argument
+    # And relies on args["dtype"] which we have to patch manually:
+    config.args["dtype"] = torch_dtype
+
     hf_model = AutoModel.from_pretrained(
         model_id,
         config=config,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,
         trust_remote_code=True,
     ).to("cuda")
     hf_model.eval()
+
+    # A HF model has image normalization as a part of model's forward
+    # However in vLLM we don't make normalization a part of the model
+    # forward step since mean/std stored as model's parameters and
+    # subject to precision loss (when using fp16/bf16) which negatively
+    # affects evaluation benchmarks.
+    hf_model.make_preprocessor_external()
 
     hf_outputs_per_image = [
         hf_model(pixel_value.to("cuda")).features for pixel_value in pixel_values
@@ -78,7 +89,7 @@ def run_radio_test(
         "nvidia/C-RADIOv2-H",
     ],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["half", "bfloat16"])
 def test_radio(dist_init, image_assets, model_id, dtype: str) -> None:
     run_radio_test(
         image_assets,

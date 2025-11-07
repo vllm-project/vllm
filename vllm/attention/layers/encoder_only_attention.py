@@ -5,7 +5,6 @@ from copy import copy
 
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionMetadata,
@@ -14,10 +13,12 @@ from vllm.attention.backends.abstract import (
 from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig
+from vllm.config.vllm import VllmConfig
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
+from vllm.v1.kv_cache_interface import KVCacheSpec
 
 
 @functools.lru_cache
@@ -72,17 +73,11 @@ class EncoderOnlyAttention(Attention):
             kv_cache_dtype = "auto"
             block_size = 16
 
-        if envs.VLLM_USE_V1:
-            underlying_attn_backend = get_attn_backend(
-                head_size, dtype, kv_cache_dtype, block_size
-            )
+        underlying_attn_backend = get_attn_backend(
+            head_size, dtype, kv_cache_dtype, block_size
+        )
 
-            attn_backend = create_encoder_only_attention_backend(
-                underlying_attn_backend
-            )
-        else:
-            # in v0 encoder only attention is handled inside the backends
-            attn_backend = None
+        attn_backend = create_encoder_only_attention_backend(underlying_attn_backend)
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_ONLY, (
@@ -98,3 +93,7 @@ class EncoderOnlyAttention(Attention):
             attn_type=AttentionType.ENCODER_ONLY,
             **kwargs,
         )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # Does not need KV cache
+        return None
