@@ -46,9 +46,11 @@ def has_flashinfer() -> bool:
     # When not using flashinfer cubin,
     # Also check if nvcc is available since it's required to JIT compile flashinfer
     if not envs.VLLM_HAS_FLASHINFER_CUBIN and shutil.which("nvcc") is None:
-        logger.debug_once("FlashInfer unavailable since nvcc was not found and not using pre-downloaded cubins")
+        logger.debug_once(
+            "FlashInfer unavailable since nvcc was not found "
+            "and not using pre-downloaded cubins"
+        )
         return False
-
     return True
 
 
