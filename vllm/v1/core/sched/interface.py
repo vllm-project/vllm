@@ -22,9 +22,9 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def __init__(
         self,
-        vllm_config: VllmConfig,
-        kv_cache_config: KVCacheConfig,
-        structured_output_manager: StructuredOutputManager,
+        vllm_config: "VllmConfig",
+        kv_cache_config: "KVCacheConfig",
+        structured_output_manager: "StructuredOutputManager",
         block_size: int,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
