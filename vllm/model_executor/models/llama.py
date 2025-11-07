@@ -346,13 +346,6 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
-        # if is_tknp_initialized() and hidden_states is not None:
-        #     if hidden_states is not None:
-        #         logger.info(f"[TKNP RANK] {get_tknp_rank()} [llama.py] {self.prefix} After mlp hidden_states.shape: {hidden_states.shape}")
-        #         print(f"[TKNP RANK] {get_tknp_rank()} [llama.py] {self.prefix} After mlp hidden_states: {hidden_states}")
-        #     else:
-        #         logger.info(f"[TKNP RANK] {get_tknp_rank()} [llama.py] {self.prefix} After mlp hidden_states is None")
-
         return hidden_states, residual
 
 @support_torch_compile

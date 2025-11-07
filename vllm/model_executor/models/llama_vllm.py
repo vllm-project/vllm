@@ -22,7 +22,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only LLaMA model compatible with HuggingFace weights. Token Parallel Experiments"""
+"""Inference-only LLaMA model compatible with HuggingFace weights."""
 from collections.abc import Iterable
 from typing import Any, Optional, Union
 
@@ -33,13 +33,12 @@ from transformers import LlamaConfig
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -56,30 +55,7 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
-'''
-Summary of changes: 
-1. RMSNorm, VocabParallelEmbedding, ParallelLMHead are updated with init_tknp_layer decorator
-2. QKVLinear and RowLinear in Attention are replaced with TokenParallelQKVLinear and TokenParallelRowLinear
-3. The MLP class is decorated with init_tknp_layer
-4. The load_weights function in LlamaForCausalLM is updated to handle token parallelism loading
-'''
 
-
-# Token parallel imports
-from vllm.model_executor.layers.token_parallel_linear import TokenParallelQKVLinear, TokenParallelRowLinear, init_tknp_layer
-
-from vllm.distributed.parallel_state import (
-    get_tknp_rank, 
-    get_tknp_world_size, 
-    get_tknp_group, 
-    is_tknp_initialized
-)
-
-RMSNorm = init_tknp_layer(RMSNorm)
-VocabParallelEmbedding = init_tknp_layer(VocabParallelEmbedding)
-ParallelLMHead = init_tknp_layer(ParallelLMHead)
-
-@init_tknp_layer
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -119,6 +95,7 @@ class LlamaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
+
 class LlamaAttention(nn.Module):
 
     def __init__(
@@ -138,10 +115,9 @@ class LlamaAttention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> None:
         super().__init__()
-        self.layer_idx = extract_layer_index(prefix)
+        layer_idx = extract_layer_index(prefix)
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
@@ -169,7 +145,7 @@ class LlamaAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        self.qkv_proj = TokenParallelQKVLinear(
+        self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
             head_size=self.head_dim,
             total_num_heads=self.total_num_heads,
@@ -179,7 +155,7 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        self.o_proj = TokenParallelRowLinear(
+        self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias_o_proj,
@@ -196,7 +172,7 @@ class LlamaAttention(nn.Module):
             if isinstance(interleaved_sliding_window, int):
                 sliding_window = interleaved_sliding_window
             elif isinstance(interleaved_sliding_window, list):
-                sw_idx = self.layer_idx % len(interleaved_sliding_window)
+                sw_idx = layer_idx % len(interleaved_sliding_window)
                 sliding_window = interleaved_sliding_window[sw_idx]
             else:
                 raise ValueError(
@@ -221,9 +197,6 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        if self.layer_idx == 0 and self.tp_rank == 0:
-            print("hidden_states shape:", hidden_states.shape)
-            
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
@@ -551,7 +524,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
                                       layer_type=layer_type)
-        # print(self.model)
 
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -624,10 +596,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
-        # Early return for non-root ranks in token parallel groups
-        if is_tknp_initialized() and get_tknp_rank() != 0:
-            return set()
-    
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]

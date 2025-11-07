@@ -363,9 +363,6 @@ class TokenParallelRowLinear(RowParallelLinear):
                 group=self.pg,
             )
             
-            # Return None (or (None, None) for bias compatibility)
-            # if hasattr(self, 'bias') and self.bias is not None:
-            #     return None, None
             return None, None 
     
     def extra_repr(self) -> str:
@@ -470,11 +467,8 @@ def init_tknp_layer(cls_to_wrap: type) -> type:
 
             # 2. If self.is_root_rank is True, setup the regular class.
             if self.is_root_rank:
-                # Instantiate the actual module we are wrapping (e.g., LlamaMLP)
-                # and pass all arguments to it.
                 self.module = cls_to_wrap(*args, **kwargs)
-                # self.weight = self.module.weight if hasattr(self.module, 'weight') else None
-                # self.bias = self.module.bias if hasattr(self.module, 'bias') else None
+
             # 3. If we are not the root rank, setup an identity function.
             else:
                 # On non-root ranks, we just need a placeholder that
@@ -490,9 +484,6 @@ def init_tknp_layer(cls_to_wrap: type) -> type:
 
             if not self.is_root_rank:
                 self.quant_method = _TokenParallelIdentityQuantMethod(self)
-            # if self.embedding_dim:
-            #     logger.info(f"TKNP RANK {self.tknp_rank}: Initialized TokenParallelWrapper for {cls_to_wrap.__name__} with embedding_dim={self.embedding_dim}")
-
 
         def forward(self, *args, **kwargs):
             # Delegate the forward call to the instantiated module.

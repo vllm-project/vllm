@@ -329,8 +329,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.shared_kv_cache_layers: dict[str, str] = {}
         
         # TKNP
+        self.root_rank = is_root_rank()
         if is_tknp_initialized():
-            self.root_rank = is_root_rank()
             self.tknp_world_size = get_tknp_world_size()
             self.req_to_tknp_rank: dict[str, int] = {}
             self.next_tknp_rank_assignment = 0  # For round-robin block assignment
@@ -410,7 +410,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """
         if scheduler_output.total_num_scheduled_tokens == self.input_batch.num_reqs:
             stage = "decode"
-            logger.info(f"[RANK {get_tknp_rank()}] TKNP Stage: decode, Need to fix tokens per rank. Note assumes 1 tokens per req")
+            # logger.debug(f"[RANK {get_tknp_rank()}] TKNP Stage: decode, Need to fix tokens per rank. Note assumes 1 tokens per req")
             tokens_per_rank = self.tknp_reqs_per_rank
         else:
             stage = "prefill"
@@ -1165,7 +1165,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_scheduled_tokens,
                 int(total_num_scheduled_tokens),
             )
-            print(f"[RANK {get_tknp_rank()}] TKNP Metadata: {tknp_metadata}")
+            # print(f"[RANK {get_tknp_rank()}] TKNP Metadata: {tknp_metadata}")
 
         # Get request indices.
         # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
