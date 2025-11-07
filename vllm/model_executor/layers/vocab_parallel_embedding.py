@@ -258,6 +258,10 @@ class VocabParallelEmbedding(CustomOp):
         )
         self.embedding_dim = embedding_dim
 
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+
         quant_method = None
         if quant_config is not None:
             quant_method = quant_config.get_quant_method(self, prefix=prefix)
