@@ -253,7 +253,7 @@ class KVOutputAggregator:
                     output_future.result(timeout=timeout)
                 return delegate_result()
 
-            result_future.result = result
+            result_future.result = result  # type: ignore[method-assign]
 
         return result_future
 
