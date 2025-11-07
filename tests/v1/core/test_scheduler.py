@@ -2201,7 +2201,7 @@ def test_priority_scheduling_preemption_when_current_request_preempted():
     # which will trigger the condition (preempted_req == request)
     output = scheduler.schedule()
 
-    assert len(output.scheduled_new_reqs) == 3
+    assert len(output.scheduled_cached_reqs) == 3
     assert len(scheduler.waiting) == 1
     running_req_ids = [req.request_id for req in scheduler.running]
 
