@@ -913,6 +913,7 @@ class NixlConnectorWorker:
             remote_tp_size=self._tp_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backend=backend,
         )
         self._use_pallas = self.kv_topo._use_pallas
 
