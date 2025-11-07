@@ -80,12 +80,14 @@ class GPTNeoXAttention(nn.Module):
             self.total_num_heads,
             bias=self.bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=self.bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
@@ -125,17 +127,20 @@ class GPTNeoXMLP(nn.Module):
         self,
         config: GPTNeoXConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.dense_4h_to_h = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
         self.act = get_act_fn(config.hidden_act)
 
