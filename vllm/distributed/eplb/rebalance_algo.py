@@ -12,6 +12,7 @@ Please find at [#12](https://github.com/deepseek-ai/EPLB/issues/12) an example
 on how the EPLB algorithm works.
 """
 
+import numpy as np
 import torch
 
 
@@ -21,11 +22,9 @@ def balanced_packing(
     """
     Pack n weighted objects to m packs, such that each bin contains exactly
     n/m objects and the weights of all packs are as balanced as possible.
-
     Parameters:
         weight: [X, n], the weight of each item
         num_packs: number of packs
-
     Returns:
         pack_index: [X, n], the pack index of each item
         rank_in_pack: [X, n], the rank of the item in the pack
@@ -34,29 +33,48 @@ def balanced_packing(
     assert num_groups % num_packs == 0
     groups_per_pack = num_groups // num_packs
 
+    device = weight.device
+
+    # Handle trivial case before conversion
     if groups_per_pack == 1:
         pack_index = torch.arange(
-            weight.size(-1), dtype=torch.int64, device=weight.device
+            weight.size(-1), dtype=torch.int64, device=device
         ).expand(weight.shape)
-        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64, device=weight.device)
+        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64, device=device)
         return pack_index, rank_in_pack
 
-    indices = weight.float().sort(-1, descending=True).indices
-    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device=weight.device)
-    rank_in_pack = torch.full_like(pack_index, fill_value=-1, device=weight.device)
+    # Convert to NumPy for CPU processing
+    weight_np = weight.cpu().numpy()
+
+    # Sort and get indices
+    indices_np = np.argsort(-weight_np, axis=-1)  # Descending order
+
+    # Initialize output arrays
+    pack_index_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
+    rank_in_pack_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
+
+    # Run the packing algorithm
     for i in range(num_layers):
-        pack_weights = [0] * num_packs
+        pack_weights = [0.0] * num_packs
         pack_items = [0] * num_packs
-        for group in indices[i]:
+
+        for group in indices_np[i]:
+            # Find pack with minimum weight that still has capacity
             pack = min(
-                (i for i in range(num_packs) if pack_items[i] < groups_per_pack),
+                (j for j in range(num_packs) if pack_items[j] < groups_per_pack),
                 key=pack_weights.__getitem__,
             )
+
             assert pack_items[pack] < groups_per_pack
-            pack_index[i, group] = pack
-            rank_in_pack[i, group] = pack_items[pack]
-            pack_weights[pack] += weight[i, group]
+            pack_index_np[i, group] = pack
+            rank_in_pack_np[i, group] = pack_items[pack]
+            pack_weights[pack] += weight_np[i, group]
             pack_items[pack] += 1
+
+    # Convert back to PyTorch tensors on original device
+    pack_index = torch.from_numpy(pack_index_np).to(device)
+    rank_in_pack = torch.from_numpy(rank_in_pack_np).to(device)
+
     return pack_index, rank_in_pack
 
 
