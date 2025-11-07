@@ -3059,15 +3059,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.runner_only_attn_layers: set[str] = get_runner_only_attn_layers(
             self.vllm_config
         )
-        print("runner_only_attn_layers", self.runner_only_attn_layers)
         self._init_kv_sharing_layers()
 
         # Resolve cudagraph_mode
         self._check_and_update_cudagraph_mode()
 
-        # TODO in this PR: waiting the review of
-        # https://github.com/vllm-project/vllm/pull/27929
-        # I think 27929 is correct.
         if self.dcp_world_size > 1:
             layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
             for layer in layers.values():
@@ -4038,13 +4034,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
         for layer_name, attn_module in attn_layers.items():
             if kv_tgt_layer := attn_module.kv_sharing_target_layer_name:
-                # The layer doesn't need its own KV cache and will use that of
-                # the target layer. We skip creating a KVCacheSpec for it, so
-                # that KV cache management logic will act as this layer does
-                # not exist, and doesn't allocate KV cache for the layer. This
-                # enables the memory saving of cross-layer kv sharing, allowing
-                # a given amount of memory to accommodate longer context lengths
-                # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
 
         # In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other
@@ -4781,6 +4770,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
             if layer_name in self.runner_only_attn_layers:
+                # The layer doesn't need its own KV cache. We skip creating a
+                # KVCacheSpec for it, so that KV cache management logic will act as
+                # this layer does not exist, and doesn't allocate KV cache for the
+                # layer, which allows a given amount of memory to accommodate longer
+                # context lengths or enable more requests to be processed
+                # simultaneously for cases like cross-layer KV cache sharing.
                 continue
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 kv_cache_spec[layer_name] = spec
