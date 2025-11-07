@@ -4,18 +4,17 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
-from vllm.config import VllmConfig
-from vllm.config.vllm import KVCacheConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.v1.structured_output import StructuredOutputManager
-
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+    from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
+    from vllm.v1.structured_output import StructuredOutputManager
 
 
 class SchedulerInterface(ABC):
