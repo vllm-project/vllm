@@ -607,7 +607,10 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
-            self.compilation_config.custom_ops.append("+rms_norm")
+            if "-rms_norm" in self.compilation_config.custom_ops:
+                logger.warning("RMS norm force enabled, sequence parallelism might break")
+            else:
+                self.compilation_config.custom_ops.append("+rms_norm")
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
