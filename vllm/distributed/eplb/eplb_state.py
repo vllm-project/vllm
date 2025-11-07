@@ -153,12 +153,7 @@ class EplbState:
         Otherwise, the rearrangement will hang at collective
         communication calls.
         """
-        self.expert_rearrangement_step_interval: int = 0
-        """
-        Interval for expert rearrangement steps.
-        This is a constant and is taken from the config.
-        """
-        spolicy: EplbPolicy | None = None
+        self.policy: EplbPolicy | None = None
         """
         Selected instance of the EPLB algorithm class
         """
@@ -343,8 +338,8 @@ class EplbState:
 
         # Construct the algorithm instance based
         # on the selected eplb algorithm type.
-        policy_type = parallel_config.eplb_config.policy
-        policy = PolicyFactory.generate_policy(policy_type)
+        policy_type = self.parallel_config.eplb_config.policy
+        self.policy = PolicyFactory.generate_policy(policy_type)
         assert policy is not None, "EplbPolicy must be initialized"
         if global_expert_load is not None:
             ep_group = get_ep_group().device_group
@@ -372,7 +367,7 @@ class EplbState:
                 new_physical_to_logical_map,
                 new_logical_to_physical_map,
                 new_logical_replica_count,
-            ) = policy.rebalance_experts(
+            ) = self.policy.rebalance_experts(
                 global_expert_load,
                 num_replicas,
                 num_groups,
