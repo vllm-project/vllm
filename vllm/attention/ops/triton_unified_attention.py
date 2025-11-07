@@ -704,6 +704,11 @@ def unified_attention(
     q_descale,
     k_descale,
     v_descale,
+    seq_threshold_3D,
+    num_par_softmax_segments,
+    softmax_segm_output,
+    softmax_segm_max,
+    softmax_segm_expsum,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -749,7 +754,7 @@ def unified_attention(
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill or launch grid size is larger than threshold
-    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
+    if max_seqlen_q > 1 or num_seqs > seq_threshold_3D:
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
@@ -802,37 +807,10 @@ def unified_attention(
             USE_FP8=output_scale is not None,
         )
     else:
-        # for initial version, NUM_SEGMENTS = 16 is chosen as a default
-        # value that showed good performance in tests
-        NUM_SEGMENTS = 16
-
-        segm_output = torch.empty(
-            num_seqs,
-            num_query_heads,
-            NUM_SEGMENTS,
-            triton.next_power_of_2(head_size),
-            dtype=torch.float32,
-            device=q.device,
-        )
-        segm_max = torch.empty(
-            num_seqs,
-            num_query_heads,
-            NUM_SEGMENTS,
-            dtype=torch.float32,
-            device=q.device,
-        )
-        segm_expsum = torch.empty(
-            num_seqs,
-            num_query_heads,
-            NUM_SEGMENTS,
-            dtype=torch.float32,
-            device=q.device,
-        )
-
-        kernel_unified_attention_3d[(num_seqs, num_kv_heads, NUM_SEGMENTS)](
-            segm_output_ptr=segm_output,
-            segm_max_ptr=segm_max,
-            segm_expsum_ptr=segm_expsum,
+        kernel_unified_attention_3d[(num_seqs, num_kv_heads, num_par_softmax_segments)](
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
             query_ptr=q,
             key_cache_ptr=k,
             value_cache_ptr=v,
@@ -869,13 +847,13 @@ def unified_attention(
             stride_v_cache_2=v.stride(2),
             stride_v_cache_3=v.stride(3),
             BLOCK_M=BLOCK_M,
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
         )
         reduce_segments[(num_seqs, num_query_heads)](
             output_ptr=out,
-            segm_output_ptr=segm_output,
-            segm_max_ptr=segm_max,
-            segm_expsum_ptr=segm_expsum,
+            segm_output_ptr=softmax_segm_output,
+            segm_max_ptr=softmax_segm_max,
+            segm_expsum_ptr=softmax_segm_expsum,
             seq_lens_ptr=seqused_k,
             num_query_heads=num_query_heads,
             out_scale_inv=1 / output_scale if output_scale is not None else 1.0,
@@ -885,6 +863,6 @@ def unified_attention(
             TILE_SIZE=TILE_SIZE_DECODE,
             HEAD_SIZE=head_size,
             HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-            NUM_SEGMENTS_PER_SEQ=NUM_SEGMENTS,
+            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
         )
