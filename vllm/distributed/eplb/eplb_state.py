@@ -203,6 +203,7 @@ class EplbState:
         """
         print("eplb_config", parallel_config.eplb_config)
 
+        # TODO: In proper load we need to take into account elastic EP.
         eplb_state_path = parallel_config.eplb_config.load_state_path
         map_is_loaded = False
         physical_to_logical_map = None

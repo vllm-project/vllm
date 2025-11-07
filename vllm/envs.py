@@ -1442,7 +1442,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
         "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
     ),
-    # (EPLB-related envs moved to config: use ParallelConfig.eplb_config)
 }
 
 # --8<-- [end:env-vars-definition]
