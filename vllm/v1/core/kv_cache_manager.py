@@ -12,7 +12,7 @@ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 
 logger = init_logger(__name__)
 
@@ -100,12 +100,16 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        waterline: float = 0.01,
     ) -> None:
         self.max_model_len = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
+        self.waterline = waterline
+        assert waterline >= 0.0
+        self.waterline_blocks = int(waterline * kv_cache_config.num_blocks)
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
@@ -293,8 +297,16 @@ class KVCacheManager:
             new_computed_blocks=new_computed_block_list,
             num_encoder_tokens=num_encoder_tokens,
         )
-
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        # waterline is applied to waiting requests only
+        waterline_blocks = (
+            self.waterline_blocks
+            if request.status in [RequestStatus.WAITING, RequestStatus.PREEMPTED]
+            else 0
+        )
+        if (
+            num_blocks_to_allocate + waterline_blocks
+            > self.block_pool.get_num_free_blocks()
+        ):
             # Cannot allocate new blocks
             return None
 

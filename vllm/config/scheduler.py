@@ -142,6 +142,9 @@ class SchedulerConfig:
     speculative decoding and pipeline parallelism.
     """
 
+    waterline: float = 0.01
+    """Use waterline to avoid frequent kv cache eviction."""
+
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
             if self.async_scheduling:
