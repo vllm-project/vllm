@@ -716,7 +716,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_backend = FlashinferMoeBackend.TENSORRT_LLM
         elif self.fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS:
             self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
-            if self.block_quant is not None:
+            if self.block_quant:
                 assert self.weight_block_size == [128, 128], (
                     f"Only support weight_block_size == [128, 128], "
                     f"got {self.weight_block_size}"
@@ -724,7 +724,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             self.flashinfer_moe_fn = partial(
                 flashinfer_cutlass_moe_fp8,
                 moe=self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant is not None,
+                use_deepseek_fp8_block_scale=self.block_quant,
             )
 
         self.allow_deep_gemm = self.fp8_backend == Fp8MoeBackend.DEEPGEMM
@@ -1110,7 +1110,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         ):
             return None
         elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            if self.block_quant is not None:
+            if self.block_quant:
                 assert self.weight_block_size == [128, 128], (
                     f"Only support weight_block_size == [128, 128], "
                     f"got {self.weight_block_size}"
@@ -1118,7 +1118,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # Wire block-scale flag through prepare/finalize when using CUTLASS
             prepare_finalize = build_flashinfer_fp8_cutlass_moe_prepare_finalize(
                 self.moe,
-                use_deepseek_fp8_block_scale=self.block_quant is not None,
+                use_deepseek_fp8_block_scale=self.block_quant,
             )
             logger.debug_once("%s", prepare_finalize.__class__.__name__)
             return prepare_finalize
@@ -1166,7 +1166,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             experts = select_cutlass_fp8_gemm_impl(
                 self.moe,
                 self.moe_quant_config,
-                use_deepseek_fp8_block_scale=self.block_quant is not None,
+                use_deepseek_fp8_block_scale=self.block_quant,
             )
             logger.debug_once("Using %s", experts.__class__.__name__)
             return experts
