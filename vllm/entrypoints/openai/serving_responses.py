@@ -390,6 +390,14 @@ class OpenAIServingResponses(OpenAIServing):
                             request=request,
                             tool_parser_cls=self.tool_parser,
                             available_tools=available_tools,
+                            tool_dicts=[
+                                convert_tool_responses_to_completions_format(
+                                    tool.model_dump()
+                                )
+                                for tool in request.tools
+                            ],
+                            chat_template=self.chat_template,
+                            chat_template_content_format=self.chat_template_content_format,
                         )
                     else:
                         context = SimpleContext()
@@ -804,6 +812,16 @@ class OpenAIServingResponses(OpenAIServing):
         output_items: list[ResponseOutputItem] = []
 
         for sentence in chat_completion_messages:
+            # if sentence['role'] == 'tool':
+            # TODO: this should be a McpCall type
+            #     function_call_output = ResponseFunctionToolCallOutputItem(
+            #         id=f"fc_{random_uuid()}",
+            #         call_id=f"call_{random_uuid()}",
+            #         type="function_call_output",
+            #         status="completed",
+            #         output=sentence['content'][0]['text'].text,
+            #     )
+            #     output_items.append(function_call_output)
             if sentence["role"] != "assistant":
                 # This could be a system/user message, and
                 # This is a message from a tool to the assistant (e.g., search result).
@@ -812,13 +830,20 @@ class OpenAIServingResponses(OpenAIServing):
                 continue
 
             for content in sentence["content"]:
-                if isinstance(content, ResponseReasoningTextContent):
+                if (
+                    isinstance(content, dict)
+                    and content.get("type") == "reasoning_text"
+                ):
                     # Reasoning content
                     reasoning_item = ResponseReasoningItem(
                         id=f"rs_{random_uuid()}",
                         summary=[],
                         type="reasoning",
-                        content=[content],
+                        content=[
+                            ResponseReasoningTextContent(
+                                text=content["text"], type="reasoning_text"
+                            )
+                        ],
                         status="completed",
                     )
                     output_items.append(reasoning_item)

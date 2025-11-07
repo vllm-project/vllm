@@ -15,7 +15,10 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
-from vllm.entrypoints.chat_utils import CustomChatCompletionMessageParam
+from vllm.entrypoints.chat_utils import (
+    ChatTemplateContentFormatOption,
+    CustomChatCompletionMessageParam,
+)
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -200,6 +203,9 @@ class ParsableContext(ConversationContext):
         request: ResponsesRequest,
         available_tools: list[str] | None,
         tool_parser_cls,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+        tool_dicts: list[dict] | None = None,
     ):
         self.last_output = None
         self.num_prompt_tokens = 0
@@ -217,6 +223,8 @@ class ParsableContext(ConversationContext):
             request=request,
             tool_parser_cls=tool_parser_cls,
         )
+        self.tool_parser_cls = tool_parser_cls
+        self.request = request
         self.tokenizer = tokenizer
         self.reasoning_parser = reasoning_parser
 
@@ -226,6 +234,10 @@ class ParsableContext(ConversationContext):
         self.available_tools = available_tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
+
+        self.chat_template = chat_template
+        self.chat_template_content_format = chat_template_content_format
+        self.tool_dicts = tool_dicts
 
     def append_output(
         self, output: RequestOutput | list[CustomChatCompletionMessageParam]
@@ -262,8 +274,9 @@ class ParsableContext(ConversationContext):
         self.called_tools.add("python")
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
+        args = json.loads(last_msg.arguments)
         param = {
-            "code": last_msg.arguments,
+            "code": args['code'],
         }
         result = await tool_session.call_tool("python", param)
         result_str = result.content[0].text
@@ -273,7 +286,9 @@ class ParsableContext(ConversationContext):
 
         message = CustomChatCompletionMessageParam(
             role="tool",
-            content=[ChatCompletionContentPartTextParam(text=content, type="text")],
+            content=[
+                ChatCompletionContentPartTextParam(text=content, type="text")
+            ],  # TODO: why is this nested?
         )
 
         return [message]
@@ -291,8 +306,16 @@ class ParsableContext(ConversationContext):
         # if recipient is not None and recipient.startswith("python"):
         #     return await self.call_python_tool(self._tool_sessions["python"], last_tool_request)
 
-    def render_for_completion(self) -> list[int]:
-        raise NotImplementedError("Should not be called.")
+    def render_for_completion(self):
+        return [
+            self.request,
+            self.tokenizer,
+            self.parser.chat_completion_messages,
+            self.tool_dicts,
+            self.tool_parser_cls,
+            self.chat_template,
+            self.chat_template_content_format,
+        ]
 
     async def init_tool_sessions(
         self,

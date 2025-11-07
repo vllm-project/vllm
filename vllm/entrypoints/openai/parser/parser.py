@@ -5,9 +5,6 @@ import logging
 from openai.types.chat.chat_completion_content_part_text_param import (
     ChatCompletionContentPartTextParam,
 )
-from openai.types.responses.response_reasoning_item import (
-    Content as ResponseReasoningTextContent,
-)
 
 from vllm.entrypoints.chat_utils import CustomChatCompletionMessageParam
 from vllm.entrypoints.openai.protocol import FunctionCall, ResponsesRequest
@@ -63,7 +60,7 @@ class StreamableParser:
             )
         )
         if reasoning_content:
-            new_content = ResponseReasoningTextContent(
+            new_content = ChatCompletionContentPartTextParam(
                 text=reasoning_content, type="reasoning_text"
             )
 
@@ -77,6 +74,7 @@ class StreamableParser:
         if tool_call_info is not None and tool_call_info.tools_called:
             # extract_tool_calls() returns a list of tool calls.
             function_calls.extend(
+                # TODO: this should be a TypedDict
                 FunctionCall(
                     name=tool_call.function.name,
                     arguments=tool_call.function.arguments,
@@ -92,8 +90,10 @@ class StreamableParser:
             self.current_chat_completion_message["content"].extend(function_calls)
 
         self.chat_completion_messages.append(self.current_chat_completion_message)
-        # if len(function_calls) > 0:
-        # TODO: add a tool call to the parser
+
+        self.current_chat_completion_message = CustomChatCompletionMessageParam(
+            role=self.current_role, content=[]
+        )
 
         return self
 

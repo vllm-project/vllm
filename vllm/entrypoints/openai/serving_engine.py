@@ -1194,6 +1194,61 @@ class OpenAIServing:
         )
         return engine_request, tokenization_kwargs
 
+    async def _render_next_turn(
+        self,
+        request,
+        tokenizer,
+        messages,
+        tool_dicts,
+        tool_parser,
+        chat_template,
+        chat_template_content_format,
+    ):
+        new_messages = []
+        for item in messages:
+            if item["role"] == "user" or item["role"] == "tool":
+                new_messages.append(item)
+            elif item["role"] == "assistant":
+                for content in item["content"]:
+                    if isinstance(content, FunctionCall):
+                        new_msg = {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "dafsdfdsa",
+                                    "type": "function",
+                                    "function": {
+                                        "name": content.name,
+                                        "arguments": content.arguments,
+                                    },
+                                }
+                            ],
+                        }
+                        new_messages.append(new_msg)
+                    elif content["type"] == "text":
+                        new_messages.append(
+                            {"role": "assistant", "content": content["text"]}
+                        )
+                    elif content["type"] == "reasoning_text":
+                        reasoning_content = content["text"]
+                        new_messages.append(
+                            {
+                                "role": "assistant",
+                                "content": "<think>" + reasoning_content + "</think>",
+                            }
+                        )
+
+        _, request_prompts, engine_prompts = await self._preprocess_chat(
+            request,
+            tokenizer,
+            new_messages,
+            tool_dicts=tool_dicts,
+            tool_parser=tool_parser,
+            chat_template=chat_template,
+            chat_template_content_format=chat_template_content_format,
+        )
+        return request_prompts, engine_prompts
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
@@ -1253,11 +1308,33 @@ class OpenAIServing:
 
             # Create inputs for the next turn.
             # Render the next prompt token ids.
-            prompt_token_ids = context.render_for_completion()
-            engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
-            request_prompt = prompt_token_ids
+            [
+                request,
+                tokenizer,
+                messages,
+                tool_dicts,
+                tool_parser,
+                chat_template,
+                chat_template_content_format,
+            ] = context.render_for_completion()
+
+            # HACK
+            request_prompts, engine_prompts = await self._render_next_turn(
+                request,
+                tokenizer,
+                messages,
+                tool_dicts,
+                tool_parser,
+                chat_template,
+                chat_template_content_format,
+            )
+            engine_prompt = engine_prompts[0]
+            request_prompt = request_prompts[0]
+
+            # engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
+            # request_prompt = prompt_token_ids
             # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(prompt_token_ids)
+            sampling_params.max_tokens = self.max_model_len - len(engine_prompt)
             # OPTIMIZATION
             priority = orig_priority - 1
 
