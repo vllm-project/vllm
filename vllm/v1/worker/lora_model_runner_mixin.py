@@ -38,14 +38,6 @@ class LoRAModelRunnerMixin:
                 "Regarding multimodal models, vLLM currently "
                 "only supports adding LoRA to language model."
             )
-        if vllm_config.speculative_config:
-            assert vllm_config.scheduler_config.max_num_batched_tokens >= (
-                vllm_config.scheduler_config.max_num_seqs
-                * (vllm_config.speculative_config.num_speculative_tokens + 1)
-            ), (
-                "Consider increasing max_num_batched_tokens or "
-                "decreasing num_speculative_tokens"
-            )
         # Add LoRA Manager to the Model Runner
         self.lora_manager = LRUCacheWorkerLoRAManager(
             vllm_config,

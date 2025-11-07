@@ -1446,6 +1446,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Hot-Swap lora model
         if self.lora_config:
+            assert (
+                np.sum(num_sampled_tokens)
+                <= self.vllm_config.scheduler_config.max_num_batched_tokens
+            )
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
