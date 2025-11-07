@@ -746,19 +746,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         if self.use_direct_call:
+            if self.calculate_kv_scales:
+                self.calc_kv_scales(q, kv_c_normed, k_pe)
+
             forward_context: ForwardContext = get_forward_context()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-            # Mirror Attention.forward scale calculation path
-            # Only calculate if the layer's calculate_kv_scales flag is True
-            # This flag gets set to False after the first forward pass
-            if self.calculate_kv_scales:
-                torch.ops.vllm.maybe_calc_kv_scales(
-                    q, kv_c_normed, k_pe, self.layer_name
-                )
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -777,6 +772,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
+            if self.calculate_kv_scales:
+                torch.ops.vllm.maybe_calc_kv_scales(
+                    q, kv_c_normed, k_pe, self.layer_name
+                )
+
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
@@ -788,12 +788,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                # Only calculate if the layer's calculate_kv_scales flag is True
-                # This flag gets set to False after the first forward pass
-                if self.calculate_kv_scales:
-                    torch.ops.vllm.maybe_calc_kv_scales(
-                        q, kv_c_normed, k_pe, self.layer_name
-                    )
                 return torch.ops.vllm.unified_mla_attention(
                     q,
                     kv_c_normed,
