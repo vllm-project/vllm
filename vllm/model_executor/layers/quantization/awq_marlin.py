@@ -686,8 +686,6 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `AWQMarlinMoEMethod` yet."

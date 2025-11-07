@@ -70,6 +70,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
+    VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_INPUT_CACHE_GIB: int = 4
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.8"
@@ -219,6 +220,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
 
 
 def get_default_cache_root():
@@ -738,6 +740,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_VIDEO_LOADER_BACKEND": lambda: os.getenv(
         "VLLM_VIDEO_LOADER_BACKEND", "opencv"
     ),
+    # Media connector implementation.
+    # - "http": Default connector that supports fetching media via HTTP.
+    #
+    # Custom implementations can be registered
+    # via `@MEDIA_CONNECTOR_REGISTRY.register("my_custom_media_connector")` and
+    # imported at runtime.
+    # If a non-existing backend is used, an AssertionError will be thrown.
+    "VLLM_MEDIA_CONNECTOR": lambda: os.getenv("VLLM_MEDIA_CONNECTOR", "http"),
     # [DEPRECATED] Cache size (in GiB per process) for multimodal input cache
     # Default is 4 GiB per API process + 4 GiB per engine core process
     "VLLM_MM_INPUT_CACHE_GIB": lambda: int(os.getenv("VLLM_MM_INPUT_CACHE_GIB", "4")),
@@ -767,7 +777,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
-        os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 0)
+        int(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "0"))
     ),
     # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
     # the user to specify a max sequence length greater than
@@ -1306,7 +1316,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
-    "VLLM_HAS_FLASHINFER_CUBIN": lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
+    "VLLM_HAS_FLASHINFER_CUBIN": lambda: bool(
+        int(os.getenv("VLLM_HAS_FLASHINFER_CUBIN", "0"))
+    ),
     # Supported options:
     # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
@@ -1442,8 +1454,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
     # Disables parallel execution of shared_experts via separate cuda stream
-    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
-        "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
+    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
+    ),
+    # Format for saving torch.compile cache artifacts
+    # - "binary": saves as binary file
+    #     Safe for multiple vllm serve processes accessing the same torch compile cache.
+    # - "unpacked": saves as directory structure (for inspection/debugging)
+    #     NOT multiprocess safe - race conditions may occur with multiple processes.
+    #     Allows viewing and setting breakpoints in Inductor's code output files.
+    "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
+        "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
 }
 
