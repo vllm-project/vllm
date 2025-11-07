@@ -220,6 +220,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_FLATTEN_LOGPROBS: bool = False
 
 
 def get_default_cache_root():
@@ -1463,6 +1464,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    # Flag to enable FlattenLogprobs whose GC overhead is significantly smaller than
+    # the original list[dict[int, Logprob]] approach.
+    # After enabled, PromptLogprobs and SampleLogprobs would populated as
+    # FlattenLogprobs.
+    "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
