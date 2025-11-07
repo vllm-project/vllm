@@ -242,7 +242,7 @@ class ChameleonMLP(nn.Module):
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.gate_down_proj",
+            prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
             raise ValueError(

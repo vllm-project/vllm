@@ -72,13 +72,13 @@ class PersimmonMLP(nn.Module):
             config.hidden_size,
             config.intermediate_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.dense_4h_to_h = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.qkv_proj",
+            prefix=f"{prefix}.dense_4h_to_h",
         )
         self.act = get_act_fn(config.hidden_act)
 
