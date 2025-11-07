@@ -4,6 +4,7 @@
 import asyncio
 import os
 from collections.abc import Callable
+from concurrent.futures import Future
 from typing import Any
 
 import pytest
@@ -27,7 +28,7 @@ class CustomMultiprocExecutor(MultiprocExecutor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-    ) -> list[Any]:
+    ) -> Any | list[Any] | Future[Any | list[Any]]:
         # Drop marker to show that this was run
         with open(".marker", "w"):
             ...
