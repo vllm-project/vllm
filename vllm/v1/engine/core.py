@@ -136,6 +136,19 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.communicator_aborted = False
         self.engine_running = True
         self.engine_core_guard_dead = False
+        self.logger = self._make_engine_core_guard_logger()
+
+    def _make_engine_core_guard_logger(self):
+        prefix = f"[EngineCoreGuard_{self.engine_index}] "
+
+        def log(msg, *args, level="info", **kwargs):
+            """
+            level: "info", "warning", "error", "debug"
+            msg: log message
+            """
+            getattr(logger, level)(prefix + msg, *args, **kwargs)
+
+        return log
 
     def run(self) -> None:
         """
@@ -149,14 +162,13 @@ class EngineCoreGuard(threading.Thread):  # changed
                 if isinstance(engine_exception, EngineLoopPausedError):
                     # The busy loop stopped due to another critical exception,
                     # put it back
-                    logger.info(
-                        "[EngineCoreGuard] Engine paused",
-                    )
+                    self.logger("Engine paused", level="info")
                 else:
-                    logger.error(
-                        "[EngineCoreGuard] Detected exception %s: %s",
+                    self.logger(
+                        "Detected exception %s: %s",
                         type(engine_exception).__name__,
                         engine_exception,
+                        level="error",
                     )
                     self._report_client_exception(engine_exception)
                 self.engine_running = False
@@ -164,13 +176,13 @@ class EngineCoreGuard(threading.Thread):  # changed
                 pass
 
             if self.client_cmd_socket.closed:
-                logger.info("[EngineCoreGuard] Client socket closed")
+                self.logger("Client socket closed", level="info")
                 break
             has_msg, _, cmd_str = recv_router_dealer_message(
                 self.client_cmd_socket, use_poller=True, poll_timeout=poll_timeout_ms
             )
             if has_msg:
-                logger.info("[EngineCoreGuard] Received cmd: %s", cmd_str)
+                self.logger("Received cmd: %s", cmd_str, level="info")
                 self._execute_cmd(cmd_str)
 
     def _stop_worker_execution(self, soft_pause: bool, timeout: int = 2) -> bool:
@@ -215,17 +227,18 @@ class EngineCoreGuard(threading.Thread):  # changed
         Execute a command received from ClientGuard.
         """
         method, method_uuid, method_params = deserialize_method_call(cmd_str)
-        logger.info("[EngineCoreGuard] Executing command: %s", method)
+        self.logger("Executing command: %s", method, level="info")
         try:
             success = run_method(self, method, args=(), kwargs=method_params)
-            logger.info("[EngineCoreGuard] Command (%s) succeeded: %s", method, success)
+            self.logger("Command (%s) succeeded: %s", method, success, level="info")
 
         except Exception as e:
-            logger.error(
-                "[EngineCoreGuard] Error executing method %s: %s %s",
+            self.logger(
+                "Error executing method %s: %s %s",
                 method,
                 type(e).__name__,
                 e,
+                level="error",
             )
             success = False
 
@@ -239,7 +252,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             soft_pause: if True, perform a soft pause using a flag; otherwise
             abort the communicator
         """
-        logger.info("[EngineCoreGuard] Start pausing EngineCore")
+        self.logger("Start pausing EngineCore", level="info")
         start_time = time.monotonic()
         if self.engine_running:
             # Clear the flag to signal busy loop should pause
@@ -331,7 +344,7 @@ def busy_loop_wrapper(busy_loop_func):
                     self.busy_loop_active.clear()
                     self.fault_signal_q.put(original_exc)
                     logger.warning(
-                        "EngineCore busy loop raised an exception. "
+                        "[BusyLoopWrapper] EngineCore busy loop raised an exception. "
                         "Suspended and waiting for fault tolerance "
                         "instructions."
                     )
@@ -346,7 +359,10 @@ def busy_loop_wrapper(busy_loop_func):
                     try:
                         # Block until recovery command received
                         cmd_str = self.cmd_q.get(timeout=self.engine_recovery_timeout)
-                        logger.debug("Received fault tolerance command: %s", cmd_str)
+                        logger.debug(
+                            "[BusyLoopWrapper] Received fault tolerance command: %s",
+                            cmd_str,
+                        )
                         if cmd_str is not None:
                             method, _, params = deserialize_method_call(cmd_str)
                             run_method(self, method, args=(), kwargs=params)
@@ -356,8 +372,8 @@ def busy_loop_wrapper(busy_loop_func):
                         # No handling instruction received within predefined
                         # timeout period.
                         logger.error(
-                            "Fault tolerance instruction not received within "
-                            "timeout. Proceeding with default exception "
+                            "[BusyLoopWrapper] Fault tolerance instruction not received"
+                            " within timeout. Proceeding with default exception "
                             "handling."
                         )
                     except Exception as cmd_exc:
