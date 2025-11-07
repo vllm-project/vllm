@@ -177,8 +177,13 @@ class LMCacheMPWorkerAdapter:
         self.kv_caches: dict[str, torch.Tensor] = {}
 
         # Request futures
-        self.store_futures: dict[str, MessagingFuture[StoreResult]] = {}
-        self.retrieve_futures: dict[str, MessagingFuture[RetrieveResult]] = {}
+        # request_id -> (future, other merged requests)
+        self.store_futures: dict[
+            str, tuple[MessagingFuture[StoreResult], list[str]]
+        ] = {}
+        self.retrieve_futures: dict[
+            str, tuple[MessagingFuture[RetrieveResult], list[str]]
+        ] = {}
 
         self.finished_stores: set[str] = set()
         self.previously_finished: set[str] = set()
@@ -215,7 +220,7 @@ class LMCacheMPWorkerAdapter:
             RequestType.STORE,
             [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         )
-        self.store_futures[request_id] = future
+        self.store_futures[request_id] = (future, [])
 
     @_lmcache_nvtx_annotate
     def submit_retrieve_request(
@@ -227,7 +232,45 @@ class LMCacheMPWorkerAdapter:
             RequestType.RETRIEVE,
             [keys, self.instance_id, op.block_ids, event.ipc_handle()],
         )
-        self.retrieve_futures[request_id] = future
+        self.retrieve_futures[request_id] = (future, [])
+
+    @_lmcache_nvtx_annotate
+    def batched_submit_store_requests(
+        self,
+        request_ids: list[str],
+        ops: list[LoadStoreOp],
+        event: torch.cuda.Event,
+    ):
+        keys = []
+        block_ids = []
+        for op in ops:
+            keys.extend(self._block_hashes_to_keys(op.block_hashes))
+            block_ids.extend(op.block_ids)
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.STORE,
+            [keys, self.instance_id, block_ids, event.ipc_handle()],
+        )
+        self.store_futures[request_ids[0]] = (future, request_ids[1:])
+
+    @_lmcache_nvtx_annotate
+    def batched_submit_retrieve_requests(
+        self,
+        request_ids: list[str],
+        ops: list[LoadStoreOp],
+        event: torch.cuda.Event,
+    ):
+        keys = []
+        block_ids = []
+        for op in ops:
+            keys.extend(self._block_hashes_to_keys(op.block_hashes))
+            block_ids.extend(op.block_ids)
+        future = send_lmcache_request(
+            self.mq_client,
+            RequestType.RETRIEVE,
+            [keys, self.instance_id, block_ids, event.ipc_handle()],
+        )
+        self.retrieve_futures[request_ids[0]] = (future, request_ids[1:])
 
     @_lmcache_nvtx_annotate
     def get_finished(
@@ -235,12 +278,14 @@ class LMCacheMPWorkerAdapter:
     ) -> tuple[set[str] | None, set[str] | None]:
         finished_stores = set()
         finished_retrieves = set()
-        for request_id, future in self.store_futures.items():
+        for request_id, (future, other_reqs) in self.store_futures.items():
             if not future.query():
                 continue
 
             result = future.result()
             finished_stores.add(request_id)
+            finished_stores.update(other_reqs)
+
             if not result:
                 # TODO: add error handling here
                 logger.error(
@@ -249,12 +294,14 @@ class LMCacheMPWorkerAdapter:
                     request_id,
                 )
 
-        for request_id, future in self.retrieve_futures.items():
+        for request_id, (future, other_reqs) in self.retrieve_futures.items():
             if not future.query():
                 continue
 
             result = future.result()
             finished_retrieves.add(request_id)
+            finished_retrieves.update(other_reqs)
+
             if not all(result):
                 # TODO: add error handing here
                 logger.error(
@@ -267,9 +314,9 @@ class LMCacheMPWorkerAdapter:
 
         # Remove the finished requests from the tracking dicts
         for request_id in finished_stores:
-            del self.store_futures[request_id]
+            self.store_futures.pop(request_id, None)
         for request_id in finished_retrieves:
-            del self.retrieve_futures[request_id]
+            self.retrieve_futures.pop(request_id, None)
 
         # Update the internal states
         self.finished_stores.update(finished_stores)

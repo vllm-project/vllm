@@ -410,11 +410,23 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         with torch.cuda.stream(torch.cuda.current_stream()):
             event = torch.cuda.Event(interprocess=True)
             event.record()
+
+        request_ids = []
+        ops = []
+
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
-            logger.info("HERE! SUBMITTING THE RETRIEVE REQUEST %s", meta.request_id)
-            self.worker_adapter.submit_retrieve_request(meta.request_id, meta.op, event)
+            request_ids.append(meta.request_id)
+            ops.append(meta.op)
+
+        if len(request_ids) > 0:
+            logger.info(
+                "HERE! SUBMITTING THE BATCHED RETRIEVE REQUESTS %s", request_ids
+            )
+            self.worker_adapter.batched_submit_retrieve_requests(
+                request_ids, ops, event
+            )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -465,10 +477,16 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             event = torch.cuda.Event(interprocess=True)
             event.record()
 
+        request_ids = []
+        ops = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
-            self.worker_adapter.submit_store_request(meta.request_id, meta.op, event)
+            request_ids.append(meta.request_id)
+            ops.append(meta.op)
+
+        if len(request_ids) > 0:
+            self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
 
     def get_finished(
         self, finished_req_ids: set[str]
