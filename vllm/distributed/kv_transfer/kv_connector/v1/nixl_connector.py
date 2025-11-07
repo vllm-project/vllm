@@ -956,7 +956,8 @@ class NixlConnectorWorker:
                 metadata = decoder.decode(metadata_bytes)
                 got_metadata_time = time.perf_counter()
                 logger.debug(
-                    "NIXL handshake: get metadata took: %s", got_metadata_time - start_time
+                    "NIXL handshake: get metadata took: %s",
+                    got_metadata_time - start_time,
                 )
 
                 # Ensure engine id matches.
@@ -1474,9 +1475,6 @@ class NixlConnectorWorker:
             )
             remote_block_size = remote_block_len // (self.slot_size_per_layer[0])
         else:
-            if tp_ratio != 1 and self.device_type == "xpu":
-                # XPU uses NHD, hence it does not support splitting on H
-                raise ValueError("Heterogeneous TP is not supported on XPU")
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
                 assert block_len == remote_block_len, (
