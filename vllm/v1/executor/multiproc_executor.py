@@ -166,8 +166,6 @@ class MultiprocExecutor(Executor):
         self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
-        if self.vllm_config.kv_transfer_config is not None:
-            assert self.kv_output_aggregator is not None
 
     def start_worker_monitor(self):
         workers = self.workers
