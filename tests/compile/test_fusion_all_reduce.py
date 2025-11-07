@@ -90,29 +90,16 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             for _ in range(3)
         ]
 
-        self.fp8_linear_1 = TestFP8Layer(
-            self.quant_key,
-            self.quant_key,
-            self.weight[0],
-            self.wscale[0],
-            input_scale=self.input_scale[0],
-        )
-
-        self.fp8_linear_2 = TestFP8Layer(
-            self.quant_key,
-            self.quant_key,
-            self.weight[1],
-            self.wscale[1],
-            input_scale=self.input_scale[1],
-        )
-
-        self.fp8_linear_3 = TestFP8Layer(
-            self.quant_key,
-            self.quant_key,
-            self.weight[2],
-            self.wscale[2],
-            input_scale=self.input_scale[2],
-        )
+        self.fp8_linear_layers = [
+            TestFP8Layer(
+                self.quant_key,
+                self.quant_key,
+                self.weight[i],
+                self.wscale[i],
+                input_scale=self.input_scale[i],
+            )
+            for i in range(3)
+        ]
 
     def forward(self, hidden_states):
         # avoid having graph input be an arg to a pattern directly
@@ -120,17 +107,17 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         x = resid = tensor_model_parallel_all_reduce(z)
         y = self.norm[0](x)
 
-        z2 = self.fp8_linear_1(y)
+        z2 = self.fp8_linear_layers[0](y)
 
         x2 = tensor_model_parallel_all_reduce(z2)
         y2, resid = self.norm[1](x2, resid)
 
-        z3 = self.fp8_linear_2(y2)
+        z3 = self.fp8_linear_layers[1](y2)
 
         x3 = tensor_model_parallel_all_reduce(z3)
         y3, resid = self.norm[2](x3, resid)  # use resid here
 
-        z4 = self.fp8_linear_3(y3)
+        z4 = self.fp8_linear_layers[2](y3)
 
         x4 = tensor_model_parallel_all_reduce(z4)
         y4, resid = self.norm[3](x4, resid)  # use resid here
@@ -143,7 +130,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
         return [
             torch.ops.vllm.all_reduce.default,
             torch.ops._C.static_scaled_fp8_quant.default
-            if self.fp8_linear.is_quant_fp8_enabled()
+            if self.fp8_linear_layers[0].is_quant_fp8_enabled()
             else torch.ops.aten.reciprocal.default,
         ]
 

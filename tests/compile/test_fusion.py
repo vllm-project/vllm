@@ -73,45 +73,36 @@ class TestModel(torch.nn.Module):
         ]
 
         with override_cutlass_fp8_supported(not cuda_force_torch):
-            self.fp8_linear_1 = TestFP8Layer(
-                self.activation_quant_key,
-                self.weight_quant_key,
-                self.w[0],
-                self.wscale[0],
-                self.scale[0],
-            )
-            self.fp8_linear_2 = TestFP8Layer(
-                self.activation_quant_key,
-                self.weight_quant_key,
-                self.w[1],
-                self.wscale[1],
-                self.scale[1],
-            )
-            self.fp8_linear_3 = TestFP8Layer(
-                self.activation_quant_key,
-                self.weight_quant_key,
-                self.w[2],
-                self.wscale[2],
-                self.scale[2],
-            )
+            self.fp8_linear_layers = [
+                TestFP8Layer(
+                    self.activation_quant_key,
+                    self.weight_quant_key,
+                    self.w[i],
+                    self.wscale[i],
+                    input_scale=self.scale[i],
+                )
+                for i in range(3)
+            ]
 
         self.enable_rms_norm_custom_op = self.norm[0].enabled()
-        self.enable_quant_fp8_custom_op = self.fp8_linear.is_quant_fp8_enabled()
+        self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
+            0
+        ].is_quant_fp8_enabled()
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
         x = resid = torch.relu(x)
         y = self.norm[0](x)
 
-        x2 = self.fp8_linear_1(y)
+        x2 = self.fp8_linear_layers[0](y)
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = self.fp8_linear_2(y2)
+        x3 = self.fp8_linear_layers[1](y2)
 
         y3, resid = self.norm[2](x3, resid)  # use resid here
 
-        x4 = self.fp8_linear_3(y3)
+        x4 = self.fp8_linear_layers[2](y3)
 
         y4, resid = self.norm[3](x4, resid)  # use resid here
         return y4
