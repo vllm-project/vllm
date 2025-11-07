@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -79,6 +79,11 @@ class SupportsMultiModal(Protocol):
     """
     A flag that indicates which implementation of
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
+    """
+
+    multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
+    """
+    A set indicating CPU-only multimodal fields.
     """
 
     @classmethod

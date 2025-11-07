@@ -1090,6 +1090,7 @@ class Qwen2_5_VLForConditionalGeneration(
     SupportsMRoPE,
 ):
     merge_by_field_config = True
+    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1364,13 +1365,8 @@ class Qwen2_5_VLForConditionalGeneration(
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
-        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
         merge_size = self.visual.spatial_merge_size
-        sizes = (
-            torch.tensor(grid_thw_list, dtype=torch.long).prod(-1)
-            // (merge_size * merge_size)
-        ).tolist()
-
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return image_embeds.split(sizes)
 
     def _postprocess_image_embeds_evs(
@@ -1430,12 +1426,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
-        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
-        sizes = (
-            torch.tensor(grid_thw_list, dtype=torch.long).prod(-1)
-            // (merge_size * merge_size)
-        ).tolist()
-
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
     def _postprocess_video_embeds_evs(
