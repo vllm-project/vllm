@@ -156,7 +156,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "latency"
-    VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 256 * 1024 * 1024
+    VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1223,7 +1223,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
-        os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(256 * 1024 * 1024))
+        os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
