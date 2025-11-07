@@ -1390,7 +1390,7 @@ class FaultHandler:
     ) -> bool:
         if instruction == "retry" and "Dead" in self.engine_status_dict.values():
             self.logger(
-                "[FaultHandler] engine_core dead unexpectedly, retry is impossible,"
+                "engine_core dead unexpectedly, retry is impossible,"
                 "shutdown will be performed",
                 level="info",
             )
@@ -1433,7 +1433,7 @@ class FaultHandler:
 
             if response is None:
                 self.logger(
-                    "[FaultHandler] EngineCoreGuard[%s] did not respond"
+                    "EngineCoreGuard[%s] did not respond"
                     ' to command "%s" within timeout.',
                     engine_index,
                     instruction,
@@ -1442,8 +1442,7 @@ class FaultHandler:
                 all_success = False
             elif not response.get("success", False):
                 self.logger(
-                    "[FaultHandler] EngineCoreGuard[%s] failed to execute command"
-                    ' "%s" (reason: %s)',
+                    'EngineCoreGuard[%s] failed to execute command "%s" (reason: %s)',
                     engine_index,
                     instruction,
                     response.get("reason", "unknown"),
