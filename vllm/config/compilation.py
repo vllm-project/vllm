@@ -18,6 +18,7 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
@@ -958,6 +959,18 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def adjust_cudagraph_sizes_to_be_multipe_of(self, multiple_of: int):
+        new_sizes = sorted(
+            [
+                round_up(size, multiple_of)
+                for size in self.compilation_config.cudagraph_capture_sizes
+            ]
+        )
+        if new_sizes[-1] > self.compilation_config.max_cudagraph_capture_size:
+            new_sizes = new_sizes[:-1]
+        self.compilation_config.max_cudagraph_capture_size = new_sizes[-1]
+        self.compilation_config.cudagraph_capture_sizes = new_sizes
 
     def compute_bs_to_padded_graph_size(self):
         # pre-compute the mapping from batch size to padded graph size

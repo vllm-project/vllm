@@ -24,7 +24,6 @@ import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
-from vllm.utils.math_utils import round_up
 
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -215,18 +214,6 @@ class VllmConfig:
         # the caller should make sure the batch_size is within the range,
         # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
-
-    def adjust_cudagraph_sizes_to_be_multipe_of(self, multiple_of: int):
-        new_sizes = sorted(
-            [
-                round_up(size, multiple_of)
-                for size in self.compilation_config.cudagraph_capture_sizes
-            ]
-        )
-        if new_sizes[-1] > self.compilation_config.max_cudagraph_capture_size:
-            new_sizes = new_sizes[:-1]
-        self.compilation_config.max_cudagraph_capture_size = new_sizes[-1]
-        self.compilation_config.cudagraph_capture_sizes = new_sizes
 
     def enable_trace_function_call_for_thread(self) -> None:
         """

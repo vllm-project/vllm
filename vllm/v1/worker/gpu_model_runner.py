@@ -4330,10 +4330,10 @@ class GPUModelRunner(
             and cudagraph_mode.separate_routine()
             and self.uniform_decode_query_len > 1
         ):
-            self.vllm_config.adjust_cudagraph_sizes_to_be_multipe_of(
+            self.compilation_config.adjust_cudagraph_sizes_to_be_multipe_of(
                 self.uniform_decode_query_len
             )
-        self.vllm_config.compilation_config.compute_bs_to_padded_graph_size()
+        self.compilation_config.compute_bs_to_padded_graph_size()
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
