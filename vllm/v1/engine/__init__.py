@@ -7,8 +7,9 @@ from collections.abc import Mapping
 from typing import Any
 
 import msgspec
-import torch
 import numpy as np
+import torch
+
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams

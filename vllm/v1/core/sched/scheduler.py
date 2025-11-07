@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import torch
-import numpy as np
-import json
-import os
-
 import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterable
 from typing import Any
 
+import numpy as np
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
@@ -29,6 +25,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsReader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
@@ -224,14 +223,21 @@ class Scheduler(SchedulerInterface):
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
-
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        self.max_num_kv_tokens = ((kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups)) + 1)* self.block_size
-        self.routed_experts_reader = RoutedExpertsReader.create(enable=self.vllm_config.model_config.enable_return_routed_experts)
-        self.routed_experts_reader.attach_buffer(max_num_kv_tokens=self.max_num_kv_tokens, model_config=self.vllm_config.model_config)
+        self.max_num_kv_tokens = (
+            (kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1)
+            * self.block_size
+        )
+        self.routed_experts_reader = RoutedExpertsReader.create(
+            enable=self.vllm_config.model_config.enable_return_routed_experts
+        )
+        self.routed_experts_reader.attach_buffer(
+            max_num_kv_tokens=self.max_num_kv_tokens,
+            model_config=self.vllm_config.model_config,
+        )
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -1180,21 +1186,23 @@ class Scheduler(SchedulerInterface):
                     block_ids = kv_blocks.get_block_ids()[0] 
                     num_tokens = request.num_tokens-1
 
-                    # 计算slot mapping  
+                    # compute slot mapping  
                     block_ids_array = np.array(block_ids, dtype=np.int32)  
                     num_blocks = len(block_ids)  
                     block_size = self.block_size  
 
-                    # 生成block内偏移  
+                    # generate block offsets  
                     block_offsets = np.arange(0, block_size)  
 
-                    # 计算slot mapping: slot = block_id * block_size + offset  
+                    # compute slot mapping: slot = block_id * block_size + offset  
                     slot_mapping = (  
                         block_offsets.reshape((1, block_size))  
                         + block_ids_array.reshape((num_blocks, 1)) * block_size  
                     ).flatten()[:num_tokens]  
 
-                    routed_experts = self.routed_experts_reader.get_routed_experts(slot_mapping)
+                    routed_experts = self.routed_experts_reader.get_routed_experts(
+                        indices=slot_mapping
+                    )
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)

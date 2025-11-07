@@ -7,9 +7,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, cast
 
-import torch
 import numpy as np
 from vllm.lora.request import LoRARequest
+import torch
+
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -254,7 +255,9 @@ class RequestState:
                 finished,
             )
 
-        output = self._new_completion_output(new_token_ids, finish_reason, stop_reason)
+        output = self._new_completion_output(
+            new_token_ids, finish_reason, stop_reason, routed_experts
+        )
 
         if self.parent_req is None:
             outputs = [output]

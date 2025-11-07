@@ -1630,7 +1630,7 @@ class GPUModelRunner(
 
                 if self.model_config.enable_return_routed_experts:
                     assert len(self.kv_cache_config.kv_cache_groups) == 1
-                    self.slot_mapping = slot_mapping.cpu()
+                    self.slot_mapping = slot_mapping.cpu().numpy()
 
             # Fill unused with -1. Needed for reshape_and_cache in full cuda
             # graph mode. `blk_table_tensor` -1 to match mamba PAD_SLOT_ID
@@ -3494,7 +3494,10 @@ class GPUModelRunner(
             self.eplb_step()
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
-            if self.model_config.enable_return_routed_experts and get_tensor_model_parallel_rank() == 0:
+            if (
+                self.model_config.enable_return_routed_experts
+                and get_tensor_model_parallel_rank() == 0
+            ):
                 RoutedExpertsCapturer.get_instance().save_captured_experts(indices=self.slot_mapping)
 
             output = ModelRunnerOutput(
@@ -5661,7 +5664,10 @@ class GPUModelRunner(
         self.init_routed_experts_capturer()
 
     def init_routed_experts_capturer(self):
-        logger.info(f"Initializing routed experts capturer, enable_return_routed_experts: {self.model_config.enable_return_routed_experts}")
+        logger.info(
+            "Initializing routed experts capturer, enable_return_routed_experts: %s",
+            self.model_config.enable_return_routed_experts,
+        )
         routed_experts_capturer = RoutedExpertsCapturer.create(
             self.model_config.enable_return_routed_experts
         )

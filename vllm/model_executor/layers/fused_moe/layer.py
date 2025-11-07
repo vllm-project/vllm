@@ -438,6 +438,8 @@ class FusedMoE(CustomOp):
             raise ValueError("Duplicate layer name: {}".format(prefix))
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
+
+        # Delayed import to avoid circular dependency
         from vllm.model_executor.models.utils import extract_layer_index
         self.layer_id = extract_layer_index(self.layer_name)
 

@@ -454,7 +454,6 @@ class EngineArgs:
     quantization: QuantizationMethods | None = ModelConfig.quantization
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
-    enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -659,7 +658,9 @@ class EngineArgs:
             **model_kwargs["allow_deprecated_quantization"],
         )
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
-        model_group.add_argument("--enable-return-routed-experts", **model_kwargs["enable_return_routed_experts"])
+        model_group.add_argument(
+            "--enable-return-routed-experts", **model_kwargs["enable_return_routed_experts"]
+        )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
         model_group.add_argument(
