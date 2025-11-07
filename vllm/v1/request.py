@@ -183,10 +183,10 @@ class Request:
     @property
     def disable_prefix_caching(self) -> bool:
         if self.sampling_params is not None:
-            return self.sampling_params.disable_prefix_caching
+            return self.sampling_params.disable_prefix_caching is True
         else:
             assert self.pooling_params is not None
-            return self.pooling_params.disable_prefix_caching
+            return self.pooling_params.disable_prefix_caching is True
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
