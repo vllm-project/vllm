@@ -441,6 +441,7 @@ class FusedMoE(CustomOp):
 
         # Delayed import to avoid circular dependency
         from vllm.model_executor.models.utils import extract_layer_index
+
         self.layer_id = extract_layer_index(self.layer_name)
 
         self.enable_eplb = enable_eplb

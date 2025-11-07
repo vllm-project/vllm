@@ -228,9 +228,9 @@ class Scheduler(SchedulerInterface):
             self.perf_metrics = ModelMetrics(vllm_config)
 
         self.max_num_kv_tokens = (
-            (kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1)
-            * self.block_size
-        )
+            kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
+        ) * self.block_size
+
         self.routed_experts_reader = RoutedExpertsReader.create(
             enable=self.vllm_config.model_config.enable_return_routed_experts
         )
@@ -1182,23 +1182,23 @@ class Scheduler(SchedulerInterface):
                 if self.vllm_config.model_config.enable_return_routed_experts:
                     assert len(self.kv_cache_config.kv_cache_groups) == 1
 
-                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)  
-                    block_ids = kv_blocks.get_block_ids()[0] 
-                    num_tokens = request.num_tokens-1
+                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                    block_ids = kv_blocks.get_block_ids()[0]
+                    num_tokens = request.num_tokens - 1
 
-                    # compute slot mapping  
-                    block_ids_array = np.array(block_ids, dtype=np.int32)  
-                    num_blocks = len(block_ids)  
-                    block_size = self.block_size  
+                    # compute slot mapping
+                    block_ids_array = np.array(block_ids, dtype=np.int32)
+                    num_blocks = len(block_ids)
+                    block_size = self.block_size
 
-                    # generate block offsets  
-                    block_offsets = np.arange(0, block_size)  
+                    # generate block offsets
+                    block_offsets = np.arange(0, block_size)
 
-                    # compute slot mapping: slot = block_id * block_size + offset  
-                    slot_mapping = (  
-                        block_offsets.reshape((1, block_size))  
-                        + block_ids_array.reshape((num_blocks, 1)) * block_size  
-                    ).flatten()[:num_tokens]  
+                    # compute slot mapping: slot = block_id * block_size + offset
+                    slot_mapping = (
+                        block_offsets.reshape((1, block_size))
+                        + block_ids_array.reshape((num_blocks, 1)) * block_size
+                    ).flatten()[:num_tokens]
 
                     routed_experts = self.routed_experts_reader.get_routed_experts(
                         indices=slot_mapping

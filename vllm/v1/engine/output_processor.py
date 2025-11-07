@@ -559,7 +559,7 @@ class OutputProcessor:
                 finish_reason,
                 stop_reason,
                 kv_transfer_params,
-                routed_experts
+                routed_experts,
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().

@@ -659,7 +659,8 @@ class EngineArgs:
         )
         model_group.add_argument("--enforce-eager", **model_kwargs["enforce_eager"])
         model_group.add_argument(
-            "--enable-return-routed-experts", **model_kwargs["enable_return_routed_experts"]
+            "--enable-return-routed-experts",
+            **model_kwargs["enable_return_routed_experts"],
         )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])

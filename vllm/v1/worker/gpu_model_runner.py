@@ -3498,7 +3498,9 @@ class GPUModelRunner(
                 self.model_config.enable_return_routed_experts
                 and get_tensor_model_parallel_rank() == 0
             ):
-                RoutedExpertsCapturer.get_instance().save_captured_experts(indices=self.slot_mapping)
+                RoutedExpertsCapturer.get_instance().save_captured_experts(
+                indices=self.slot_mapping
+            )
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -5672,12 +5674,15 @@ class GPUModelRunner(
             self.model_config.enable_return_routed_experts
         )
         block_size = self.cache_config.block_size
-        self.max_num_kv_tokens = ((self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)) + 1) * block_size
+        self.max_num_kv_tokens = (
+            self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)
+            + 1
+        ) * block_size
         routed_experts_capturer.init_buffer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
             model_config=self.model_config,
-            enable_shared_memory= get_tensor_model_parallel_rank() == 0
+            enable_shared_memory=get_tensor_model_parallel_rank() == 0,
         )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
