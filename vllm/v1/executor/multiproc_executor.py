@@ -33,11 +33,9 @@ from vllm.distributed.parallel_state import (
     get_inner_dp_world_group,
     get_pp_group,
     get_tp_group,
-    is_global_first_rank,
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_loopback_ip,
@@ -81,6 +79,10 @@ class MultiprocExecutor(Executor):
             # retrieve through remote sync from remote driver
             self.rpc_broadcast_mq = None
             self.scheduler_output_handle = None
+
+    def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
+        self.monitor_workers = monitor_workers
+        super().__init__(vllm_config)
 
     def _init_executor(self) -> None:
         # Call self.shutdown at exit to clean up
@@ -172,7 +174,8 @@ class MultiprocExecutor(Executor):
             # Wait for all remote response mqs to be ready
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
-            self.start_worker_monitor()
+            if self.monitor_workers:
+                self.start_worker_monitor()
             success = True
         finally:
             if not success:
@@ -193,7 +196,7 @@ class MultiprocExecutor(Executor):
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
 
-    def start_worker_monitor(self):
+    def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
         self_ref = weakref.ref(self)
 
@@ -217,9 +220,13 @@ class MultiprocExecutor(Executor):
                 _self.failure_callback = None
                 callback()
 
-        Thread(
-            target=monitor_workers, daemon=True, name="MultiprocWorkerMonitor"
-        ).start()
+        if not inline:
+            Thread(
+                target=monitor_workers, daemon=True, name="MultiprocWorkerMonitor"
+            ).start()
+            return
+
+        monitor_workers()
 
     def register_failure_callback(self, callback: FailureCallback):
         if self.is_failed:
@@ -877,93 +884,3 @@ def set_multiprocessing_worker_envs():
         )
         os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
         torch.set_num_threads(default_omp_num_threads)
-
-
-class ExecutorProc:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        executor_class: type[Executor],
-    ):
-        from vllm.plugins import load_general_plugins
-        from vllm.version import __version__ as VLLM_VERSION
-
-        load_general_plugins()
-
-        self.vllm_config = vllm_config
-        if is_global_first_rank():
-            logger.info(
-                "Initializing a vLLM (%s) Executor Proc (%s) with config: %s",
-                executor_class.__name__,
-                VLLM_VERSION,
-                vllm_config,
-            )
-
-        self.model_executor = executor_class(vllm_config)
-
-    def run_busy_loop(self):
-        """Core busy loop of the EngineCore."""
-        while True:
-            time.sleep(1)
-
-    def shutdown(self):
-        self.model_executor.shutdown()
-
-    def __del__(self):
-        self.shutdown()
-
-    @staticmethod
-    def create(vllm_config: VllmConfig, executor_class: type[Executor]):
-        context = get_mp_context()
-        node_rank = vllm_config.parallel_config.distributed_node_rank
-        process = context.Process(
-            target=ExecutorProc.start,
-            name=f"ModelExecutorProc_{node_rank}",
-            kwargs={
-                "vllm_config": vllm_config,
-                "executor_class": executor_class,
-            },
-        )
-        process.start()
-        return process
-
-    @staticmethod
-    def start(vllm_config: VllmConfig, executor_class: type[Executor]):
-        """Launch exeuctor_proc busy loop in background process."""
-
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
-        shutdown_requested = False
-
-        # Ensure we can serialize transformer config after spawning
-        maybe_register_config_serialize_by_value()
-
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
-
-        # Either SIGTERM or SIGINT will terminate the engine_core
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-        exeuctor_proc: ExecutorProc | None = None
-        try:
-            decorate_logs()
-            exeuctor_proc = ExecutorProc(vllm_config, executor_class)
-            exeuctor_proc.run_busy_loop()
-
-        except SystemExit:
-            logger.debug("ExecutorProc exiting.")
-            raise
-        except Exception as e:
-            if ExecutorProc is None:
-                logger.exception("ExecutorProc failed to start.")
-            else:
-                logger.exception("ExecutorProc encountered a fatal error.")
-            raise e
-        finally:
-            if exeuctor_proc is not None:
-                exeuctor_proc.shutdown()
