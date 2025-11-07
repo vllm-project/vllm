@@ -132,11 +132,12 @@ def rocm_aiter_gemm_w8a8_blockscale_fake(
     return torch.empty(m, n, dtype=output_dtype, device=input_2d.device)
 
 
-direct_register_custom_op(
-    op_name="rocm_aiter_gemm_w8a8_blockscale",
-    op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
-    fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
-)
+if current_platform.is_rocm():
+    direct_register_custom_op(
+        op_name="rocm_aiter_gemm_w8a8_blockscale",
+        op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
+        fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
+    )
 
 
 # TODO we should be able to change the type of block_size to GroupShape
