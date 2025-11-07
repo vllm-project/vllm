@@ -137,6 +137,13 @@ optimization_level_03 = {
     "use_inductor_graph_partition": False,
 }
 
+optimzation_level_to_config = {
+    OptimizationLevel.O0: optimization_level_00,
+    OptimizationLevel.O1: optimization_level_01,
+    OptimizationLevel.O2: optimization_level_02,
+    OptimizationLevel.O3: optimization_level_03,
+}
+
 
 @config
 @dataclass(config=ConfigDict(arbitrary_types_allowed=True))
@@ -546,17 +553,7 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
-        if self.optimization_level == OptimizationLevel.O0:
-            default_config = optimization_level_00
-        elif self.optimization_level == OptimizationLevel.O1:
-            default_config = optimization_level_01
-        elif self.optimization_level == OptimizationLevel.O2:
-            default_config = optimization_level_02
-        elif self.optimization_level == OptimizationLevel.O3:
-            default_config = optimization_level_03
-        else:
-            raise ValueError(f"Unknown optimization level: {self.optimization_level}")
-
+        default_config = optimzation_level_to_config[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE

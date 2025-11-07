@@ -20,10 +20,7 @@ from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OptimizationLevel,
-    optimization_level_00,
-    optimization_level_01,
-    optimization_level_02,
-    optimization_level_03,
+    optimzation_level_to_config,
 )
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
@@ -630,7 +627,7 @@ def test_vllm_config_defaults_are_none():
     config.model_config = None
 
     # Use the global optimization level defaults
-    default_config = optimization_level_00
+    default_config = optimzation_level_to_config[OptimizationLevel.O0]
 
     # Verify that all pass_config values are None before defaults are applied
     for pass_k in default_config["pass_config"]:
@@ -703,14 +700,7 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         )
 
     # Use the global optimization level defaults
-    if optimization_level == OptimizationLevel.O0:
-        default_config = optimization_level_00
-    elif optimization_level == OptimizationLevel.O1:
-        default_config = optimization_level_01
-    elif optimization_level == OptimizationLevel.O2:
-        default_config = optimization_level_02
-    else:
-        default_config = optimization_level_03
+    default_config = optimzation_level_to_config[optimization_level]
 
     # Verify pass_config defaults
     for pass_k, pass_v in default_config["pass_config"].items():
