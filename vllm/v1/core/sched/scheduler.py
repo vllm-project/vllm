@@ -22,6 +22,7 @@ from vllm.v1.core.encoder_cache_manager import (
     compute_encoder_budget,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -33,7 +34,11 @@ from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_qu
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import (
+    BlockResidencyEvent,
+    PrefixCacheStats,
+    SchedulerStats,
+)
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -61,6 +66,14 @@ class Scheduler(SchedulerInterface):
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
+        metrics_cfg = vllm_config.observability_config
+        self._kv_metrics_enabled = bool(metrics_cfg.kv_cache_metrics)
+        self.kv_metrics_collector: KVCacheMetricsCollector | None = None
+        if self._kv_metrics_enabled:
+            self.kv_metrics_collector = KVCacheMetricsCollector(
+                enabled=True,
+                sample_rate=metrics_cfg.kv_cache_metrics_sample,
+            )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 
@@ -171,6 +184,7 @@ class Scheduler(SchedulerInterface):
             log_stats=self.log_stats,
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
+            metrics_collector=self.kv_metrics_collector,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
@@ -1248,19 +1262,30 @@ class Scheduler(SchedulerInterface):
         spec_decoding_stats: SpecDecodingStats | None = None,
         kv_connector_stats: KVConnectorStats | None = None,
     ) -> SchedulerStats | None:
-        if not self.log_stats:
+        if not (self.log_stats or self._kv_metrics_enabled):
             return None
         prefix_cache_stats = self.kv_cache_manager.make_prefix_cache_stats()
-        assert prefix_cache_stats is not None
-        connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
+        if prefix_cache_stats is None:
+            prefix_cache_stats = PrefixCacheStats()
+        connector_prefix_cache_stats = None
+        if self.log_stats:
+            connector_prefix_cache_stats = self._make_connector_prefix_cache_stats()
+        block_events: list[BlockResidencyEvent] = []
+        if self._kv_metrics_enabled:
+            block_events = self.kv_cache_manager.collect_block_residency_events()
+        spec_stats = spec_decoding_stats if self.log_stats else None
+        connector_stats_payload = None
+        if self.log_stats and kv_connector_stats is not None:
+            connector_stats_payload = kv_connector_stats.data
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             prefix_cache_stats=prefix_cache_stats,
             connector_prefix_cache_stats=connector_prefix_cache_stats,
-            spec_decoding_stats=spec_decoding_stats,
-            kv_connector_stats=kv_connector_stats.data if kv_connector_stats else None,
+            block_residency_events=block_events,
+            spec_decoding_stats=spec_stats,
+            kv_connector_stats=connector_stats_payload,
         )
 
     def make_spec_decoding_stats(

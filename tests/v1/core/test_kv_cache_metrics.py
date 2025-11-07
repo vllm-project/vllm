@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 from vllm.v1.core.kv_cache_metrics import (
     BlockMetricsState,
@@ -41,10 +41,10 @@ class TestBlockMetricsState:
 
         assert len(state.access_history) == 4
         assert list(state.access_history) == [
-            2000000000,
             3000000000,
             4000000000,
             5000000000,
+            6000000000,
         ]
 
     def test_lifetime(self):
@@ -137,8 +137,6 @@ class TestKVCacheMetricsCollector:
     def test_evict_no_accesses(self):
         # lifetime should equal idle if never accessed
         c = KVCacheMetricsCollector(enabled=True, sample_rate=1.0)
-        c.histogram_block_lifetime = MagicMock()
-        c.histogram_idle_before_evict = MagicMock()
 
         block = KVCacheBlock(block_id=0)
         with patch("time.monotonic_ns", return_value=1000000000):
@@ -147,16 +145,13 @@ class TestKVCacheMetricsCollector:
         with patch("time.monotonic_ns", return_value=6000000000):
             c.on_block_evicted(block)
 
-        lifetime = c.histogram_block_lifetime.observe.call_args[0][0]
-        idle = c.histogram_idle_before_evict.observe.call_args[0][0]
-        assert abs(lifetime - 5.0) < 0.001
-        assert abs(idle - 5.0) < 0.001
+        events = c.drain_events()
+        assert len(events) == 1
+        assert abs(events[0].lifetime_seconds - 5.0) < 0.001
+        assert abs(events[0].idle_seconds - 5.0) < 0.001
 
     def test_evict(self):
         c = KVCacheMetricsCollector(enabled=True, sample_rate=1.0)
-        c.histogram_block_lifetime = MagicMock()
-        c.histogram_idle_before_evict = MagicMock()
-        c.histogram_reuse_gap = MagicMock()
 
         block = KVCacheBlock(block_id=0)
         with patch("time.monotonic_ns", return_value=1000000000):
@@ -170,14 +165,16 @@ class TestKVCacheMetricsCollector:
         with patch("time.monotonic_ns", return_value=4000000000):
             c.on_block_evicted(block)
 
-        assert c.histogram_block_lifetime.observe.called
-        assert c.histogram_idle_before_evict.observe.called
-        assert c.histogram_reuse_gap.observe.called
+        events = c.drain_events()
+        assert len(events) == 1
+        sample = events[0]
+        assert abs(sample.lifetime_seconds - 3.0) < 0.001
+        assert abs(sample.idle_seconds - 1.0) < 0.001
+        assert sample.reuse_gaps_seconds == (1.0,)
         assert 0 not in c.block_metrics
 
     def test_prefix_residency(self):
         c = KVCacheMetricsCollector(enabled=True, sample_rate=1.0)
-        c.histogram_prefix_residency = MagicMock()
 
         block = KVCacheBlock(block_id=0)
         with patch("time.monotonic_ns", return_value=1000000000):
@@ -194,8 +191,9 @@ class TestKVCacheMetricsCollector:
         with patch("time.monotonic_ns", return_value=10000000000):
             c.on_block_evicted(block)
 
-        residency = c.histogram_prefix_residency.observe.call_args[0][0]
-        assert abs(residency - 5.0) < 0.001
+        events = c.drain_events()
+        assert len(events) == 1
+        assert abs(events[0].prefix_residency_seconds - 5.0) < 0.001
 
     def test_reset(self):
         c = KVCacheMetricsCollector(enabled=True, sample_rate=1.0)
@@ -215,8 +213,6 @@ class TestKVCacheMetricsCollector:
     def test_concurrent_access(self):
         # shouldn't crash with concurrent calls
         c = KVCacheMetricsCollector(enabled=True, sample_rate=1.0)
-        c.histogram_block_lifetime = MagicMock()
-        c.histogram_idle_before_evict = MagicMock()
 
         def worker(op, start, n):
             for i in range(n):
@@ -239,9 +235,10 @@ class TestKVCacheMetricsCollector:
         for t in threads:
             t.join()
 
+        assert isinstance(c.drain_events(), list)
+
     def test_huge_time_jump(self):
         c = KVCacheMetricsCollector(enabled=True, sample_rate=1.0)
-        c.histogram_block_lifetime = MagicMock()
 
         block = KVCacheBlock(block_id=0)
         with patch("time.monotonic_ns", return_value=1000000000):
@@ -250,4 +247,6 @@ class TestKVCacheMetricsCollector:
         with patch("time.monotonic_ns", return_value=9999999999999999):
             c.on_block_evicted(block)
 
-        assert c.histogram_block_lifetime.observe.called
+        events = c.drain_events()
+        assert len(events) == 1
+        assert events[0].lifetime_seconds > 0

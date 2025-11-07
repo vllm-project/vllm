@@ -9,9 +9,10 @@ from typing import Literal, overload
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.metrics.stats import PrefixCacheStats
+from vllm.v1.metrics.stats import BlockResidencyEvent, PrefixCacheStats
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -100,12 +101,14 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
         self.log_stats = log_stats
+        self.metrics_collector = metrics_collector
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
 
@@ -138,6 +141,7 @@ class KVCacheManager:
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
             dcp_world_size=dcp_world_size,
+            metrics_collector=self.metrics_collector,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -215,6 +219,11 @@ class KVCacheManager:
             )
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
+
+    def collect_block_residency_events(self) -> list[BlockResidencyEvent]:
+        if not self.metrics_collector:
+            return []
+        return self.metrics_collector.drain_events()
 
     def allocate_slots(
         self,

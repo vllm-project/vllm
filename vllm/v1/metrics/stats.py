@@ -151,6 +151,16 @@ class MultiModalCacheStats(BaseCacheStats):
 
 
 @dataclass
+class BlockResidencyEvent:
+    """Single KV cache block eviction sample."""
+
+    lifetime_seconds: float
+    idle_seconds: float
+    reuse_gaps_seconds: tuple[float, ...]
+    prefix_residency_seconds: float | None = None
+
+
+@dataclass
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -165,6 +175,8 @@ class SchedulerStats:
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
+
+    block_residency_events: list[BlockResidencyEvent] = field(default_factory=list)
 
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
