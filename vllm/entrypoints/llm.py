@@ -352,10 +352,22 @@ class LLM:
         return self.llm_engine.get_tokenizer()
 
     def _apply_input_processor_plugin(
-        self, prompts, lora_request, sampling_params, priority
+        self,
+        prompts,
+        lora_request,
+        params,
     ):
         """Apply the input side of the custom IO processor if there is one."""
         if self.io_processor is None:
+            if isinstance(prompts, dict) and "data" in prompts:
+                # Previously this was what we used to distinguish IOProcessor
+                # prompts with pooling, but now we just pass everything to the
+                # input processor if there is one. We warn in this situation
+                # as it's likely a mistake.
+                logger.warning(
+                    "No IOProcessor is installed, but the prompt contains"
+                    " a 'data' key; did you mean to install an IOProcessor?"
+                )
             return (prompts, lora_request)
 
         user_lora_request = lora_request
@@ -370,10 +382,9 @@ class LLM:
         # obtain the actual model prompts from the pre-processor
         prompts = self.io_processor.pre_process(
             prompt=validated_prompt,
-            params=sampling_params,
+            params=params,
             llm_instance=self,
             lora_request=lora_request,
-            priority=priority,
         )
 
         # reset the lora request unless it's one the user explicitly gave,
@@ -390,6 +401,26 @@ class LLM:
         if self.io_processor is None:
             return model_outputs
         return self.io_processor.post_process(model_output=model_outputs)
+
+    def _get_params(self, params):
+        """Applies the custom io processor to get the sampling params.
+
+
+        Args:
+            params: The Pooling or Sampling Params provided by the user,
+                or the default params if None were provided.
+        """
+        if is_list_of(params, PoolingParams) or is_list_of(params, SamplingParams):
+            validated_params = []
+            for param in as_iter(params):
+                validated_params.append(
+                    self.io_processor.validate_or_generate_params(param)
+                )
+            params = validated_params
+        else:
+            assert not isinstance(params, Sequence)
+            params = self.io_processor.validate_or_generate_params(params)
+        return params
 
     @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
@@ -462,15 +493,16 @@ class LLM:
                 "generative model."
             )
 
-        if sampling_params is None:
-            # Use default sampling params.
-            sampling_params = self.get_default_sampling_params()
+        sampling_params = self._get_params(
+            sampling_params
+            if sampling_params is not None
+            else self.get_default_sampling_params
+        )
 
         prompts, lora_request = self._apply_input_processor_plugin(
             prompts,
             lora_request,
-            sampling_params,
-            priority,
+            params=sampling_params,
         )
 
         self._validate_and_add_requests(
@@ -482,8 +514,8 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        self.engine_class.validate_outputs(outputs, RequestOutput)
-        return self._apply_output_processor_plugin(outputs)
+        model_outputs = self.engine_class.validate_outputs(outputs, RequestOutput)
+        return self._apply_output_processor_plugin(model_outputs)
 
     def _get_modality_specific_lora_reqs(
         self,
@@ -1070,44 +1102,21 @@ class LLM:
                 "pooling model."
             )
 
-        io_processor_prompt = False
-        if isinstance(prompts, dict) and "data" in prompts:
-            io_processor_prompt = True
-            if self.io_processor is None:
-                raise ValueError(
-                    "No IOProcessor plugin installed. Please refer "
-                    "to the documentation and to the "
-                    "'prithvi_geospatial_mae_io_processor' "
-                    "offline inference example for more details."
-                )
-
-            # Validate the request data is valid for the loaded plugin
-            validated_prompt = self.io_processor.parse_request(prompts)
-
-            # obtain the actual model prompts from the pre-processor
-            prompts = self.io_processor.pre_process(prompt=validated_prompt)
-
-        if io_processor_prompt:
-            assert self.io_processor is not None
-            if is_list_of(pooling_params, PoolingParams):
-                validated_pooling_params: list[PoolingParams] = []
-                for param in as_iter(pooling_params):
-                    validated_pooling_params.append(
-                        self.io_processor.validate_or_generate_params(param)
-                    )
-                pooling_params = validated_pooling_params
-            else:
-                assert not isinstance(pooling_params, Sequence)
-                pooling_params = self.io_processor.validate_or_generate_params(
-                    pooling_params
-                )
-        else:
-            if pooling_params is None:
-                # Use default pooling params.
-                pooling_params = PoolingParams()
-
         if pooling_task not in self.supported_tasks:
             raise ValueError(f"pooling_task must be one of {self.supported_tasks}.")
+
+        pooling_params = self._get_params(
+            pooling_params if pooling_params is not None else PoolingParams()
+        )
+
+        # NOTE: Previously, we inspected the prompts dict for the "data" key,
+        # but IO processors are now more generally; conditional processing for
+        # the requests should be handled in with the IO processors themselves.
+        prompts, lora_request = self._apply_input_processor_plugin(
+            prompts,
+            lora_request,
+            params=pooling_params,
+        )
 
         for param in as_iter(pooling_params):
             param.verify(pooling_task, model_config)
@@ -1128,26 +1137,7 @@ class LLM:
             outputs, PoolingRequestOutput
         )
 
-        if io_processor_prompt:
-            # get the post-processed model outputs
-            assert self.io_processor is not None
-            processed_outputs = self.io_processor.post_process(
-                model_output=model_outputs
-            )
-
-            return [
-                PoolingRequestOutput[Any](
-                    request_id="",
-                    outputs=processed_outputs,
-                    num_cached_tokens=getattr(
-                        processed_outputs, "num_cached_tokens", 0
-                    ),
-                    prompt_token_ids=[],
-                    finished=True,
-                )
-            ]
-        else:
-            return model_outputs
+        return self._apply_output_processor_plugin(model_outputs)
 
     def embed(
         self,
