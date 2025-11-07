@@ -180,6 +180,14 @@ class Request:
     def num_output_tokens(self) -> int:
         return len(self._output_token_ids)
 
+    @property
+    def disable_prefix_caching(self) -> bool:
+        if self.sampling_params is not None:
+            return self.sampling_params.disable_prefix_caching
+        else:
+            assert self.pooling_params is not None
+            return self.pooling_params.disable_prefix_caching
+
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
 
