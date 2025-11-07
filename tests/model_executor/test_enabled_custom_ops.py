@@ -124,7 +124,9 @@ def test_enabled_ops_invalid(env: str):
             RMSNorm(1024).enabled()
 
 
-@pytest.mark.parametrize("use_rocm_aiter", [True, False])
+@pytest.mark.parametrize(
+    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
+)
 def test_topk_dispatch(use_rocm_aiter: bool):
     topk_func = dispatch_topk_func(use_rocm_aiter)
 
