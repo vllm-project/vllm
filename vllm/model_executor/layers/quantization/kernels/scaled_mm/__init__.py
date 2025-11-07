@@ -61,7 +61,6 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         FlashInferScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
         PerTensorTorchScaledMMLinearKernel,
-        RowWiseTorchScaledMMLinearKernel,
         ChannelWiseTorchScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
@@ -76,10 +75,38 @@ _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
 
 
+def can_implement_scaled_mm_linear_kernel(
+    kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
+) -> tuple[bool, str]:
+    if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
+        return False, f" {kernel.__name__} disabled by environment variable"
+
+    # If the current platform uses compute_capability,
+    # make sure the kernel supports the compute cability.
+    if compute_capability is not None:
+        kernel_min_capability = kernel.get_min_capability()
+        if (
+            kernel_min_capability is not None
+            and kernel_min_capability > compute_capability
+        ):
+            return (
+                False,
+                f"{kernel.__name__} requires capability "
+                f"{kernel_min_capability}, current compute capability "
+                f"is {compute_capability}",
+            )
+    can_implement, failure_reason = kernel.can_implement(config)
+    if not can_implement:
+        return (False, f" {kernel.__name__} cannot implement due to: {failure_reason}")
+
+    return True, ""
+
+
 def choose_scaled_mm_linear_kernel(
     config: _KernelConfigT,
     possible_kernels: dict[PlatformEnum, list[type[_KernelT]]],
     compute_capability: int | None = None,
+    force_kernel: type[_KernelT] | None = None,
 ) -> type[_KernelT]:
     """
     Choose a _KernelT that can implement the given config for the
@@ -94,6 +121,9 @@ def choose_scaled_mm_linear_kernel(
         compute_capability (Optional[int], optional): The compute capability of
             the target device, if None uses `current_platform` to get the
             compute capability. Defaults to None.
+        force_kernel (Optional[type[_KernelT]]): An Optional forced kernel to override
+            the possible_kernels if it can be implemented. If None, it will only try the
+            possible kernels.
 
     Raises:
         ValueError: If no kernel can implement the given config.
@@ -107,40 +137,32 @@ def choose_scaled_mm_linear_kernel(
         if _cc is not None:
             compute_capability = _cc[0] * 10 + _cc[1]
 
-    failure_reasons = []
+    failure_reason_list = []
+
+    if force_kernel is not None:
+        can_implement, failure_reason = can_implement_scaled_mm_linear_kernel(
+            force_kernel, config, compute_capability
+        )
+        if can_implement:
+            return force_kernel
+
+        logger.info_once(
+            "Tried to force %s, but the kernel couldn't be implemented",
+            force_kernel.__name__,
+            scope="global",
+        )
+
     for kernel in possible_kernels[current_platform._enum]:
-        if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
-            failure_reasons.append(
-                f" {kernel.__name__} disabled by environment variable"
-            )
-            continue
-
-        # If the current platform uses compute_capability,
-        # make sure the kernel supports the compute cability.
-        if compute_capability is not None:
-            kernel_min_capability = kernel.get_min_capability()
-            if (
-                kernel_min_capability is not None
-                and kernel_min_capability > compute_capability
-            ):
-                failure_reasons.append(
-                    f"{kernel.__name__} requires capability "
-                    f"{kernel_min_capability}, current compute capability "
-                    f"is {compute_capability}"
-                )
-                continue
-
-        can_implement, failure_reason = kernel.can_implement(config)
+        can_implement, failure_reason = can_implement_scaled_mm_linear_kernel(
+            kernel, config, compute_capability
+        )
         if can_implement:
             return kernel
-        else:
-            failure_reasons.append(
-                f" {kernel.__name__} cannot implement due to: {failure_reason}"
-            )
+        failure_reason_list.append(failure_reason)
 
     raise ValueError(
         "Failed to find a kernel that can implement the "
-        "ScaledMM linear layer. Reasons: \n" + "\n".join(failure_reasons)
+        "ScaledMM linear layer. Reasons: \n" + "\n".join(failure_reason_list)
     )
 
 
@@ -148,7 +170,8 @@ def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
-    module_name: str,
+    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
@@ -157,16 +180,16 @@ def init_fp8_linear_kernel(
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
-        scaled_mm_linear_kernel_config,
-        _POSSIBLE_FP8_KERNELS,
+        scaled_mm_linear_kernel_config, _POSSIBLE_FP8_KERNELS, force_kernel=force_kernel
     )
 
-    logger.info_once(
-        "Selected %s for %s",
-        kernel_type.__name__,
-        module_name,
-        scope="global",
-    )
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
+        )
 
     return kernel_type(
         scaled_mm_linear_kernel_config,

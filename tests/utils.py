@@ -45,6 +45,9 @@ from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+    FP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
@@ -1443,6 +1446,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor,
         out_dtype: torch.dtype | None = None,
+        force_kernel: FP8ScaledMMLinearKernel | None = None,
     ):
         super().__init__()
         self.weight_scale = weight_scale
@@ -1454,7 +1458,7 @@ class TestFP8Layer(torch.nn.Module):
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
             out_dtype=out_dtype,
-            module_name=self.__class__.__name__,
+            force_kernel=force_kernel,
         )
 
     def is_quant_fp8_enabled(self) -> bool:
