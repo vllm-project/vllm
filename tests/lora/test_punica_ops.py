@@ -9,9 +9,8 @@ import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.lora.utils import PunicaTensors, assert_close, generate_data_for_nslices
 from vllm.platforms import current_platform
-
-from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
 
 @pytest.fixture(autouse=True)
