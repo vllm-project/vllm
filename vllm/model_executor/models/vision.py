@@ -11,6 +11,7 @@ import torch
 from transformers import PretrainedConfig
 
 from vllm.attention.backends.registry import _Backend
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -98,6 +99,11 @@ def get_vit_attn_backend(
         return selected_backend
 
     return current_platform.get_vit_attn_backend(head_size, dtype)
+
+
+def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
