@@ -515,7 +515,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
     external_parameters: Optional[dict] = SchedulerConfig.external_parameters
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
@@ -555,7 +555,7 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool = SchedulerConfig.async_scheduling
+    async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
@@ -1485,20 +1485,6 @@ class EngineArgs:
             else ParallelConfig.data_parallel_rpc_port
         )
 
-        if self.async_scheduling:
-            if self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not supported with pipeline-parallel-size > 1."
-                )
-
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling."
-                )
-
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
@@ -1543,8 +1529,8 @@ class EngineArgs:
         )
 
         if self.async_scheduling and (
-            parallel_config.distributed_executor_backend
-            not in ("mp", "uni", "external_launcher")
+                parallel_config.distributed_executor_backend
+                not in ("mp", "uni", "external_launcher")
         ):
             raise ValueError(
                 "Currently, async scheduling only supports `mp`, `uni` or "
