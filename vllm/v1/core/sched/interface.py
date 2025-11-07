@@ -25,7 +25,7 @@ class SchedulerInterface(ABC):
         kv_cache_config: KVCacheConfig,
         structured_output_manager: StructuredOutputManager,
         block_size: int,
-        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
+        mm_registry: "MultiModalRegistry" = MULTIMODAL_REGISTRY,
         include_finished_set: bool = False,
         log_stats: bool = False,
     ) -> None:
