@@ -1575,13 +1575,6 @@ class EngineArgs:
         )
 
         if lora_config is not None and speculative_config is not None:
-            if self.compilation_config.cudagraph_specialize_lora:
-                logger.warning_once(
-                    "Currenlty cudagraph_specialize_lora is not supported "
-                    "when using both LoRA and speculative decoding. "
-                    "Setting cudagraph_specialize_lora to False."
-                )
-                self.compilation_config.cudagraph_specialize_lora = False
             assert scheduler_config.max_num_batched_tokens >= (
                 scheduler_config.max_num_seqs
                 * (speculative_config.num_speculative_tokens + 1)
