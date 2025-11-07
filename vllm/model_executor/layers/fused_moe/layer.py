@@ -651,6 +651,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             from flashinfer.fused_moe.core import (
                 convert_to_block_layout,
                 get_w2_permute_indices_with_cache,
+                _maybe_get_cached_w3_w1_permute_indices,
             )
 
             # Swap halves to arrange as [w3; w1] (kernel expectation)
@@ -662,25 +663,25 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             # Reorder rows of W1 for fused gated activation
             w13_weights_bf16_shuffled = []
             w2_weights_bf16_shuffled = []
-            for i in range(self.moe.num_experts):
-                permute_indices = get_w2_permute_indices_with_cache(
+            for i in range(layer.local_num_experts):
+                permute_indices = _maybe_get_cached_w3_w1_permute_indices(
                     self._cache_permute_indices,
-                    layer.w13_weight.data[i].clone().view(torch.uint8),
+                    layer.w13_weight.data[i].view(torch.uint8),
                     epilogue_tile_m,
                 )
                 tmp_weights1 = (
-                    layer.w13_weight.data[i]
+                    layer.w13_weight.data[i].clone()
                     .view(torch.uint8)[permute_indices.to(layer.w13_weight.data.device)]
                     .contiguous()
                 )
 
                 permute_indices = get_w2_permute_indices_with_cache(
                     self._cache_permute_indices,
-                    layer.w2_weight.data[i].clone().view(torch.uint8),
+                    layer.w2_weight.data[i].view(torch.uint8),
                     epilogue_tile_m,
                 )
                 tmp_weights2 = (
-                    layer.w2_weight.data[i]
+                    layer.w2_weight.data[i].clone()
                     .view(torch.uint8)[permute_indices.to(layer.w2_weight.data.device)]
                     .contiguous()
                 )
@@ -1510,7 +1511,6 @@ class FusedMoE(CustomOp):
                 )
             else:
                 self.routing_method_type = RoutingMethodType.TopK
-
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
