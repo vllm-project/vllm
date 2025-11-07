@@ -1320,7 +1320,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         use_spec_decode: bool = False,
         for_cudagraph_capture: bool = False,
         scheduled_encoder_inputs: dict[str, list[int]] | None = None,
-        common_prefix_lens: list[list[int]] | None = None,
+        cascade_attn_prefix_lens: list[list[int]] | None = None,
     ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
         """
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
@@ -1436,9 +1436,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata = common_attn_metadata
 
             for attn_gid, attn_group in enumerate(self.attn_groups[kv_cache_gid]):
-                common_prefix_len = (
-                    common_prefix_lens[kv_cache_gid][attn_gid]
-                    if common_prefix_lens
+                cascade_attn_prefix_len = (
+                    cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
+                    if cascade_attn_prefix_lens
                     else 0
                 )
                 builder = attn_group.get_metadata_builder()
@@ -1466,7 +1466,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             )
                         else:
                             attn_metadata_i = builder.build(
-                                common_prefix_len=common_prefix_len,
+                                common_prefix_len=cascade_attn_prefix_len,
                                 common_attn_metadata=common_attn_metadata,
                             )
                         for layer_name in kv_cache_group.layer_names:
@@ -1480,7 +1480,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         )
                     else:
                         attn_metadata_i = builder.build(
-                            common_prefix_len=common_prefix_len,
+                            common_prefix_len=cascade_attn_prefix_len,
                             common_attn_metadata=common_attn_metadata,
                             **extra_attn_metadata_args,
                         )
@@ -1496,30 +1496,33 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_common_prefix_blocks: list[int],
     ) -> list[list[int]] | None:
         """
-        :return: Optional[common_prefix_lens]
-                   common_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
-                   None if we should not use cascade attention
+        :return: Optional[cascade_attn_prefix_lens]
+            cascade_attn_prefix_lens is 2D: ``[kv_cache_group_id][attn_group_idx]``,
+            None if we should not use cascade attention
         """
 
         use_cascade_attn = False
         num_kv_cache_groups = len(self.kv_cache_config.kv_cache_groups)
-        common_prefix_lens: list[list[int]] = [[] for _ in range(num_kv_cache_groups)]
+        cascade_attn_prefix_lens: list[list[int]] = [
+            [] for _ in range(num_kv_cache_groups)
+        ]
 
         for kv_cache_gid in range(num_kv_cache_groups):
             for attn_group in self.attn_groups[kv_cache_gid]:
                 if isinstance(attn_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                     prefix_len = 0
                 else:
-                    prefix_len = self._compute_cascade_attn_prefix_len(
+                    # 0 if cascade attention should not be used
+                    cascade_attn_prefix_len = self._compute_cascade_attn_prefix_len(
                         num_scheduled_tokens,
                         num_common_prefix_blocks[kv_cache_gid],
                         attn_group.kv_cache_spec,
                         attn_group.get_metadata_builder(),
                     )
-                common_prefix_lens[kv_cache_gid].append(prefix_len)
+                cascade_attn_prefix_lens[kv_cache_gid].append(cascade_attn_prefix_len)
                 use_cascade_attn |= prefix_len > 0
 
-        return common_prefix_lens if use_cascade_attn else None
+        return cascade_attn_prefix_lens if use_cascade_attn else None
 
     def _compute_cascade_attn_prefix_len(
         self,
@@ -2554,12 +2557,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output, num_scheduled_tokens_np, max_num_scheduled_tokens
                 )
 
-                common_prefix_lens = None
+                cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
                 if self.cascade_attn_enabled and ubatch_slices is None:
                     # Pre-compute cascade attention prefix lengths
                     # NOTE: Must be AFTER _prepare_inputs uses self.input_batch state
-                    common_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
                         num_scheduled_tokens_np,
                         scheduler_output.num_common_prefix_blocks,
                     )
@@ -2578,7 +2581,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
                         scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
-                        common_prefix_lens=common_prefix_lens,
+                        cascade_attn_prefix_lens=cascade_attn_prefix_lens,
                     )
                 )
 
@@ -2614,7 +2617,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
             cudagraph_runtime_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
-                    batch_descriptor, use_cascade_attn=common_prefix_lens is not None
+                    batch_descriptor,
+                    use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
             )
 
