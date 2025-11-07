@@ -12,6 +12,7 @@ import pytest
 from packaging.version import Version
 from transformers import (
     AutoModel,
+    AutoModelForCausalLM,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
@@ -86,6 +87,29 @@ COMMON_BROADCAST_SETTINGS = {
 # this is a good idea for checking your command first, since tests are slow.
 
 VLM_TEST_SETTINGS = {
+    "paddleocr_vl": VLMTestInfo(
+        models=["PaddlePaddle/PaddleOCR-VL"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        img_idx_to_prompt=lambda idx: (
+            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+        ),
+        multi_image_prompt=(
+            "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "请分别描述这两张图片。"
+        ),
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(), (0.25,)],
+        vllm_runner_kwargs={"gpu_memory_utilization": 0.5},
+        # Use strict comparator; normalize outputs to (ids, text)
+        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
+        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
+        comparator=check_outputs_equal,
+        marks=[pytest.mark.core_model],
+    ),
     #### Core tests to always run in the CI
     "llava": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
