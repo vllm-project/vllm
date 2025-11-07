@@ -451,13 +451,13 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
-FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[str, dict[int, float]] = {
-    "9.0": {
+FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
+    90: {
         2: 64,  # 64MB
         4: 2,  # 2MB
         8: 0.5,  # 0.5MB
     },
-    "10.0": {
+    100: {
         2: 64,  # 64MB
         4: 32,  # 32MB
         8: 1,  # 1MB
@@ -467,13 +467,13 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[str, dict[int, float]] = {
 # Max size of the input tensor per world size per device capability
 # to use flashinfer one shot fused allreduce
 # OneShot max size is at most 64MB / world size (FlashInfer restriction)
-_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[str, dict[int, float]] = {
-    "9.0": {
+_FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
+    90: {
         2: 32,  # 32MB
         4: 2,  # 2MB
         8: 0.5,  # 0.5MB
     },
-    "10.0": {
+    100: {
         2: 32,  # 32MB
         4: 4,  # 4MB
         8: 1,  # 1MB
@@ -507,9 +507,7 @@ if flashinfer_comm is not None:
         current_tensor_size = num_tokens * hidden_size * element_size
 
         if num_tokens <= max_token_num:
-            device_capability = (
-                current_platform.get_device_capability().as_version_str()
-            )
+            device_capability = current_platform.get_device_capability().to_int()
             # Get one shot input size limit for the current world size
             # for the current device capability
             max_one_shot_size_mb = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(

@@ -118,12 +118,12 @@ class PassConfig:
     Unspecified will fallback to default values 
     which are compute capability and world size dependent.
         FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
-            "9.0": {
+            90: {
                 2: 64,  # 64MB
                 4: 2,  # 2MB
                 8: 1,  # 1MB
             },
-            "10.0": {
+            100: {
                 2: 64,  # 64MB
                 4: 32,  # 32MB
                 8: 1,  # 1MB
@@ -151,8 +151,10 @@ class PassConfig:
         from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
         from vllm.platforms import current_platform
 
+        if not current_platform.is_cuda():
+            return {}
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
-            current_platform.get_device_capability().as_version_str(), {}
+            current_platform.get_device_capability().to_int(), {}
         )
 
     def uuid(self):
