@@ -36,9 +36,8 @@ logger = init_logger(__name__)
 
 
 # constants
-MIN_LAUNCH_GRID_SIZE_2D = 128   # Minimum launch grid size of 2D kernel
-NUM_PAR_SOFTMAX_SEGMENTS = 16   # Number of parallel tiled softmax segments
-
+MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
+NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
 
 
 @dataclass
@@ -99,7 +98,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.headdim = model_config.get_head_size()
 
         # Check if CUDA Graphs are enabled for decode
-        self.decode_cudagraph_enabled = self.vllm_config.compilation_config.cudagraph_mode in (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_DECODE_ONLY, CUDAGraphMode.FULL)
+        self.decode_cudagraph_enabled = (
+            self.vllm_config.compilation_config.cudagraph_mode
+            in (
+                CUDAGraphMode.FULL_AND_PIECEWISE,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+                CUDAGraphMode.FULL,
+            )
+        )
 
         # Set initial value for the threshold for the number of sequences used
         # to select between the 2D and 3D kernels for decode.
@@ -107,8 +113,11 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         if self.decode_cudagraph_enabled:
             # Select the CUDA Graph capture size closest to self.seq_threshold_3D
             # as threshold. This ensures that each captured graph covers the
-            # correct execution path. 
-            upd_seq_threshold_3D = min(self.vllm_config.compilation_config.cudagraph_capture_sizes, key=lambda x: abs(x - self.seq_threshold_3D))
+            # correct execution path.
+            upd_seq_threshold_3D = min(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes,
+                key=lambda x: abs(x - self.seq_threshold_3D),
+            )
 
             # If the updated threshold becomes significantly larger than the
             # initial value, it is reset to zero. This enforces the use of the
@@ -120,10 +129,26 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 self.seq_threshold_3D = 0
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        self.softmax_segm_output = torch.empty((self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments, self.headdim), dtype=torch.float32, device=device)
-        self.softmax_segm_max = torch.empty((self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments), dtype=torch.float32, device=device)
-        self.softmax_segm_expsum = torch.empty((self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments), dtype=torch.float32, device=device)
-
+        self.softmax_segm_output = torch.empty(
+            (
+                self.seq_threshold_3D,
+                self.num_heads_q,
+                self.num_par_softmax_segments,
+                self.headdim,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_max = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_expsum = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -416,11 +441,11 @@ class TritonAttentionImpl(AttentionImpl):
             q_descale=None,  # Not supported
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
-            seq_threshold_3D = seq_threshold_3D,
-            num_par_softmax_segments = num_par_softmax_segments,
-            softmax_segm_output = softmax_segm_output,
-            softmax_segm_max = softmax_segm_max,
-            softmax_segm_expsum = softmax_segm_expsum,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
             sinks=self.sinks,
             output_scale=output_scale,
         )
