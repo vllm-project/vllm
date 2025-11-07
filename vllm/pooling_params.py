@@ -57,7 +57,7 @@ class PoolingParams(
     ## Internal use only
     task: PoolingTask | None = None
     requires_token_ids: bool = False
-    disable_prefix_caching: bool = None
+    skip_prefix_caching: bool = None
     extra_kwargs: dict[str, Any] | None = None
     output_kind: RequestOutputKind = RequestOutputKind.FINAL_ONLY
 
@@ -123,14 +123,14 @@ class PoolingParams(
             if getattr(self, k, None) is None:
                 setattr(self, k, getattr(pooler_config, k))
 
-        if self.disable_prefix_caching is None:
+        if self.skip_prefix_caching is None:
             # If prefix caching is enabled,
             # the output of all pooling may less than n_prompt_tokens,
-            # we need to disable prefix_caching at this request.
+            # we need to skip prefix caching at this request.
             if self.task in ["token_embed", "token_classify"]:
-                self.disable_prefix_caching = True
+                self.skip_prefix_caching = True
             else:
-                self.disable_prefix_caching = False
+                self.skip_prefix_caching = False
 
         self._verify_step_pooling(pooler_config, valid_parameters)
 

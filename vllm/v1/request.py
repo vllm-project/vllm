@@ -181,17 +181,17 @@ class Request:
         return len(self._output_token_ids)
 
     @property
-    def disable_prefix_caching(self) -> bool:
+    def skip_prefix_caching(self) -> bool:
         if (
             self.sampling_params is not None
-            and self.sampling_params.disable_prefix_caching is not None
+            and self.sampling_params.skip_prefix_caching is not None
         ):
-            return self.sampling_params.disable_prefix_caching
+            return self.sampling_params.skip_prefix_caching
         elif (
             self.pooling_params is not None
-            and self.pooling_params.disable_prefix_caching is not None
+            and self.pooling_params.skip_prefix_caching is not None
         ):
-            return self.pooling_params.disable_prefix_caching
+            return self.pooling_params.skip_prefix_caching
         return False
 
     def is_finished(self) -> bool:
