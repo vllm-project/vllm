@@ -98,8 +98,8 @@ def build_defaults(
     # The optimizations that depend on these properties currently set to False
     # in all cases.
     # if model_config is not None:
-    #     is_quantized = model_config.is_quantized()
-    #     is_sequential = not model_config.is_model_moe()
+    #     is_quantized = lambda c: c.model_config.is_quantized()
+    #     is_sequential = lambda c: not c.model_config.is_model_moe()
     # See https://github.com/vllm-project/vllm/issues/25689.
 
     def enable_fusion(cfg):
