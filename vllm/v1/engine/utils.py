@@ -1188,7 +1188,7 @@ def wait_for_engine_startup(
         )
 
 
-def generate_unique_uuids(n: int):
+def generate_unique_uuids(n: int) -> set[uuid.UUID]:
     """Generate a set of unique UUID v4 objects.
 
     Generates a specified number of unique UUID (version 4) objects.
@@ -1264,7 +1264,7 @@ def broadcast_instruction(
 
 
 def wait_for_instruction_result(
-    cmd_socket,
+    cmd_socket: zmq.Socket,
     target_identities: set[bytes] | list[bytes],
     method_name: str,
     timeout: int,
