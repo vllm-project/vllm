@@ -3,7 +3,7 @@
 
 import asyncio
 import atexit
-from collections.abc import Iterable
+from collections.abc import Iterable, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
@@ -402,6 +402,7 @@ def group_mm_kwargs_by_modality(
     device: torch.types.Device = None,
     pin_memory: bool = False,
     merge_by_field_config: bool | None = None,
+    multimodal_cpu_fields: Set[str] = frozenset(),
 ) -> Iterable[tuple[str, int, BatchedTensorInputs]]:
     """Group consecutive `MultiModalKwargsItem`s from `mm_kwargs` with the same
     modality together into the same `MultiModalKwargs` instance.
@@ -443,12 +444,17 @@ def group_mm_kwargs_by_modality(
             )
 
             if device is not None:
-                mm_kwargs_group = json_map_leaves(
-                    lambda x: x.to(device=device, non_blocking=True)
-                    if isinstance(x, torch.Tensor)
-                    else x,
-                    mm_kwargs_group,
-                )
+                mm_kwargs_group = {
+                    k: json_map_leaves(
+                        lambda x: x.to(device=device, non_blocking=True)
+                        if isinstance(x, torch.Tensor)
+                        else x,
+                        v,
+                    )
+                    if k not in multimodal_cpu_fields
+                    else v
+                    for k, v in mm_kwargs_group.items()
+                }
         else:
             mm_kwargs_group = MultiModalKwargs.as_kwargs(
                 MultiModalKwargs.batch(

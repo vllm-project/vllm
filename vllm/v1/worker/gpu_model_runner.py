@@ -938,6 +938,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             mm_kwargs_combined.update(mm_kwargs_group)
 
@@ -1768,6 +1769,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             curr_group_outputs = []
 
@@ -1794,6 +1796,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             device=self.device,
                             pin_memory=self.pin_memory,
                             merge_by_field_config=model.merge_by_field_config,
+                            multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
 
@@ -1936,6 +1939,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Add the grouped features to encoder_features dict
             # This allows the model to receive them as kwargs (e.g.,
@@ -3292,6 +3296,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 device=self.device,
                 pin_memory=self.pin_memory,
                 merge_by_field_config=model.merge_by_field_config,
+                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 
