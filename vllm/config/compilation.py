@@ -150,6 +150,7 @@ class CompilationConfig:
         - [`backend`][vllm.config.CompilationConfig.backend]
         - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+        - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
     - CudaGraph capture:
         - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
@@ -267,6 +268,9 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    compile_mm_encoder: bool = True
+    """Whether or not to compile the multimodal encoder.
+    Currently, this only works for `Qwen2_5_vl`."""
 
     # Inductor capture
     use_inductor: bool | None = None
