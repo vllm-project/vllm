@@ -868,6 +868,19 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
+    def triton_gemm_a8w8_blockscale(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        block_size: list[int],
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+
+        return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+
+    @staticmethod
     def per_1x128_fp8_quant(
         input_2d: torch.Tensor,
     ) -> tuple[torch.Tensor, ...]:
@@ -877,6 +890,23 @@ class rocm_aiter_ops:
         aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
         return aiter_per1x128_quant(input_2d.contiguous(), quant_dtype=dtypes.fp8)
 
+    @staticmethod
+    def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
+        return (n, k) in [
+            (1024, 8192),
+            (2112, 7168),
+            (3072, 1536),
+            (32768, 8192),
+            (4096, 7168),
+            (4608, 7168),
+            (512, 7168),
+            (7168, 2048),
+            (7168, 256),
+            (8192, 1024),
+            (8192, 32768),
+        ]
+
+    @staticmethod
     def shuffle_weight(
         self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:

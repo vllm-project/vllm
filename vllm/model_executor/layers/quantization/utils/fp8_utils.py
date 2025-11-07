@@ -250,7 +250,9 @@ class W8A8BlockFp8LinearOp:
         ):
             output = self._run_deepgemm(input_2d, weight, weight_scale)
         else:
-            output = self.w8a8_blockscale_op(input_2d, weight, weight_scale)
+            output = self.w8a8_blockscale_op(
+                input_2d, weight, weight_scale, input_scale
+            )
 
         if bias is not None:
             output = output + bias
@@ -279,7 +281,9 @@ class W8A8BlockFp8LinearOp:
         input_2d: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
@@ -307,25 +311,52 @@ class W8A8BlockFp8LinearOp:
         input_2d: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
 
-        q_input, input_scale = rocm_aiter_ops.per_1x128_fp8_quant(input_2d)
-        return rocm_aiter_ops.gemm_w8a8_blockscale(
-            q_input,
-            weight,
-            input_scale,
-            weight_scale,
-            list(self.weight_group_shape),
-            input_2d.dtype,
-        )
+        n, k = weight.shape
+        if input_scale is not None:
+            q_input = input_2d
+
+        # MI350 case uses triton kernel
+        if (
+            not current_platform.is_fp8_fnuz()
+            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        ):
+            q_input, input_scale = per_token_group_quant_fp8(
+                input_2d,
+                self.act_quant_group_shape.col,
+                column_major_scales=False,
+                use_ue8m0=False,
+            )
+            return rocm_aiter_ops.triton_gemm_a8w8_blockscale(
+                q_input,
+                weight,
+                input_scale,
+                weight_scale,
+                input_2d.dtype,
+            )
+
+        # MI300 uses tuned AITER ASM/C++ kernel
+        else:
+            q_input, input_scale = rocm_aiter_ops.per_1x128_fp8_quant(input_2d)
+            return rocm_aiter_ops.gemm_w8a8_blockscale(
+                q_input,
+                weight,
+                input_scale,
+                weight_scale,
+                input_2d.dtype,
+            )
 
     def _run_triton(
         self,
         input_2d: torch.Tensor,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert input_scale is None
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
@@ -347,6 +378,7 @@ class W8A8BlockFp8LinearOp:
                 torch.Tensor,
                 torch.Tensor,
                 torch.Tensor,
+                torch.Tensor | None,
             ],
             torch.Tensor,
         ],

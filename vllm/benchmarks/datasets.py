@@ -30,7 +30,6 @@ from io import BytesIO
 from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
-import cv2
 import numpy as np
 from PIL import Image
 from transformers import PreTrainedTokenizerBase
@@ -850,6 +849,8 @@ class RandomMultiModalDataset(RandomDataset):
         Creates a video with random pixel values, encodes it to MP4 format,
         and returns the content as bytes.
         """
+        import cv2
+
         random_pixels = self._rng.integers(
             0,
             256,
