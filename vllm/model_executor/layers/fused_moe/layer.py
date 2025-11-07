@@ -915,7 +915,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             or logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        assert custom_routing_function is None
         return layer.ipex_fusion(
             x,
             use_grouped_topk,
@@ -924,6 +923,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            custom_routing_function=custom_routing_function,
         )
 
     def forward_tpu(
@@ -1178,7 +1178,7 @@ class FusedMoE(CustomOp):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all all_reduce on the output of the layer
+        reduce_results: Whether to all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.

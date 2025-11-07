@@ -12,7 +12,6 @@ from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -460,6 +459,8 @@ class RMSNormGated(CustomOp):
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+
         return rmsnorm_fn(
             x,
             self.weight,
