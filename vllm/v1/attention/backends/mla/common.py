@@ -480,6 +480,14 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
     )
 
 
+# Currently 394MB, this can be tuned based on GEMM sizes used.
+# Chosen to be the same as sglang:
+#  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
+FLASHINFER_WORKSPACE_BUFFER_SIZE = max(
+    394 * 1024 * 1024, envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
+)
+
+
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -609,7 +617,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if self._use_fi_prefill:
             self._workspace_buffer = torch.empty(
-                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
                 device=device,
             )
@@ -623,7 +631,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if self._use_trtllm_ragged_prefill:
             self._workspace_buffer = torch.empty(
-                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                FLASHINFER_WORKSPACE_BUFFER_SIZE,
                 dtype=torch.uint8,
                 device=device,
             )
