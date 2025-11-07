@@ -4,6 +4,7 @@
 KV cache helper for store.
 """
 
+import contextlib
 from collections.abc import Sequence
 from concurrent.futures import CancelledError, Future
 from typing import TYPE_CHECKING, Literal
@@ -239,6 +240,21 @@ class KVOutputAggregator:
                 result_future.set_exception(e)
 
         output_future.add_done_callback(callback)
+
+        from vllm.v1.executor.multiproc_executor import FutureWrapper
+
+        if isinstance(output_future, FutureWrapper):
+            # Due to the threadless implementation of multiproc FutureWrapper,
+            # we must block on the delegate future's result() method.
+            delegate_result = result_future.result
+
+            def result(timeout=None):
+                with contextlib.suppress(Exception):
+                    output_future.result(timeout=timeout)
+                return delegate_result()
+
+            result_future.result = result
+
         return result_future
 
 
