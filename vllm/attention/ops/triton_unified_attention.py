@@ -753,7 +753,7 @@ def unified_attention(
     TILE_SIZE_PREFILL = 32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
-    # if batch contains a prefill or launch grid size is larger than threshold
+    # if batch contains a prefill or number of sequences is larger than threshold
     if max_seqlen_q > 1 or num_seqs > seq_threshold_3D:
         kernel_unified_attention_2d[
             (
