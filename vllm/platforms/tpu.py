@@ -205,10 +205,6 @@ class TpuPlatform(Platform):
         return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa
 
     @classmethod
-    def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,
@@ -250,6 +246,22 @@ class TpuPlatform(Platform):
     @classmethod
     def use_sync_weight_loader(cls) -> bool:
         return True
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        logger.warning(
+            "--max-model-len is not specified, "
+            "it's currently using model's default length %d, "
+            "which might be too large."
+            "Please input with --max-model-len based on your "
+            "request input length and output length, to avoid "
+            "unnecessary degradation.",
+            max_model_len,
+        )
+        return max_model_len
 
 
 try:

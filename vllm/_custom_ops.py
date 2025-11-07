@@ -475,10 +475,18 @@ def gptq_gemm(
     b_gptq_scales: torch.Tensor,
     b_g_idx: torch.Tensor,
     use_exllama: bool,
+    use_v2_format: bool,
     bit: int,
 ) -> torch.Tensor:
     return torch.ops._C.gptq_gemm(
-        a, b_q_weight, b_gptq_qzeros, b_gptq_scales, b_g_idx, use_exllama, bit
+        a,
+        b_q_weight,
+        b_gptq_qzeros,
+        b_gptq_scales,
+        b_g_idx,
+        use_exllama,
+        use_v2_format,
+        bit,
     )
 
 
@@ -492,6 +500,7 @@ if hasattr(torch.ops._C, "gptq_gemm"):
         b_gptq_scales: torch.Tensor,
         b_g_idx: torch.Tensor,
         use_exllama: bool,
+        use_v2_format: bool,
         bit: int,
     ) -> torch.Tensor:
         return torch.empty(
@@ -851,7 +860,11 @@ def cutlass_sparse_scaled_mm_supported(cuda_device_capability: int) -> bool:
 
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+    try:
+        return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
+    except AttributeError:
+        # Return False on non-CUDA platforms where it is not available
+        return False
 
 
 def cutlass_sparse_compress(a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -1396,7 +1409,7 @@ def scaled_fp4_quant(
     rounded_m = round_up(m, 128)
     scale_n = n // block_size
     rounded_n = round_up(scale_n, 4)
-    output_scale = torch.zeros(
+    output_scale = torch.empty(
         (rounded_m, rounded_n // 4), device=device, dtype=torch.int32
     )
 
@@ -1734,6 +1747,10 @@ def selective_scan_fwd(
     has_initial_state: torch.Tensor | None,
     ssm_states: torch.Tensor,
     pad_slot_id: int,
+    block_size: int = 1024,
+    block_idx_first_scheduled_token: torch.Tensor | None = None,
+    block_idx_last_scheduled_token: torch.Tensor | None = None,
+    initial_state_idx: torch.Tensor | None = None,
 ):
     torch.ops._C.selective_scan_fwd(
         u,
@@ -1750,6 +1767,10 @@ def selective_scan_fwd(
         has_initial_state,
         ssm_states,
         pad_slot_id,
+        block_size,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+        initial_state_idx,
     )
 
 
@@ -1830,6 +1851,8 @@ def moe_lora_align_block_size(
     sorted_token_ids: torch.Tensor,
     experts_ids: torch.Tensor,
     num_tokens_post_pad: torch.Tensor,
+    adapter_enabled: torch.Tensor,
+    lora_ids: torch.Tensor,
 ) -> None:
     torch.ops._moe_C.moe_lora_align_block_size(
         topk_ids,
@@ -1842,6 +1865,8 @@ def moe_lora_align_block_size(
         sorted_token_ids,
         experts_ids,
         num_tokens_post_pad,
+        adapter_enabled,
+        lora_ids,
     )
 
 

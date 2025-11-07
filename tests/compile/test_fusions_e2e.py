@@ -54,11 +54,11 @@ if current_platform.is_cuda():
 
     MODELS_FP4 = [
         ModelBackendTestCase(
-            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
             backend=_Backend.FLASHINFER,
-            attention_fusions=48,
-            allreduce_fusions=96,
+            attention_fusions=32,
+            allreduce_fusions=65,
         ),
     ]
 
@@ -95,8 +95,7 @@ elif current_platform.is_rocm():
         ),
     ]
 
-# TODO(luka) test both in nightly
-CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
+CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
@@ -132,6 +131,9 @@ def test_attn_quant(
         mode = CUDAGraphMode.FULL_AND_PIECEWISE
         splitting_ops: list[str] | None = None
     else:
+        # FIXME: Llama-4-Scout-17B-16E-Instruct-FP8 + FlashInfer + Blackwell end at
+        # CUDAGraphMode.NONE here because it derives an attention backend that
+        # does not support full cudagraphs
         mode = CUDAGraphMode.FULL_DECODE_ONLY
         splitting_ops = []
 
@@ -168,8 +170,7 @@ def test_attn_quant(
     assert int(matches[0]) == attention_fusions
 
 
-# TODO(luka) test both in nightly
-CUSTOM_OPS_RMS_NORM = ["-rms_norm"]  # , "+rms_norm"]
+CUSTOM_OPS_RMS_NORM = ["-rms_norm", "+rms_norm"]
 
 
 def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:

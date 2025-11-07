@@ -3,7 +3,7 @@
 import hashlib
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import safetensors
 import torch
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -86,8 +87,17 @@ class SharedStorageConnector(KVConnectorBase_V1):
     # It does extra work which will overwrite the existing prefix-cache in GPU
     # - to remove the overhead, need to add some "mask" in the ReqMeta class
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(
+            vllm_config=vllm_config,
+            role=role,
+            kv_cache_config=kv_cache_config,
+        )
         self._block_size = vllm_config.cache_config.block_size
         self._requests_need_load: dict[str, Request] = {}
         self._storage_path = self._kv_transfer_config.get_from_extra_config(
@@ -336,36 +346,34 @@ class SharedStorageConnector(KVConnectorBase_V1):
 
         cached_reqs = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(cached_reqs.req_ids):
+            resumed_from_preemption = req_id in cached_reqs.resumed_req_ids
+            if not resumed_from_preemption or req_id not in self._requests_need_load:
+                continue
+
             num_computed_tokens = cached_reqs.num_computed_tokens[i]
             num_new_tokens = scheduler_output.num_scheduled_tokens[req_id]
             new_block_ids = cached_reqs.new_block_ids[i]
-            resumed_from_preemption = cached_reqs.resumed_from_preemption[i]
 
-            # NOTE(rob): here we rely on the resumed requests being
-            # the first N requests in the list scheduled_cache_reqs.
-            if not resumed_from_preemption:
-                break
-            if req_id in self._requests_need_load:
-                # NOTE(rob): cached_req_data does not have the full
-                # list of token ids (only new tokens). So we look it
-                # up in the actual request object.
-                request = self._requests_need_load[req_id]
-                total_tokens = num_computed_tokens + num_new_tokens
-                token_ids = request.all_token_ids[:total_tokens]
+            # NOTE(rob): cached_req_data does not have the full
+            # list of token ids (only new tokens). So we look it
+            # up in the actual request object.
+            request = self._requests_need_load[req_id]
+            total_tokens = num_computed_tokens + num_new_tokens
+            token_ids = request.all_token_ids[:total_tokens]
 
-                # NOTE(rob): For resumed req, new_block_ids is all
-                # of the block_ids for the request.
-                assert new_block_ids is not None
-                block_ids = new_block_ids[0]
+            # NOTE(rob): For resumed req, new_block_ids is all
+            # of the block_ids for the request.
+            assert new_block_ids is not None
+            block_ids = new_block_ids[0]
 
-                meta.add_request(
-                    token_ids=token_ids,
-                    block_ids=block_ids,
-                    block_size=self._block_size,
-                    is_store=False,
-                    mm_hashes=[f.identifier for f in request.mm_features],
-                )
-                total_need_load += 1
+            meta.add_request(
+                token_ids=token_ids,
+                block_ids=block_ids,
+                block_size=self._block_size,
+                is_store=False,
+                mm_hashes=[f.identifier for f in request.mm_features],
+            )
+            total_need_load += 1
 
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()

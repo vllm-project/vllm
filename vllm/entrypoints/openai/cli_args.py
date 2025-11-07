@@ -29,7 +29,7 @@ from vllm.entrypoints.constants import (
 from vllm.entrypoints.openai.serving_models import LoRAModulePath
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = init_logger(__name__)
 
@@ -219,7 +219,7 @@ class FrontendArgs:
         frontend_kwargs["middleware"]["default"] = []
 
         # Special case: Tool call parser shows built-in options.
-        valid_tool_parsers = list(ToolParserManager.tool_parsers.keys())
+        valid_tool_parsers = list(ToolParserManager.list_registered())
         parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
