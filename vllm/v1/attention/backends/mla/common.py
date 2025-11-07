@@ -895,7 +895,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     )
                     local_chunk_ends = torch.min(
                         padded_local_context_lens_cpu.unsqueeze(0),
-                        local_chunk_starts + padded_local_max_context_chunk_across_ranks,
+                        local_chunk_starts
+                        + padded_local_max_context_chunk_across_ranks,
                     )
                     padded_local_chunk_seq_lens = (
                         local_chunk_ends - local_chunk_starts
@@ -1018,7 +1019,7 @@ def reorg_kvcache(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     reorg and unpad kvcache after cp local gather to tp layout for attn kernel.
-    e.g. 
+    e.g.
     allgatered_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T1_0, T1_1, ...,
                               T0_4, T0_5, pad, pad, T1_2, pad, ...]
     -> reorganized_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T0_4, T0_5,
@@ -1715,7 +1716,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
-                cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[i],
+                cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[
+                    i
+                ],
                 batch_size=attn_metadata.num_prefills,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
