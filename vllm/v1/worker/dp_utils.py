@@ -8,6 +8,7 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
