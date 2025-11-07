@@ -21,7 +21,7 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
         enforce_eager=True,
         runner="pooling",
         enable_chunked_prefill=False,
-        enable_prefix_caching=False,
+        enable_prefix_caching=True,
     ) as vllm_model:
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
@@ -30,4 +30,16 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
 
         for n, output in zip(n_prompt_tokens, pooling_outputs):
             assert len(output.prompt_token_ids) == n
+            assert len(output.outputs.data) == n
+            assert output.num_cached_tokens == 0
+
+        # test enable_prefix_caching plus all pooling
+        pooling_outputs = vllm_model.llm.encode(
+            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            pooling_task="token_embed",
+        )
+
+        for n, output in zip(n_prompt_tokens, pooling_outputs):
+            assert len(output.prompt_token_ids) == n
+            assert len(output.outputs.data) == n
             assert output.num_cached_tokens == 0

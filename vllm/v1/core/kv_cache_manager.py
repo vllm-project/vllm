@@ -186,10 +186,19 @@ class KVCacheManager:
                 - The number of computed tokens.
         """
         # Prefix caching is disabled or
-        # When the request requires prompt logprobs, we skip prefix caching.
-        if not self.enable_caching or (
-            request.sampling_params is not None
-            and request.sampling_params.prompt_logprobs is not None
+        # When the request requires prompt logprobs or
+        # When pooling model with all pooling
+        # we skip prefix caching.
+        if (
+            not self.enable_caching
+            or (
+                request.sampling_params is not None
+                and request.sampling_params.disable_prefix_caching
+            )
+            or (
+                request.pooling_params is not None
+                and request.pooling_params.disable_prefix_caching
+            )
         ):
             return self.empty_kv_cache_blocks, 0
 
