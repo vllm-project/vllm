@@ -1604,16 +1604,11 @@ class NixlConnectorWorker:
         split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
         sample_cache = list(self.device_kv_caches.values())[0][0]
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
-            if len(block_ids_list) == 0:
-                continue
             assert block_size_ratio > 1, "Only nP < nD supported currently."
             fn = _process_local_gt_remote
             block_ids_list = [[item for sublist in block_ids_list for item in sublist]]
 
             for block_ids in block_ids_list:
-                if len(block_ids) == 0:
-                    # we don't need to do permute for this req
-                    continue
                 indices = torch.tensor(block_ids, device=sample_cache.device)
 
                 for _, cache_or_caches in self.device_kv_caches.items():
