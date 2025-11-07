@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import KVCacheBlock
 
+from vllm.v1.metrics.stats import BlockResidencyEvent
+
 
 class BlockMetricsState:
     """Tracks lifecycle metrics for a single KV cache block."""
@@ -80,11 +82,7 @@ class KVCacheMetricsCollector:
         self._lock = threading.Lock()
         self.block_metrics: dict[int, BlockMetricsState] = {}
 
-        # Set by PrometheusStatLogger
-        self.histogram_block_lifetime = None
-        self.histogram_idle_before_evict = None
-        self.histogram_reuse_gap = None
-        self.histogram_prefix_residency = None
+        self._eviction_events: list[BlockResidencyEvent] = []
 
     def should_sample_block(self) -> bool:
         if not self.enabled or self.sample_rate <= 0:
@@ -116,26 +114,23 @@ class KVCacheMetricsCollector:
                 return
 
             now_ns = time.monotonic_ns()
-
-            if self.histogram_block_lifetime:
-                self.histogram_block_lifetime.observe(
-                    metrics.get_lifetime_seconds(now_ns)
-                )
-
-            if self.histogram_idle_before_evict:
-                self.histogram_idle_before_evict.observe(
-                    metrics.get_idle_time_seconds(now_ns)
-                )
-
-            if self.histogram_reuse_gap:
-                for gap in metrics.get_reuse_gaps_seconds():
-                    self.histogram_reuse_gap.observe(gap)
-
-            # Prefix residency from last request that used this block
-            if metrics.max_request_end_ns > 0 and self.histogram_prefix_residency:
+            lifetime = metrics.get_lifetime_seconds(now_ns)
+            idle_time = metrics.get_idle_time_seconds(now_ns)
+            reuse_gaps = tuple(metrics.get_reuse_gaps_seconds())
+            prefix_residency: float | None = None
+            if metrics.max_request_end_ns > 0:
                 residency = (now_ns - metrics.max_request_end_ns) / 1e9
                 if residency >= 0:
-                    self.histogram_prefix_residency.observe(residency)
+                    prefix_residency = residency
+
+            self._eviction_events.append(
+                BlockResidencyEvent(
+                    lifetime_seconds=lifetime,
+                    idle_seconds=idle_time,
+                    reuse_gaps_seconds=reuse_gaps,
+                    prefix_residency_seconds=prefix_residency,
+                )
+            )
 
     def on_request_prefill_complete(
         self, request_id: str, prefix_block_ids: set[int]
@@ -155,3 +150,12 @@ class KVCacheMetricsCollector:
         """Clear all state on cache reset."""
         with self._lock:
             self.block_metrics.clear()
+            self._eviction_events.clear()
+
+    def drain_events(self) -> list[BlockResidencyEvent]:
+        if not self.enabled:
+            return []
+        with self._lock:
+            events = self._eviction_events
+            self._eviction_events = []
+        return events

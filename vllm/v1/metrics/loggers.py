@@ -1019,6 +1019,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
 
+            if scheduler_stats.block_residency_events:
+                lifetime_hist = self.histogram_kv_block_lifetime[engine_idx]
+                idle_hist = self.histogram_kv_block_idle_before_evict[engine_idx]
+                reuse_hist = self.histogram_kv_block_reuse_gap[engine_idx]
+                prefix_hist = self.histogram_request_prefix_residency[engine_idx]
+
+                for event in scheduler_stats.block_residency_events:
+                    lifetime_hist.observe(event.lifetime_seconds)
+                    idle_hist.observe(event.idle_seconds)
+                    for gap in event.reuse_gaps_seconds:
+                        reuse_hist.observe(gap)
+                    if event.prefix_residency_seconds is not None:
+                        prefix_hist.observe(event.prefix_residency_seconds)
+
             if self.gauge_lora_info is not None:
                 running_lora_adapters = ",".join(
                     scheduler_stats.running_lora_adapters.keys()

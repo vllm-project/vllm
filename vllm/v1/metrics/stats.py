@@ -176,6 +176,8 @@ class SchedulerStats:
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
 
+    block_residency_events: list[BlockResidencyEvent] = field(default_factory=list)
+
     spec_decoding_stats: SpecDecodingStats | None = None
     kv_connector_stats: dict[str, Any] | None = None
 
