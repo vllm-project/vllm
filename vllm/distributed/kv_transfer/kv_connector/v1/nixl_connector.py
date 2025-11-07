@@ -695,7 +695,8 @@ class NixlConnectorWorker:
                 f"Local block size {self.block_size} is not divisible "
                 f"by remote block size {remote_block_size} or vice versa."
             )
-            return remote_block_size / self.block_size
+            ret = self.block_size / remote_block_size
+            return ret if ret < 0 else int(ret)
 
         def tp_ratio_from_engine_id(
             self,
@@ -1227,6 +1228,17 @@ class NixlConnectorWorker:
         self,
         block_size: int,
     ) -> int:
+        """
+        Function used for register local xfer handler with local block_size or
+        Remote block_size.
+
+        When local block_size is same as remote block_size, we use local block_size
+        to register local_xfer_handler during init.
+
+        When remote block size is less than local block size, we need to use
+        register another local_xfer_handler using remote block len to ensure
+        data copy correctness.
+        """
         block_size_ratio = self.block_size // block_size
         blocks_data = []
         for i, base_addr in enumerate(self.seen_base_addresses):
@@ -1336,7 +1348,7 @@ class NixlConnectorWorker:
         # Create dst descs and xfer side handles. TP workers have same #blocks
         # so we only register once per engine_id.
         # Example:
-        # block_size_ratio < 1:
+        # block_size_ratio > 1:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
@@ -1364,8 +1376,8 @@ class NixlConnectorWorker:
         # Register all remote blocks, but only the corresponding kv heads.
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             kv_block_len = self.get_backend_aware_kv_block_len(layer_idx=i)
-            remote_kv_block_len = int(kv_block_len * block_size_ratio)
-            if block_size_ratio <= 1:
+            remote_kv_block_len = kv_block_len // block_size_ratio
+            if block_size_ratio > 1:
                 # using remote kv_block_len as transfer unit
                 kv_block_len = remote_kv_block_len
             rank_offset = (
@@ -1406,8 +1418,8 @@ class NixlConnectorWorker:
             remote_agent_name, descs
         )
 
-        if block_size_ratio < 1:
-            # when prefill with small block_size, we need to init a
+        if block_size_ratio > 1:
+            # when prefill with smaller block_size, we need to init a
             # new handler with same block_len to match
             self.src_xfer_side_handles[nixl_agent_meta.block_size] = (
                 self.register_local_xfer_handler(nixl_agent_meta.block_size)
@@ -1464,7 +1476,7 @@ class NixlConnectorWorker:
             # With replicated KV cache, only the number of blocks can differ.
             for i in range(len(self.block_len_per_layer)):
                 assert (
-                    self.block_len_per_layer[i] * block_size_ratio
+                    self.block_len_per_layer[i] // block_size_ratio
                     == nixl_agent_meta.block_lens[i]
                 ), "KV cache sizes must match between P and D when replicated"
         else:
@@ -1476,7 +1488,7 @@ class NixlConnectorWorker:
 
             assert (
                 remote_block_len
-                == self.block_len_per_layer[0] * tp_ratio * block_size_ratio
+                == (self.block_len_per_layer[0] * tp_ratio) // block_size_ratio
             ), (
                 "Remote P worker KV layer cache must be of shape [2, N, "
                 "local_kv_heads*tp_ratio, block_size, head_dim] and same dtype."
@@ -1568,8 +1580,8 @@ class NixlConnectorWorker:
     def blocksize_post_process(self, block_ids_per_ratio: dict[float, list[list[int]]]):
         def _process_local_gt_remote(blocks_to_update, block_size_ratio):
             n_kv_heads, block_size, head_size = blocks_to_update.shape[1:]
-            remote_block_size = int(block_size * block_size_ratio)
-            n_blocks = int(1 / block_size_ratio)
+            remote_block_size = block_size // block_size_ratio
+            n_blocks = block_size_ratio
             # actual permute is to convert
             # for local blocksize > remote blocksize
             # ex: local blocksize = 16 tokens, remote blocksize = 4 tokens
@@ -1594,11 +1606,10 @@ class NixlConnectorWorker:
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
             if len(block_ids_list) == 0:
                 continue
-            if block_size_ratio < 1:
-                fn = _process_local_gt_remote
-                block_ids_list = [
-                    [item for sublist in block_ids_list for item in sublist]
-                ]
+            assert block_size_ratio > 1, "Only nP < nD supported currently."
+            fn = _process_local_gt_remote
+            block_ids_list = [[item for sublist in block_ids_list for item in sublist]]
+
             for block_ids in block_ids_list:
                 if len(block_ids) == 0:
                     # we don't need to do permute for this req
@@ -1829,11 +1840,9 @@ class NixlConnectorWorker:
         request_id: str,
     ):
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
-        block_size_ratio_inv = None
-        if block_size_ratio < 1:
-            block_size_ratio_inv = int(1 / block_size_ratio)
+        if block_size_ratio > 1:
             local_block_ids = self.get_mapped_blocks(
-                np.asarray(local_block_ids), block_size_ratio_inv
+                np.asarray(local_block_ids), block_size_ratio
             )
             if len(local_block_ids) > len(remote_block_ids):
                 local_block_ids = local_block_ids[: len(remote_block_ids)]
@@ -1881,8 +1890,8 @@ class NixlConnectorWorker:
         # Get side handles.
         block_size = (
             self.block_size
-            if block_size_ratio >= 1
-            else int(self.block_size * block_size_ratio)
+            if block_size_ratio <= 1
+            else self.block_size // block_size_ratio
         )
         local_xfer_side_handle = self.src_xfer_side_handles[block_size]
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
@@ -1904,7 +1913,7 @@ class NixlConnectorWorker:
             local_block_descs_ids = self._get_block_descs_ids(
                 self.engine_id,
                 local_block_ids,
-                block_size_ratio_inv=block_size_ratio_inv,
+                block_size_ratio=block_size_ratio,
             )
         else:
             # TODO(mgoin): remove this once we have hybrid memory allocator
@@ -1933,7 +1942,7 @@ class NixlConnectorWorker:
                     self.engine_id,
                     layer_remote_block_ids,
                     layer_idx,
-                    block_size_ratio_inv=block_size_ratio_inv,
+                    block_size_ratio=block_size_ratio,
                 )
 
                 local_descs_list.append(layer_local_desc_ids)
@@ -1994,7 +2003,7 @@ class NixlConnectorWorker:
         engine_id: str,
         block_ids: list[int],
         layer_idx: int | None = None,
-        block_size_ratio_inv: int | None = None,
+        block_size_ratio: float | None = None,
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
@@ -2017,8 +2026,8 @@ class NixlConnectorWorker:
                 region_ids = np.arange(layer_idx, layer_idx + 1)
 
         num_blocks = self.dst_num_blocks[engine_id]
-        if block_size_ratio_inv is not None:
-            num_blocks = num_blocks * block_size_ratio_inv
+        if block_size_ratio is not None:
+            num_blocks = int(num_blocks * block_size_ratio)
 
         # Compute the desc ids for each block.
         region_ids = region_ids[:, None]
