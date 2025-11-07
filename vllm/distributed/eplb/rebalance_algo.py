@@ -43,13 +43,11 @@ def balanced_packing(
         rank_in_pack = torch.zeros_like(weight, dtype=torch.int64, device=device)
         return pack_index, rank_in_pack
 
-    # Convert to NumPy for CPU processing
     weight_np = weight.cpu().numpy()
 
-    # Sort and get indices
-    indices_np = np.argsort(-weight_np, axis=-1)  # Descending order
+    # Sort and get indices in decending order
+    indices_np = np.argsort(-weight_np, axis=-1)
 
-    # Initialize output arrays
     pack_index_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
     rank_in_pack_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
 
@@ -59,7 +57,7 @@ def balanced_packing(
         pack_items = [0] * num_packs
 
         for group in indices_np[i]:
-            # Find pack with minimum weight that still has capacity
+            # Find a pack with capacity that has the lowest weight
             pack = min(
                 (j for j in range(num_packs) if pack_items[j] < groups_per_pack),
                 key=pack_weights.__getitem__,
@@ -71,7 +69,6 @@ def balanced_packing(
             pack_weights[pack] += weight_np[i, group]
             pack_items[pack] += 1
 
-    # Convert back to PyTorch tensors on original device
     pack_index = torch.from_numpy(pack_index_np).to(device)
     rank_in_pack = torch.from_numpy(rank_in_pack_np).to(device)
 
