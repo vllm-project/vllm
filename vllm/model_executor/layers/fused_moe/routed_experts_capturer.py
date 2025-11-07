@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import fcntl
 import logging
 from abc import ABC, abstractmethod
@@ -163,9 +165,11 @@ class _RoutedExpertsCapturerReal(RoutedExpertsCapturer):
                     # Ensure device buffer exists
                     if self._experts_capturer_device_buffer is None:
                         raise RuntimeError("Device buffer not initialized.")
-                    data = self._experts_capturer_device_buffer[
-                        :num_tokens, :, :
-                    ].cpu().numpy()
+                    data = (
+                        self._experts_capturer_device_buffer[:num_tokens, :, :]
+                        .cpu()
+                        .numpy()
+                    )
                     # indices should be valid for host buffer
                     self._host_buffer_view[indices, :, :] = data
             finally:
