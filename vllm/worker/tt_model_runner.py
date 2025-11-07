@@ -27,6 +27,12 @@ from vllm.worker.model_runner_base import ModelRunnerBase, ModelRunnerInputBase
 
 logger = init_logger(__name__)
 
+# Padding default values for sampling parameters in decode mode
+# These values ensure greedy/deterministic behavior for padded positions
+PADDING_TEMPERATURE = 0.0  # Greedy sampling (argmax)
+PADDING_TOP_K = 1  # Consider only the top token (argmax)
+PADDING_TOP_P = 1.0  # No nucleus filtering
+
 
 @dataclass(frozen=True)
 class TTSamplingParams:
@@ -409,8 +415,9 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 for key in ["temperature", "top_k", "top_p"]:
                     top_pk_sampling_params.setdefault(key, []).append(
                         getattr(sampling_params, key))
+
             else:
-                # uniform sampling
+                # uniform sampling - all requests must have same params
                 if len(top_pk_sampling_params) == 0:
                     top_pk_sampling_params[
                         "temperature"] = sampling_params.temperature
@@ -447,6 +454,30 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 pin_memory=False,
                 generators=generators)
             tt_sampling_params = None
+
+        elif (TTPlatform.non_greedy_decoding_on_device
+              and perform_device_sampling):
+            sampling_metadata = None
+            temp_list = top_pk_sampling_params["temperature"]
+            top_k_list = top_pk_sampling_params["top_k"]
+            top_p_list = top_pk_sampling_params["top_p"]
+
+            # Pad sampling params to max_num_seqs in decode mode for
+            # proper permutation
+            # This must be done before permutation, just like tokens
+            # and page_table
+            if not is_prompt and len(temp_list) > 0 and len(
+                    temp_list) < self.scheduler_config.max_num_seqs:
+                batch_pad_len = self.scheduler_config.max_num_seqs - len(
+                    temp_list)
+                # Pad with default values for greedy/deterministic behavior
+                temp_list = temp_list + [PADDING_TEMPERATURE] * batch_pad_len
+                top_k_list = top_k_list + [PADDING_TOP_K] * batch_pad_len
+                top_p_list = top_p_list + [PADDING_TOP_P] * batch_pad_len
+
+            tt_sampling_params = TTSamplingParams(temperature=temp_list,
+                                                  top_k=top_k_list,
+                                                  top_p=top_p_list)
         else:
             sampling_metadata = None
             tt_sampling_params = TTSamplingParams(
@@ -779,6 +810,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         # based on tpu_model_runner.py
         # TT backend does not support the advanced sampling parameters
         # such as logprobs.
+
         zero_logprob = Logprob(0.0)
         sampler_outputs = []
         for batch_idx, seq_id in enumerate(seq_groups):
@@ -974,6 +1006,42 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     "tokens"][inverse_perm_indices, :]
                 execute_model_kwargs["page_table"] = execute_model_kwargs[
                     "page_table"][inverse_perm_indices, :]
+
+                # permute the sampling_params if present
+                # (already padded to max_num_seqs)
+                if ("sampling_params" in execute_model_kwargs and
+                        execute_model_kwargs["sampling_params"] is not None):
+                    tt_sampling_params = execute_model_kwargs[
+                        "sampling_params"]
+                    # Permute each sampling parameter list using the
+                    # full inverse_perm_indices
+                    if isinstance(tt_sampling_params.temperature,
+                                  list) and len(
+                                      tt_sampling_params.temperature) > 0:
+                        # Defensive check: ensure all indices are within bounds
+                        max_idx = len(tt_sampling_params.temperature)
+                        assert all(
+                            0 <= int(i) < max_idx for i in inverse_perm_indices
+                        ), (f"Out-of-bounds index in inverse_perm_indices: "
+                            f"{inverse_perm_indices.tolist()} for sampling "
+                            f"param list of length {max_idx}")
+                        permuted_temp = [
+                            tt_sampling_params.temperature[i]
+                            for i in inverse_perm_indices
+                        ]
+                        permuted_top_k = [
+                            tt_sampling_params.top_k[i]
+                            for i in inverse_perm_indices
+                        ]
+                        permuted_top_p = [
+                            tt_sampling_params.top_p[i]
+                            for i in inverse_perm_indices
+                        ]
+                        execute_model_kwargs[
+                            "sampling_params"] = TTSamplingParams(
+                                temperature=permuted_temp,
+                                top_k=permuted_top_k,
+                                top_p=permuted_top_p)
 
             tt_out = self.model.decode_forward(**execute_model_kwargs,
                                                **enc_dec_kwargs,
