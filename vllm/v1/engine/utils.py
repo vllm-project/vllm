@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import msgspec
+import regex as re
 import zmq
 
 from vllm import envs
@@ -219,11 +220,15 @@ class CoreEngineProcManager:
                 died_proc = next(
                     proc for proc in self.processes if proc.sentinel == sentinel
                 )
+
+                match = re.match(r"EngineCore_DP(\d+)", died_proc.name)
+                engine_rank = match.group(1)
+
                 fault_info = FaultInfo(
                     type="engine_core dead",
                     message=f"Engine core proc {died_proc.pid} "
                     f"(PID: {died_proc.name}) died unexpectedly.",
-                    engine_id=died_proc.name[-1],
+                    engine_id=engine_rank,
                     additional_info=None,
                 )
                 self.engine_down_socket.send_multipart(

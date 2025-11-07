@@ -18,6 +18,7 @@ from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
 import msgspec.msgpack
+import regex as re
 import zmq
 import zmq.asyncio
 from ray.util.state import get_actor
@@ -813,13 +814,18 @@ class MPClient(EngineCoreClient):
                             for proc in engine_processes
                             if proc.sentinel == sentinel
                         )
+
+                        match = re.match(r"EngineCore_DP(\d+)", died_proc.name)
+                        engine_rank = match.group(1)
+
                         fault_info = FaultInfo(
                             type="engine_core dead",
                             message=f"Engine core proc {died_proc.pid} "
                             f"(PID: {died_proc.name}) died unexpectedly.",
-                            engine_id=died_proc.name[-1],
+                            engine_id=engine_rank,
                             additional_info=None,
                         )
+
                         engine_manager.engine_down_socket.send_multipart(
                             [b"", fault_info.serialize().encode("utf-8")]
                         )
