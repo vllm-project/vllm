@@ -148,7 +148,7 @@ class TrainingManager:
         self.grad_norm: float = 0.0
 
         # Logging
-        self.log_interval: int = 5
+        self.log_interval: int = 50
         self._last_logged_step: int = 0
 
         # TODO(girfan): Take the params from elsewhere.
@@ -241,9 +241,7 @@ class TrainingManager:
         loss_value: float = self.training_state.loss / steps_since_last_log
         learning_rate: float = self.get_learning_rate()
         self._last_logged_step = self.training_state.total_steps
-        logger.info(f"training loss = {loss_value:.6f}")
-        logger.info(f"learning rate = {learning_rate:.6f}")
-        logger.info(f"grad norm = {self.grad_norm:.6f}")
+        logger.info(f"loss = {loss_value:.6f}, learning rate = {learning_rate:.6f}, grad norm = {self.grad_norm:.6f}")
 
     def should_run_optimizer_step(self) -> bool:
         # TODO(girfan): Maybe this check should be in the GPUModelRunner so we can access steps_in_epoch?
@@ -314,27 +312,26 @@ class TrainingManager:
             raise ValueError(f"LoRA index {index} not found in LoRA manager")
         return self.is_registered_by_id(lora_id)
 
-    def optimizer_eval(self):
-        """Setup the optimizer for evaluation."""
-        self.optimizer.eval()
-        pass
-
     def lora_eval(self, lora_request: LoRARequest):
         """Evaluate the LoRA adapter."""
-        pass
+        self.model.eval()
+        if hasattr(self.optimizer, "eval") and callable(self.optimizer.eval):
+            self.optimizer.eval()
 
     def lora_train(self, lora_request: LoRARequest):
         """Make the LoRA adapter trainable."""
         _ = self._try_initialize_lora_for_training(lora_request)
-        pass
+        self.model.train()
+        if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
+            self.optimizer.train()
 
     # TODO(girfan): Take the params from earlier in the code.
     def _try_initialize_lora_for_training(
         self,
         lora_request: LoRARequest,
         learning_rate: float = 1e-4,
-        num_training_steps: int = 30,
-        num_warmup_steps: int = 10,
+        num_training_steps: int = 300,
+        num_warmup_steps: int = 100,
         weight_decay: float = 0.0,
         scheduler_type: str = "cosine",
     ):

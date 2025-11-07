@@ -474,20 +474,28 @@ class LLM:
         # step every batch, do_sync_step every gradient_accumulation_steps
         # tr_loss is always accumulated and reset after eval
 
-        def _run_batch(dataset_iter: Iterator, batch_size: int, lora_request: LoRARequest, is_eval: bool):
+        def _run_batch(dataset_iter: Iterator, batch_size: int, lora_request: LoRARequest, is_eval: bool) -> list[RequestOutput]:
             training_params = TrainingParams(is_eval=is_eval)
             request_ids = self._add_training_requests_from_iter(dataset_iter, batch_size, training_params, lora_request)
             outputs = self._run_engine(use_tqdm=use_tqdm)
+            return outputs
 
         def _run_eval():
             max_eval_batch_size = 8
             eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
             total_eval_steps = math.ceil(len(tokenized_eval_dataset) / eval_batch_size)
             eval_iter = iter(tokenized_eval_dataset)
+            eval_losses = []
             with tqdm(total=total_eval_steps, desc="Evaluation Progress") as eval_pbar:
                 for _ in range(0, len(tokenized_eval_dataset), eval_batch_size):
-                    _run_batch(eval_iter, eval_batch_size, lora_request, is_eval=True)
+                    outputs = _run_batch(eval_iter, eval_batch_size, lora_request, is_eval=True)
+                    # Add the loss of each request to the eval losses.
+                    for output in outputs:
+                        eval_losses.append(output.loss)
                     eval_pbar.update(1)
+                # Report the mean loss of the eval batch.
+                mean_loss = sum(eval_losses) / len(eval_losses)
+                logger.info(f"eval loss = {mean_loss:.6f}")
 
         total_steps = (num_epochs * num_steps_per_epoch * gradient_accumulation_steps) // batch_size
         completed_steps = 0

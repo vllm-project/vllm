@@ -2389,8 +2389,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cudagraph_runtime_mode, batch_descriptor = \
                 self.cudagraph_dispatcher.dispatch(batch_descriptor)
 
-            # cudagraph_runtime_mode = CUDAGraphMode.NONE
-
         # TODO(girfan): Use a field from input_batch to check?
         # Check if this is a LoRA training request
         is_lora_training = all(req.lora_request is not None for req in scheduler_output.scheduled_new_reqs)
@@ -2410,12 +2408,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         lora_request = scheduler_output.scheduled_new_reqs[0].lora_request
         assert all(req.lora_request == lora_request for req in scheduler_output.scheduled_new_reqs if req.is_training)
 
-        if not is_eval_batch:
-            self.training_manager.lora_train(lora_request)
-        else:
-            # TODO(girfan): Freeze the LoRA adapter
-            self.training_manager.lora_eval(lora_request)
-
         # Run the model WITHOUT torch.inference_mode() to enable gradients
         with (set_forward_context(
                 attn_metadata,
@@ -2426,12 +2418,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
         ), record_function_or_nullcontext("Forward")):
-            # Keep torch.enable_grad() active for ENTIRE forward + loss computation
-            with torch.enable_grad():
-                if not is_eval_batch:
-                    self.model.train()
+            ctx = torch.enable_grad() if not is_eval_batch else torch.no_grad()
+            with ctx:
+                if is_eval_batch:
+                    self.training_manager.lora_eval(lora_request)
                 else:
-                    self.model.eval()
+                    self.training_manager.lora_train(lora_request)
 
                 model_kwargs["is_lora_training"] = True
 
@@ -2560,12 +2552,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         training_loss = self.training_manager.loss
         training_logits = per_req_logits
-        eval_loss = None if len(all_eval_losses) == 0 else torch.stack(all_eval_losses, dim=0)
+        eval_loss = None if len(all_eval_losses) == 0 else torch.stack(all_eval_losses, dim=0).item()
         eval_logits = {}
         loss = training_loss if not is_eval_batch else eval_loss
         logits = training_logits if not is_eval_batch else eval_logits
-
-        logger.info(f"tr_loss = {tr_loss}, loss = {loss}, is_eval_batch = {is_eval_batch}")
 
         return ModelRunnerOutput(
             req_ids=req_ids_output,
