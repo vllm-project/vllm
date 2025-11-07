@@ -4722,16 +4722,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        if self.dcp_world_size > 1:
-            layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-            for layer in layers.values():
-                assert layer.impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer.impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
-                )
-
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
         Add encoder-only attention layers to the KV cache config.
