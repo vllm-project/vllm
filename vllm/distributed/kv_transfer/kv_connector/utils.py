@@ -221,24 +221,39 @@ class KVOutputAggregator:
 
     def async_aggregate(
         self,
-        output_future: Future[Sequence[ModelRunnerOutput | None]],
+        output_futures: Sequence[Future[ModelRunnerOutput | None]],
         output_rank: int = 0,
     ) -> Future[ModelRunnerOutput | None]:
-        """Takes a future that resolves to a list of outputs and returns a future
-        which resolves to a single aggregated output."""
+        """Takes a list of futures and returns a single future which resolves
+        to the respective list of outputs."""
         result_future: Future[ModelRunnerOutput | None] = Future()
 
-        def callback(fut):
-            if result_future.done():
-                return
-            try:
-                result_future.set_result(self.aggregate(fut.result(), output_rank))
-            except CancelledError:
-                result_future.cancel()
-            except Exception as e:
-                result_future.set_exception(e)
+        outputs: list[ModelRunnerOutput | None] = [None] * len(output_futures)
+        remaining = len(output_futures)
 
-        output_future.add_done_callback(callback)
+        def make_callback(idx):
+            def callback(fut):
+                if result_future.done():
+                    return
+
+                try:
+                    outputs[idx] = fut.result()
+                except CancelledError:
+                    result_future.cancel()
+                except Exception as e:
+                    result_future.set_exception(e)
+
+                # this check assumes io_thread_pool uses a single thread
+                nonlocal remaining
+                remaining -= 1
+                if not remaining:
+                    result_future.set_result(self.aggregate(outputs, output_rank))
+
+            return callback
+
+        for i, output_future in enumerate(output_futures):
+            output_future.add_done_callback(make_callback(i))
+
         return result_future
 
 
