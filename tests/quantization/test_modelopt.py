@@ -55,14 +55,29 @@ GSM8K_FP8_ACCURACY_CONFIGS = [
     # Llama 3.1 8B Instruct FP8 quantized with ModelOpt
     AccuracyTestConfig(
         model_name="nvidia/Llama-3.1-8B-Instruct-FP8",
-        expected_value=0.70,  # Expected GSM8K accuracy (adjust based on actual benchmark)
+        expected_value=0.70,
         rtol=0.05,
     ),
     # Qwen 3 8B FP8 quantized with ModelOpt
     AccuracyTestConfig(
         model_name="nvidia/Qwen3-8B-FP8",
-        expected_value=0.90,  # Expected GSM8K accuracy (adjust based on actual benchmark)
+        expected_value=0.90,
         rtol=0.05,
+    ),
+]
+
+GSM8K_FP4_ACCURACY_CONFIGS = [
+    # Llama 3.1 8B Instruct FP4 quantized with ModelOpt
+    AccuracyTestConfig(
+        model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
+        expected_value=0.69,
+        rtol=0.8,
+    ),
+    # Qwen 3 8B FP4 quantized with ModelOpt
+    AccuracyTestConfig(
+        model_name="nvidia/Qwen3-8B-FP4",
+        expected_value=0.90,
+        rtol=0.8,
     ),
 ]
 
@@ -149,6 +164,40 @@ def test_modelopt_fp8_checkpoint_setup(vllm_runner):
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_modelopt_fp8_gsm8k_accuracy(config: AccuracyTestConfig, tp_size: int):
     """Test ModelOpt FP8 quantization accuracy on GSM8K benchmark."""
+    if torch.cuda.device_count() < tp_size:
+        pytest.skip(
+            f"This test requires >={tp_size} GPUs, got only {torch.cuda.device_count()}"
+        )
+
+    task = "gsm8k"
+
+    # Run GSM8K evaluation using lm_eval
+    results = lm_eval.simple_evaluate(
+        model="vllm",
+        model_args=config.get_model_args(tp_size=tp_size),
+        tasks=task,
+        batch_size=64,
+        num_fewshot=8,
+        limit=200,
+    )
+
+    EXPECTED_VALUE = config.expected_value
+    measured_value = results["results"][task]["exact_match,strict-match"]
+
+    assert (
+        measured_value - config.rtol < EXPECTED_VALUE
+        and measured_value + config.rtol > EXPECTED_VALUE
+    ), f"Expected: {EXPECTED_VALUE} ± {config.rtol} | Measured: {measured_value}"
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("modelopt_fp4"),
+    reason="ModelOpt FP4 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("config", GSM8K_FP4_ACCURACY_CONFIGS)
+@pytest.mark.parametrize("tp_size", [1, 2, 8])
+def test_modelopt_fp4_gsm8k_accuracy(config: AccuracyTestConfig, tp_size: int):
+    """Test ModelOpt FP4 quantization accuracy on GSM8K benchmark."""
     if torch.cuda.device_count() < tp_size:
         pytest.skip(
             f"This test requires >={tp_size} GPUs, got only {torch.cuda.device_count()}"
