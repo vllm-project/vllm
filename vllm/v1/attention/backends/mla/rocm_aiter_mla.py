@@ -278,7 +278,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         B = q.shape[0]
         o = torch.zeros(
             B, self.num_heads, self.kv_lora_rank, dtype=torch.bfloat16, device=q.device
-        ).fill_(-1)
+        )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
 
