@@ -353,6 +353,53 @@ class VllmConfig:
                 self.model_config, self.load_config
             )
 
+        executor_backend = self.parallel_config.distributed_executor_backend
+        executor_supports_async_sched = executor_backend in (
+            "mp",
+            "uni",
+            "external_launcher",
+        )
+
+        if self.scheduler_config.async_scheduling:
+            # Async scheduling explicitly enabled, hard fail any incompatibilities.
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "Async scheduling is not yet compatible with "
+                    "pipeline_parallel_size > 1."
+                )
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Async scheduling is not yet compatible with speculative decoding."
+                )
+            if not executor_supports_async_sched:
+                raise ValueError(
+                    "Currently, async scheduling only supports `mp`, `uni`, or "
+                    "`external_launcher` distributed executor backend, but you chose "
+                    f"`{executor_backend}`."
+                )
+        elif self.scheduler_config.async_scheduling is None:
+            # Enable async scheduling unless there is an incompatible option.
+            # NOTE: we won't reach here until async scheduling is enabled by default.
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                or self.speculative_config is not None
+            ):
+                logger.warning(
+                    "Async scheduling is not yet supported with speculative decoding "
+                    " or pipeline_parallel_size > 1 and will be disabled."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif not executor_supports_async_sched:
+                logger.warning(
+                    "Async scheduling will be disabled because it is not supported "
+                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
+                    "`external_launcher` are supported).",
+                    executor_backend,
+                )
+                self.scheduler_config.async_scheduling = False
+            else:
+                self.scheduler_config.async_scheduling = True
+
         from vllm.platforms import current_platform
 
         if (
@@ -467,7 +514,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.use_eagle()
             ):
-                raise NotImplementedError(
+                raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
                     "compatible with EAGLE as EAGLE requires correct logits "
                     "for all tokens while fast prefill gives incorrect logits "
@@ -491,7 +538,7 @@ class VllmConfig:
                     )
                 if not getattr(self.model_config.hf_config, "is_causal", True):
                     disable_chunked_prefill_reasons.append(
-                        "Only models using causal attention supports chunked "
+                        "Only models using causal attention support chunked "
                         "prefill and prefix caching; disabling both."
                     )
             elif self.model_config.is_encoder_decoder:
