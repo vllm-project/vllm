@@ -102,13 +102,7 @@ def get_vit_attn_backend(
 
 
 def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
-    """
-    Callable to be passed to `@support_torch_compile`'s `enable_if` argument.
-
-    Defaults to `True` but is disabled in the following situations:
-
-    - The model uses dynamic rope scaling.
-    """
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
     return vllm_config.compilation_config.compile_mm_encoder
 
 
