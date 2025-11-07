@@ -68,8 +68,10 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
         ],
     ]
 
-    lora_output = do_sample(llm, mixtral_lora_files, lora_id=1, prompts=prompts)
-    assert all([lora_output[i] in expected_lora_output[i] for i in range(len(prompts))])
+    def check_outputs(generated: list[str]):
+        assert len(generated) == len(expected_lora_output)
+        for gen, gt_choices in zip(generated, expected_lora_output):
+            assert gen in gt_choices
 
-    lora_output = do_sample(llm, mixtral_lora_files, lora_id=2, prompts=prompts)
-    assert all([lora_output[i] in expected_lora_output[i] for i in range(len(prompts))])
+    check_outputs(do_sample(llm, mixtral_lora_files, lora_id=1, prompts=prompts))
+    check_outputs(do_sample(llm, mixtral_lora_files, lora_id=2, prompts=prompts))
