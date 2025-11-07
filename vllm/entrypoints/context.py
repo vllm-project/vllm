@@ -12,6 +12,7 @@ from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
+from vllm.entrypoints.chat_utils import CustomChatCompletionMessageParam
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -20,6 +21,7 @@ from vllm.entrypoints.harmony_utils import (
 from vllm.entrypoints.openai.parser.parser import (
     get_streamable_parser_for_simple_context,
 )
+from vllm.entrypoints.openai.protocol import ResponsesRequest
 from vllm.entrypoints.tool import Tool
 from vllm.entrypoints.tool_server import ToolServer
 from vllm.outputs import RequestOutput
@@ -189,9 +191,11 @@ class ParsableContext(ConversationContext):
     def __init__(
         self,
         *,
-        sentences: list,
+        chat_completion_messages: list[CustomChatCompletionMessageParam],
         tokenizer: AnyTokenizer,
         reasoning_parser: ReasoningParser,
+        request: ResponsesRequest,
+        tool_parser_cls,
     ):
         self.last_output = None
         self.num_prompt_tokens = 0
@@ -203,13 +207,17 @@ class ParsableContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.parser = get_streamable_parser_for_simple_context(
-            tokenizer=tokenizer, reasoning_parser=reasoning_parser, sentences=sentences
+            tokenizer=tokenizer,
+            reasoning_parser=reasoning_parser,
+            chat_completion_messages=chat_completion_messages,
+            request=request,
+            tool_parser_cls=tool_parser_cls,
         )
         self.tokenizer = tokenizer
         self.reasoning_parser = reasoning_parser
 
-        self.num_init_sentences = len(sentences)
-        self.sentences = sentences
+        self.num_init_chat_completion_messages = len(chat_completion_messages)
+        self.chat_completion_messages = chat_completion_messages
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -219,9 +227,10 @@ class ParsableContext(ConversationContext):
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
-        output_token_ids = output.outputs[0].token_ids
-        for token_id in output_token_ids:
-            self.parser.process(token_id)
+        # output_token_ids = output.outputs[0].token_ids
+        # for token_id in output_token_ids:
+        #     self.parser.process(token_id)
+        self.parser.process(output.outputs[0])
 
     def append_tool_output(self, output) -> None:
         raise NotImplementedError("Should not be called.")
