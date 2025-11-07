@@ -7,6 +7,7 @@ import queue
 import signal
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -165,9 +166,10 @@ class EngineCoreGuard(threading.Thread):  # changed
                     self.logger("Engine paused", level="info")
                 else:
                     self.logger(
-                        "Detected exception %s: %s",
+                        "[EngineCoreGuard] Detected exception %s: %s\n Call Stack:\n%s",
                         type(engine_exception).__name__,
                         engine_exception,
+                        "".join(traceback.format_tb(engine_exception.__traceback__)),
                         level="error",
                     )
                     self._report_client_exception(engine_exception)

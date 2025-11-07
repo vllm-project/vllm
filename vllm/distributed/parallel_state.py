@@ -25,6 +25,7 @@ If you only need to use the distributed environment without model/pipeline
 
 import contextlib
 import gc
+import os
 import pickle
 import weakref
 from collections import namedtuple
@@ -325,10 +326,22 @@ class GroupCoordinator:
         self_device_group = None
         self_cpu_group = None
 
+        if torch_distributed_backend == "nccl":
+            options = torch._C._distributed_c10d.ProcessGroupNCCL.Options()
+            if enable_fault_tolerance:
+                # need to set communicators as nonblocking to abort safely
+                options.config.blocking = 0
+                os.environ["NCCL_COMM_BLOCKING"] = "0"
+
         for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
-            )
+            if torch_distributed_backend == "nccl":
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend, pg_options=options
+                )
+            else:
+                device_group = torch.distributed.new_group(
+                    ranks, backend=torch_distributed_backend
+                )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
             if not enable_fault_tolerance:

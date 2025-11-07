@@ -454,7 +454,7 @@ class ClientGuard:
             # Pause will be invoked again during fault-tolerance handling,
             # so it's unnecessary to track whether all engines are currently
             # paused.
-            self.fault_handler.submit_fault("pause", 2, soft_pause=True)
+            self.fault_handler.submit_fault("pause", 5, soft_pause=False)
 
     def shutdown_guard(self):
         self.client_guard_dead = True

@@ -1290,11 +1290,11 @@ async def send_fault_tolerance_instruction(raw_request: Request):
                 }
             )
         else:
-            logger.error("Instruction has been executed failed, close client actively.")
+            logger.error("Fault tolerance failed, shutdown the app.")
             client.shutdown()
             raise HTTPException(
                 status_code=400,
-                detail="Instruction has been executed failed, close client actively.",
+                detail="Instruction execution failed.",
             )
 
     except Exception as e:
