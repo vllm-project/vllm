@@ -6,8 +6,8 @@ from collections.abc import Sequence as GenericSequence
 from dataclasses import dataclass
 from typing import Any, Generic
 
-import torch
 import numpy as np
+import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
