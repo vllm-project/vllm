@@ -73,6 +73,7 @@ from vllm.v1.serial_utils import (
     MsgpackEncoder,
     deserialize_method_call,
     run_method,
+    serialize_method_call,
 )
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
@@ -298,8 +299,10 @@ class EngineCoreGuard(threading.Thread):  # changed
         if not success:
             return success
 
-        # Nothing needs to be done for EngineCore
-        self.cmd_q.put(None)
+        # If the Gloo communication times out, the data parallel group (dp_group) needs to be reinitialized
+        command = "destroy_dp_group_on_fault_tolerance"
+        self.cmd_q.put(serialize_method_call(command))
+
         # Ensure busy loop has been recovered.
         elapsed = time.monotonic() - start_time
         remaining_timeout = max(0, timeout - elapsed)
@@ -1636,6 +1639,13 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
 
+    def destroy_dp_group_on_fault_tolerance(self):
+        stateless_destroy_torch_distributed_process_group(self.dp_group)
+        self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group(
+            self.vllm_config.fault_tolerance_config.gloo_comm_timeout,
+            self.vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        )
+
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
@@ -1696,7 +1706,7 @@ class DPEngineCoreProc(EngineCoreProc):
             self.scheduler.finish_requests(id, RequestStatus.FINISHED_ABORTED)
             engine_finish_outputs.outputs.append(
                 EngineCoreOutput(
-                    request_id=id, finish_reason=FinishReason.ABORT, new_token_ids=[0]
+                    request_id=id, finish_reason=FinishReason.ABORT, new_token_ids=[]
                 )
             )
         self.output_queue.put((0, engine_finish_outputs))
