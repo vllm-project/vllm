@@ -154,26 +154,6 @@ AUDIO_ASSETS = AudioTestAssets()
 """Singleton instance of {class}`AudioTestAssets`."""
 
 
-@pytest.fixture(scope="function", autouse=True)
-def cleanup_VLLM_USE_V1(monkeypatch):
-    """
-    The V1 oracle sets "VLLM_USE_V1" during loading. This means
-    that each invocation of a test change the env variable.
-
-    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
-    made during the test run by vLLM will be cleaned up.
-
-    This fixture is used by every test.
-    """
-
-    # If VLLM_USE_V1 is not set, set then delete. This will
-    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
-    # if VLLM modifies the value of envs.VLLM_USE_V1.
-    if "VLLM_USE_V1" not in os.environ:
-        monkeypatch.setenv("VLLM_USE_V1", "")
-        monkeypatch.delenv("VLLM_USE_V1")
-
-
 @pytest.fixture(autouse=True)
 def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
