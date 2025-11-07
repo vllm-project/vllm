@@ -141,19 +141,19 @@ class FutureWrapper(Future):
     the result() call. If not only the first worker's output is returned.
     """
 
-    def __init__(self, ref_or_refs, aggregator: KVOutputAggregator | None = None):
+    def __init__(self, refs, aggregator: KVOutputAggregator | None = None):
         super().__init__()
-        self.ref_or_refs = ref_or_refs
+        self.refs = refs
         self.aggregator = aggregator
 
     def result(self, timeout=None):
         if timeout is not None:
             raise NotImplementedError("timeout is not supported")
 
-        outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
-            return outputs
+            return self.refs[0].get()
 
+        outputs = [ref.get() for ref in self.refs]
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 

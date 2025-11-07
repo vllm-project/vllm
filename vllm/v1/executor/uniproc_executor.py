@@ -13,10 +13,9 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
-from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
@@ -59,60 +58,32 @@ class UniProcExecutor(Executor):
     def max_concurrent_batches(self) -> int:
         return 2 if self.scheduler_config.async_scheduling else 1
 
-    def collective_rpc(  # type: ignore[override]
+    def collective_rpc(
         self,
         method: str | Callable,
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict | None = None,
         non_block: bool = False,
-        single_value: bool = False,
-    ) -> Any | list[Any] | Future[Any | list[Any]]:
+    ) -> list[Any]:
         if kwargs is None:
             kwargs = {}
 
         if not non_block:
-            result = run_method(self.driver_worker, method, args, kwargs)
-            return result if single_value else [result]
+            return [run_method(self.driver_worker, method, args, kwargs)]
 
         try:
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
                 if (async_thread := self.async_output_thread) is not None:
-                    get_output = result.get_output
-                    if not single_value:
-                        get_output = lambda: [get_output()]
-                    return async_thread.submit(get_output)
+                    return [async_thread.submit(result.get_output)]
                 result = result.get_output()
             future = Future[Any]()
-            future.set_result(result if single_value else [result])
+            future.set_result(result)
         except Exception as e:
             future = Future[Any]()
             future.set_exception(e)
-        return future
-
-    def execute_model(  # type: ignore[override]
-        self, scheduler_output: SchedulerOutput, non_block: bool = False
-    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.collective_rpc(
-            "execute_model",
-            args=(scheduler_output,),
-            non_block=non_block,
-            single_value=True,
-        )
-
-    def sample_tokens(  # type: ignore[override]
-        self, grammar_output: GrammarOutput | None, non_block: bool = False
-    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.collective_rpc(
-            "sample_tokens",
-            args=(grammar_output,),
-            non_block=non_block,
-            single_value=True,
-        )
-
-    def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.collective_rpc("take_draft_token_ids", single_value=True)
+        return [future]
 
     def check_health(self) -> None:
         # UniProcExecutor will always be healthy as long as
