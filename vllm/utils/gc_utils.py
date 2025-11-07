@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import json
+import os
 import time
 from collections import Counter
 from contextlib import suppress
@@ -95,12 +96,19 @@ def freeze_gc_heap() -> None:
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
+    if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+        # Skip gc manipulations when CUDA_VISIBLE_DEVICES is explicitly
+        # set to empty (e.g. simulating cuda empty environment in unit test)
+        #
+        # The early return is to avoid tensor deallocation errors during
+        # gc.collect
+        return
     # Move objects in permanent generation back to the oldest generation
     # in case the heap is already frozen.
     # NOTE: This prevents cyclic references stay in the system when there're
     # multiple freeze invocations.
     gc.unfreeze()
-    # Invoke all GC collect for all generations to ensure objects are
+    # Invoke GC collects for all generations to ensure objects are
     # cyclic-refrenence-free before gc.freeze
     gc.collect(0)
     gc.collect(1)
