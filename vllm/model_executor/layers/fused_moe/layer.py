@@ -564,7 +564,6 @@ class FusedMoE(CustomOp):
                 )
             else:
                 self.routing_method_type = RoutingMethodType.TopK
-
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
