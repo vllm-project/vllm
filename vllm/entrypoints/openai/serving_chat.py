@@ -1372,6 +1372,9 @@ class OpenAIServingChat(OpenAIServing):
                         else "stop"
                     ),
                     stop_reason=output.stop_reason,
+                    token_ids=(
+                        as_list(output.token_ids) if request.return_token_ids else None
+                    ),
                 )
                 choices.append(choice_data)
                 continue
