@@ -435,25 +435,26 @@ class RayDistributedExecutor(Executor):
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
-            return FutureWrapper(refs[0])
+            return FutureWrapper(refs)
 
         # Get output from all workers when connector is present
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+            outputs = [ref.get() for ref in refs]
+            return self.kv_output_aggregator.aggregate(outputs)
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)
 
-    def collective_rpc(  # type: ignore[override]
+    def collective_rpc(
         self,
         method: str | Callable,
         timeout: float | None = None,
         args: tuple = (),
         kwargs: dict[str, Any] | None = None,
         non_block: bool = False,
-    ) -> list[Any] | Future[list[Any]]:
+    ) -> list[Any]:
         """Runs the given method on all workers."""
         sent_method = method if isinstance(method, str) else cloudpickle.dumps(method)
         del method
@@ -469,7 +470,7 @@ class RayDistributedExecutor(Executor):
 
         # Get the results of the ray workers.
         if non_block:
-            return FutureWrapper(ray_worker_outputs)
+            return [FutureWrapper((output,)) for output in ray_worker_outputs]
 
         return ray.get(ray_worker_outputs, timeout=timeout)
 
