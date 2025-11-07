@@ -2436,7 +2436,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 model_kwargs["is_lora_training"] = True
 
                 # Execute the model forward pass
-                start_time = time.time()
                 model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -2444,8 +2443,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-                end_time = time.time()
-                logger.info(f"model forward time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # For training, model_output should be hidden states
                 hidden_states = model_output
@@ -2462,10 +2459,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 # Compute logits for loss calculation
                 # For training, we need logits for all tokens (achieved via logits_indices)
-                start_time = time.time()
                 logits = self.model.compute_logits(hidden_states, None)
-                end_time = time.time()
-                logger.info(f"logits computation time = {(end_time - start_time) * 1000:.6f} ms")
 
                 per_req_logits = {}
                 all_logits = []
@@ -2475,7 +2469,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 req_id_to_index = {}
                 req_ids_output = []
 
-                start_time = time.time()
                 offset = 0
                 for i, req_id in enumerate(self.input_batch.req_ids):
                     if req_id is None:
@@ -2533,46 +2526,32 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # TODO(girfan): Check if this is correct.
                 # https://github.com/huggingface/transformers/issues/41842
                 num_items_in_batch = labels.ne(-100).sum()
-                end_time = time.time()
-                logger.info(f"batch ({len(self.input_batch.req_ids)} requests) computation time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # Compute loss for this batch
-                start_time = time.time()
-                loss = ForCausalLMLoss(
+                tr_loss = ForCausalLMLoss(
                     logits,
                     labels,
                     self.model.config.vocab_size,
                     num_items_in_batch=num_items_in_batch
                 )
-                end_time = time.time()
-                logger.info(f"loss computation time = {(end_time - start_time) * 1000:.6f} ms")
 
                 if not is_eval_batch:
                     # Backward pass
-                    start_time = time.time()
-                    loss.backward()
-                    end_time = time.time()
-                    logger.info(f"backward pass time = {(end_time - start_time) * 1000:.6f} ms")
+                    tr_loss.backward()
 
                     # Add loss and step the training manager
-                    start_time = time.time()
-                    self.training_manager.add_loss(loss.detach())
+                    self.training_manager.add_loss(tr_loss.detach())
                     self.training_manager.step()
-                    end_time = time.time()
-                    logger.info(f"training manager add loss and step time = {(end_time - start_time) * 1000:.6f} ms")
                 else:
                     # Store eval loss
-                    all_eval_losses.append(loss.detach())
+                    all_eval_losses.append(tr_loss.detach())
 
             if not is_eval_batch:
                 # Run the optimizer step if it is time to do so
-                start_time = time.time()
                 if self.training_manager.should_run_optimizer_step():
                     self.training_manager.optimizer_step()
                     self.training_manager.reset_steps()
                     self.training_manager.model_zero_grad()
-                end_time = time.time()
-                logger.info(f"optimizer step time = {(end_time - start_time) * 1000:.6f} ms")
 
                 # Log the training state if it is time to do so
                 if self.training_manager.should_log():
@@ -2582,9 +2561,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         training_loss = self.training_manager.loss
         training_logits = per_req_logits
         eval_loss = None if len(all_eval_losses) == 0 else torch.stack(all_eval_losses, dim=0)
-        eval_logits = None
+        eval_logits = {}
         loss = training_loss if not is_eval_batch else eval_loss
         logits = training_logits if not is_eval_batch else eval_logits
+
+        logger.info(f"tr_loss = {tr_loss}, loss = {loss}, is_eval_batch = {is_eval_batch}")
 
         return ModelRunnerOutput(
             req_ids=req_ids_output,

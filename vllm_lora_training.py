@@ -26,10 +26,10 @@ LEARNING_RATE = 1e-4
 NUM_EPOCHS = 3
 BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = 2
-WARMUP_STEPS = 100
+WARMUP_STEPS = 10
 MAX_LENGTH = 512
-DATASET_SIZE = 1000
-EVAL_STEPS = 200
+DATASET_SIZE = 100
+EVAL_STEPS = 10
 TARGET_MODULES = ["q_proj", "v_proj"]
 
 # This determines the batch size in vLLM.
@@ -121,7 +121,8 @@ results = llm.train(
     warmup_steps=WARMUP_STEPS,
     max_length=MAX_LENGTH,
     eval_dataset=eval_data,
-    use_tqdm=True,
+    eval_steps=EVAL_STEPS,
+    use_tqdm=False,
 )
 
 # Extract results

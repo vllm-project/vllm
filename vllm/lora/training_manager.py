@@ -144,11 +144,11 @@ class TrainingManager:
         self.trainable_lora_params: Dict[str, nn.Parameter] = {}
         self.optimizer: Optional[torch.optim.Optimizer] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
-        self.training_step: int = 0
         self.max_grad_norm: float = 1.0
+        self.grad_norm: float = 0.0
 
         # Logging
-        self.log_interval: int = 75
+        self.log_interval: int = 5
         self._last_logged_step: int = 0
 
         # TODO(girfan): Take the params from elsewhere.
@@ -238,11 +238,12 @@ class TrainingManager:
 
     def log(self):
         steps_since_last_log: int = self.training_state.total_steps - self._last_logged_step
-        loss_value: float = self.training_state.loss // steps_since_last_log
+        loss_value: float = self.training_state.loss / steps_since_last_log
         learning_rate: float = self.get_learning_rate()
         self._last_logged_step = self.training_state.total_steps
         logger.info(f"training loss = {loss_value:.6f}")
         logger.info(f"learning rate = {learning_rate:.6f}")
+        logger.info(f"grad norm = {self.grad_norm:.6f}")
 
     def should_run_optimizer_step(self) -> bool:
         # TODO(girfan): Maybe this check should be in the GPUModelRunner so we can access steps_in_epoch?
@@ -327,12 +328,13 @@ class TrainingManager:
         _ = self._try_initialize_lora_for_training(lora_request)
         pass
 
+    # TODO(girfan): Take the params from earlier in the code.
     def _try_initialize_lora_for_training(
         self,
         lora_request: LoRARequest,
         learning_rate: float = 1e-4,
-        num_training_steps: int = 300,
-        num_warmup_steps: int = 0,
+        num_training_steps: int = 30,
+        num_warmup_steps: int = 10,
         weight_decay: float = 0.0,
         scheduler_type: str = "cosine",
     ):
@@ -341,7 +343,7 @@ class TrainingManager:
 
         # Check if the LoRA adapter is already trainable
         if lora_id in self.trainable_lora_ids:
-            logger.warning(f"LoRA adapter {lora_id} is already trainable")
+            logger.debug(f"LoRA adapter {lora_id} is already trainable")
             return
 
         # Mark the LoRA adapter setup as in progress
@@ -465,6 +467,7 @@ class TrainingManager:
                 trainable_params,
                 max_norm=self.max_grad_norm,
             )
+            self.grad_norm = grad_norm
         else:
             # Calculate gradient norm without clipping
             total_norm = 0.0

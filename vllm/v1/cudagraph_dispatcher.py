@@ -57,7 +57,8 @@ class CudagraphDispatcher:
         self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode,
-                                  uniform_decode_query_len: int):
+                                  uniform_decode_query_len: int,
+                                  enable_lora_training: bool = False):
         # This should be called only after attention backend is initialized.
 
         # Note: we create all valid keys possible for cudagraph but do not
@@ -68,10 +69,22 @@ class CudagraphDispatcher:
         # CompilationConfig.cudagraph_mode. In addition, if we allow lazy
         # capturing in future PR, some keys may never be triggered.
         if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+            # Register batch descriptors for inference mixed mode (non-uniform decode).
             for bs in self.compilation_config.cudagraph_capture_sizes:
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    BatchDescriptor(num_tokens=bs, uniform_decode=False))
+                    BatchDescriptor(num_tokens=bs, uniform_decode=False, 
+                                   is_training=False))
+            
+            # Register separate batch descriptors for training if enabled.
+            # Training graphs have different computation (forward + backward) 
+            # compared to inference (forward only).
+            if enable_lora_training:
+                for bs in self.compilation_config.cudagraph_capture_sizes:
+                    self.add_cudagraph_key(
+                        cudagraph_mode.mixed_mode(),
+                        BatchDescriptor(num_tokens=bs, uniform_decode=False,
+                                       is_training=True))
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
         # mode full cudagraphs then add them here.
@@ -86,7 +99,8 @@ class CudagraphDispatcher:
             for bs in cudagraph_capture_sizes_for_decode:
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    BatchDescriptor(num_tokens=bs, uniform_decode=True))
+                    BatchDescriptor(num_tokens=bs, uniform_decode=True,
+                                   is_training=False))
         self.keys_initialized = True
 
     def dispatch(

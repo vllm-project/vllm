@@ -311,6 +311,8 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         if is_trainable:
             assert trainable_slices is not None, "trainable_slices is required for MergedColumnParallelLinearWithLoRA"
             for slice in trainable_slices:
+                if slice >= self.n_slices:
+                    continue
                 self.lora_a_stacked[slice].requires_grad_(True)
                 self.lora_b_stacked[slice].requires_grad_(True)
                 if lora_bias is not None and lora_bias[slice] is not None:

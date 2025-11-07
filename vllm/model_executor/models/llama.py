@@ -27,6 +27,7 @@ from collections.abc import Iterable
 from itertools import islice
 from typing import Any, Optional, Union
 
+import time
 import torch
 from torch import nn
 from transformers import LlamaConfig

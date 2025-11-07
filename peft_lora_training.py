@@ -19,10 +19,11 @@ LEARNING_RATE = 1e-4
 NUM_EPOCHS = 3  # 3 epochs as requested
 BATCH_SIZE = 4
 GRADIENT_ACCUMULATION_STEPS = 2
-WARMUP_STEPS = 100
+WARMUP_STEPS = 10
 MAX_LENGTH = 512
-DATASET_SIZE = 1000
-EVAL_STEPS = 100
+DATASET_SIZE = 100
+EVAL_STEPS = 10
+LOGGING_STEPS = 5
 
 print("=" * 80)
 print("PEFT LORA TRAINING (Q+V only)")
@@ -138,7 +139,7 @@ training_args = TrainingArguments(
     gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
     learning_rate=LEARNING_RATE,
     warmup_steps=WARMUP_STEPS,
-    logging_steps=25,
+    logging_steps=LOGGING_STEPS,
     eval_strategy="steps",
     eval_steps=EVAL_STEPS,
     save_strategy="epoch",

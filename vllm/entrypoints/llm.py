@@ -4,7 +4,7 @@
 import math
 import itertools
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Optional, Union, cast
 
 import cloudpickle
 from datasets import Dataset
@@ -474,19 +474,38 @@ class LLM:
         # step every batch, do_sync_step every gradient_accumulation_steps
         # tr_loss is always accumulated and reset after eval
 
-        def _run_batch(tokenized_dataset: Dataset, batch_size: int, lora_request: LoRARequest, use_tqdm: bool, is_eval: bool):
+        def _run_batch(dataset_iter: Iterator, batch_size: int, lora_request: LoRARequest, is_eval: bool):
             training_params = TrainingParams(is_eval=is_eval)
-            request_ids = self._add_training_requests(tokenized_dataset, batch_size, training_params, lora_request, use_tqdm)
+            request_ids = self._add_training_requests_from_iter(dataset_iter, batch_size, training_params, lora_request)
             outputs = self._run_engine(use_tqdm=use_tqdm)
 
-        eval_batch_size = 8
+        def _run_eval():
+            max_eval_batch_size = 8
+            eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
+            total_eval_steps = math.ceil(len(tokenized_eval_dataset) / eval_batch_size)
+            eval_iter = iter(tokenized_eval_dataset)
+            with tqdm(total=total_eval_steps, desc="Evaluation Progress") as eval_pbar:
+                for _ in range(0, len(tokenized_eval_dataset), eval_batch_size):
+                    _run_batch(eval_iter, eval_batch_size, lora_request, is_eval=True)
+                    eval_pbar.update(1)
 
-        for epoch in range(num_epochs):
-            for step in range(num_steps_per_epoch):
-                for batch in range(gradient_accumulation_steps):
-                    _run_batch(tokenized_train_dataset, batch_size, lora_request, use_tqdm, is_eval=False)
-            for _ in range(0, len(tokenized_eval_dataset), eval_batch_size):
-                _run_batch(tokenized_eval_dataset, eval_batch_size, lora_request, use_tqdm, is_eval=True)
+        total_steps = (num_epochs * num_steps_per_epoch * gradient_accumulation_steps) // batch_size
+        completed_steps = 0
+
+        with tqdm(total=total_steps, desc="Training Progress") as pbar:
+            for epoch in range(num_epochs):
+                train_iter = iter(tokenized_train_dataset)  # Reset per epoch
+                for step in range(num_steps_per_epoch):
+                    for batch in range(gradient_accumulation_steps):
+                        _run_batch(train_iter, batch_size, lora_request, is_eval=False)
+                        completed_steps += 1
+                        pbar.update(1)
+
+                        if completed_steps % eval_steps == 0:
+                            _run_eval()
+
+        # Run eval at the end
+        _run_eval()
 
         # TODO(girfan): Implement this.
         total_steps = 0
@@ -503,31 +522,28 @@ class LLM:
             }
         }
 
-    def _add_training_requests(
+    def _add_training_requests_from_iter(
         self,
-        training_data: Dataset,
+        dataset_iter: Iterator,
         batch_size: int,
         training_params: TrainingParams,
         lora_request: LoRARequest,
-        use_tqdm: bool,
     ) -> list[str]:
-        training_data_iter = training_data
-        if use_tqdm:
-            training_data_iter = tqdm(training_data_iter, desc="Adding training requests")
-
         request_ids = []
-        i = 0
-        for sample in training_data_iter:
+        for i in range(batch_size):
+            try:
+                sample = next(dataset_iter)
+            except StopIteration:
+                logger.warning(f"Dataset exhausted after {i} samples (requested {batch_size})")
+                break
+
             request_id = self._add_training_request(
                 sample=sample,
                 training_params=training_params,
                 lora_request=lora_request,
             )
             request_ids.append(request_id)
-            i += 1
-            if i == batch_size:
-                break
-        logger.info(f"Added {len(request_ids)} training requests")
+
         return request_ids
 
     def _add_training_request(

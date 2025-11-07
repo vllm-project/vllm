@@ -140,6 +140,9 @@ class FlashAttentionMetadata:
 
     causal: bool = True
 
+    # Training mode flag
+    is_training: bool = False
+
 
 def _get_sliding_window_configs(
         vllm_config: VllmConfig) -> set[Optional[tuple[int, int]]]:

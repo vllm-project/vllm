@@ -971,11 +971,11 @@ class Scheduler(SchedulerInterface):
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
             if new_token_ids or pooler_output is not None or kv_transfer_params or request.is_training:
                 # Get training loss and logits if available
-                training_loss = None
-                training_logits = None
+                loss = None
+                logits = None
                 if request.is_training:
-                    training_loss = model_runner_output.training_loss
-                    training_logits = model_runner_output.training_logits.get(req_id)
+                    loss = model_runner_output.loss
+                    logits = model_runner_output.logits.get(req_id)
 
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -991,8 +991,8 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
-                        training_loss=training_loss,
-                        training_logits=training_logits,
+                        loss=loss,
+                        logits=logits,
                     ))
             else:
                 # Invariant: EngineCore returns no partial prefill outputs.
