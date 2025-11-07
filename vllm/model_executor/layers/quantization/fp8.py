@@ -142,7 +142,13 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
             logger.info_once("Using FlashInfer FP8 MoE TRTLLM backend for SM100")
             return Fp8MoeBackend.FLASHINFER_TRTLLM
         else:
-            # CUTLASS path covers both SM90 and SM100
+            if block_quant and current_platform.is_device_capability(100):
+                raise ValueError(
+                    "FlashInfer FP8 MoE throughput backend does not "
+                    "support block quantization. Please use "
+                    "VLLM_FLASHINFER_MOE_BACKEND=latency "
+                    "instead."
+                )
             logger.info_once("Using FlashInfer FP8 MoE CUTLASS backend for SM90/SM100")
             return Fp8MoeBackend.FLASHINFER_CUTLASS
 
