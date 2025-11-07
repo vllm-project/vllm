@@ -530,7 +530,6 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, str],
-    monkeypatch: pytest.MonkeyPatch,
 ):
     """Spec decode logprobs should match those of the base model.
 
@@ -541,64 +540,62 @@ def test_spec_decode_logprobs(
     """
     from vllm import LLM
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        prompt = "Hello world"
-        sampling_params = SamplingParams(
-            temperature=0, logprobs=3, max_tokens=10, ignore_eos=False
-        )
-        method, model_name, spec_model_name = model_setup
-        max_model_len = 256
+    prompt = "Hello world"
+    sampling_params = SamplingParams(
+        temperature=0, logprobs=3, max_tokens=10, ignore_eos=False
+    )
+    method, model_name, spec_model_name = model_setup
+    max_model_len = 256
 
-        # Run base LLM.
-        ref_llm = LLM(
-            model=model_name,
-            max_logprobs=5,
-            max_model_len=max_model_len,
-            seed=42,
-            logprobs_mode=logprobs_mode,
-            gpu_memory_utilization=0.4,
-        )
-        ref_results = ref_llm.generate([prompt], sampling_params)
-        # Collect logprobs outputs from reference LLM.
-        ref_logprobs = []
-        for output in ref_results[0].outputs:
-            for logprobs in output.logprobs:
-                for token_id in logprobs:
-                    ref_logprobs.append(logprobs[token_id])
-        del ref_llm
-        torch.cuda.empty_cache()
-        cleanup_dist_env_and_memory()
+    # Run base LLM.
+    ref_llm = LLM(
+        model=model_name,
+        max_logprobs=5,
+        max_model_len=max_model_len,
+        seed=42,
+        logprobs_mode=logprobs_mode,
+        gpu_memory_utilization=0.4,
+    )
+    ref_results = ref_llm.generate([prompt], sampling_params)
+    # Collect logprobs outputs from reference LLM.
+    ref_logprobs = []
+    for output in ref_results[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                ref_logprobs.append(logprobs[token_id])
+    del ref_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
 
-        # Run spec decode LLM.
-        spec_llm = LLM(
-            model_name,
-            speculative_config={
-                "method": method,
-                "model": spec_model_name,
-                "num_speculative_tokens": 3,
-                "max_model_len": max_model_len,
-            },
-            max_logprobs=5,
-            max_model_len=max_model_len,
-            seed=42,
-            logprobs_mode=logprobs_mode,
-            gpu_memory_utilization=0.4,
-        )
-        spec_results = spec_llm.generate([prompt], sampling_params)
-        # Collect logprobs outputs from spec decode LLM.
-        spec_logprobs = []
-        for output in spec_results[0].outputs:
-            for logprobs in output.logprobs:
-                for token_id in logprobs:
-                    spec_logprobs.append(logprobs[token_id])
-        del spec_llm
-        torch.cuda.empty_cache()
-        cleanup_dist_env_and_memory()
+    # Run spec decode LLM.
+    spec_llm = LLM(
+        model_name,
+        speculative_config={
+            "method": method,
+            "model": spec_model_name,
+            "num_speculative_tokens": 3,
+            "max_model_len": max_model_len,
+        },
+        max_logprobs=5,
+        max_model_len=max_model_len,
+        seed=42,
+        logprobs_mode=logprobs_mode,
+        gpu_memory_utilization=0.4,
+    )
+    spec_results = spec_llm.generate([prompt], sampling_params)
+    # Collect logprobs outputs from spec decode LLM.
+    spec_logprobs = []
+    for output in spec_results[0].outputs:
+        for logprobs in output.logprobs:
+            for token_id in logprobs:
+                spec_logprobs.append(logprobs[token_id])
+    del spec_llm
+    torch.cuda.empty_cache()
+    cleanup_dist_env_and_memory()
 
-        # Per-token logprobs are expected to be the same.
-        assert len(ref_logprobs) == len(spec_logprobs)
-        for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
-            assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, abs_tol=1e-3)
-            assert ref_logprob.rank == spec_logprob.rank
-            assert ref_logprob.decoded_token == spec_logprob.decoded_token
+    # Per-token logprobs are expected to be the same.
+    assert len(ref_logprobs) == len(spec_logprobs)
+    for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
+        assert math.isclose(ref_logprob.logprob, spec_logprob.logprob, abs_tol=1e-3)
+        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.decoded_token == spec_logprob.decoded_token

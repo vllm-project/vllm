@@ -81,7 +81,12 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         device: torch.device,
     ):
         super().__init__(
-            kv_cache_spec, layer_names, vllm_config, device, FlashAttnMLAMetadata
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            FlashAttnMLAMetadata,
+            supports_dcp_with_varlen=True,
         )
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.fa_aot_schedule = get_flash_attn_version() == 3
