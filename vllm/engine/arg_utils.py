@@ -1574,11 +1574,16 @@ class EngineArgs:
             else None
         )
 
-        if lora_config is not None and speculative_config is not None:
-            assert scheduler_config.max_num_batched_tokens >= (
+        if (
+            lora_config is not None
+            and speculative_config is not None
+            and scheduler_config.max_num_batched_tokens
+            < (
                 scheduler_config.max_num_seqs
                 * (speculative_config.num_speculative_tokens + 1)
-            ), (
+            )
+        ):
+            raise ValueError(
                 "Consider increasing max_num_batched_tokens or "
                 "decreasing num_speculative_tokens"
             )
