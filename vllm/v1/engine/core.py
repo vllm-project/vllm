@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import json
 import os
 import queue
 import signal
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -30,7 +32,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.network_utils import make_zmq_socket
+from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -43,25 +45,36 @@ from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.exceptions import EngineLoopPausedError, FaultInfo
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
+    broadcast_instruction,
     get_device_indices,
+    wait_for_instruction_result,
 )
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import (
+    MsgpackDecoder,
+    MsgpackEncoder,
+    deserialize_method_call,
+    run_method,
+    serialize_method_call,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -71,6 +84,318 @@ POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+class EngineCoreGuard(threading.Thread):  # changed
+    """
+    EngineCoreGuard monitors a single EngineCore instance, responsible for:
+      1. Receiving fault signals (exceptions raised in EngineCore busy loop)
+      2. Receiving and executing commands from ClientGuard
+      3. Reporting execution results or faults back to the ClientGuard
+    """
+
+    def __init__(
+        self,
+        engine_index: int,
+        fault_signal_q: queue.Queue,
+        cmd_q: queue.Queue,
+        busy_loop_active: threading.Event,
+        engine_input_q: queue.Queue,
+        client_cmd_addr: str,
+        worker_cmd_addr: str,
+        fault_report_addr: str,
+        guard_identity: bytes,
+        tp_size: int,
+        pp_size: int,
+        dp_size: int,
+    ):
+        super().__init__(daemon=True)
+        self.engine_index = engine_index
+        self.fault_signal_q = fault_signal_q
+        self.cmd_q = cmd_q
+        self.busy_loop_active = busy_loop_active
+        self.engine_input_q = engine_input_q
+        self.tp_size = tp_size
+        self.pp_size = pp_size
+        self.dp_size = dp_size
+
+        self.ctx = zmq.Context()
+        # Client <-> EngineCoreGuard sockets
+        self.fault_report_socket = make_zmq_socket(
+            self.ctx,
+            fault_report_addr,
+            zmq.DEALER,
+            bind=False,
+            identity=guard_identity,
+        )
+
+        self.client_cmd_socket = make_zmq_socket(
+            self.ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=guard_identity
+        )
+        # EngineCoreGuard <-> WorkerGuard sockets
+        self.worker_cmd_socket = make_zmq_socket(
+            self.ctx, worker_cmd_addr, zmq.ROUTER, bind=True
+        )
+        self.poller = zmq.Poller()
+        self.communicator_aborted = False
+        self.engine_running = True
+        self.engine_core_guard_dead = False
+        self.logger = self._make_engine_core_guard_logger()
+
+    def _make_engine_core_guard_logger(self):
+        prefix = f"[EngineCoreGuard_{self.engine_index}] "
+
+        def log(msg, *args, level="info", **kwargs):
+            """
+            level: "info", "warning", "error", "debug"
+            msg: log message
+            """
+            getattr(logger, level)(prefix + msg, *args, **kwargs)
+
+        return log
+
+    def run(self) -> None:
+        """
+        Run the main monitoring loop for EngineCoreGuard.
+        """
+        poll_timeout_ms = 100
+        while not self.engine_core_guard_dead:
+            # Check for engine fault signals
+            try:
+                engine_exception = self.fault_signal_q.get_nowait()
+                if isinstance(engine_exception, EngineLoopPausedError):
+                    # The busy loop stopped due to another critical exception,
+                    # put it back
+                    self.logger("Engine paused", level="info")
+                else:
+                    self.logger(
+                        "[EngineCoreGuard] Detected exception %s: %s\n Call Stack:\n%s",
+                        type(engine_exception).__name__,
+                        engine_exception,
+                        "".join(traceback.format_tb(engine_exception.__traceback__)),
+                        level="error",
+                    )
+                    self._report_client_exception(engine_exception)
+                self.engine_running = False
+            except queue.Empty:
+                pass
+
+            if self.client_cmd_socket.closed:
+                self.logger("Client socket closed", level="info")
+                break
+            has_msg, _, cmd_str = recv_router_dealer_message(
+                self.client_cmd_socket, use_poller=True, poll_timeout=poll_timeout_ms
+            )
+            if has_msg:
+                self.logger("Received cmd: %s", cmd_str, level="info")
+                self._execute_cmd(cmd_str)
+
+    def _stop_worker_execution(self, soft_pause: bool, timeout: int = 2) -> bool:
+        if soft_pause:
+            pause_method = "pause_by_signal"
+        else:
+            pause_method = "pause_by_abort_communicators"
+            self.communicator_aborted = True
+
+        success = self._execute_worker_method(pause_method, timeout=timeout)
+        return success
+
+    def _execute_worker_method(self, method_name, timeout: int = 5, **kwargs) -> bool:
+        identities = set()
+        for tp_rank in range(self.tp_size):
+            for pp_rank in range(self.pp_size):
+                identity = f"{tp_rank}_{pp_rank}".encode()
+                identities.add(identity)
+
+        method_uuid = broadcast_instruction(
+            self.worker_cmd_socket, identities, method_name, **kwargs
+        )
+
+        all_success = True
+        worker_responses = wait_for_instruction_result(
+            self.worker_cmd_socket, identities, method_name, timeout, method_uuid
+        )
+        for identity in identities:
+            response = worker_responses.get(identity)
+            if response is None or not response.get("success", False):
+                all_success = False
+
+        return all_success
+
+    def _report_client_exception(self, exception: Exception) -> None:
+        msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
+        msg_bytes = msg.encode("utf-8")
+        self.fault_report_socket.send_multipart([b"", msg_bytes])
+
+    def _execute_cmd(self, cmd_str):
+        """
+        Execute a command received from ClientGuard.
+        """
+        method, method_uuid, method_params = deserialize_method_call(cmd_str)
+        self.logger("Executing command: %s", method, level="info")
+        try:
+            success = run_method(self, method, args=(), kwargs=method_params)
+            self.logger("Command (%s) succeeded: %s", method, success, level="info")
+
+        except Exception as e:
+            self.logger(
+                "Error executing method %s: %s %s",
+                method,
+                type(e).__name__,
+                e,
+                level="error",
+            )
+            success = False
+
+        self._send_execution_result(success, method_uuid)
+
+    def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
+        """
+        Pause the busy loop safely.
+        Args:
+            timeout:wait for the busy loop to acknowledge the pause signal
+            soft_pause: if True, perform a soft pause using a flag; otherwise
+            abort the communicator
+        """
+        self.logger("Start pausing EngineCore", level="info")
+        start_time = time.monotonic()
+        if self.engine_running:
+            # Clear the flag to signal busy loop should pause
+            self.busy_loop_active.clear()
+            # Put a sentinel (empty request) to unblock the busy loop
+            # if it's blocked on input_queue.get()
+            self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
+            success = self._stop_worker_execution(
+                soft_pause=soft_pause,
+                timeout=timeout,
+            )
+            elapsed = time.monotonic() - start_time
+            if success:
+                remaining_timeout = max(0, timeout - elapsed)
+                try:
+                    # Wait for engine to acknowledge the pause via fault_signal_q
+                    exception = self.fault_signal_q.get(timeout=remaining_timeout)
+                    self.fault_signal_q.put(exception)
+                    success = True
+                    self.engine_running = False
+                except queue.Empty:
+                    # Timeout waiting for pause acknowledgment
+                    success = False
+        else:
+            # already paused
+            success = True
+            if not soft_pause:
+                # abort the communicators
+                self._stop_worker_execution(soft_pause=False, timeout=timeout)
+        return success
+
+    def retry(self, timeout: int = 1):
+        """
+        Handle the retry instruction from the ClientGuard.
+        This instruction tells the EngineCore to continue its busy loop
+        after being suspended due to an exception.
+        """
+        start_time = time.monotonic()
+
+        success = self._execute_worker_method("restart_worker", timeout=timeout)
+        if not success:
+            return success
+
+        if self.dp_size > 1:
+            # If the Gloo communication times out
+            # the data parallel group (dp_group) needs to be reinitialized
+            command = "reinit_dp_group_on_fault_tolerance"
+            self.cmd_q.put(serialize_method_call(command))
+        else:
+            self.cmd_q.put(None)
+
+        # Ensure busy loop has been recovered.
+        elapsed = time.monotonic() - start_time
+        remaining_timeout = max(0, timeout - elapsed)
+        success = self.busy_loop_active.wait(timeout=remaining_timeout)
+        self.engine_running = success
+        return success
+
+    def _send_execution_result(self, success: bool, method_uuid: str):
+        msg = {
+            "engine_index": self.engine_index,
+            "success": success,
+            "method_uuid": method_uuid,
+        }
+        msg_bytes = json.dumps(msg).encode("utf-8")
+        self.client_cmd_socket.send_multipart([b"", msg_bytes])
+
+    def shutdown(self):
+        if self.fault_report_socket is not None:
+            self.fault_report_socket.close()
+        if self.client_cmd_socket is not None:
+            self.client_cmd_socket.close()
+        if self.worker_cmd_socket is not None:
+            self.worker_cmd_socket.close()
+        if self.ctx is not None:
+            self.ctx.term()
+        self.engine_core_guard_dead = True
+
+
+def busy_loop_wrapper(busy_loop_func):
+    """
+    Wrap the busy loop function to perform fault tolerance.
+    """
+
+    def run_with_fault_tolerance(self):
+        while True:
+            try:
+                if self.enable_fault_tolerance:
+                    self.busy_loop_active.set()
+                busy_loop_func(self)
+            except SystemExit:
+                raise
+            except Exception as original_exc:
+                if self.enable_fault_tolerance:
+                    self.busy_loop_active.clear()
+                    self.fault_signal_q.put(original_exc)
+                    logger.warning(
+                        "[BusyLoopWrapper] EngineCore busy loop raised an exception. "
+                        "Suspended and waiting for fault tolerance "
+                        "instructions."
+                    )
+                    # Put running requests into waiting list.
+                    # todo Changed to non-preemptive mode
+
+                    self.engine_finish_requests()
+                    # After pausing, discard the request
+
+                    try:
+                        # Block until recovery command received
+                        cmd_str = self.cmd_q.get(timeout=self.engine_recovery_timeout)
+                        logger.debug(
+                            "[BusyLoopWrapper] Received fault tolerance command: %s",
+                            cmd_str,
+                        )
+                        if cmd_str is not None:
+                            method, _, params = deserialize_method_call(cmd_str)
+                            run_method(self, method, args=(), kwargs=params)
+                        # recovery succeeded; restart the busy loop
+                        continue
+                    except queue.Empty:
+                        # No handling instruction received within predefined
+                        # timeout period.
+                        logger.error(
+                            "[BusyLoopWrapper] Fault tolerance instruction not received"
+                            " within timeout. Proceeding with default exception "
+                            "handling."
+                        )
+                    except Exception as cmd_exc:
+                        raise RuntimeError(
+                            "Fault tolerance execution failed."
+                        ) from cmd_exc
+
+                # Fault tolerance not enabled OR no instruction received
+                # before timeout. Re-raise the original exception
+                # for upper level handling.
+                raise original_exc
+
+    return run_with_fault_tolerance
 
 
 class EngineCore:
@@ -563,10 +888,6 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
-
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
@@ -598,6 +919,50 @@ class EngineCoreProc(EngineCore):
             )
 
             self._init_data_parallel(vllm_config)
+
+            # Initialize fault tolerance settings.
+            ft_config = vllm_config.fault_tolerance_config
+            self.enable_fault_tolerance = ft_config.enable_fault_tolerance
+            if self.enable_fault_tolerance:
+                # Track whether the busy loop is currently active.
+                self.busy_loop_active = threading.Event()
+                self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
+                self.cmd_q: queue.Queue[str | None] = queue.Queue()
+                self.engine_recovery_timeout = ft_config.engine_recovery_timeout
+                engine_core_guard_ids = addresses.engine_core_guard_identities
+                assert engine_core_guard_ids is not None
+                assert addresses.fault_report_addr is not None
+                assert addresses.client_cmd_addr is not None
+                assert addresses.engine_core_cmd_addrs is not None
+                engine_core_cmd_addr = addresses.engine_core_cmd_addrs[
+                    vllm_config.parallel_config.data_parallel_rank
+                ]
+                self.engine_core_guard = EngineCoreGuard(
+                    engine_index=self.engine_index,
+                    fault_signal_q=self.fault_signal_q,
+                    cmd_q=self.cmd_q,
+                    busy_loop_active=self.busy_loop_active,
+                    engine_input_q=self.input_queue,
+                    fault_report_addr=addresses.fault_report_addr,
+                    client_cmd_addr=addresses.client_cmd_addr,
+                    worker_cmd_addr=engine_core_cmd_addr,
+                    guard_identity=engine_core_guard_ids[self.engine_index],
+                    tp_size=vllm_config.parallel_config.tensor_parallel_size,
+                    pp_size=vllm_config.parallel_config.pipeline_parallel_size,
+                    dp_size=vllm_config.parallel_config.data_parallel_size,
+                )
+                self.engine_core_guard.start()
+                vllm_config.fault_tolerance_config.engine_core_cmd_addr = (
+                    engine_core_cmd_addr
+                )
+                # Do not shut down the engine immediately upon failure.
+                executor_fail_callback = lambda: self.fault_signal_q.put(
+                    RuntimeError(f"Executor on EngineCore {self.engine_index} failed.")
+                )
+            else:
+                executor_fail_callback = lambda: self.input_queue.put_nowait(
+                    (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+                )
 
             super().__init__(
                 vllm_config, executor_class, log_stats, executor_fail_callback
@@ -852,15 +1217,22 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
+            self._check_busy_loop_active()
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
+            self._check_busy_loop_active()
             self._process_engine_step()
+
+    def _check_busy_loop_active(self):
+        if self.enable_fault_tolerance and not self.busy_loop_active.is_set():
+            raise EngineLoopPausedError("Engine busy loop is paused.")
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -908,6 +1280,8 @@ class EngineCoreProc(EngineCore):
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
+        elif request_type == EngineCoreRequestType.PAUSE:
+            self._check_busy_loop_active()
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
@@ -1100,6 +1474,26 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
+    def engine_finish_requests(self):
+        assert isinstance(self.scheduler, V1Scheduler)
+        engine_finish_outputs = EngineCoreOutputs()
+        engine_finish_outputs.engine_index = self.engine_index
+        for request_id in list(self.scheduler.requests.keys()):
+            self.scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
+            engine_finish_outputs.outputs.append(
+                EngineCoreOutput(
+                    request_id=request_id,
+                    finish_reason=FinishReason.ABORT,
+                    new_token_ids=[],
+                )
+            )
+        self.output_queue.put((0, engine_finish_outputs))
+
+    def shutdown(self):
+        super().shutdown()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_core_guard.shutdown()
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1154,7 +1548,10 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
         self.dp_rank = dp_rank
-        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+        self.dp_group = vllm_config.parallel_config.stateless_init_dp_group(
+            vllm_config.fault_tolerance_config.gloo_comm_timeout,
+            vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        )
 
     def shutdown(self):
         super().shutdown()
@@ -1202,15 +1599,18 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
+            self._check_busy_loop_active()
             self._process_input_queue()
 
             # 2) Step the engine core.
+            self._check_busy_loop_active()
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
 
@@ -1222,9 +1622,11 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
+                self._check_busy_loop_active()
                 self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
+            self._check_busy_loop_active()
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
             )
@@ -1256,6 +1658,13 @@ class DPEngineCoreProc(EngineCoreProc):
             return True
 
         return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
+
+    def reinit_dp_group_on_fault_tolerance(self):
+        stateless_destroy_torch_distributed_process_group(self.dp_group)
+        self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group(
+            self.vllm_config.fault_tolerance_config.gloo_comm_timeout,
+            self.vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        )
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

@@ -4,13 +4,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Optional
 
+from vllm.v1.request import Request, RequestStatus
+
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.metrics.stats import SchedulerStats
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-    from vllm.v1.request import Request, RequestStatus
+    # from vllm.v1.request import Request, RequestStatus
 
 
 class SchedulerInterface(ABC):
@@ -44,6 +46,30 @@ class SchedulerInterface(ABC):
     def get_grammar_bitmask(
         self, scheduler_output: "SchedulerOutput"
     ) -> "GrammarOutput | None":
+        raise NotImplementedError
+
+    @abstractmethod
+    def preempt_request(
+        self,
+        scheduled_timestamp: float | None = None,
+        preempted_req: Request | None = None,
+    ) -> Request:
+        """
+        Preempt a running request and move it back to the waiting queue.
+
+        This method removes the specified request from the running queue (or the
+        last running request if none is specified), updates its status and statistics,
+        and moves it back to the waiting queue. Optionally records a preemption event
+        if logging is enabled.
+
+        Args:
+            scheduled_timestamp: Optional timestamp for logging the preemption event.
+            preempted_req: Specific request to preempt. If None, preempt the last
+                request in the running queue.
+
+        Returns:
+            The request that was preempted and returned to the waiting queue.
+        """
         raise NotImplementedError
 
     @abstractmethod

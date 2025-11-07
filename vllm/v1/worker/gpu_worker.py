@@ -4,18 +4,28 @@
 
 import copy
 import gc
+import json
 import os
+import threading
+import time
+import traceback
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from contextlib import AbstractContextManager, nullcontext
+from datetime import timedelta
+from functools import partial
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed
 import torch.nn as nn
+import zmq
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (
+    cleanup_dist_env_and_memory,
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
@@ -26,6 +36,8 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
+    GroupCoordinator,
+    get_all_model_groups,
     get_pp_group,
     get_tp_group,
 )
@@ -39,6 +51,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
+from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -48,6 +61,7 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
+from vllm.v1.serial_utils import deserialize_method_call, run_method
 from vllm.v1.utils import report_usage_stats
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
@@ -58,6 +72,180 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.core.sched.output import SchedulerOutput
+
+
+class WorkerGuard:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        pause_event: threading.Event,
+        init_distributed_env_callback: Callable,
+        device: torch.cuda.device,
+    ):
+        self.vllm_config = vllm_config
+        self.zmq_ctx = zmq.Context()
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.tp_rank = get_tp_group().rank_in_group
+        self.pp_rank = get_pp_group().rank_in_group
+        self.init_distributed_env_callback = init_distributed_env_callback
+        self.device = device
+        identity = f"{self.tp_rank}_{self.pp_rank}".encode()
+        worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
+        self.cmd_socket = make_zmq_socket(
+            ctx=self.zmq_ctx,
+            path=worker_cmd_addr,
+            socket_type=zmq.DEALER,
+            bind=False,
+            identity=identity,
+        )
+        self.worker_guard_dead = False
+        self.pause_event = pause_event
+        self.communicator_aborted = False
+        self.logger = self._make_worker_logger()
+        threading.Thread(
+            target=self.run, daemon=True, name="WorkerGuardCmdReceiver"
+        ).start()
+
+    def _make_worker_logger(self):
+        prefix = f"[WorkerGuard_dp{self.dp_rank}_tp{self.tp_rank}_pp{self.pp_rank}] "
+
+        def log(msg, *args, level="info", **kwargs):
+            """
+            level: "info", "warning", "error", "debug"
+            msg: log message
+            """
+            getattr(logger, level)(prefix + msg, *args, **kwargs)
+
+        return log
+
+    def run(self):
+        """Run the message receiving loop and handle control commands"""
+        torch.cuda.set_device(self.device)
+        while True:
+            # Use blocking receive - will wait until a message arrives
+            has_msg, _, cmd_str = recv_router_dealer_message(self.cmd_socket)
+            if self.worker_guard_dead:
+                self.logger("Worker guard dead, exiting")
+                break
+            if has_msg:
+                assert cmd_str is not None
+                method, method_uuid, params = deserialize_method_call(cmd_str)
+                self.logger("Executing command: %s", method)
+                try:
+                    success = run_method(self, method, args=(), kwargs=params)
+                except Exception as e:
+                    self.logger(
+                        "Error executing method %s: %s %s\n Call Stack:\n %s",
+                        method,
+                        type(e).__name__,
+                        e,
+                        "".join(traceback.format_tb(e.__traceback__)),
+                        level="error",
+                    )
+                    success = False
+                self._send_execution_result(success, method_uuid)
+
+    def pause_by_signal(self):
+        self._set_device_communicator_status(False)
+        self.pause_event.set()
+        self.logger("Pause signal sent.")
+        return True
+
+    def pause_by_abort_communicators(self, timeout=5):
+        """
+        Abort all NCCL communicators and process groups in parallel using a thread pool.
+        """
+        if self.communicator_aborted:
+            return True
+        self._set_device_communicator_status(False)
+        torch.cuda.set_device(self.device)
+        model_groups = get_all_model_groups()
+        futures = []
+        start_time = time.time()
+
+        def _abort_nccl_comm(group: GroupCoordinator):
+            if group.device_communicator is not None:
+                nccl_comm = group.device_communicator.pynccl_comm
+                nccl_comm.nccl_abort_comm()
+
+        def _abort_process_group(group: GroupCoordinator):
+            device = torch.device("cuda")
+            backend = group.device_group._get_backend(device)
+            backend.abort()
+
+        with ThreadPoolExecutor(max_workers=len(model_groups) * 2) as executor:
+            for group in model_groups:
+                futures.append(executor.submit(_abort_nccl_comm, group))
+                futures.append(executor.submit(_abort_process_group, group))
+
+            done, not_done = [], []
+            for future in as_completed(futures):
+                elapsed = time.time() - start_time
+                remaining = max(timeout - elapsed, 0)
+                if remaining == 0:
+                    self.logger(
+                        "Timeout while waiting for abort operations", level="warning"
+                    )
+                    break
+                try:
+                    # Wait at most 'remaining' seconds for this future
+                    future.result(timeout=remaining)
+                    done.append(future)
+                except TimeoutError:
+                    not_done.append(future)
+                except Exception as e:
+                    self.logger("Abort call raised exception: %s", e, level="warning")
+                    not_done.append(future)
+
+            # Add any futures that were not processed yet
+            not_done.extend([f for f in futures if f not in done and f not in not_done])
+            if not_done:
+                self.logger(
+                    "%d abort calls did not finish in total %s seconds",
+                    len(not_done),
+                    timeout,
+                    level="warning",
+                )
+
+        self.communicator_aborted = True
+        success = len(not_done) == 0
+        if success:
+            cleanup_dist_env_and_memory()
+            self.logger("Communicators are aborted.")
+        else:
+            self.logger("Communicators did not abort in time.", level="warning")
+        return success
+
+    def _set_device_communicator_status(self, active: bool):
+        model_groups = get_all_model_groups()
+        for group in model_groups:
+            if group.device_communicator is not None:
+                nccl_comm = group.device_communicator.pynccl_comm
+                nccl_comm.available = active
+                nccl_comm.disabled = not active
+
+    def restart_worker(self):
+        if self.communicator_aborted:
+            torch.cuda.set_device(self.device)
+            with set_current_vllm_config(self.vllm_config):
+                self.init_distributed_env_callback()
+                self.communicator_aborted = False
+            torch.cuda.synchronize()
+        self.pause_event.clear()
+        return True
+
+    def _send_execution_result(self, success: bool, method_uuid: str):
+        msg = {
+            "success": success,
+            "method_uuid": method_uuid,
+        }
+        msg_bytes = json.dumps(msg).encode("utf-8")
+        self.cmd_socket.send_multipart([b"", msg_bytes])
+
+    def shutdown(self):
+        self.worker_guard_dead = True
+        self.cmd_socket.close()
+        self.zmq_ctx.term()
 
 
 class Worker(WorkerBase):
@@ -77,6 +265,7 @@ class Worker(WorkerBase):
             is_driver_worker=is_driver_worker,
         )
 
+        self.worker_guard: WorkerGuard | None = None
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils.import_utils import init_cached_hf_modules
@@ -211,12 +400,17 @@ class Worker(WorkerBase):
             # memory snapshot
             # This ensures NCCL buffers are allocated before we measure
             # available memory
+            start = time.time()
             init_worker_distributed_environment(
                 self.vllm_config,
                 self.rank,
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+            )
+            elapsed = time.time() - start
+            logger.info_once(
+                "init distributed environment took %.2f seconds", elapsed, scope="local"
             )
 
             # Set random seed.
@@ -254,6 +448,22 @@ class Worker(WorkerBase):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            with set_current_vllm_config(self.vllm_config):
+                init_distributed_env_callback = partial(
+                    init_worker_distributed_environment,
+                    self.vllm_config,
+                    self.rank,
+                    self.distributed_init_method,
+                    self.local_rank,
+                )
+            self.worker_guard = WorkerGuard(
+                self.vllm_config,
+                self.model_runner.pause_event,
+                init_distributed_env_callback,
+                self.device,
+            )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
@@ -856,6 +1066,8 @@ class Worker(WorkerBase):
     def shutdown(self) -> None:
         if runner := getattr(self, "model_runner", None):
             runner.ensure_kv_transfer_shutdown()
+        if self.worker_guard is not None:
+            self.worker_guard.shutdown()
 
 
 def init_worker_distributed_environment(
@@ -872,12 +1084,27 @@ def init_worker_distributed_environment(
     init_batch_invariance()
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+        timeout = timedelta(
+            seconds=vllm_config.fault_tolerance_config.gloo_comm_timeout
+        )
+    else:
+        timeout = None
+
     init_distributed_environment(
-        parallel_config.world_size, rank, distributed_init_method, local_rank, backend
+        parallel_config.world_size,
+        rank,
+        distributed_init_method,
+        local_rank,
+        backend,
+        vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        timeout,
     )
 
     ensure_model_parallel_initialized(
         parallel_config.tensor_parallel_size,
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size,
+        vllm_config.fault_tolerance_config.enable_fault_tolerance,
+        timeout,
     )
