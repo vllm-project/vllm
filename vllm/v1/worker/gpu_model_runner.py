@@ -138,7 +138,11 @@ from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    get_runner_only_attn_layers,
+    init_kv_sharing,
+    is_residual_scattered_for_sp,
+)
 
 from .utils import (
     AttentionGroup,
@@ -146,6 +150,7 @@ from .utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     gather_mm_placeholders,
+    get_attn_backend_cls,
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
@@ -3048,6 +3053,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
 
+        # Attention layers that are only in the KVCacheConfig of the runner
+        # (e.g., KV sharing, encoder-only attention), but not in the
+        # KVCacheConfig of the scheduler.
+        assert len(self.runner_only_attn_layers) == 0, (
+            "runner_only_attn_layers is not empty"
+        )
+        self.runner_only_attn_layers.update(
+            get_runner_only_attn_layers(self.vllm_config)
+        )
+        (
+            self.shared_kv_cache_layers,
+            self.kv_sharing_fast_prefill_eligible_layers,
+            self.kv_sharing_fast_prefill_logits_indices,
+        ) = init_kv_sharing(self.vllm_config, self.device)
+
+        # Resolve cudagraph_mode
+        self._check_and_update_cudagraph_mode()
+
+        if self.dcp_world_size > 1:
+            layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+            for layer in layers.values():
+                assert layer.impl.need_to_return_lse_for_decode, (
+                    "DCP requires attention impls to return"
+                    " the softmax lse for decode, but the impl "
+                    f"{layer.impl.__class__.__name__} "
+                    "does not return the softmax lse for decode."
+                )
+
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
 
@@ -4066,9 +4099,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             attention_backend_maps.append(attn_backends[0])
             attention_backend_set.update(attn_backends[1])
 
-        # Resolve cudagraph_mode before actually initialize metadata_builders
-        self._check_and_update_cudagraph_mode(attention_backend_set)
-
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
 
@@ -4095,15 +4125,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
-    def _check_and_update_cudagraph_mode(
-        self, attention_backends: set[type[AttentionBackend]]
-    ) -> None:
+    def _check_and_update_cudagraph_mode(self) -> None:
         """
         Resolve the cudagraph_mode when there are multiple attention
         backends with potential conflicting CUDA graph support.
         Then initialize the cudagraph_dispatcher based on the resolved
         cudagraph_mode.
         """
+        attention_backends = set(
+            get_attn_backend_cls(
+                self.vllm_config, self.kv_sharing_fast_prefill_eligible_layers
+            ).values()
+        )
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_backend_name = None
 
@@ -4626,19 +4659,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         add_kv_sharing_layers_to_kv_cache_groups(
             self.shared_kv_cache_layers,
             kv_cache_config.kv_cache_groups,
-            self.runner_only_attn_layers,
         )
-
-        if self.cache_config.kv_sharing_fast_prefill:
-            # In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other
-            # similar KV sharing setups, only the layers that generate KV caches
-            # are involved in the prefill phase, enabling prefill to early exit.
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-            for layer_name in reversed(attn_layers):
-                if layer_name in self.shared_kv_cache_layers:
-                    self.kv_sharing_fast_prefill_eligible_layers.add(layer_name)
-                else:
-                    break
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -4694,7 +4715,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
-        Add encoder-only layers to the KV cache config.
+        Add encoder-only attention layers to the KV cache config.
         """
         block_size = self.vllm_config.cache_config.block_size
         encoder_only_attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
@@ -4708,7 +4729,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                 )
                 encoder_only_attn_specs[attn_spec].append(layer_name)
-                self.runner_only_attn_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
             assert len(encoder_only_attn_specs) == 1, (
                 "Only support one encoder-only attention spec now"
@@ -4731,7 +4751,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
             if isinstance(attn_module, Attention) and (
-                kv_tgt_layer := attn_module.kv_sharing_target_layer_name
+                attn_module.kv_sharing_target_layer_name
             ):
                 # The layer doesn't need its own KV cache and will use that of
                 # the target layer. We skip creating a KVCacheSpec for it, so
@@ -4740,7 +4760,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # enables the memory saving of cross-layer kv sharing, allowing
                 # a given amount of memory to accommodate longer context lengths
                 # or enable more requests to be processed simultaneously.
-                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):

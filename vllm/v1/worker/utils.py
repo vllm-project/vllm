@@ -7,13 +7,22 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.attention.backends.abstract import AttentionBackend
-from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
+from vllm.attention.layer import Attention, AttentionType
+from vllm.config import (
+    ModelConfig,
+    SchedulerConfig,
+    VllmConfig,
+    get_layers_from_vllm_config,
+)
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
 from vllm.multimodal.cache import processor_only_cache_from_config
 from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
+from vllm.v1.attention.backends.utils import (
+    AttentionMetadataBuilder,
+    create_fast_prefill_custom_backend,
+)
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
@@ -248,7 +257,6 @@ def gather_mm_placeholders(
 def add_kv_sharing_layers_to_kv_cache_groups(
     shared_kv_cache_layers: dict[str, str],
     kv_cache_groups: list[KVCacheGroupSpec],
-    runner_only_attn_layers: set[str] | None = None,
 ) -> None:
     """
     Sets up KV cache sharing by reusing the allocated KV caches in `kv_caches`
@@ -271,9 +279,6 @@ def add_kv_sharing_layers_to_kv_cache_groups(
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         tgt_kv_cache_group = layer_to_kv_cache_group[target_layer_name]
         tgt_kv_cache_group.layer_names.append(layer_name)
-
-        if runner_only_attn_layers is not None:
-            runner_only_attn_layers.add(layer_name)
 
 
 def bind_kv_cache(
@@ -364,3 +369,99 @@ def is_residual_scattered_for_sp(
         return True
 
     return num_input_tokens in vllm_config.compilation_config.compile_sizes
+
+
+def get_runner_only_attn_layers(
+    vllm_config: VllmConfig,
+) -> set[str]:
+    """
+    Get the runner-only attention layers that the scheduler doesn't need to allocate
+    KV cache for.
+    """
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    runner_only_attn_layers: set[str] = set()
+    for layer_name, attn_module in attn_layers.items():
+        if attn_module.attn_type == AttentionType.ENCODER_ONLY:
+            # Encoder-only attention layers don't need KV cache.
+            runner_only_attn_layers.add(layer_name)
+        elif attn_module.kv_sharing_target_layer_name:
+            # KV sharing layers use the KV cache of other layers.
+            runner_only_attn_layers.add(layer_name)
+    return runner_only_attn_layers
+
+
+def init_kv_sharing(
+    vllm_config: VllmConfig, device: torch.device
+) -> tuple[dict[str, str], set[str], torch.Tensor | None]:
+    """
+    Initialize the KV sharing layers.
+
+    Args:
+        vllm_config: The VllmConfig.
+        device: The device to initialize the KV sharing layers on.
+
+    Returns:
+        A tuple of:
+            shared_kv_cache_layers: A dictionary of layer names to their target layer
+            names.
+            kv_sharing_fast_prefill_eligible_layers: A set of layer names that are
+            eligible for fast prefill optimization mentioned in You Only Cache Once
+            (https://arxiv.org/abs/2405.05254).
+            kv_sharing_fast_prefill_logits_indices: A buffer for logits indices used in
+            fast prefill optimization. None if fast prefill optimization is not enabled.
+    """
+
+    # If an Attention layer `layer_name` is in the keys of this dict, it
+    # means this layer will perform attention using the keys and values
+    # from the KV cache of `shared_kv_cache_layers[layer_name]`.
+    shared_kv_cache_layers: dict[str, str] = {}
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for layer_name, attn_module in attn_layers.items():
+        if kv_tgt_layer := attn_module.kv_sharing_target_layer_name:
+            shared_kv_cache_layers[layer_name] = kv_tgt_layer
+
+    # In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other
+    # similar KV sharing setups, only the layers that generate KV caches
+    # are involved in the prefill phase, enabling prefill to early exit.
+    # Layers in this set will be skipped during prefill.
+    kv_sharing_fast_prefill_eligible_layers: set[str] = set()
+    kv_sharing_fast_prefill_logits_indices = None
+
+    if vllm_config.cache_config.kv_sharing_fast_prefill:
+        kv_sharing_fast_prefill_logits_indices = torch.zeros(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device,
+        )
+        for layer_name in reversed(attn_layers):
+            if layer_name in shared_kv_cache_layers:
+                kv_sharing_fast_prefill_eligible_layers.add(layer_name)
+            else:
+                break
+
+    return (
+        shared_kv_cache_layers,
+        kv_sharing_fast_prefill_eligible_layers,
+        kv_sharing_fast_prefill_logits_indices,
+    )
+
+
+def get_attn_backend_cls(
+    vllm_config: VllmConfig,
+    kv_sharing_fast_prefill_eligible_layers: set[str],
+    layer_names: list[str] | None = None,
+) -> dict[str, type[AttentionBackend]]:
+    """
+    Get the attention backend classes for the given VllmConfig.
+    """
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
+    attn_backend_cls_dict = {}
+    for layer_name, attn_module in attn_layers.items():
+        attn_backend = attn_module.get_attn_backend()
+        if layer_name in kv_sharing_fast_prefill_eligible_layers:
+            attn_backend = create_fast_prefill_custom_backend(
+                "FastPrefill",
+                attn_backend,
+            )
+        attn_backend_cls_dict[layer_name] = attn_backend
+    return attn_backend_cls_dict
