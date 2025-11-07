@@ -227,7 +227,7 @@ class Scheduler(SchedulerInterface):
         # Available memory = unused KV cache blocks
 
         # Get available KV cache blocks
-        available_blocks = self.kv_cache_manager.get_num_free_blocks()
+        available_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
 
         # Each token needs: 1 KV cache block / block_size + activation memory
         # Activation memory for 1 token:
