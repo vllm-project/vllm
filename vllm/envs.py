@@ -948,8 +948,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use aiter triton kernels for gemm ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower()
-        in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
