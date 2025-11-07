@@ -70,7 +70,10 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
     block_diagonal_sharded_loras: bool = False
-    """Enables BD-LoRA"""
+    """Serves adapters with Block-Diagonal LoRA. This can increase the 
+    inference performance, but requires a certain adapter format. Refer to 
+    https://arxiv.org/html/2510.23346v1 for more information. If this is enabled, 
+    do not enable --fully-sharded-loras."""
 
     def compute_hash(self) -> str:
         """

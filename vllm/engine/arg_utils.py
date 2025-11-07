@@ -986,12 +986,7 @@ class EngineArgs:
         )
         lora_group.add_argument(
             "--block-diagonal-sharded-loras",
-            action="store_true",
-            help=(
-                "By default, only half of the LoRA computation is "
-                "sharded with tensor parallelism. "
-                "Enabling this will use the fully block-diagonal sharded layers. "
-            ),
+            **lora_kwargs["block_diagonal_sharded_loras"],
         )
 
         lora_group.add_argument("--max-cpu-loras", **lora_kwargs["max_cpu_loras"])
