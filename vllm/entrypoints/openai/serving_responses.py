@@ -339,7 +339,7 @@ class OpenAIServingResponses(OpenAIServing):
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
-        if self.use_harmony and self.tool_server is not None:
+        if self.tool_server is not None:
             if self.tool_server.has_tool("browser"):
                 builtin_tool_list.append("browser")
             if self.tool_server.has_tool("python"):
@@ -389,6 +389,7 @@ class OpenAIServingResponses(OpenAIServing):
                             reasoning_parser=self.reasoning_parser,
                             request=request,
                             tool_parser_cls=self.tool_parser,
+                            available_tools=available_tools,
                         )
                     else:
                         context = SimpleContext()

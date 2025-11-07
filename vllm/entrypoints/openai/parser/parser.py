@@ -124,6 +124,9 @@ def get_streamable_parser_for_simple_context(
     )
 
 
+# def render_parser_for_completion():
+
+
 """
 TODO:
 how to figure out which tokens are special tokens
