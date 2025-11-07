@@ -128,7 +128,7 @@ def test_enabled_ops_invalid(env: str):
 def test_topk_dispatch(use_rocm_aiter: bool):
     topk_func = dispatch_topk_func(use_rocm_aiter)
 
-    if current_platform.is_rocm() and int(use_rocm_aiter):
+    if current_platform.is_rocm() and use_rocm_aiter:
         assert topk_func == rocm_aiter_ops.topk_softmax
     else:
         assert topk_func == vllm_topk_softmax
