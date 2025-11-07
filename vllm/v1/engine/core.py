@@ -299,8 +299,9 @@ class EngineCoreGuard(threading.Thread):  # changed
         if not success:
             return success
 
-        # If the Gloo communication times out, the data parallel group (dp_group) needs to be reinitialized
-        command = "destroy_dp_group_on_fault_tolerance"
+        # If the Gloo communication times out
+        # the data parallel group (dp_group) needs to be reinitialized
+        command = "reinit_dp_group_on_fault_tolerance"
         self.cmd_q.put(serialize_method_call(command))
 
         # Ensure busy loop has been recovered.
@@ -1639,7 +1640,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
 
-    def destroy_dp_group_on_fault_tolerance(self):
+    def reinit_dp_group_on_fault_tolerance(self):
         stateless_destroy_torch_distributed_process_group(self.dp_group)
         self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group(
             self.vllm_config.fault_tolerance_config.gloo_comm_timeout,
