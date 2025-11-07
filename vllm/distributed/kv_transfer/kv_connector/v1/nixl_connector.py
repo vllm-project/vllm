@@ -1898,7 +1898,7 @@ class NixlConnectorWorker:
         block_size = (
             self.block_size
             if block_size_ratio <= 1
-            else self.block_size // block_size_ratio
+            else int(self.block_size // block_size_ratio)
         )
         local_xfer_side_handle = self.src_xfer_side_handles[block_size]
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
