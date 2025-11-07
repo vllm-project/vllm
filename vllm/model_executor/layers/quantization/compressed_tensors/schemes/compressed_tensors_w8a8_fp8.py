@@ -70,10 +70,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.out_dtype = torch.get_default_dtype()
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
-        self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
 
         if self.weight_block_size is not None:
+            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+            self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
             assert not self.is_static_input_scheme
             self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
             self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(

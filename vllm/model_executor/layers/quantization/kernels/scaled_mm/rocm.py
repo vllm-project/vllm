@@ -78,12 +78,12 @@ def rocm_per_tensor_float_w8a8_scaled_mm(
     return torch.narrow(output, 0, 0, A.shape[0]).view(*output_shape)
 
 
-# if current_platform.is_rocm():
-direct_register_custom_op(
-    op_name="rocm_per_tensor_float_w8a8_scaled_mm_impl",
-    op_func=rocm_per_tensor_float_w8a8_scaled_mm_impl,
-    fake_impl=rocm_per_tensor_float_w8a8_scaled_mm_fake,
-)
+if current_platform.is_rocm():
+    direct_register_custom_op(
+        op_name="rocm_per_tensor_float_w8a8_scaled_mm_impl",
+        op_func=rocm_per_tensor_float_w8a8_scaled_mm_impl,
+        fake_impl=rocm_per_tensor_float_w8a8_scaled_mm_fake,
+    )
 
 
 class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
