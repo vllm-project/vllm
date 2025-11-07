@@ -264,7 +264,10 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.device = device
 
     def _init_reorder_batch_threshold(
-        self, reorder_batch_threshold: int = 1, supports_spec_as_decode: bool = False
+        self,
+        reorder_batch_threshold: int = 1,
+        supports_spec_as_decode: bool = False,
+        supports_dcp_with_varlen: bool = False,
     ) -> None:
         self.reorder_batch_threshold = reorder_batch_threshold
         if self.reorder_batch_threshold is not None and supports_spec_as_decode:
@@ -280,6 +283,12 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
                     self.reorder_batch_threshold,
                     1 + speculative_config.num_speculative_tokens,
                 )
+
+        if (
+            self.vllm_config.parallel_config.decode_context_parallel_size > 1
+            and not supports_dcp_with_varlen
+        ):
+            self.reorder_batch_threshold = 1
 
     @abstractmethod
     def build(
