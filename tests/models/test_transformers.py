@@ -82,7 +82,7 @@ def test_models(
     from packaging.version import Version
 
     installed = Version(transformers.__version__)
-    required = Version("4.57.0.dev0")
+    required = Version("5.0.0.dev")
     if model == "allenai/OLMoE-1B-7B-0924" and installed < required:
         pytest.skip(
             "MoE models with the Transformers backend require "
@@ -211,11 +211,7 @@ def test_embed_loading(vllm_runner, model):
 def test_pooling(hf_runner, vllm_runner, example_prompts, arch):
     model = get_model(arch)
 
-    vllm_kwargs = dict(
-        max_model_len=None,
-        model_impl="transformers",
-        compilation_config=dict(cudagraph_capture_sizes=[8]),
-    )
+    vllm_kwargs = dict(max_model_len=None, model_impl="transformers")
 
     hf_kwargs = dict()
     if arch == "TransformersEmbeddingModel":

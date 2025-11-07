@@ -60,16 +60,23 @@ class LlamaModel(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList(
-            [
-                Llama4DecoderLayer(
-                    vllm_config=vllm_config,
-                    prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
-                    config=self.config,
-                )
-                for i in range(self.config.num_hidden_layers)
-            ]
-        )
+        # Temporarily modify vllm_config.quant_config for draft model layers
+        original_quant_config = vllm_config.quant_config
+        vllm_config.quant_config = quant_config
+        try:
+            self.layers = nn.ModuleList(
+                [
+                    Llama4DecoderLayer(
+                        vllm_config=vllm_config,
+                        prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                        config=self.config,
+                    )
+                    for i in range(self.config.num_hidden_layers)
+                ]
+            )
+        finally:
+            # Restore original quant_config
+            vllm_config.quant_config = original_quant_config
         self.fc = torch.nn.Linear(
             self.config.hidden_size * 2, self.config.hidden_size, bias=False
         )
@@ -181,6 +188,9 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         self.logits_processor = LogitsProcessor(
             self.config.vocab_size, scale=logit_scale
         )
+
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
 
     def get_language_model(self) -> torch.nn.Module:
         return self.model

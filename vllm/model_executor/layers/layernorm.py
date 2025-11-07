@@ -8,8 +8,12 @@ import torch.nn.functional as F
 
 import vllm.envs as envs
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.batch_invariant import (
+    rms_norm_batch_invariant,
+    vllm_is_batch_invariant,
+)
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def is_rocm_aiter_rmsnorm_enabled() -> bool:
@@ -21,6 +25,8 @@ def rms_norm(
 ) -> torch.Tensor:
     from vllm import _custom_ops as ops
 
+    if vllm_is_batch_invariant():
+        return rms_norm_batch_invariant(x, weight, variance_epsilon)
     out = torch.empty_like(x)
     ops.rms_norm(
         out,
@@ -39,6 +45,10 @@ def fused_add_rms_norm(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm import _custom_ops as ops
 
+    if vllm_is_batch_invariant():
+        return rms_norm_batch_invariant(
+            x + residual, weight, variance_epsilon
+        ), x + residual
     ops.fused_add_rms_norm(
         x,
         residual,
@@ -46,22 +56,6 @@ def fused_add_rms_norm(
         variance_epsilon,
     )
     return x, residual
-
-
-def poly_norm(
-    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    from vllm import _custom_ops as ops
-
-    out = torch.empty_like(x)
-    ops.poly_norm(
-        out,
-        x,
-        weight,
-        bias,
-        variance_epsilon,
-    )
-    return out
 
 
 def rocm_aiter_rms_norm_impl(
@@ -168,14 +162,11 @@ class RMSNorm(CustomOp):
         self.variance_size_override = (
             None if var_hidden_size == hidden_size else var_hidden_size
         )
+        weight_dtype = dtype or torch.get_default_dtype()
         self.has_weight = has_weight
-        if dtype is not None:
-            self.weight = torch.ones(hidden_size, dtype=dtype)
-        else:
-            self.weight = torch.ones(hidden_size)
+        self.weight = torch.ones(hidden_size, dtype=weight_dtype)
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
-        weight_dtype = self.weight.data.dtype
 
         if current_platform.is_rocm():
             self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
@@ -185,46 +176,68 @@ class RMSNorm(CustomOp):
                 with_fused_add=True, dtype=weight_dtype
             )
 
+    @staticmethod
+    def forward_static(
+        x: torch.Tensor,
+        variance_epsilon: float,
+        hidden_size: int,
+        orig_dtype: torch.dtype,
+        weight: torch.Tensor | None = None,
+        residual: torch.Tensor | None = None,
+        variance_size_override: int | None = None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """PyTorch-native implementation equivalent to forward()."""
+        x = x.to(torch.float32)
+        if residual is not None:
+            # residual promoted f16->f32 automatically,
+            # otherwise Inductor eliminates the casts to and from f16,
+            # increasing memory usage (and complicating pattern matching)
+            x = x + residual
+            residual = x.to(orig_dtype)
+
+        if x.shape[-1] != hidden_size:
+            raise ValueError(
+                f"Expected hidden_size to be {hidden_size}, but found: {x.shape[-1]}"
+            )
+
+        if variance_size_override is None:
+            x_var = x
+        else:
+            if hidden_size < variance_size_override:
+                raise ValueError(
+                    "Expected hidden_size to be at least "
+                    f"{variance_size_override}, but found: {hidden_size}"
+                )
+
+            x_var = x[:, :, :variance_size_override]
+
+        variance = x_var.pow(2).mean(dim=-1, keepdim=True)
+
+        x = x * torch.rsqrt(variance + variance_epsilon)
+        x = x.to(orig_dtype)
+        if weight is not None:
+            x = x * weight
+        if residual is None:
+            return x
+        else:
+            return x, residual
+
     def forward_native(
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        if residual is not None:
-            x = x + residual.to(torch.float32)
-            residual = x.to(orig_dtype)
 
-        hidden_size = x.shape[-1]
-        if hidden_size != self.hidden_size:
-            raise ValueError(
-                "Expected hidden_size to be "
-                f"{self.hidden_size}, but found: {hidden_size}"
-            )
-
-        if self.variance_size_override is None:
-            x_var = x
-        else:
-            if hidden_size < self.variance_size_override:
-                raise ValueError(
-                    "Expected hidden_size to be at least "
-                    f"{self.variance_size_override}, but found: {hidden_size}"
-                )
-
-            x_var = x[:, :, : self.variance_size_override]
-
-        variance = x_var.pow(2).mean(dim=-1, keepdim=True)
-
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = x.to(orig_dtype)
-        if self.has_weight:
-            x = x * self.weight
-        if residual is None:
-            return x
-        else:
-            return x, residual
+        return self.forward_static(
+            x,
+            self.variance_epsilon,
+            self.hidden_size,
+            x.dtype,
+            self.weight.data if self.has_weight else None,
+            residual,
+            self.variance_size_override,
+        )
 
     def forward_cuda(
         self,
@@ -356,51 +369,107 @@ class GemmaRMSNorm(CustomOp):
         return self.forward_native(x, residual)
 
 
-@CustomOp.register("poly_norm")
-class PolyNorm(CustomOp):
-    """Polynomial normalization.
+@CustomOp.register("rms_norm_gated")
+class RMSNormGated(CustomOp):
+    """RMS Normalization with optional gating.
 
-    Computes x -> w_0 * RMSNorm(x^3) + w_1 * RMSNorm(x^2) + w_2 * RMSNorm(x) + b
-    where w_n is the learned weight and b is the bias.
-    Refer to https://arxiv.org/html/2411.03884v1
+    This is a native PyTorch implementation that supports:
+    - Standard RMS normalization
+    - Group RMS normalization
+    - Optional gating with SiLU activation
     """
 
     def __init__(
         self,
-        eps: float = 1e-6,
-    ) -> None:
-        super().__init__()
-        self.weight = torch.nn.Parameter(torch.ones(3) / 3)
-        self.bias = torch.nn.Parameter(torch.zeros(1))
-        self.variance_epsilon = eps
+        hidden_size: int,
+        eps: float = 1e-5,
+        group_size: int | None = None,
+        norm_before_gate: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        """Initialize RMSNormGated.
 
-    def _norm(self, x):
-        return x / torch.sqrt(x.pow(2).mean(-1, keepdim=True) + self.variance_epsilon)
+        Args:
+            hidden_size: Size of the hidden dimension
+            eps: Epsilon for numerical stability
+            group_size: If not None, do GroupNorm with each group
+                        having group_size elements.
+                        group_size=None is equivalent to group_size=hidden_size
+                        (i.e. there's only 1 group).
+            norm_before_gate: If True and z is provided: out = norm(x) * silu(z)
+                              If False and z is provided: out = norm(x * silu(z))
+            device: Device to create parameters on
+            dtype: Data type for parameters
+        """
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.register_parameter("bias", None)
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
 
     def forward_native(
-        self,
-        x: torch.Tensor,
+        self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """PyTorch-native implementation equivalent to forward().
-
-        Refer to https://github.com/BryceZhuo/PolyCom?tab=readme-ov-file/README.md
         """
+        Native PyTorch implementation of RMS normalization with gating.
 
-        orig_dtype = x.dtype
-        x_float = x.to(torch.float32)
-        output = (
-            self.weight[0] * self._norm(x_float**3)
-            + self.weight[1] * self._norm(x_float**2)
-            + self.weight[2] * self._norm(x_float)
-            + self.bias
-        )
-        return output.to(orig_dtype)
+        Args:
+            x: Input tensor
+            z: Optional gating tensor
+
+        Returns:
+            Normalized (and optionally gated) tensor
+
+        If z is not None:
+            - norm_before_gate=True: out = norm(x) * silu(z)
+            - norm_before_gate=False: out = norm(x * silu(z))
+        """
+        # Apply gating before normalization if needed
+        if z is not None and not self.norm_before_gate:
+            x = x * F.silu(z)
+
+        # RMS Normalization
+        if self.group_size is None:
+            # Standard RMS norm across the last dimension
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x_normed = x * torch.rsqrt(variance + self.eps)
+            out = x_normed * self.weight
+        else:
+            # Group RMS norm
+            from einops import rearrange
+
+            x_group = rearrange(x, "... (g d) -> ... g d", d=self.group_size)
+            variance = x_group.pow(2).mean(dim=-1, keepdim=True)
+            x_normed = x_group * torch.rsqrt(variance + self.eps)
+            out = rearrange(x_normed, "... g d -> ... (g d)") * self.weight
+
+        # Apply gating after normalization if needed
+        if z is not None and self.norm_before_gate:
+            out = out * F.silu(z)
+
+        return out
 
     def forward_cuda(
-        self,
-        x: torch.Tensor,
+        self, x: torch.Tensor, z: torch.Tensor | None = None
     ) -> torch.Tensor:
-        return poly_norm(x, self.weight, self.bias, self.variance_epsilon)
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
 
 
 class LayerNorm(nn.Module):

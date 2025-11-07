@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import inspect
 import json
 from abc import ABC, abstractmethod
 from collections import Counter, defaultdict, deque
@@ -42,15 +43,17 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 # pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypedDict
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.utils import MediaConnector
+from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import random_uuid, supports_kw
+from vllm.utils import random_uuid
+from vllm.utils.func_utils import supports_kw
 
 logger = init_logger(__name__)
 
@@ -804,11 +807,17 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
         multimodal_config = self._tracker.model_config.multimodal_config
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
-        self._connector = MediaConnector(
+
+        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
+
+    @property
+    def model_config(self) -> ModelConfig:
+        return self._tracker.model_config
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
         image = self._connector.fetch_image(image_url) if image_url else None
@@ -821,6 +830,12 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         image_embeds: str | dict[str, str] | None,
         uuid: str | None = None,
     ) -> None:
+        mm_config = self.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
+            raise ValueError(
+                "You must set `--enable-mm-embeds` to input `image_embeds`"
+            )
+
         if isinstance(image_embeds, dict):
             embeds = {
                 k: self._connector.fetch_image_embedding(v)
@@ -879,11 +894,16 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
         multimodal_config = self._tracker.model_config.multimodal_config
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
-        self._connector = MediaConnector(
+        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
         )
+
+    @property
+    def model_config(self) -> ModelConfig:
+        return self._tracker.model_config
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
         image_coro = self._connector.fetch_image_async(image_url) if image_url else None
@@ -896,6 +916,12 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         image_embeds: str | dict[str, str] | None,
         uuid: str | None = None,
     ) -> None:
+        mm_config = self.model_config.get_multimodal_config()
+        if not mm_config.enable_mm_embeds:
+            raise ValueError(
+                "You must set `--enable-mm-embeds` to input `image_embeds`"
+            )
+
         future: asyncio.Future[str | dict[str, str] | None] = asyncio.Future()
 
         if isinstance(image_embeds, dict):
@@ -1494,23 +1520,52 @@ def _resolve_chat_template_kwargs(
 _cached_resolve_chat_template_kwargs = lru_cache(_resolve_chat_template_kwargs)
 
 
+@lru_cache
+def _get_hf_base_chat_template_params() -> frozenset[str]:
+    # Get standard parameters from HuggingFace's base tokenizer class.
+    # This dynamically extracts parameters from PreTrainedTokenizer's
+    # apply_chat_template method, ensuring compatibility with tokenizers
+    # that use **kwargs to receive standard parameters.
+
+    # Read signature from HF's base class - the single source of truth
+    base_sig = inspect.signature(PreTrainedTokenizer.apply_chat_template)
+    # Exclude VAR_KEYWORD (**kwargs) and VAR_POSITIONAL (*args) placeholders
+    return frozenset(
+        p.name
+        for p in base_sig.parameters.values()
+        if p.kind
+        not in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.VAR_POSITIONAL)
+    )
+
+
 def resolve_chat_template_kwargs(
     tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
     chat_template: str,
     chat_template_kwargs: dict[str, Any],
+    raise_on_unexpected: bool = True,
 ) -> dict[str, Any]:
+    # We exclude chat_template from kwargs here, because
+    # chat template has been already resolved at this stage
+    unexpected_vars = {"chat_template", "tokenize"}
+    if raise_on_unexpected and (
+        unexpected_in_kwargs := unexpected_vars & chat_template_kwargs.keys()
+    ):
+        raise ValueError(
+            "Found unexpected chat template kwargs from request: "
+            f"{unexpected_in_kwargs}"
+        )
+
     fn_kw = {
         k
         for k in chat_template_kwargs
         if supports_kw(tokenizer.apply_chat_template, k, allow_var_kwargs=False)
     }
-
     template_vars = _cached_resolve_chat_template_kwargs(chat_template)
 
-    # We exclude chat_template from kwargs here, because
-    # chat template has been already resolved at this stage
-    unexpected_vars = {"chat_template"}
-    accept_vars = (fn_kw | template_vars) - unexpected_vars
+    # Allow standard HF parameters even if tokenizer uses **kwargs to receive them
+    hf_base_params = _get_hf_base_chat_template_params()
+
+    accept_vars = (fn_kw | template_vars | hf_base_params) - unexpected_vars
     return {k: v for k, v in chat_template_kwargs.items() if k in accept_vars}
 
 
@@ -1521,7 +1576,6 @@ def apply_hf_chat_template(
     tools: list[dict[str, Any]] | None,
     *,
     model_config: ModelConfig,
-    tokenize: bool = False,  # Different from HF's default
     **kwargs: Any,
 ) -> str:
     hf_chat_template = resolve_hf_chat_template(
@@ -1538,17 +1592,18 @@ def apply_hf_chat_template(
             "does not define one."
         )
 
+    resolved_kwargs = resolve_chat_template_kwargs(
+        tokenizer=tokenizer,
+        chat_template=hf_chat_template,
+        chat_template_kwargs=kwargs,
+    )
+
     try:
-        resolved_kwargs = resolve_chat_template_kwargs(
-            tokenizer=tokenizer,
-            chat_template=hf_chat_template,
-            chat_template_kwargs=kwargs,
-        )
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
             tools=tools,  # type: ignore[arg-type]
             chat_template=hf_chat_template,
-            tokenize=tokenize,
+            tokenize=False,
             **resolved_kwargs,
         )
 

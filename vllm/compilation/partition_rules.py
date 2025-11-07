@@ -2,14 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
-from typing import TYPE_CHECKING
+import logging
 
+import torch
 from torch._library.utils import lookup_op
 
 from vllm.logger import init_logger
-
-if TYPE_CHECKING:
-    import torch
 
 logger = init_logger(__name__)
 
@@ -38,8 +36,16 @@ def resolve_defined_ops(op_names: list[str]) -> list["torch._ops.OpOverload"]:
             resolved.append(lookup_op(op_name))
         except Exception:
             # Skip operators that don't exist (e.g., model-specific ops)
-            logger.warning(
-                "Failed to resolve operator for Inductor partition: %s", op_name
+            # Do not warn for attention ops, warn for others
+            # (most likely manually specified)
+            from vllm.config import CompilationConfig
+
+            logger.log(
+                logging.DEBUG
+                if op_name in CompilationConfig._attention_ops
+                else logging.WARNING,
+                "Failed to resolve operator for CUDAGraph partition: %s",
+                op_name,
             )
             continue
 
@@ -47,47 +53,35 @@ def resolve_defined_ops(op_names: list[str]) -> list["torch._ops.OpOverload"]:
 
 
 @contextlib.contextmanager
-def inductor_partition_rule_context(overloads: list["torch._ops.OpOverload"]):
+def inductor_partition_rule_context(splitting_ops: list[str]):
     """Context manager to temporarily register Inductor partition rules.
 
     Registers custom partition rules for specified operators, forcing the
     Inductor scheduler to partition the graph at these operators. The rules
     are automatically restored to their previous state on exit.
 
-    Note: Callers should use resolve_defined_ops() to convert operator names
-    to OpOverload objects before calling this function.
-
     Args:
-        overloads: List of resolved operator overload objects.
+        splitting_ops: List of operator names to partition on.
     """
-    if not overloads:
+    if not splitting_ops:
         logger.debug("No partition ops provided; skipping rule registration.")
         yield
         return
 
-    from torch._inductor.scheduler import (  # type: ignore
-        _custom_should_partition_fns,
-        register_should_partition_rule,
-    )
-
-    def _always_partition(*_args, **_kwargs):
-        return True
-
     # Save current state before registering
-    saved_rules = _custom_should_partition_fns.copy()
 
-    for overload in overloads:
-        register_should_partition_rule(
-            overload,
-            _always_partition,
-        )
+    saved_splitting_ops: list[str] = list(
+        torch._inductor.config.custom_should_partition_ops
+    )
+    torch._inductor.config.custom_should_partition_ops = splitting_ops
 
-    logger.debug("Registered inductor partition rules for %d operators", len(overloads))
+    logger.debug(
+        "Registered inductor partition rules for %d operators", len(splitting_ops)
+    )
 
     try:
         yield
     finally:
         # Clear and restore previous state
-        _custom_should_partition_fns.clear()
-        _custom_should_partition_fns.update(saved_rules)
+        torch._inductor.config.custom_should_partition_ops = saved_splitting_ops
         logger.debug("Restored previous partition rules state.")

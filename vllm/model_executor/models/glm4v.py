@@ -615,13 +615,12 @@ class GLM4VForCausalLM(
         return None
 
     def _process_image_input(self, image_input: GLMVImagePixelInputs) -> torch.Tensor:
-        pixel_values = image_input["data"].to(dtype=self.config.torch_dtype)
+        pixel_values = image_input["data"].to(dtype=self.config.dtype)
 
         return self.transformer.vision(pixel_values)
 
-    @classmethod
     def get_mrope_input_positions(
-        cls,
+        self,
         input_tokens: list[int],
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,

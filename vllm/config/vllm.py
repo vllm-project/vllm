@@ -2,27 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+import getpass
 import hashlib
 import json
 import os
+import tempfile
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import replace
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import torch
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, model_validator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.logger import init_logger
+from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
 
 from .cache import CacheConfig
-from .compilation import CompilationConfig, CompilationLevel, CUDAGraphMode
+from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
@@ -40,10 +44,13 @@ if TYPE_CHECKING:
     from transformers import PretrainedConfig
 
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     PretrainedConfig = Any
 
     QuantizationConfig = Any
+
+    KVCacheConfig = Any
 
 logger = init_logger(__name__)
 
@@ -77,24 +84,20 @@ class VllmConfig:
         default_factory=StructuredOutputsConfig
     )
     """Structured outputs configuration."""
-    observability_config: ObservabilityConfig | None = None
+    observability_config: ObservabilityConfig = Field(
+        default_factory=ObservabilityConfig
+    )
     """Observability configuration."""
     quant_config: QuantizationConfig | None = None
     """Quantization configuration."""
     compilation_config: CompilationConfig = Field(default_factory=CompilationConfig)
     """`torch.compile` and cudagraph capture configuration for the model.
 
-    As a shorthand, `-O<n>` can be used to directly specify the compilation
-    level `n`: `-O3` is equivalent to `-O.level=3` (same as `-O='{"level":3}'`).
-    Currently, -O <n> and -O=<n> are supported as well but this will likely be
-    removed in favor of clearer -O<n> syntax in the future.
-
-    NOTE: level 0 is the default level without any optimization. level 1 and 2
-    are for internal testing only. level 3 is the recommended level for
-    production, also default in V1.
+    As a shorthand, one can append compilation arguments via 
+    -0.parameter=arguement such as `-O.mode=3` (same as `-O='{"mode":3}'`).
 
     You can specify the full compilation config like so:
-    `{"level": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
+    `{"mode": 3, "cudagraph_capture_sizes": [1, 2, 4, 8]}`
     """
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
@@ -129,7 +132,6 @@ class VllmConfig:
         from vllm import __version__
 
         vllm_factors.append(__version__)
-        vllm_factors.append(envs.VLLM_USE_V1)
         if self.model_config:
             vllm_factors.append(self.model_config.compute_hash())
         else:
@@ -170,10 +172,7 @@ class VllmConfig:
             vllm_factors.append(self.structured_outputs_config.compute_hash())
         else:
             vllm_factors.append("None")
-        if self.observability_config:
-            vllm_factors.append(self.observability_config.compute_hash())
-        else:
-            vllm_factors.append("None")
+        vllm_factors.append(self.observability_config.compute_hash())
         if self.quant_config:
             pass  # should be captured by model_config.quantization
         if self.compilation_config:
@@ -203,11 +202,33 @@ class VllmConfig:
         return hash_str
 
     def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_capture_size,
+        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
         # it should raise an IndexError.
         # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_capture_size
+        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
         return self.compilation_config.bs_to_padded_graph_size[batch_size]
+
+    def enable_trace_function_call_for_thread(self) -> None:
+        """
+        Set up function tracing for the current thread,
+        if enabled via the `VLLM_TRACE_FUNCTION` environment variable.
+        """
+        if envs.VLLM_TRACE_FUNCTION:
+            tmp_dir = tempfile.gettempdir()
+            # add username to tmp_dir to avoid permission issues
+            tmp_dir = os.path.join(tmp_dir, getpass.getuser())
+            filename = (
+                f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
+                f"_thread_{threading.get_ident()}_at_{datetime.now()}.log"
+            ).replace(" ", "_")
+            log_path = os.path.join(
+                tmp_dir,
+                "vllm",
+                f"vllm-instance-{self.instance_id}",
+                filename,
+            )
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            enable_trace_function_call(log_path)
 
     @staticmethod
     def _get_quantization_config(
@@ -268,6 +289,48 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    def _post_init_kv_transfer_config(self) -> None:
+        """Update KVTransferConfig based on top-level configs in VllmConfig.
+
+        Right now, this function reads the offloading settings from
+        CacheConfig and configures the KVTransferConfig accordingly.
+        """
+        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+            return
+
+        # If no KVTransferConfig is provided, create a default one.
+        if self.kv_transfer_config is None:
+            self.kv_transfer_config = KVTransferConfig()
+
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
+            raise ValueError(
+                "You must set kv_offloading_size when kv_offloading_backend is set."
+            )
+        num_kv_ranks = (
+            self.parallel_config.tensor_parallel_size
+            * self.parallel_config.pipeline_parallel_size
+        )
+
+        if kv_offloading_backend == "native":
+            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
+
+            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
+            # done after the model's KV cache is initialized
+            self.kv_transfer_config.kv_connector_extra_config.update(
+                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+            )
+        elif kv_offloading_backend == "lmcache":
+            self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
+            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
+            self.kv_transfer_config.kv_connector_extra_config = {
+                "lmcache.local_cpu": True,
+                "lmcache.max_local_cpu_size": kv_gb_per_rank,
+            }
+
+        # This is the same for all backends
+        self.kv_transfer_config.kv_role = "kv_both"
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -283,7 +346,6 @@ class VllmConfig:
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:
-            self.lora_config.verify_with_cache_config(self.cache_config)
             self.lora_config.verify_with_model_config(self.model_config)
 
         if self.quant_config is None and self.model_config is not None:
@@ -305,33 +367,24 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        # If the user does not explicitly set a compilation level, then
-        # we use the default level. The default level depends on other
+        # If the user does not explicitly set a compilation mode, then
+        # we use the default mode. The default mode depends on other
         # settings (see the below code).
-        if self.compilation_config.level is None:
-            if envs.VLLM_USE_V1:
-                if (
-                    self.model_config is not None
-                    and not self.model_config.enforce_eager
-                ):
-                    self.compilation_config.level = CompilationLevel.PIECEWISE
-                else:
-                    self.compilation_config.level = CompilationLevel.NO_COMPILATION
-
+        if self.compilation_config.mode is None:
+            if self.model_config is not None and not self.model_config.enforce_eager:
+                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
-                # NB: Passing both --enforce-eager and a compilation level
-                # in V0 means the compilation level wins out.
-                self.compilation_config.level = CompilationLevel.NO_COMPILATION
+                self.compilation_config.mode = CompilationMode.NONE
         else:
-            assert self.compilation_config.level >= CompilationLevel.NO_COMPILATION
-            assert self.compilation_config.level <= CompilationLevel.PIECEWISE
+            assert self.compilation_config.mode >= CompilationMode.NONE
+            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
-        # compilation level and backend.
+        # compilation mode and backend.
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
-                and self.compilation_config.level > CompilationLevel.NO_COMPILATION
+                and self.compilation_config.mode > CompilationMode.NONE
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
@@ -348,39 +401,61 @@ class VllmConfig:
             # if cudagraph_mode is not explicitly set by users, set default
             # value
             if self.compilation_config.cudagraph_mode is None:
-                if (
-                    envs.VLLM_USE_V1
-                    and self.compilation_config.level == CompilationLevel.PIECEWISE
-                ):
+                if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
                     # default to full and piecewise for most models
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_AND_PIECEWISE
                     )
-
-                    # pooling models and encoder-decoder models
-                    # do not support full cudagraphs
-                    if self.model_config is not None and (
-                        self.model_config.pooler_config is not None
-                        or self.model_config.is_encoder_decoder
-                    ):
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
-                    # decode context parallel do not support full cudagraphs now.
-                    if self.parallel_config.decode_context_parallel_size > 1:
-                        logger.warning(
-                            "Decode context parallel (DCP) is enabled, which is "
-                            "incompatible with full CUDA graphs. Set "
-                            "cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
                 else:
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+            # if cudagraph_mode has full cudagraphs, we need to check support
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                # decode context parallel does not support full cudagraphs
+                if self.parallel_config.decode_context_parallel_size > 1:
+                    logger.warning_once(
+                        "Decode context parallel (DCP) is enabled, which is "
+                        "incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                elif self.model_config is not None:
+                    if self.model_config.pooler_config is not None:
+                        logger.warning_once(
+                            "Pooling models do not support full cudagraphs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    elif self.model_config.is_encoder_decoder:
+                        logger.warning_once(
+                            "Encoder-decoder models do not support full cudagraphs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                    elif (
+                        current_platform.is_cuda()
+                        and current_platform.is_device_capability(100)
+                        and self.model_config.max_model_len > 131072
+                        and not self.model_config.use_mla
+                    ):
+                        # Refer to vllm/utils/flashinfer.py::use_trtllm_attention()
+                        logger.warning_once(
+                            "NVIDIA Blackwell TRTLLM attention cannot support "
+                            "max_model_len >= 131072 (found "
+                            f"{self.model_config.max_model_len}), causing dynamic "
+                            "dispatching that breaks full cudagraphs. "
+                            "Overriding cudagraph_mode to PIECEWISE."
+                        )
+                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
                 logger.info("Cudagraph is disabled under eager mode")
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            elif envs.VLLM_USE_V1:
+                # override related settings when enforce eager
+                self.compilation_config.max_cudagraph_capture_size = 0
+                self.compilation_config.cudagraph_capture_sizes = []
+            else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
             self._set_cudagraph_sizes()
@@ -486,15 +561,12 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # Do this after all the updates to compilation_config.level
-        if (
-            envs.VLLM_USE_V1
-            and self.compilation_config.level == CompilationLevel.PIECEWISE
-        ):
+        # Do this after all the updates to compilation_config.mode
+        if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
 
         # final check of cudagraph mode after all possible updates
-        if envs.VLLM_USE_V1 and current_platform.is_cuda_alike():
+        if current_platform.is_cuda_alike():
             if (
                 self.compilation_config.cudagraph_mode.has_full_cudagraphs()
                 and self.model_config is not None
@@ -508,8 +580,8 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
-                assert self.compilation_config.level == CompilationLevel.PIECEWISE, (
-                    "Compilation level should be CompilationLevel.PIECEWISE "
+                assert self.compilation_config.mode == CompilationMode.VLLM_COMPILE, (
+                    "Compilation mode should be CompilationMode.VLLM_COMPILE "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
@@ -539,10 +611,7 @@ class VllmConfig:
         if not self.instance_id:
             self.instance_id = random_uuid()[:5]
 
-        if (
-            envs.VLLM_USE_V1
-            and not self.scheduler_config.disable_hybrid_kv_cache_manager
-        ):
+        if not self.scheduler_config.disable_hybrid_kv_cache_manager:
             # logger should only print warning message for hybrid models. As we
             # can't know whether the model is hybrid or not now, so we don't log
             # warning message here and will log it later.
@@ -550,7 +619,18 @@ class VllmConfig:
                 # Hybrid KV cache manager is not supported on non-GPU platforms.
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_transfer_config is not None:
-                # Hybrid KV cache manager is not compatible with KV transfer.
+                # NOTE(Kuntai): turn HMA off for connector for now.
+                # TODO(Kuntai): have a more elegent solution to check and
+                # turn off HMA for connector that does not support HMA.
+                logger.warning(
+                    "Turning off hybrid kv cache manager because "
+                    "`--kv-transfer-config` is set. This will reduce the "
+                    "performance of vLLM on LLMs with sliding window attention "
+                    "or Mamba attention. If you are a developer of kv connector"
+                    ", please consider supporting hybrid kv cache manager for "
+                    "your connector by making sure your connector is a subclass"
+                    " of `SupportsHMA` defined in kv_connector/v1/base.py."
+                )
                 self.scheduler_config.disable_hybrid_kv_cache_manager = True
             if self.kv_events_config is not None:
                 # Hybrid KV cache manager is not compatible with KV events.
@@ -608,6 +688,9 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        # Handle the KV connector configs
+        self._post_init_kv_transfer_config()
+
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
@@ -638,11 +721,13 @@ class VllmConfig:
 
         ```python
         max_graph_size = min(max_num_seqs * 2, 512)
-        # 1, 2, 4, then multiples of 8 up to max_graph_size
-        cuda_graph_sizes = [1, 2, 4, 8, 16, 24, 32, 40, ..., max_graph_size]
+        # 1, 2, 4, then multiples of 8 up to 256 and then multiples of 16
+        # up to max_graph_size
+        cuda_graph_sizes = [1, 2, 4] + list(range(8, 256, 8)) + list(
+            range(256, max_graph_size + 1, 16))
 
         In the end, `vllm_config.compilation_config.cudagraph_capture_sizes`
-        will be the final sizes to capture cudagraph (in descending order).
+        will be the final sizes to capture cudagraph (in ascending order).
 
         These sizes are used to capture and reuse CUDA graphs for
         performance-critical paths (e.g., decoding). Capturing enables
@@ -669,35 +754,111 @@ class VllmConfig:
             not be used.
         """
 
-        # calculate the default `batch_size_capture_list`
-        batch_size_capture_list = []
-        if self.model_config is not None and not self.model_config.enforce_eager:
-            cuda_graph_sizes = self.scheduler_config.cuda_graph_sizes
-            if len(cuda_graph_sizes) == 1:
-                max_graph_size = cuda_graph_sizes[0]
-                assert max_graph_size >= 1, (
-                    "Maximum cudagraph size should be greater than or equal to 1."
+        if (
+            self.model_config is not None
+            and not self.model_config.enforce_eager
+            and self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
+            # determine the initial max_cudagraph_capture_size
+            max_cudagraph_capture_size = (
+                self.compilation_config.max_cudagraph_capture_size
+            )
+            if max_cudagraph_capture_size is None:
+                max_cudagraph_capture_size = min(
+                    self.scheduler_config.max_num_seqs * 2, 512
                 )
-                batch_size_capture_list = [
-                    i for i in [1, 2, 4] if i <= max_graph_size
-                ] + list(range(8, max_graph_size + 1, 8))
-            elif len(cuda_graph_sizes) > 1:
-                batch_size_capture_list = sorted(cuda_graph_sizes)
+            max_num_tokens = self.scheduler_config.max_num_batched_tokens
+            max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
+
+            assert max_cudagraph_capture_size >= 1, (
+                "Maximum cudagraph size should be greater than or equal to 1 "
+                "when using cuda graph."
+            )
+
+            # determine the cudagraph_capture_sizes
+            if self.compilation_config.cudagraph_capture_sizes is not None:
+                assert len(self.compilation_config.cudagraph_capture_sizes) > 0, (
+                    "cudagraph_capture_sizes should contain at least one element "
+                    "when using cuda graph."
+                )
+                # de-duplicate the sizes provided by the config
+                dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
+                cudagraph_capture_sizes = dedup_sizes
+                # sort to make sure the sizes are in ascending order
+                cudagraph_capture_sizes.sort()
             else:
-                raise TypeError(f"Invalid value for {cuda_graph_sizes=}.")
+                cudagraph_capture_sizes = [
+                    i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+                ]
+                if max_cudagraph_capture_size >= 8:
+                    # Step size 8 for small batch sizes, up to 256(not included)
+                    cudagraph_capture_sizes += list(
+                        range(8, min(max_cudagraph_capture_size + 1, 256), 8)
+                    )
+                if max_cudagraph_capture_size >= 256:
+                    # Step size 16 for larger batch sizes
+                    cudagraph_capture_sizes += list(
+                        range(256, max_cudagraph_capture_size + 1, 16)
+                    )
+
             if (
                 self.parallel_config.tensor_parallel_size > 1
                 and self.compilation_config.pass_config.enable_sequence_parallelism
             ):
-                batch_size_capture_list = self.update_sizes_for_sequence_parallelism(
-                    batch_size_capture_list
+                cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
+                    cudagraph_capture_sizes
                 )
-            max_num_tokens = self.scheduler_config.max_num_batched_tokens
-            batch_size_capture_list = [
-                size for size in batch_size_capture_list if size <= max_num_tokens
-            ]
 
-        self.compilation_config.init_with_cudagraph_sizes(batch_size_capture_list)
+            # user-specific compilation_config.max_cudagraph_capture_size get
+            # truncated to valid_max_size when they are inconsistent.
+            valid_max_size = (
+                cudagraph_capture_sizes[-1] if cudagraph_capture_sizes else 0
+            )
+            if (
+                self.compilation_config.max_cudagraph_capture_size is not None
+                and self.compilation_config.max_cudagraph_capture_size != valid_max_size
+            ):
+                # raise error only when both two flags are user-specified
+                # and they are inconsistent with each other
+                if self.compilation_config.cudagraph_capture_sizes is not None:
+                    raise ValueError(
+                        "customized max_cudagraph_capture_size"
+                        f"(={self.compilation_config.max_cudagraph_capture_size}) "
+                        "should be consistent with the max value of "
+                        f"cudagraph_capture_sizes(={valid_max_size})"
+                    )
+
+                logger.warning(
+                    "Truncating max_cudagraph_capture_size to %d",
+                    valid_max_size,
+                )
+            # always set the final max_cudagraph_capture_size
+            self.compilation_config.max_cudagraph_capture_size = valid_max_size
+
+            if self.compilation_config.cudagraph_capture_sizes is not None and len(
+                cudagraph_capture_sizes
+            ) < len(self.compilation_config.cudagraph_capture_sizes):
+                # If users have specified capture sizes, we only need to
+                # compare the lens before and after modification since the modified
+                # list is only the subset of the original list.
+                logger.warning(
+                    (
+                        "cudagraph_capture_sizes specified in compilation_config"
+                        " %s is overridden by config %s"
+                    ),
+                    self.compilation_config.cudagraph_capture_sizes,
+                    cudagraph_capture_sizes,
+                )
+            # always write back the final sizes
+            self.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
+
+        else:
+            # no cudagraph in use
+            self.compilation_config.max_cudagraph_capture_size = 0
+            self.compilation_config.cudagraph_capture_sizes = []
+
+        # complete the remaining process.
+        self.compilation_config.post_init_cudagraph_sizes()
 
     def recalculate_max_model_len(self, max_model_len: int):
         # Can only be called in try_verify_and_update_config
@@ -746,10 +907,13 @@ class VllmConfig:
                     "Overriding `load_format` to 'runai_streamer'"
                 )
                 self.load_config.load_format = "runai_streamer"
-            elif self.load_config.load_format != "runai_streamer":
+            elif self.load_config.load_format not in (
+                "runai_streamer",
+                "runai_streamer_sharded",
+            ):
                 raise ValueError(
                     f"To load a model from S3, 'load_format' "
-                    f"must be 'runai_streamer', "
+                    f"must be 'runai_streamer' or 'runai_streamer_sharded', "
                     f"but got '{self.load_config.load_format}'. "
                     f"Model: {self.model_config.model}"
                 )
@@ -803,6 +967,20 @@ class VllmConfig:
             f"compilation_config={self.compilation_config!r}"
         )
 
+    @model_validator(mode="after")
+    def validate_mamba_block_size(self) -> "VllmConfig":
+        if self.model_config is None:
+            return self
+        mamba_block_size_is_set = (
+            self.cache_config.mamba_block_size is not None
+            and self.cache_config.mamba_block_size != self.model_config.max_model_len
+        )
+        if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
+            raise ValueError(
+                "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
+
 
 _current_vllm_config: VllmConfig | None = None
 _current_prefix: str | None = None
@@ -837,7 +1015,7 @@ def set_current_vllm_config(
 
         if (
             check_compile
-            and vllm_config.compilation_config.level == CompilationLevel.PIECEWISE
+            and vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE
             and compilation_counter.num_models_seen == num_models_seen
         ):
             # If the model supports compilation,

@@ -12,7 +12,6 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 from typing_extensions import deprecated
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -22,12 +21,14 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (
-    cdiv,
-    direct_register_custom_op,
-    get_cuda_view_from_cpu_tensor,
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
+)
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    get_cuda_view_from_cpu_tensor,
 )
 
 logger = init_logger(__name__)
@@ -43,6 +44,14 @@ class WeightsMapper:
     orig_to_new_substr: WeightsMapping = field(default_factory=dict)
     orig_to_new_prefix: WeightsMapping = field(default_factory=dict)
     orig_to_new_suffix: WeightsMapping = field(default_factory=dict)
+
+    def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
+        """Combine two `WeightsMapper`s by merging their mappings."""
+        return WeightsMapper(
+            orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
+            orig_to_new_prefix={**self.orig_to_new_prefix, **other.orig_to_new_prefix},
+            orig_to_new_suffix={**self.orig_to_new_suffix, **other.orig_to_new_suffix},
+        )
 
     def _map_name(self, key: str) -> str | None:
         for substr, new_key in self.orig_to_new_substr.items():
@@ -99,13 +108,13 @@ class AutoWeightsLoader:
     the weights only once.
 
     The weight loading logic for individual modules can be overridden
-    by defining a ``load_weights`` method.
+    by defining a `load_weights` method.
 
     Similarly, the weight loading logic for individual parameters can be
-    overridden by defining a ``weight_loader`` method.
+    overridden by defining a `weight_loader` method.
 
     Detailed weight loading information can be viewed by setting the
-    environment variable ``VLLM_LOGGING_LEVEL=DEBUG``.
+    environment variable `VLLM_LOGGING_LEVEL=DEBUG`.
     """
 
     # Models trained using early version ColossalAI
@@ -372,9 +381,9 @@ def flatten_bn(
     concat: bool = False,
 ) -> list[torch.Tensor] | torch.Tensor:
     """
-    Flatten the ``B`` and ``N`` dimensions of batched multimodal inputs.
+    Flatten the `B` and `N` dimensions of batched multimodal inputs.
 
-    The input tensor should have shape ``(B, N, ...)```.
+    The input tensor should have shape `(B, N, ...)`.
     """
     if isinstance(x, torch.Tensor):
         return x.flatten(0, 1)
@@ -424,12 +433,12 @@ def _merge_multimodal_embeddings(
     is_multimodal: torch.Tensor,
 ) -> torch.Tensor:
     """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
+    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    positions in `inputs_embeds` corresponding to placeholder tokens in
+    `input_ids`.
 
     Note:
-        This updates ``inputs_embeds`` in place.
+        This updates `inputs_embeds` in place.
     """
     if len(multimodal_embeddings) == 0:
         return inputs_embeds
@@ -475,14 +484,14 @@ def merge_multimodal_embeddings(
     placeholder_token_id: int | list[int],
 ) -> torch.Tensor:
     """
-    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
-    positions in ``inputs_embeds`` corresponding to placeholder tokens in
-    ``input_ids``.
+    Merge `multimodal_embeddings` into `inputs_embeds` by overwriting the
+    positions in `inputs_embeds` corresponding to placeholder tokens in
+    `input_ids`.
 
-    ``placeholder_token_id`` can be a list of token ids (e.g, token ids
+    `placeholder_token_id` can be a list of token ids (e.g, token ids
     of img_start, img_break, and img_end tokens) when needed: This means
-    the order of these tokens in the ``input_ids`` MUST MATCH the order of
-    their embeddings in ``multimodal_embeddings`` since we need to
+    the order of these tokens in the `input_ids` MUST MATCH the order of
+    their embeddings in `multimodal_embeddings` since we need to
     slice-merge instead of individually scattering.
 
     For example, if input_ids is "TTTTTSIIIBIIIBIIIETTT", where
@@ -497,7 +506,7 @@ def merge_multimodal_embeddings(
     input_ids for a correct embedding merge.
 
     Note:
-        This updates ``inputs_embeds`` in place.
+        This updates `inputs_embeds` in place.
     """
     if isinstance(placeholder_token_id, list):
         is_multimodal = isin_list(input_ids, placeholder_token_id)
@@ -566,11 +575,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     pin_memory = is_pin_memory_available()
     uva_available = is_uva_available()
 
-    if envs.VLLM_USE_V1:
-        assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-        uva_offloading = True
-    else:
-        uva_offloading = False
+    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
+    uva_offloading = True
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
