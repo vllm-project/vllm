@@ -165,9 +165,8 @@ steps:
       --ignore=entrypoints/openai/correctness/
       --ignore=entrypoints/openai/test_collective_rpc.py
       --ignore=entrypoints/openai/tool_parsers/
-      --ignore=entrypoints/openai/test_vision.py
       --ignore=entrypoints/openai/test_optional_middleware.py
-  # ^ Skip encoder models (test_vision.py, test_optional_middleware.py) on ROCm: https://github.com/vllm-project/vllm/issues/27442
+  # Skip test_optional_middleware.py since encoder models are supported on ROCm: https://github.com/vllm-project/vllm/issues/27442
   - pytest -v -s entrypoints/test_chat_utils.py
 
 - label: Entrypoints Integration Test (Pooling)
@@ -196,7 +195,6 @@ steps:
       --ignore=entrypoints/pooling/openai/test_rerank.py
       --ignore=entrypoints/pooling/openai/test_score.py
       --ignore=entrypoints/pooling/openai/test_truncation.py
-      --ignore=entrypoints/pooling/openai/test_vision_embedding.py
 
 - label: Distributed Tests (4 GPUs) # 35min
   timeout_in_minutes: 50

@@ -1263,8 +1263,6 @@ def pytest_collection_modifyitems(config, items):
         # Encoder-decoder models
         "openai/whisper-small",
         "openai/whisper-large-v3-turbo",
-        "mistralai/Voxtral-Mini-3B-2507",
-        "microsoft/Phi-3.5-vision-instruct",
         # Encoder-only models (cross-encoders, embedding models)
         "cross-encoder/ms-marco-MiniLM-L-6-v2",
         "intfloat/e5-small",
@@ -1272,7 +1270,6 @@ def pytest_collection_modifyitems(config, items):
         "BAAI/bge-reranker-base",
         "BAAI/bge-reranker-v2-m3",
         "BAAI/bge-base-en-v1.5",
-        "TIGER-Lab/VLM2Vec-Full",
         "Snowflake/snowflake-arctic-embed-m-v1.5",
         "sentence-transformers/all-MiniLM-L12-v2",
         "sentence-transformers/stsb-roberta-base-v2",
