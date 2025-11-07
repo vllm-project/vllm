@@ -418,7 +418,7 @@ class SamplingParams(
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to disable prefix_caching at this request.
-            self.disable_prefix_caching = not self.prompt_logprobs
+            self.disable_prefix_caching = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
