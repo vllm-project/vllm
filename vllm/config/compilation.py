@@ -822,20 +822,6 @@ class CompilationConfig:
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_cudagraph_capture_size + 1)
-        ]
-        for end, start in zip(
-            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
-            [0] + self.cudagraph_capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_graph_size[bs] = end
-
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is
         # CompilationMode.VLLM_COMPILE
@@ -972,3 +958,18 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def compute_bs_to_padded_graph_size(self):
+        # pre-compute the mapping from batch size to padded graph size
+        self.bs_to_padded_graph_size = [
+            0 for i in range(self.max_cudagraph_capture_size + 1)
+        ]
+        for end, start in zip(
+            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
+            [0] + self.cudagraph_capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self.bs_to_padded_graph_size[bs] = start
+                else:
+                    self.bs_to_padded_graph_size[bs] = end
