@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionLayer
 from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonDecodeMetadata,
@@ -129,9 +129,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         )
         block_table_tensor = (
             block_table_tensor
-            + torch.arange(0, page_size, device="cuda", dtype=block_table_tensor.dtype)[
-                None, None, :
-            ]
+            + torch.arange(
+                0,
+                page_size,
+                device=block_table_tensor.device,
+                dtype=block_table_tensor.dtype,
+            )[None, None, :]
         )
         block_table_tensor = block_table_tensor.view(bs, -1)
 

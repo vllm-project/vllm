@@ -225,7 +225,7 @@ def apply_rotary_2c(
     interleaved=False,
     inplace=False,
     conjugate=False,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Arguments:
         x: (batch, seqlen, nheads, headdim) if cu_seqlens is None
@@ -283,7 +283,7 @@ def apply_rotary_2c(
     # ValueError: Pointer argument (at 0) cannot be accessed from Triton
     # (cpu tensor?)
     with torch.cuda.device(x.device.index):
-        torch.library.wrap_triton(rotary_kernel)[grid](
+        rotary_kernel[grid](
             output_x,  # data ptrs
             output_y,  # data ptrs
             x,
