@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # ABOUTME: Emits EPS counters to log files and aggregates totals.
 # ABOUTME: Simple JSONL-based reporting for EigenPage Summaries metrics.
 
@@ -6,10 +8,10 @@ from __future__ import annotations
 import json
 import logging
 import time
-from dataclasses import asdict
 from collections import defaultdict
+from collections.abc import Sequence
+from dataclasses import asdict
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from vllm.v1.eps.telemetry import EpsStepCounters
 
@@ -40,6 +42,7 @@ class EpsReporter:
 
         if self._jsonl_path:
             self._jsonl_path.parent.mkdir(parents=True, exist_ok=True)
+            self._logger.debug("Writing EPS metrics to %s", self._jsonl_path)
             with self._jsonl_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps(payload) + "\n")
         else:
@@ -60,12 +63,19 @@ class EpsAggregator:
     def ingest(self, counters: EpsStepCounters) -> None:
         self.steps += 1
         for key in [
-            "pages_total", "pages_visited", "pages_skipped",
-            "pages_unique_total", "pages_unique_kept",
-            "blocks_total", "blocks_kept",
-            "groups_total", "groups_kept",
-            "kv_bytes_total", "kv_bytes_kept",
-            "eps_prepass_ms", "decode_ms",
+            "pages_total",
+            "pages_visited",
+            "pages_skipped",
+            "pages_unique_total",
+            "pages_unique_kept",
+            "blocks_total",
+            "blocks_kept",
+            "groups_total",
+            "groups_kept",
+            "kv_bytes_total",
+            "kv_bytes_kept",
+            "eps_prepass_ms",
+            "decode_ms",
         ]:
             self.cumulative[key] += float(getattr(counters, key, 0.0))
 

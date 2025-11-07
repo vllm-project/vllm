@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
 
 import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import reduce
 from itertools import product
-from typing import TYPE_CHECKING, Any, NamedTuple, Sequence, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -93,15 +94,14 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.eps import (
+    EpsAggregator,
+    EpsForwardContext,
+    EpsJLState,
     EpsReporter,
     EpsRuntimeConfig,
     EpsStepCounters,
-    EpsJLState,
-    EpsAggregator,
     build_eps_forward_context,
     eps_context,
-    jl_update_block,
-    jl_update_once,
     run_union_prepass,
     to_runtime_config,
 )
@@ -238,7 +238,7 @@ class ExecuteModelState(NamedTuple):
     """Ephemeral cached state transferred between execute_model() and
     sample_tokens(), after execute_model() returns None."""
 
-    scheduler_output: "SchedulerOutput"
+    scheduler_output: SchedulerOutput
     logits: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
     spec_decode_common_attn_metadata: CommonAttentionMetadata | None
@@ -270,6 +270,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._eps_union_enabled = self.eps_runtime_config.union_enabled
         self.eps_reporter = EpsReporter(self.eps_runtime_config.metrics_path)
         self.eps_aggregator = EpsAggregator()
+        logger.debug(
+            "EPS runtime config: %s, union_enabled=%s",
+            self.eps_runtime_config,
+            self.eps_runtime_config.union_enabled,
+        )
         self._eps_layer_lookup: dict[str, tuple[int, int]] = {}
         self.latest_eps_counters: EpsStepCounters | None = None
 
@@ -614,7 +619,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         return model_kwargs
 
-    def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
+    def _may_reorder_batch(self, scheduler_output: SchedulerOutput) -> None:
         """
         Update the order of requests in the batch based on the attention
         backend's needs. For example, some attention backends (namely MLA) may
@@ -659,7 +664,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
-    def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
+    def _update_states(self, scheduler_output: SchedulerOutput) -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
 
@@ -945,7 +950,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _extract_mm_kwargs(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
     ) -> BatchedTensorInputs:
         if not scheduler_output or not self.is_multimodal_raw_input_only_model:
             return {}
@@ -1075,7 +1080,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _get_encoder_seq_lens(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         kv_cache_spec: KVCacheSpec,
         num_reqs: int,
     ) -> np.ndarray | None:
@@ -1106,7 +1111,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             block_table = self.input_batch.block_table.block_tables[group_idx]
             max_blocks = block_table.max_num_blocks_per_req
-            num_groups = blocks_to_groups(max_blocks, self.eps_runtime_config.group_blocks)
+            num_groups = blocks_to_groups(
+                max_blocks, self.eps_runtime_config.group_blocks
+            )
             if num_groups <= 0:
                 eps_states.append(None)
                 continue
@@ -1126,7 +1133,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _gather_eps_request_data(
         self, num_reqs: int
-    ) -> tuple[list[str], list[Sequence[EpsJLState | None]], list[tuple[list[int], ...]], list[int]]:
+    ) -> tuple[
+        list[str],
+        list[Sequence[EpsJLState | None]],
+        list[tuple[list[int], ...]],
+        list[int],
+    ]:
         request_ids = [req_id for req_id in self.input_batch.req_ids[:num_reqs]]
         group_count = len(self.input_batch.block_table.block_tables)
         request_states: list[Sequence[EpsJLState | None]] = []
@@ -1147,7 +1159,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _build_eps_context_for_prepass(self, num_reqs: int) -> EpsForwardContext | None:
         if not self._eps_union_enabled or num_reqs <= 0:
             return None
-        request_ids, request_states, request_block_ids, block_sizes = self._gather_eps_request_data(num_reqs)
+        request_ids, request_states, request_block_ids, block_sizes = (
+            self._gather_eps_request_data(num_reqs)
+        )
         ctx = build_eps_forward_context(
             cfg=self.eps_runtime_config,
             layer_lookup=self._eps_layer_lookup,
@@ -1158,7 +1172,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             token_request_indices=None,
             cudagraph_capture=False,
         )
-        ctx.device_union_groups = set(getattr(self, '_eps_backend_union_groups', set()))
+        ctx.device_union_groups = set(getattr(self, "_eps_backend_union_groups", set()))
         return ctx
 
     def _maybe_build_eps_context(
@@ -1171,7 +1185,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if not self._eps_union_enabled or num_reqs <= 0:
             return None
 
-        request_ids, request_states, request_block_ids, block_sizes = self._gather_eps_request_data(num_reqs)
+        request_ids, request_states, request_block_ids, block_sizes = (
+            self._gather_eps_request_data(num_reqs)
+        )
         token_indices = torch.as_tensor(req_indices, dtype=torch.int32, device="cpu")
 
         ctx = build_eps_forward_context(
@@ -1184,16 +1200,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             token_request_indices=token_indices,
             cudagraph_capture=cudagraph_runtime_mode != CUDAGraphMode.NONE,
         )
-        ctx.device_union_groups = set(getattr(self, '_eps_backend_union_groups', set()))
+        ctx.device_union_groups = set(getattr(self, "_eps_backend_union_groups", set()))
         return ctx
-
 
     def get_eps_metrics(self) -> dict[str, float]:
         if not self._eps_union_enabled:
             return {}
         return self.eps_aggregator.snapshot()
 
-    def _run_eps_prepass(self, scheduler_output: "SchedulerOutput") -> None:
+    def _run_eps_prepass(self, scheduler_output: SchedulerOutput) -> None:
         if not self._eps_union_enabled:
             self.latest_eps_counters = None
             return
@@ -1203,13 +1218,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.latest_eps_counters = None
             return
 
-        backend_groups = getattr(self, "_eps_backend_union_groups", set())
-        if backend_groups and len(backend_groups) == len(self.kv_cache_config.kv_cache_groups):
+        backend_groups: set[int] = set(
+            getattr(self, "_eps_backend_union_groups", set())
+        )
+        if backend_groups and len(backend_groups) == len(
+            self.kv_cache_config.kv_cache_groups
+        ):
             self.latest_eps_counters = EpsStepCounters()
             return
 
         block_tables = self.input_batch.block_table.block_tables
-        kv_specs = [group.kv_cache_spec for group in self.kv_cache_config.kv_cache_groups]
+        kv_specs = [
+            group.kv_cache_spec for group in self.kv_cache_config.kv_cache_groups
+        ]
         eps_ctx = self._build_eps_context_for_prepass(num_reqs)
 
         pushed = False
@@ -1235,7 +1256,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.latest_eps_counters = counters
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
+        self, scheduler_output: SchedulerOutput
     ) -> tuple[
         PerLayerAttnMetadata,
         torch.Tensor,
@@ -1246,13 +1267,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         UBatchSlices | None,
         torch.Tensor | None,
         bool,
+        np.ndarray,
     ]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
             logits_indices, spec_decode_metadata,
             num_scheduled_tokens, spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens, use_cascade_attn
+            max_num_scheduled_tokens, use_cascade_attn, req_indices
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1731,7 +1753,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         return common_prefix_len if use_cascade else 0
 
-    def _calc_mrope_positions(self, scheduler_output: "SchedulerOutput"):
+    def _calc_mrope_positions(self, scheduler_output: SchedulerOutput):
         mrope_pos_ptr = 0
         for index, req_id in enumerate(self.input_batch.req_ids):
             req = self.requests[req_id]
@@ -1889,7 +1911,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _batch_mm_kwargs_from_scheduler(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
     ) -> tuple[list[MultiModalKwargsItem], list[tuple[str, PlaceholderRange]]]:
         """Batch multimodal kwargs from scheduled encoder inputs.
 
@@ -1920,7 +1942,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return mm_kwargs, mm_hashes_pos
 
-    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+    def _execute_mm_encoder(self, scheduler_output: SchedulerOutput):
         # Batch the multi-modal inputs using the helper method.
         mm_kwargs, mm_hashes_pos = self._batch_mm_kwargs_from_scheduler(
             scheduler_output
@@ -2002,7 +2024,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _gather_mm_embeddings(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         shift_computed_tokens: int = 0,
     ) -> tuple[list[torch.Tensor], torch.Tensor]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -2090,7 +2112,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _extract_encoder_inputs(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
     ) -> dict[str, torch.Tensor]:
         """Extract encoder inputs for encoder-decoder models.
 
@@ -2308,7 +2330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _preprocess(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         num_input_tokens: int,  # Padded
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> tuple[
@@ -2439,7 +2461,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def _bookkeeping_sync(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         sampler_output: SamplerOutput,
         logits: torch.Tensor | None,
         hidden_states: torch.Tensor,
@@ -2620,7 +2642,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     @torch.inference_mode()
     def execute_model(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
@@ -2740,9 +2762,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         decode_elapsed = (time.perf_counter() - decode_start) * 1000.0
-        device_union_groups = set(getattr(eps_ctx, 'device_union_groups', set())) if eps_ctx is not None else set()
-        use_device_counters = bool(device_union_groups)
-        if use_device_counters:
+        if eps_ctx is not None:
+            device_union_groups = set(getattr(eps_ctx, "device_union_groups", set()))
+        else:
+            device_union_groups = set()
+        if device_union_groups and eps_ctx is not None:
             device_counts = eps_ctx.device_counters or EpsStepCounters()
             eps_ctx.device_counters = device_counts
             if self.latest_eps_counters is None:
@@ -2753,7 +2777,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.latest_eps_counters.decode_ms = decode_elapsed
             self.eps_aggregator.ingest(self.latest_eps_counters)
             if self.eps_reporter is not None:
-                self.eps_reporter.add_step(scheduler_output.req_ids, self.latest_eps_counters)
+                self.eps_reporter.add_step(
+                    scheduler_output.req_ids, self.latest_eps_counters
+                )
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2826,7 +2852,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     @torch.inference_mode
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self, grammar_output: GrammarOutput | None
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.execute_model_state is None:
             # Nothing to do (PP non-final rank case), output isn't used.
@@ -2969,7 +2995,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def propose_draft_token_ids(
         self,
-        scheduler_output: "SchedulerOutput",
+        scheduler_output: SchedulerOutput,
         sampled_token_ids: torch.Tensor | list[list[int]],
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
@@ -3282,7 +3308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def save_tensorized_model(
         self,
-        tensorizer_config: "TensorizerConfig",
+        tensorizer_config: TensorizerConfig,
     ) -> None:
         TensorizerLoader.save_model(
             self.get_model(),
@@ -4282,18 +4308,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         self._eps_backend_union_groups: set[int] = set()
         mapping: dict[str, tuple[int, int]] = {}
-        for group_idx, attn_group in enumerate(self.attn_groups):
+        for group_idx, attn_group_list in enumerate(self.attn_groups):
             group_supports_device = True
-            for layer_idx, layer_name in enumerate(attn_group.layer_names):
-                mapping[layer_name] = (group_idx, layer_idx)
-                layer = layers[layer_name]
-                setattr(layer, "_eps_layer_name", layer_name)
-                setattr(layer, "_eps_layer_index", layer_idx)
-                setattr(layer, "_eps_kv_group_id", group_idx)
-                impl = getattr(layer, "impl", None)
-                supports = getattr(impl, "supports_eps_union", None)
-                if not callable(supports) or not supports():
-                    group_supports_device = False
+            for attn_group in attn_group_list:
+                for layer_idx, layer_name in enumerate(attn_group.layer_names):
+                    mapping[layer_name] = (group_idx, layer_idx)
+                    layer = layers[layer_name]
+                    layer._eps_layer_name = layer_name
+                    layer._eps_layer_index = layer_idx
+                    layer._eps_kv_group_id = group_idx
+                    impl = getattr(layer, "impl", None)
+                    supports = getattr(impl, "supports_eps_union", None)
+                    if not callable(supports) or not supports():
+                        group_supports_device = False
             if group_supports_device:
                 self._eps_backend_union_groups.add(group_idx)
         self._eps_layer_lookup = mapping

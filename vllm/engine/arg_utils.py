@@ -38,8 +38,8 @@ from vllm.config import (
     CompilationConfig,
     ConfigType,
     DeviceConfig,
-    EpsConfig,
     EPLBConfig,
+    EpsConfig,
     KVEventsConfig,
     KVTransferConfig,
     LoadConfig,
@@ -1151,6 +1151,16 @@ class EngineArgs:
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
         )
+        eps_field_names = {field.name for field in dataclasses.fields(EpsConfig)}
+        eps_overrides = {}
+        for name in eps_field_names:
+            cli_key = f"eps_{name}"
+            if hasattr(args, cli_key):
+                eps_overrides[name] = getattr(args, cli_key)
+        if eps_overrides:
+            engine_args.eps_config = dataclasses.replace(
+                engine_args.eps_config, **eps_overrides
+            )
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
