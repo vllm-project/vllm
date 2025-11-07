@@ -3,7 +3,10 @@
 set -ex
 
 # Get release version, default to 1.0.0.dev for nightly/per-commit builds
-RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null | sed 's/^v//' || echo "1.0.0.dev")
+RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null | sed 's/^v//')
+if [ -z "${RELEASE_VERSION}" ]; then
+  RELEASE_VERSION="1.0.0.dev"
+fi
 
 buildkite-agent annotate --style 'info' --context 'release-workflow' << EOF
 To download the wheel (by commit):
