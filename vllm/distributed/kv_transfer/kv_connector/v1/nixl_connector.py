@@ -970,9 +970,6 @@ class NixlConnectorWorker:
         expected_engine_id: str,
     ) -> dict[int, str]:
         """Do a NIXL handshake with a remote instance."""
-
-        start_time = time.perf_counter()
-
         # When target instance TP > local TP, we need to perform multiple
         # handshakes. Do it in a single background job for simplicity.
         # Regardless, only handshake with the remote TP rank(s) that current
@@ -988,6 +985,7 @@ class NixlConnectorWorker:
                     "Querying metadata on path: %s at remote tp rank %s", path, remote_rank
                 )
 
+                start_time = time.perf_counter()
                 # Send query for the request.
                 msg = msgspec.msgpack.encode((GET_META_MSG, remote_rank))
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
@@ -1007,7 +1005,8 @@ class NixlConnectorWorker:
 
                 got_metadata_time = time.perf_counter()
                 logger.debug(
-                    "Querying metadata on path: %s at remote rank %s", path, remote_rank
+                    "NIXL handshake: get metadata took: %s",
+                    got_metadata_time - start_time,
                 )
 
                 # Check compatibility hash BEFORE decoding agent metadata
@@ -1651,9 +1650,6 @@ class NixlConnectorWorker:
                     == nixl_agent_meta.block_lens[i]
                 ), "KV cache sizes must match between P and D when replicated"
         else:
-            if tp_ratio != 1 and self.device_type == "xpu":
-                # XPU uses NHD, hence it does not support splitting on H
-                raise ValueError("Heterogeneous TP is not supported on XPU")
             # When MLA is not used, this is a list of the same block length
             for block_len in nixl_agent_meta.block_lens:
                 assert block_len == remote_block_len, (
@@ -2101,7 +2097,7 @@ class NixlConnectorWorker:
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote_engine_id,
-                remote_request_id=meta.remote_request_id
+                remote_request_id=meta.remote_request_id,
                 local_block_ids=meta.local_physical_block_ids,
                 remote_block_ids=meta.remote_block_ids,
                 remote_rank=remote_rank,
