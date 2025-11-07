@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -141,7 +142,12 @@ class KVConnectorMetadata(ABC):  # noqa: B024
 
 
 class KVConnectorBase_V1(ABC):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
             "subject to change in the future as we iterate the design."
@@ -152,6 +158,14 @@ class KVConnectorBase_V1(ABC):
             self._kv_transfer_config = vllm_config.kv_transfer_config
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
+        self._kv_cache_config = kv_cache_config
+        if self._kv_cache_config is None:
+            logger.warning(
+                "KVConnectorBase_V1 initialized without kv_cache_config. "
+                "This is deprecated - please update your connector to accept "
+                "kv_cache_config as the third constructor argument and pass it "
+                "to super().__init__()."
+            )
         self._role = role
 
     @property
