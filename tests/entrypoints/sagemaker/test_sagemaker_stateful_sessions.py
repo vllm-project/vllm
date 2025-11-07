@@ -4,16 +4,16 @@
 
 import openai  # use the official client for correctness check
 import pytest
-import pytest_asyncio
 import requests
 
-from ..utils import RemoteOpenAIServer
+from ...utils import RemoteOpenAIServer
+from .conftest import (
+    HEADER_SAGEMAKER_CLOSED_SESSION_ID,
+    HEADER_SAGEMAKER_NEW_SESSION_ID,
+    HEADER_SAGEMAKER_SESSION_ID,
+    MODEL_NAME_SMOLLM,
+)
 
-# any model with a chat template should work here
-HEADER_SAGEMAKER_CLOSED_SESSION_ID = "X-Amzn-SageMaker-Closed-Session-Id"
-HEADER_SAGEMAKER_SESSION_ID = "X-Amzn-SageMaker-Session-Id"
-HEADER_SAGEMAKER_NEW_SESSION_ID = "X-Amzn-SageMaker-New-Session-Id"
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 CLOSE_BADREQUEST_CASES = [
     (
         "nonexistent_session_id",
@@ -25,31 +25,10 @@ CLOSE_BADREQUEST_CASES = [
 ]
 
 
-@pytest.fixture(scope="module")
-def server():  # noqa: F811
-    args = [
-        # use half precision for speed and memory savings in CI environment
-        "--dtype",
-        "bfloat16",
-        "--max-model-len",
-        "8192",
-        "--enforce-eager",
-    ]
-
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
-
-
 @pytest.mark.asyncio
-async def test_create_session_badrequest(server: RemoteOpenAIServer):
+async def test_create_session_badrequest(basic_server_with_lora: RemoteOpenAIServer):
     bad_response = requests.post(
-        server.url_for("invocations"),
+        basic_server_with_lora.url_for("invocations"),
         json={"requestType": "NEW_SESSION", "extra-field": "extra-field-data"},
     )
 
@@ -62,14 +41,14 @@ async def test_create_session_badrequest(server: RemoteOpenAIServer):
     CLOSE_BADREQUEST_CASES,
 )
 async def test_close_session_badrequest(
-    server: RemoteOpenAIServer,
+    basic_server_with_lora: RemoteOpenAIServer,
     test_name: str,
     session_id_change: dict[str, str],
     request_body_change: dict[str, str],
     expected_error: str | None,
 ):
     # first attempt to create a session
-    url = server.url_for("invocations")
+    url = basic_server_with_lora.url_for("invocations")
     create_response = requests.post(url, json={"requestType": "NEW_SESSION"})
     create_response.raise_for_status()
     valid_session_id, expiration = create_response.headers.get(
@@ -102,10 +81,10 @@ async def test_close_session_badrequest(
 
 @pytest.mark.asyncio
 async def test_close_session_invalidrequest(
-    server: RemoteOpenAIServer, client: openai.AsyncOpenAI
+    basic_server_with_lora: RemoteOpenAIServer, async_client: openai.AsyncOpenAI
 ):
     # first attempt to create a session
-    url = server.url_for("invocations")
+    url = basic_server_with_lora.url_for("invocations")
     create_response = requests.post(url, json={"requestType": "NEW_SESSION"})
     create_response.raise_for_status()
     valid_session_id, expiration = create_response.headers.get(
@@ -133,9 +112,9 @@ async def test_close_session_invalidrequest(
 
 
 @pytest.mark.asyncio
-async def test_session(server: RemoteOpenAIServer):
+async def test_session(basic_server_with_lora: RemoteOpenAIServer):
     # first attempt to create a session
-    url = server.url_for("invocations")
+    url = basic_server_with_lora.url_for("invocations")
     create_response = requests.post(url, json={"requestType": "NEW_SESSION"})
     create_response.raise_for_status()
     valid_session_id, expiration = create_response.headers.get(
@@ -146,7 +125,7 @@ async def test_session(server: RemoteOpenAIServer):
     # test invocation with session id
 
     request_args = {
-        "model": MODEL_NAME,
+        "model": MODEL_NAME_SMOLLM,
         "prompt": "what is 1+1?",
         "max_completion_tokens": 5,
         "temperature": 0.0,
@@ -154,7 +133,7 @@ async def test_session(server: RemoteOpenAIServer):
     }
 
     invocation_response = requests.post(
-        server.url_for("invocations"),
+        basic_server_with_lora.url_for("invocations"),
         headers={HEADER_SAGEMAKER_SESSION_ID: valid_session_id},
         json=request_args,
     )

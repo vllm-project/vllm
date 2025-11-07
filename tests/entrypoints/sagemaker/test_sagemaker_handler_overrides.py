@@ -22,9 +22,10 @@ import tempfile
 import pytest
 import requests
 
-from ..utils import RemoteOpenAIServer
-
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+from ...utils import RemoteOpenAIServer
+from .conftest import (
+    MODEL_NAME_SMOLLM,
+)
 
 
 class TestHandlerOverrideIntegration:
@@ -140,7 +141,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 # Customer tests their server and sees their overrides work
                 # automatically
                 ping_response = requests.get(server.url_for("ping"))
@@ -150,7 +153,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 invoke_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                     },
@@ -223,7 +226,9 @@ async def my_invoke(request: Request):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 ping_response = requests.get(server.url_for("ping"))
                 assert ping_response.status_code == 200
                 ping_data = ping_response.json()
@@ -231,7 +236,7 @@ async def my_invoke(request: Request):
                 invoke_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                     },
@@ -312,7 +317,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 ping_response = requests.get(server.url_for("ping"))
                 assert ping_response.status_code == 200
                 ping_data = ping_response.json()
@@ -320,7 +327,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 invoke_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                     },
@@ -394,7 +401,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 ping_response = requests.get(server.url_for("ping"))
                 assert ping_response.status_code == 200
                 ping_data = ping_response.json()
@@ -402,7 +411,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 invoke_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                     },
@@ -452,7 +461,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
         except ImportError:
             env_dict = {}
 
-        with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as server:
+        with RemoteOpenAIServer(MODEL_NAME_SMOLLM, args, env_dict=env_dict) as server:
             # Test that default ping works
             ping_response = requests.get(server.url_for("ping"))
             assert ping_response.status_code == 200
@@ -461,7 +470,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
             invoke_response = requests.post(
                 server.url_for("invocations"),
                 json={
-                    "model": MODEL_NAME,
+                    "model": MODEL_NAME_SMOLLM,
                     "messages": [{"role": "user", "content": "Hello"}],
                     "max_tokens": 5,
                 },
@@ -552,7 +561,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 # Test ping handler override
                 ping_response = requests.get(server.url_for("ping"))
                 assert ping_response.status_code == 200
@@ -566,7 +577,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 invoke_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                     },
@@ -691,7 +702,9 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 # Test ping handler priority
                 ping_response = requests.get(server.url_for("ping"))
                 assert ping_response.status_code == 200
@@ -705,7 +718,7 @@ async def custom_sagemaker_invocation_handler(request: Request):
                 invoke_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                     },
@@ -719,57 +732,3 @@ async def custom_sagemaker_invocation_handler(request: Request):
 
         finally:
             os.unlink(script_path)
-
-    @pytest.mark.asyncio
-    async def test_disable_sagemaker_standards_flag(self):
-        """Test that --disable-sagemaker-standards flag actually disables
-        SageMaker features."""
-
-        # Test with SageMaker standards disabled
-        disabled_args = [
-            "--dtype",
-            "bfloat16",
-            "--max-model-len",
-            "2048",
-            "--enforce-eager",
-            "--max-num-seqs",
-            "32",
-            "--disable-sagemaker-standards",
-        ]
-
-        with RemoteOpenAIServer(MODEL_NAME, disabled_args) as server:
-            # Basic endpoints should still work when disabled
-            ping_response = requests.get(server.url_for("ping"))
-            assert ping_response.status_code == 200
-
-            # Standard OpenAI endpoints should work
-            chat_response = requests.post(
-                server.url_for("v1/chat/completions"),
-                json={
-                    "model": MODEL_NAME,
-                    "messages": [{"role": "user", "content": "Hello"}],
-                    "max_tokens": 5,
-                },
-            )
-            assert chat_response.status_code == 200
-
-            # Test that SageMaker-specific features are disabled
-            # The invocations endpoint should either not exist or not process
-            # SageMaker headers
-            invocation_response = requests.post(
-                server.url_for("invocations"),
-                json={
-                    "model": MODEL_NAME,
-                    "messages": [{"role": "user", "content": "Hello"}],
-                    "max_tokens": 5,
-                },
-            )
-
-            # When SageMaker standards are disabled, the invocations endpoint
-            # should either:
-            # 1. Return 404 (endpoint doesn't exist), or
-            # 2. Return 200 but without SageMaker-specific processing
-            assert invocation_response.status_code in [
-                200,
-                404,
-            ], f"Unexpected status code: {invocation_response.status_code}"

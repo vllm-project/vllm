@@ -12,9 +12,10 @@ import tempfile
 import pytest
 import requests
 
-from ..utils import RemoteOpenAIServer
-
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+from ...utils import RemoteOpenAIServer
+from .conftest import (
+    MODEL_NAME_SMOLLM,
+)
 
 
 class TestMiddlewareIntegration:
@@ -120,12 +121,14 @@ async def customer_output_formatter(response):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 # Test 1: Middlewares applied to chat/completions endpoint
                 chat_response = requests.post(
                     server.url_for("v1/chat/completions"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                         "temperature": 0.0,
@@ -156,7 +159,7 @@ async def customer_output_formatter(response):
                 invocations_response = requests.post(
                     server.url_for("invocations"),
                     json={
-                        "model": MODEL_NAME,
+                        "model": MODEL_NAME_SMOLLM,
                         "messages": [{"role": "user", "content": "Hello"}],
                         "max_tokens": 5,
                         "temperature": 0.0,
@@ -227,7 +230,9 @@ async def ping_tracking_middleware(request, call_next):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 # Test ping endpoint with middleware
                 response = requests.get(server.url_for("ping"))
 
@@ -311,7 +316,9 @@ async def env_post_process(response):
                 "32",
             ]
 
-            with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_vars) as server:
+            with RemoteOpenAIServer(
+                MODEL_NAME_SMOLLM, args, env_dict=env_vars
+            ) as server:
                 response = requests.get(server.url_for("ping"))
                 assert response.status_code == 200
 

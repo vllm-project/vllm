@@ -1624,8 +1624,7 @@ def build_app(args: Namespace) -> FastAPI:
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
-    if not args.disable_sagemaker_standards:
-        app = sagemaker_standards.bootstrap(app)
+    app = sagemaker_standards.bootstrap(app)
 
     return app
 
