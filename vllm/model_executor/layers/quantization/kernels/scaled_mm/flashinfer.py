@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.platforms import current_platform
@@ -10,7 +12,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
-from .utils import apply_weights_fp8
 
 
 def flashinfer_w8a8_scaled_mm(
@@ -29,13 +30,6 @@ def flashinfer_w8a8_scaled_mm(
 
 
 class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    def get_ouput_padding(self) -> int | None:
-        return None
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return 100
-
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
@@ -71,21 +65,12 @@ class FlashInferScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             )
         return True, None
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ):
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        return apply_weights_fp8(
-            flashinfer_w8a8_scaled_mm,
-            self.quant_fp8,
-            w,
-            x,
-            w_s,
-            x_s,
-            bias,
-            x_s_ub,
-            self.config.out_dtype,
-        )
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 100
+
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        return flashinfer_w8a8_scaled_mm
+
+    def get_ouput_padding(self) -> int | None:
+        return None

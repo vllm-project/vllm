@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
 from packaging import version
 
@@ -11,7 +13,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
-from .utils import apply_weights_fp8
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
@@ -155,24 +156,8 @@ class PerTensorTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
             )
         return True, None
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ):
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        return apply_weights_fp8(
-            torch_per_tensor_w8a8_scaled_mm,
-            self.quant_fp8,
-            w,
-            x,
-            w_s,
-            x_s,
-            bias,
-            x_s_ub,
-            self.config.out_dtype,
-        )
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        return torch_per_tensor_w8a8_scaled_mm
 
 
 class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
@@ -209,24 +194,8 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
         return True, None
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ):
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        return apply_weights_fp8(
-            torch_row_wise_w8a8_scaled_mm,
-            self.quant_fp8,
-            w,
-            x,
-            w_s,
-            x_s,
-            bias,
-            x_s_ub,
-            self.config.out_dtype,
-        )
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        return torch_row_wise_w8a8_scaled_mm
 
 
 class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
@@ -245,21 +214,5 @@ class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 
         return True, None
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ):
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        return apply_weights_fp8(
-            torch_channelwise_w8a8_scaled_mm,
-            self.quant_fp8,
-            w,
-            x,
-            w_s,
-            x_s,
-            bias,
-            x_s_ub,
-            self.config.out_dtype,
-        )
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        return torch_channelwise_w8a8_scaled_mm

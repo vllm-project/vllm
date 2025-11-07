@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, TypeVar
 
@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -98,11 +99,8 @@ class FP8ScaledMMLinearKernel(
             group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_ouput_padding(),
         )
+        self.fp8_dtype = current_platform.fp8_dtype()
         super().__init__(c, layer_param_names)
-
-    @abstractmethod
-    def get_ouput_padding(self) -> int | None:
-        raise NotImplementedError
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -120,6 +118,53 @@ class FP8ScaledMMLinearKernel(
             getattr(layer, x_s),
             getattr(layer, x_s_ub),
         )
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        scaled_mm_func = self.get_scaled_mm_func()
+        quant_fp8 = self.quant_fp8
+        fp8_dtype = self.fp8_dtype
+        maybe_out_dtype = self.config.out_dtype
+        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
+
+        #   ops.scaled_fp8_quant supports both dynamic and static quant.
+        #   If dynamic, layer.input_scale is None and x_s computed from x.
+        #   If static, layer.input_scale is scalar and x_s is input_scale.
+        # View input as 2D matrix for fp8 methods
+        x_2d = x.view(-1, x.shape[-1])
+        output_shape = [*x.shape[:-1], w.shape[1]]
+        out_dtype = x.dtype if maybe_out_dtype is None else maybe_out_dtype
+
+        # If input not quantized
+        # TODO(luka) remove this path if not used anymore
+        x_2d_q = x_2d
+        if x.dtype != fp8_dtype:
+            x_2d_q, x_s = quant_fp8(
+                x_2d,
+                x_s,
+                x_s_ub,
+            )
+        return scaled_mm_func(
+            A=x_2d_q,
+            B=w,
+            out_dtype=out_dtype,
+            As=x_s,
+            Bs=w_s,
+            bias=bias,
+            output_shape=output_shape,
+        )
+
+    @abstractmethod
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_ouput_padding(self) -> int | None:
+        raise NotImplementedError
 
 
 class Int8ScaledMMLinearKernel(

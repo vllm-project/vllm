@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from collections.abc import Callable
+
 import torch
 
 from vllm import _custom_ops as ops
@@ -17,7 +19,6 @@ from .ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
-from .utils import apply_weights_fp8
 
 
 def cutlass_w8a8_scaled_mm_fp8(
@@ -160,9 +161,6 @@ class CutlassScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
 
 class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    def get_ouput_padding(self) -> int | None:
-        return None
-
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
@@ -174,21 +172,8 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         return True, None
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ):
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        return apply_weights_fp8(
-            cutlass_w8a8_scaled_mm_fp8,
-            self.quant_fp8,
-            w,
-            x,
-            w_s,
-            x_s,
-            bias,
-            x_s_ub,
-            self.config.out_dtype,
-        )
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        return cutlass_w8a8_scaled_mm_fp8
+
+    def get_ouput_padding(self) -> int | None:
+        return None

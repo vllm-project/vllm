@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
+
 import torch
 
 import vllm.envs as envs
@@ -12,7 +14,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
-from .utils import apply_weights_fp8
 
 
 def rocm_per_tensor_float_w8a8_scaled_mm_impl(
@@ -86,9 +87,6 @@ direct_register_custom_op(
 
 
 class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    def get_ouput_padding(self) -> int | None:
-        return None
-
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         # TODO: check if this causes an issue on non-ROCM platforms
@@ -125,21 +123,8 @@ class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             )
         return True, None
 
-    def apply_weights(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ):
-        w, w_s, x_s, x_s_ub = self._get_layer_params(layer)
-        return apply_weights_fp8(
-            rocm_per_tensor_float_w8a8_scaled_mm,
-            self.quant_fp8,
-            w,
-            x,
-            w_s,
-            x_s,
-            bias,
-            x_s_ub,
-            self.config.out_dtype,
-        )
+    def get_scaled_mm_func(self) -> Callable[..., torch.Tensor]:
+        return rocm_per_tensor_float_w8a8_scaled_mm
+
+    def get_ouput_padding(self) -> int | None:
+        return None
