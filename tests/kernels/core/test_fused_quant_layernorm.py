@@ -27,7 +27,7 @@ NUM_TOKENS_HIDDEN_SIZES = [
 
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
-GROUP_SIZES = [None, [1, 128]]
+GROUP_SIZES = [None, [1, 64], [1, 128]]
 SEEDS = [0]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
