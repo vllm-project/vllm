@@ -89,7 +89,6 @@ if current_platform.is_rocm():
 class ROCmScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        # TODO: check if this causes an issue on non-ROCM platforms
         from vllm.platforms.rocm import on_mi3xx
 
         per_tensor_activation_scales = (
