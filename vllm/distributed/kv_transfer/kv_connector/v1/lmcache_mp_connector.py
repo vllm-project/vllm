@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import enum
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, Optional, cast
 
 import torch
 import zmq
@@ -14,15 +16,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
-    LMCacheMPRequestMetadata,
-    LMCacheMPRequestState,
-    LMCacheMPRequestTracker,
     LMCacheMPSchedulerAdapter,
     LMCacheMPWorkerAdapter,
-    convert_block_hashes_to_bytes,
+    LoadStoreOp,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
@@ -75,7 +76,7 @@ def create_scheduler_adapter(
 
 def create_worker_adapter(
     server_url: str, zmq_context: zmq.Context, vllm_config: VllmConfig
-) -> LMCacheMPSchedulerAdapter:
+) -> LMCacheMPWorkerAdapter:
     # TODO: have a helper function to calculate the correct rank and
     # world size for the MLA and other models
     return LMCacheMPWorkerAdapter(
@@ -86,6 +87,226 @@ def create_worker_adapter(
         vllm_config.parallel_config.rank,
         vllm_config.cache_config.block_size,
     )
+
+
+def convert_block_hashes_to_bytes(
+    block_hashes: list["BlockHash"],
+) -> list[bytes]:
+    return cast(list[bytes], block_hashes)
+
+
+class LMCacheMPRequestState(enum.Enum):
+    """
+    State machine:
+    PREFETCHING -- update_state_after_alloc --> WAITING_FOR_LOAD
+    WAITING_FOR_LOAD -- process_loading_requests --> READY
+    """
+
+    PREFETCHING = enum.auto()
+    WAITING_FOR_LOAD = enum.auto()
+    READY = enum.auto()
+
+
+@dataclass
+class LMCacheMPRequestTracker:
+    # NOTE: this class used vLLM data structures, should be part of
+    # vLLM integration code
+
+    request_id: str
+
+    # Read-only lists to track the token ids and block hashes
+    all_token_ids: ConstantList[int]
+    block_hashes: ConstantList["BlockHash"]
+
+    # Block ids and hashes will be updated at update_states_after_alloc and
+    # during the generation
+    allocated_block_ids: list[int] = field(default_factory=list)
+
+    # Number of scheduled tokens in this request. We keep tracking this to
+    # avoid saving half-full blocks.
+    num_scheduled_tokens: int = 0
+
+    # Number of blocks stored will be initialized when lookup the external
+    # hit tokens and will be updated when processing new requests and cached
+    # requests.
+    num_stored_blocks: int = 0
+
+    # Staging load operation -- save vllm and lmcache hit tokens during lookup
+    num_vllm_hit_blocks: int = 0
+    num_lmcache_hit_blocks: int = 0
+
+    # Main state
+    state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
+
+    def __init__(self, request: "Request"):
+        self.request_id = request.request_id
+        self.all_token_ids = request.all_token_ids
+        self.block_hashes = ConstantList(request.block_hashes)
+        self.allocated_block_ids = []
+        self.num_stored_blocks = 0
+        self.num_vllm_hit_blocks = 0
+        self.num_lmcache_hit_blocks = 0
+        self.state = LMCacheMPRequestState.PREFETCHING
+
+    ####
+    # Check the state of the request
+    ####
+    def needs_retrieve(self) -> bool:
+        """Check whether the current request needs retrieve, will be used
+        update_stage_after_alloc"""
+        return (
+            self.num_lmcache_hit_blocks > self.num_vllm_hit_blocks
+            and self.state != LMCacheMPRequestState.READY
+        )
+
+    def is_ready_for_retrieving(self) -> bool:
+        """Check whether the current request is ready for retrieving,
+        will be used in process_loading_requests"""
+        return (
+            self.state == LMCacheMPRequestState.WAITING_FOR_LOAD
+            and self.needs_retrieve()
+        )
+
+    ####
+    # Update internal states
+    ####
+    def increase_num_scheduled_tokens(self, num_new_tokens: int):
+        self.num_scheduled_tokens += num_new_tokens
+
+    def increase_num_stored_blocks(self, num_new_blocks: int):
+        """Increase the number of stored blocks for the current request
+        This function will be called when processing the cached requests.
+        """
+        self.num_stored_blocks += num_new_blocks
+        # NOTE: when having a new request, we will first see the num computed
+        # tokens before seeing the allocated block ids.
+        # assert self.num_stored_blocks <= len(self.allocated_block_ids), \
+        #        "The number of stored blocks should not exceed the number "\
+        #        "of allocated blocks"
+
+    def update_block_ids(
+        self,
+        new_block_ids: list[int],
+    ):
+        """Update the block ids for the current request
+        This function will be called when processing the cached requests.
+        """
+        self.allocated_block_ids.extend(new_block_ids)
+
+    ####
+    # For debugging
+    ####
+    def __repr__(self) -> str:
+        return (
+            f"LMCacheMPRequestTracker(request_id={self.request_id}, "
+            f"num_tokens={len(self.all_token_ids)}, "
+            f"num_block_hashes={len(self.block_hashes)}, "
+            f"num_allocated_blocks={len(self.allocated_block_ids)}, "
+            f"num_stored_blocks={self.num_stored_blocks}, "
+            f"vllm_hit_blocks={self.num_vllm_hit_blocks}, "
+            f"lmcache_hit_blocks={self.num_lmcache_hit_blocks}, "
+            f"state={self.state})"
+        )
+
+    def __str__(self) -> str:
+        return self.__repr__()
+
+
+@dataclass
+class LMCacheMPRequestMetadata:
+    request_id: str
+    direction: Literal["STORE", "RETRIEVE"]
+    op: LoadStoreOp
+
+    @staticmethod
+    def GetStoreMetadata(
+        tracker: LMCacheMPRequestTracker,
+        blocks_in_chunk: int,
+        vllm_block_size: int,
+    ) -> "LMCacheMPRequestMetadata | None":
+        """
+        Generate the store metadata for the current request tracker.
+
+        Args:
+            tracker: The request tracker to generate the metadata from.
+            blocks_in_chunk: the number of blocks in a LMCache data chunk
+        """
+        # Store the blocks that has block hashes
+        # NOTE: the invariant here is that `num_stored_blocks` should
+        # always be a multiple of `blocks_in_chunk`
+        # TODO: This should be checked everytime we update the num_stored_blocks
+        min_available_blocks = min(
+            len(tracker.block_hashes),
+            len(tracker.allocated_block_ids),
+            tracker.num_scheduled_tokens // vllm_block_size,
+        )
+        num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
+        num_chunks = num_staging_blocks // blocks_in_chunk
+
+        if num_chunks >= 1:
+            start = tracker.num_stored_blocks
+            end = start + num_chunks * blocks_in_chunk
+            block_hashes = convert_block_hashes_to_bytes(
+                tracker.block_hashes[start:end]
+            )
+            block_ids = tracker.allocated_block_ids[start:end]
+
+            ret = LMCacheMPRequestMetadata(
+                request_id=tracker.request_id,
+                direction="STORE",
+                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+            )
+
+            # Update the request tracker
+            tracker.increase_num_stored_blocks(end - start)
+            return ret
+
+        return None
+
+    @staticmethod
+    def GetRetrieveMetadata(
+        tracker: LMCacheMPRequestTracker,
+        blocks_in_chunk: int,
+    ) -> "LMCacheMPRequestMetadata | None":
+        """
+        Generate the retrieve metadata for the current request tracker.
+
+        Args:
+            tracker: The request tracker to generate the metadata from.
+            blocks_in_chunk: the number of blocks in a LMCache data chunk
+        """
+        if not tracker.is_ready_for_retrieving():
+            return None
+
+        # |---------------------|-----------------|----------------|
+        # | num_vllm_hit_blocks |
+        # | lmcache chunk 1   | lmcache chunk 2   |
+        #                     |  need to retrieve |
+
+        start = tracker.num_vllm_hit_blocks // blocks_in_chunk * blocks_in_chunk
+        end = tracker.num_lmcache_hit_blocks
+        assert end % blocks_in_chunk == 0, (
+            "The number of LMCache hit blocks should be a multiple of the "
+            "number of blocks in a lmcache chunk. "
+        )
+        assert len(tracker.block_hashes) >= end, (
+            "The number of block hashes should be greater than or equal to the "
+            "number of LMCache hit blocks. "
+        )
+        if end > start:
+            block_hashes = convert_block_hashes_to_bytes(
+                tracker.block_hashes[start:end]
+            )
+            block_ids = tracker.allocated_block_ids[start:end]
+
+            ret = LMCacheMPRequestMetadata(
+                request_id=tracker.request_id,
+                direction="RETRIEVE",
+                op=LoadStoreOp(block_hashes=block_hashes, block_ids=block_ids),
+            )
+            return ret
+
+        return None
 
 
 class LMCacheMPConnectorMetadata(KVConnectorMetadata):
