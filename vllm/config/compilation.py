@@ -251,13 +251,6 @@ class CompilationConfig:
     disabled when running with Inductor: mode>=VLLM_COMPILE and use_inductor=True.
     Inductor generates (fused) Triton kernels for disabled custom ops."""
     splitting_ops: list[str] | None = None
-
-    """
-    Provide control over whether to compile the multimodal encoder 
-    such as Qwen2_5_vl 
-    """
-    compile_mm_encoder: bool = True
-
     """A list of ops to exclude from cudagraphs, used in piecewise compilation.
 
     The behavior depends on use_inductor_graph_partition:
@@ -275,6 +268,9 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    compile_mm_encoder: bool = True
+    """Whether or not to compile the multimodal encoder.
+    Currently, this only works for `Qwen2_5_vl`."""
 
     # Inductor capture
     use_inductor: bool | None = None
