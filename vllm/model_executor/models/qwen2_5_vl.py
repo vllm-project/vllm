@@ -67,6 +67,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -464,6 +465,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         "seqlens": 0,
     },
     mark_unbacked_dims={"seqlens": 0},
+    enable_if=should_torch_compile_mm_vit,
 )
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
@@ -529,7 +531,8 @@ class Qwen2_5_VisionBlock(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
-    }
+    },
+    enable_if=should_torch_compile_mm_vit,
 )
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -560,7 +563,8 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
-    }
+    },
+    enable_if=should_torch_compile_mm_vit,
 )
 class Qwen2_5_VisionPatchMerger(nn.Module):
     def __init__(
