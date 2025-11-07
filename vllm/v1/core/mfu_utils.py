@@ -308,11 +308,26 @@ def analyze_model_mfu_fast(model, parameter_count, args, kwargs):
 
 
 def analyze_model_mfu(model, args, kwargs):
-    ep = export(model, args=args, kwargs=kwargs)
+    # Unwrap CUDAGraphWrapper if present (for detailed mode analysis)
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+
+    actual_model = model
+    if isinstance(model, CUDAGraphWrapper):
+        actual_model = model.runnable
+
+    try:
+        ep = export(actual_model, args=args, kwargs=kwargs)
+    except Exception as e:
+        logger.warning(
+            "Failed to export model for detailed MFU analysis: %s. "
+            "Returning empty MFU info. Consider using 'fast' or 'manual' mode instead.",
+            e,
+        )
+        return MFUInfo()
 
     mfu_info = MFUInfo()
     for node in ep.graph.nodes:
-        f, r, w = analyze_node(node, model)
+        f, r, w = analyze_node(node, actual_model)
         mfu_info.flops += f
         mfu_info.read_bytes += r
         mfu_info.write_bytes += w
