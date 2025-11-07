@@ -610,7 +610,28 @@ class MessageQueue:
         reader_rank: int = 0,
         blocking: bool = False,
     ):
-        """Create a message queue from ranks."""
+        """
+        Creates a MessageQueue for a process group with a single reader.
+
+        This method is designed for scenarios where only one process (the reader)
+        will consume messages, and all other processes are writers. It sets up
+        the shared memory buffer and communication handles accordingly, and
+        gathers the handles from all processes to the reader.
+
+        Args:
+            pg (ProcessGroup): The torch distributed process group.
+            max_chunk_bytes (int): Maximum size in bytes for each chunk in the buffer.
+            max_chunks (int): Maximum number of chunks in the buffer.
+            reader_rank (int, optional): The global rank that will act as the reader.
+                Defaults to 0.
+            blocking (bool, optional): If True, blocks until all processes are ready.
+                Defaults to False.
+
+        Returns:
+            tuple[MessageQueue, list[Handle]]:
+            The MessageQueue instance for the calling process,
+            and a list of handles (only non-empty for the reader process).
+        """
         local_size = torch.cuda.device_count()
         rank = dist.get_rank()
         same_node = rank // local_size == reader_rank // local_size
