@@ -14,6 +14,8 @@ from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
+from .utils import supports_pdl
+
 
 @triton.jit
 def _lora_shrink_kernel(
@@ -43,6 +45,7 @@ def _lora_shrink_kernel(
     SPLIT_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
     SLICE_NUM: tl.constexpr,
+    USE_GDC: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
@@ -83,7 +86,6 @@ def _lora_shrink_kernel(
     cta_lora_seq_indices = (
         token_indices_sorted_by_lora_ids + lora_m_indices_start + cta_m_offset
     )
-
     # Load all relevant row indices.
     offset_m = tl.arange(0, BLOCK_M) % cta_m_len
     ram = tl.load(cta_lora_seq_indices + offset_m)
@@ -118,6 +120,7 @@ def _lora_shrink_kernel(
         EVEN_K,
         SPLIT_K,
         SLICE_NUM,
+        USE_GDC,
     )
 
 
@@ -217,7 +220,7 @@ def _lora_shrink(
         # thread blocks exit early.
         MAX_LORAS,
     )
-
+    use_gdc = supports_pdl(inputs.device)
     _lora_shrink_kernel[grid](
         inputs,
         lora_ptr_tensor,
@@ -245,9 +248,11 @@ def _lora_shrink(
         SPLIT_K,
         GROUP_SIZE_M,
         NUM_SLICES,
+        use_gdc,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
         num_stages=NUM_STAGES,
+        launch_pdl=use_gdc,
     )
 
     return
