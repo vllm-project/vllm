@@ -165,6 +165,7 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
 
 class MistralTokenizer(TokenizerBase):
     def __init__(self, tokenizer: "TransformersMistralTokenizer") -> None:
+        from mistral_common.protocol.instruct.validator import ValidationMode
         from mistral_common.tokens.tokenizers.sentencepiece import (
             SentencePieceTokenizer,
         )
@@ -174,6 +175,14 @@ class MistralTokenizer(TokenizerBase):
         self.mistral = tokenizer.tokenizer
         self.instruct = self.mistral.instruct_tokenizer
         self.tokenizer = self.instruct.tokenizer
+
+        mode = self.mistral._chat_completion_request_validator._mode
+        if mode != ValidationMode.test:
+            raise ValueError(
+                "Mistral tokenizer must be in test mode. Make sure to "
+                "set `mode='ValidationMode.test'` when creating the "
+                "Mistral tokenizer."
+            )
 
         _mistral_version_str = str(self.tokenizer.version.value)
         self.version: int = int(_mistral_version_str.split("v")[-1])
@@ -205,6 +214,7 @@ class MistralTokenizer(TokenizerBase):
     def from_pretrained(
         cls, path_or_repo_id: str, *, revision: str | None = None
     ) -> "MistralTokenizer":
+        from mistral_common.protocol.instruct.validator import ValidationMode
         from transformers.tokenization_mistral_common import (
             MistralCommonTokenizer as TransformersMistralTokenizer,
         )
@@ -212,7 +222,7 @@ class MistralTokenizer(TokenizerBase):
         str_revision = "main" if revision is None else revision
         return cls(
             TransformersMistralTokenizer.from_pretrained(
-                path_or_repo_id, revision=str_revision
+                path_or_repo_id, revision=str_revision, mode=ValidationMode.test
             )
         )
 
@@ -339,20 +349,14 @@ class MistralTokenizer(TokenizerBase):
         max_length: int | None = None,
         add_special_tokens: bool | None = None,
     ) -> list[int]:
-        if add_special_tokens is not None:
-            return self.transformers_tokenizer.encode(
-                text,
-                truncation=truncation,
-                max_length=max_length,
-                add_special_tokens=add_special_tokens,
-            )
-        else:
-            encoded = self.tokenizer.encode(text, bos=True, eos=False)
+        encoded = self.tokenizer.encode(
+            text, bos=add_special_tokens is not False, eos=False
+        )
 
-            if truncation is not False and max_length is not None:
-                return encoded[:max_length]
-            else:
-                return encoded
+        if truncation is not False and max_length is not None:
+            return encoded[:max_length]
+        else:
+            return encoded
 
     def apply_chat_template(
         self,
@@ -383,6 +387,9 @@ class MistralTokenizer(TokenizerBase):
         )
 
     def decode(self, ids: list[int] | int, skip_special_tokens: bool = True) -> str:
+        if isinstance(ids, int):
+            ids = [ids]
+
         return self.transformers_tokenizer.decode(
             ids, skip_special_tokens=skip_special_tokens
         )

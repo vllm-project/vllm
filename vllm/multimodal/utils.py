@@ -20,6 +20,7 @@ import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
 from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
+from vllm.utils.registry import ExtensionManager
 
 from .audio import AudioMediaIO
 from .base import MediaIO
@@ -46,7 +47,10 @@ atexit.register(global_thread_pool.shutdown)
 
 _M = TypeVar("_M")
 
+MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
+
+@MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
     def __init__(
         self,
@@ -440,7 +444,9 @@ def group_mm_kwargs_by_modality(
 
             if device is not None:
                 mm_kwargs_group = json_map_leaves(
-                    lambda x: x.to(device=device) if isinstance(x, torch.Tensor) else x,
+                    lambda x: x.to(device=device, non_blocking=True)
+                    if isinstance(x, torch.Tensor)
+                    else x,
                     mm_kwargs_group,
                 )
         else:
