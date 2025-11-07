@@ -572,7 +572,7 @@ class VllmConfig:
             logger.warning(
                 "Warning Compilation was disabled by user settings,"
                 "Optimizations settings that are only active during"
-                "compiliation will be ignored."
+                "compilation will be ignored."
             )
 
         def has_blocked_weights():
