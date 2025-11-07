@@ -71,126 +71,71 @@ class OptimizationLevel(Enum):
     """O3: Currently the same as -O2s."""
 
 
-def build_defaults(
-    optimization_level: OptimizationLevel,
-    compilation_config: CompilationConfig,
-    model_config: ModelConfig | None = None,
-):
-    # If user does not set custom ops via none or all set it here based on
-    # compilation mode and backend. Since mode may depend on optmization level
-    # we handle this case separately here.
+is_quantized = False
+is_dense = False
+# The optimizations that depend on these properties currently set to False
+# in all cases.
+# if model_config is not None:
+#     is_quantized = lambda c: c.model_config.is_quantized()
+#     is_sequential = lambda c: not c.model_config.is_model_moe()
+# See https://github.com/vllm-project/vllm/issues/25689.
 
-    mode = compilation_config.mode
-    if mode is None:
-        if optimization_level.value > OptimizationLevel.O0.value:
-            mode = CompilationMode.VLLM_COMPILE
-        else:
-            mode = CompilationMode.NONE
 
-    if all(s not in compilation_config.custom_ops for s in ("all", "none")):
-        if compilation_config.backend == "inductor" and mode > CompilationMode.NONE:
-            compilation_config.custom_ops.append("none")
-        else:
-            compilation_config.custom_ops.append("all")
+def enable_fusion(cfg):
+    """Returns True if RMS norm or quant FP8 is enabled."""
+    return cfg.compilation_config.is_custom_op_enabled(
+        "rms_norm"
+    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
-    is_quantized = False
-    is_dense = False
-    # The optimizations that depend on these properties currently set to False
-    # in all cases.
-    # if model_config is not None:
-    #     is_quantized = lambda c: c.model_config.is_quantized()
-    #     is_sequential = lambda c: not c.model_config.is_model_moe()
-    # See https://github.com/vllm-project/vllm/issues/25689.
 
-    def enable_fusion(cfg):
-        """Returns True if RMS norm or quant FP8 is enabled."""
-        return cfg.compilation_config.is_custom_op_enabled(
-            "rms_norm"
-        ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
-
-    optimization_level_00 = {
-        "general": {
-            "pass_config": {
-                "enable_noop": False,
-                "enable_fusion": False,
-                "enable_fi_allreduce_fusion": False,
-            },
-            "mode": mode,
-            "cudagraph_mode": CUDAGraphMode.NONE,
-            "use_inductor_graph_partition": False,
-        },
-        "is_quantized": {"pass_config": {"enable_attn_fusion": False}},
-        "is_sequential": {
-            "pass_config": {
-                "enable_sequence_parallelism": False,
-                "enable_async_tp": False,
-            }
-        },
-    }
-    optimization_level_01 = {
-        "general": {
-            "pass_config": {
-                "enable_noop": True,
-                "enable_fusion": enable_fusion,
-                "enable_fi_allreduce_fusion": False,
-            },
-            "mode": mode,
-            "cudagraph_mode": CUDAGraphMode.PIECEWISE,
-            "use_inductor_graph_partition": False,
-        },
-        "is_quantized": {"pass_config": {"enable_attn_fusion": False}},
-        "is_sequential": {
-            "pass_config": {
-                "enable_sequence_parallelism": False,
-                "enable_async_tp": False,
-            }
-        },
-    }
-    optimization_level_02 = {
-        "general": {
-            "pass_config": {
-                "enable_noop": True,
-                "enable_fusion": enable_fusion,
-                "enable_fi_allreduce_fusion": False,
-            },
-            "mode": mode,
-            "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-            "use_inductor_graph_partition": False,
-        },
-        "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
-        "is_sequential": {
-            "pass_config": {
-                "enable_sequence_parallelism": is_dense,
-                "enable_async_tp": is_dense,
-            }
-        },
-    }
-    optimization_level_03 = {
-        "general": {
-            "pass_config": {
-                "enable_noop": True,
-                "enable_fusion": enable_fusion,
-                "enable_fi_allreduce_fusion": False,
-            },
-            "mode": mode,
-            "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
-            "use_inductor_graph_partition": False,
-        },
-        "is_quantized": {"pass_config": {"enable_attn_fusion": is_quantized}},
-        "is_sequential": {
-            "pass_config": {
-                "enable_sequence_parallelism": is_dense,
-                "enable_async_tp": is_dense,
-            }
-        },
-    }
-    optimization_level_to_config = {
-        OptimizationLevel.O0: optimization_level_00,
-        OptimizationLevel.O1: optimization_level_01,
-        OptimizationLevel.O2: optimization_level_02,
-        OptimizationLevel.O3: optimization_level_03,
-    }
-    return optimization_level_to_config[optimization_level]
+optimization_level_00 = {
+    "pass_config": {
+        "enable_noop": False,
+        "enable_fusion": False,
+        "enable_fi_allreduce_fusion": False,
+        "enable_attn_fusion": False,
+        "enable_sequence_parallelism": False,
+        "enable_async_tp": False,
+    },
+    "cudagraph_mode": CUDAGraphMode.NONE,
+    "use_inductor_graph_partition": False,
+}
+optimization_level_01 = {
+    "pass_config": {
+        "enable_noop": True,
+        "enable_fusion": enable_fusion,
+        "enable_fi_allreduce_fusion": False,
+        "enable_attn_fusion": False,
+        "enable_sequence_parallelism": False,
+        "enable_async_tp": False,
+    },
+    "cudagraph_mode": CUDAGraphMode.PIECEWISE,
+    "use_inductor_graph_partition": False,
+}
+optimization_level_02 = {
+    "pass_config": {
+        "enable_noop": True,
+        "enable_fusion": enable_fusion,
+        "enable_fi_allreduce_fusion": False,
+        "enable_attn_fusion": is_quantized,
+        "enable_sequence_parallelism": is_dense,
+        "enable_async_tp": is_dense,
+    },
+    "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+    "use_inductor_graph_partition": False,
+}
+optimization_level_03 = {
+    "pass_config": {
+        "enable_noop": True,
+        "enable_fusion": enable_fusion,
+        "enable_fi_allreduce_fusion": False,
+        "enable_attn_fusion": is_quantized,
+        "enable_sequence_parallelism": is_dense,
+        "enable_async_tp": is_dense,
+    },
+    "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
+    "use_inductor_graph_partition": False,
+}
 
 
 @config
@@ -457,9 +402,9 @@ class VllmConfig:
             - (DYNAMO_TRACE_ONCE): Full optimization
             - (VLLM_COMPILE): Maximum optimization with autotuning
         """
-        for k, v in default_config["general"].items():
+        for k, v in default_config.items():
             if k == "pass_config":
-                for pass_k, pass_v in default_config["general"]["pass_config"].items():
+                for pass_k, pass_v in default_config["pass_config"].items():
                     self._set_config_default(
                         self.compilation_config.pass_config, pass_k, pass_v
                     )
@@ -467,12 +412,6 @@ class VllmConfig:
                 self._set_config_default(self.compilation_config, k, v)
 
         assert self.optimization_level is not None
-
-        for k, v in default_config["is_quantized"]["pass_config"].items():
-            self._set_config_default(self.compilation_config.pass_config, k, v)
-
-        for k, v in default_config["is_sequential"]["pass_config"].items():
-            self._set_config_default(self.compilation_config.pass_config, k, v)
 
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
@@ -592,12 +531,32 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
-        # Apply optimization level-specific defaults
-        default_config = build_defaults(
-            optimization_level=self.optimization_level,
-            compilation_config=self.compilation_config,
-            model_config=self.model_config,
-        )
+        if self.compilation_config.mode is None:
+            if self.optimization_level.value > OptimizationLevel.O0.value:
+                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
+            else:
+                self.compilation_config.mode = CompilationMode.NONE
+
+        if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
+            if (
+                self.compilation_config.backend == "inductor"
+                and self.compilation_config.mode > CompilationMode.NONE
+            ):
+                self.compilation_config.custom_ops.append("none")
+            else:
+                self.compilation_config.custom_ops.append("all")
+
+        if self.optimization_level == OptimizationLevel.O0:
+            default_config = optimization_level_00
+        elif self.optimization_level == OptimizationLevel.O1:
+            default_config = optimization_level_01
+        elif self.optimization_level == OptimizationLevel.O2:
+            default_config = optimization_level_02
+        elif self.optimization_level == OptimizationLevel.O3:
+            default_config = optimization_level_03
+        else:
+            raise ValueError(f"Unknown optimization level: {self.optimization_level}")
+
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
@@ -608,7 +567,9 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_sequence_parallelism = True
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             if "-rms_norm" in self.compilation_config.custom_ops:
-                logger.warning("RMS norm force enabled, sequence parallelism might break")
+                logger.warning(
+                    "RMS norm force enabled, sequence parallelism might break"
+                )
             else:
                 self.compilation_config.custom_ops.append("+rms_norm")
 

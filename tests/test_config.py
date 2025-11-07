@@ -18,7 +18,13 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
-from vllm.config.vllm import OptimizationLevel, build_defaults
+from vllm.config.vllm import (
+    OptimizationLevel,
+    optimization_level_00,
+    optimization_level_01,
+    optimization_level_02,
+    optimization_level_03,
+)
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -622,24 +628,18 @@ def test_vllm_config_defaults_are_none():
     config.compilation_config = CompilationConfig()
     config.optimization_level = OptimizationLevel.O0
     config.model_config = None
-    default_config = build_defaults(
-        optimization_level=config.optimization_level,
-        compilation_config=config.compilation_config,
-        model_config=config.model_config,
-    )
 
-    for k in default_config["general"]:
-        if k == "pass_config":
-            for pass_k in default_config["general"]["pass_config"]:
-                assert getattr(config.compilation_config.pass_config, pass_k) is None
-        else:
+    # Use the global optimization level defaults
+    default_config = optimization_level_00
+
+    # Verify that all pass_config values are None before defaults are applied
+    for pass_k in default_config["pass_config"]:
+        assert getattr(config.compilation_config.pass_config, pass_k) is None
+
+    # Verify that other config values are None before defaults are applied
+    for k in default_config:
+        if k != "pass_config":
             assert getattr(config.compilation_config, k) is None
-
-    for k in default_config["is_quantized"]["pass_config"]:
-        assert getattr(config.compilation_config.pass_config, k) is None
-
-    for k in default_config["is_sequential"]["pass_config"]:
-        assert getattr(config.compilation_config.pass_config, k) is None
 
 
 @pytest.mark.parametrize(
@@ -702,35 +702,28 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
             optimization_level=optimization_level,
         )
 
-    default_config = build_defaults(
-        optimization_level=optimization_level,
-        compilation_config=vllm_config.compilation_config,
-        model_config=model_config,
-    )
+    # Use the global optimization level defaults
+    if optimization_level == OptimizationLevel.O0:
+        default_config = optimization_level_00
+    elif optimization_level == OptimizationLevel.O1:
+        default_config = optimization_level_01
+    elif optimization_level == OptimizationLevel.O2:
+        default_config = optimization_level_02
+    else:
+        default_config = optimization_level_03
 
-    # Verify general defaults
-    for k, v in default_config["general"].items():
-        if k == "pass_config":
-            for pass_k, pass_v in default_config["general"]["pass_config"].items():
-                actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
-                expected = pass_v(vllm_config) if callable(pass_v) else pass_v
-                assert actual == expected
-        else:
+    # Verify pass_config defaults
+    for pass_k, pass_v in default_config["pass_config"].items():
+        actual = getattr(vllm_config.compilation_config.pass_config, pass_k)
+        expected = pass_v(vllm_config) if callable(pass_v) else pass_v
+        assert actual == expected
+
+    # Verify other config defaults
+    for k, v in default_config.items():
+        if k != "pass_config":
             actual = getattr(vllm_config.compilation_config, k)
             expected = v(vllm_config) if callable(v) else v
             assert actual == expected
-
-    # Verify quantized-specific defaults
-    for k, v in default_config["is_quantized"]["pass_config"].items():
-        actual = getattr(vllm_config.compilation_config.pass_config, k)
-        expected = v(vllm_config) if callable(v) else v
-        assert actual == expected
-
-    # Verify sequential-specific defaults
-    for k, v in default_config["is_sequential"]["pass_config"].items():
-        actual = getattr(vllm_config.compilation_config.pass_config, k)
-        expected = v(vllm_config) if callable(v) else v
-        assert actual == expected
 
 
 def test_vllm_config_callable_defaults():
