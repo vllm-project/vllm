@@ -1898,25 +1898,40 @@ def topk_softmax(
 
 def grouped_topk(
     scores: torch.Tensor,
-    scores_with_bias: torch.Tensor,
     num_expert_group: int,
     topk_group: int,
     topk: int,
     renormalize: bool,
     routed_scaling_factor: float,
+    bias: torch.Tensor,
+    scoring_func: int = 0,
 ):
+    """
+    Perform grouped top-k routing for mixture of experts.
+
+    Args:
+        scores: Raw inputs (logits if scoring_func=1, scores if scoring_func=0)
+        num_expert_group: Number of expert groups
+        topk_group: Number of groups to select
+        topk: Number of experts to select per token
+        renormalize: Whether to renormalize the output weights
+        routed_scaling_factor: Scaling factor for routing weights
+        bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
+        scoring_func: 0=none (no activation), 1=sigmoid
+    """
     if not current_platform.is_cuda():
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA platforms"
         )
     return torch.ops._moe_C.grouped_topk(
         scores,
-        scores_with_bias,
         num_expert_group,
         topk_group,
         topk,
         renormalize,
         routed_scaling_factor,
+        bias,
+        scoring_func,
     )
 
 
