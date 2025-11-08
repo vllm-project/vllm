@@ -326,7 +326,7 @@ class DeepseekV2MoE(nn.Module):
             num_expert_group=getattr(config, "n_group", 1),
             topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
+            scoring_func=getattr(config, "scoring_func", "softmax"),
             # we do scaling outside, set factor to 1.0 to avoid double mul
             # aiter applies routed_scaling_factor internally
             routed_scaling_factor=1.0
