@@ -32,18 +32,42 @@ class TestPreemptAndAsyncScheduling:
     )
 
     def test_with_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
-        """Test consistency of combos of async scheduling, preemption,
-        uni/multiproc executor, and various sampling parameters."""
+        """Test consistency of combos of async scheduling, spec decoding."""
 
+        # use no_spec_decoding with async_scheduling as baseline run,
+        # the main puspose is to validate spec decoding with async_scheduling
+        # doesn't  make accuracy worser.
         self.preempt_and_async_scheduling_e2e(
             monkeypatch,
             MTP_MODEL,
             [{}],
-            spec_configs=[{"method": "mtp", "num_speculative_tokens": 1}, None],
+            test_preemptions=[False],
+            executors=["mp"],
+            async_schedulings=[True],
+            spec_configs=[None, {"method": "mtp", "num_speculative_tokens": 2}],
+        )
+
+    def test_acceptance_rate_with_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
+        """Test consistency and acceptance rate of combos of
+        async scheduling, spec decoding.
+        """
+        # use spec_decoding with sync_scheduling as baseline run,
+        # then it's convenient to validate async_scheduling with spec_decoding
+        # doesn't make acceptance rate worser.
+        self.preempt_and_async_scheduling_e2e(
+            monkeypatch,
+            MTP_MODEL,
+            [{}],
+            test_preemptions=[False],
+            executors=["mp"],
+            async_schedulings=[False, True],
+            spec_configs=[{"method": "mtp", "num_speculative_tokens": 2}],
         )
 
     def test_without_spec_decoding(
-        self, sample_json_schema, monkeypatch: pytest.MonkeyPatch
+        self,
+        sample_json_schema,
+        monkeypatch: pytest.MonkeyPatch,
     ):
         """Test consistency of combos of async scheduling, preemption,
         uni/multiproc executor with spec decoding."""
@@ -62,7 +86,13 @@ class TestPreemptAndAsyncScheduling:
             ),
         ]
         self.preempt_and_async_scheduling_e2e(
-            monkeypatch, MODEL, sampling_param_tests, [None]
+            monkeypatch,
+            MODEL,
+            sampling_param_tests,
+            test_preemptions=[False, True],
+            executors=["mp", "uni"],
+            async_schedulings=[False, True],
+            spec_configs=[None],
         )
 
     @dynamo_config.patch(cache_size_limit=16)
@@ -71,6 +101,9 @@ class TestPreemptAndAsyncScheduling:
         monkeypatch: pytest.MonkeyPatch,
         model: str,
         sampling_param_tests: list[dict[str, Any]],
+        test_preemptions: list[bool],
+        executors: list[str],
+        async_schedulings: list[bool],
         spec_configs: list[dict | None],
     ):
         """Test consistency of combos of async scheduling, preemption,
@@ -80,9 +113,9 @@ class TestPreemptAndAsyncScheduling:
             m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
             # m.setenv("VLLM_BATCH_INVARIANT", "1")
             outputs: list[tuple[str, list, list]] = []
-            for test_preemption in [False, True]:
-                for executor in ["mp", "uni"]:
-                    for async_scheduling in [False, True]:
+            for test_preemption in test_preemptions:
+                for executor in executors:
+                    for async_scheduling in async_schedulings:
                         for spec_config in spec_configs:
                             spec_decoding = spec_config is not None
                             cache_arg: dict[str, Any] = (

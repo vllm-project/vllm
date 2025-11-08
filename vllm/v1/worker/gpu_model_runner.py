@@ -546,7 +546,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pin_memory=self.pin_memory,
         )
         self.valid_sampled_token_count_cpu = torch.empty(
-            self.max_model_len,
+            self.max_num_reqs,
             dtype=torch.int64,
             device="cpu",
             pin_memory=self.pin_memory,
@@ -768,8 +768,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
-
             req_index = self.input_batch.req_id_to_index.get(req_id)
+            prev_req_index = (
+                self.input_batch.prev_req_id_to_index.get(req_id)
+                if self.input_batch.prev_req_id_to_index
+                else None
+            )
             # prev_num_draft_len is used in async scheduling mode with
             # spec decode. it indicates if need to update num_computed_tokens
             # of the request. for example:
@@ -785,10 +789,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # when prev_num_draft_len > 0.
             if (
                 self.use_async_scheduling
-                and req_index is not None
+                and prev_req_index is not None
                 and (prev_draft_tokens_len := req_state.prev_num_draft_len)
             ):
-                num_accepted = valid_sampled_token_count[req_index] - 1
+                num_accepted = valid_sampled_token_count[prev_req_index] - 1
                 num_rejected = prev_draft_tokens_len - num_accepted
                 num_computed_tokens -= num_rejected
 
@@ -872,12 +876,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, []
             )
-            req_state.prev_num_draft_len = len(spec_token_ids)
+            num_spec_tokens = len(spec_token_ids)
+            req_state.prev_num_draft_len = num_spec_tokens
             # in the async scheduling mode, token_ids_cpu assigned from
             # spec_token_ids are placeholders and will be overwritten in
             # _prepare_input_ids.
             if spec_token_ids:
-                num_spec_tokens = len(spec_token_ids)
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
                 end_token_index = start_index + num_spec_tokens
                 self.input_batch.token_ids_cpu[
@@ -893,6 +897,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # even when speculative decoding is enabled.
             self.input_batch.spec_token_ids[req_index] = spec_token_ids
 
+            # there are no draft tokens with async scheduling,
+            # we clear the spec_decoding info in scheduler_output and
+            # use normal sampling but rejection_sampling.
+            if (
+                self.use_async_scheduling
+                and self._draft_token_ids is None
+                and scheduler_output.total_num_scheduled_spec_tokens
+            ):
+                scheduler_output.total_num_scheduled_spec_tokens -= num_spec_tokens
+                scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
+                scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
+                scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
@@ -2439,7 +2455,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # These will be copied into input_ids in the next step
             # when preparing inputs.
             # With spec decoding, this is done in propose_draft_token_ids().
-            if not self.num_spec_tokens:
+            if spec_decode_metadata is None:
                 assert sampled_token_ids.shape[-1] == 1
                 self.input_batch.prev_sampled_token_ids = sampled_token_ids
             self.input_batch.prev_req_id_to_index = {
@@ -2571,6 +2587,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "State error: sample_tokens() must be called "
                 "after execute_model() returns None."
             )
+
+        # self._draft_token_ids is None when `input_fits_in_drafter=False`
+        # and there is no draft tokens scheduled. so it need to update the
+        # spec_decoding info in scheduler_output with async_scheduling.
+        # use deepcopy to avoid the modification has influence on the
+        # scheduler_output in engine core process.
+        # TODO(Ronald1995): deepcopy is expensive when there is a large
+        # number of requests, optimize it later.
+        if (
+            self.use_async_scheduling
+            and self._draft_token_ids is None
+            and scheduler_output.total_num_scheduled_spec_tokens
+        ):
+            scheduler_output = deepcopy(scheduler_output)
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
@@ -2808,10 +2839,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             + self.speculative_config.num_speculative_tokens
             <= effective_drafter_max_model_len
         )
-        if use_padded_batch_for_eagle and input_fits_in_drafter:
-            # EAGLE speculative decoding can use the GPU sampled tokens
-            # as inputs, and does not need to wait for bookkeeping to finish.
-            propose_draft_token_ids(sampler_output.sampled_token_ids)
+        if use_padded_batch_for_eagle:
+            if input_fits_in_drafter:
+                # EAGLE speculative decoding can use the GPU sampled tokens
+                # as inputs, and does not need to wait for bookkeeping to finish.
+                propose_draft_token_ids(sampler_output.sampled_token_ids)
+            elif self.use_async_scheduling:
+                # input_fits_in_drafter is false, but _draft_token_ids are generated
+                # at this step, so we need to prepare the next token ids
+                # and valid sampled token count with actutally sampled tokens.
+                if self._draft_token_ids is not None:
+                    next_token_ids, valid_sampled_tokens_count = (
+                        self.drafter.prepare_next_token_ids_padded(
+                            spec_decode_common_attn_metadata,
+                            sampler_output.sampled_token_ids,
+                            self.requests,
+                            self.input_batch,
+                            self.discard_request_indices.gpu,
+                            self.num_discarded_requests,
+                        )
+                    )
+                    self._copy_valid_sampled_token_count(
+                        next_token_ids, valid_sampled_tokens_count
+                    )
+                    self._draft_token_ids = None
+                else:
+                    # No draft tokens available, all requests are sampled
+                    # normally but rejection sampling.
+                    self.valid_sampled_token_count_cpu.fill_(1)
 
         with record_function_or_nullcontext("Bookkeep"):
             (
@@ -2885,6 +2940,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             draft_token_ids = self._draft_token_ids
         self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
+
+    def _copy_valid_sampled_token_count(
+        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
+    ) -> None:
+        if self.valid_sampled_token_count_event is not None:
+            default_stream = torch.cuda.current_stream()
+            # initialize a new stream to overlap the copy operation with
+            # prepare_input of draft model.
+            with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
+                self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
+                self.valid_sampled_token_count_cpu[
+                    : valid_sampled_tokens_count.shape[0]
+                ].copy_(valid_sampled_tokens_count, non_blocking=True)
+                self.valid_sampled_token_count_event.record()
+
+            self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
 
     def propose_draft_token_ids(
         self,
@@ -2973,22 +3044,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.num_discarded_requests,
                     )
                 )
-                if self.valid_sampled_token_count_event is not None:
-                    default_stream = torch.cuda.current_stream()
-                    # initialize a new stream to overlap the copy operation with
-                    # prepare_input of draft model.
-                    with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
-                        self.valid_sampled_token_count_copy_stream.wait_stream(  # type: ignore
-                            default_stream
-                        )
-                        self.valid_sampled_token_count_cpu[
-                            : valid_sampled_tokens_count.shape[0]
-                        ].copy_(valid_sampled_tokens_count, non_blocking=True)
-                        self.valid_sampled_token_count_event.record()
-
-                    self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(
-                        1
-                    )
+                self._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count
+                )
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
