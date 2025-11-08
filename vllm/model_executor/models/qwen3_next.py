@@ -1387,7 +1387,7 @@ def fused_gdn_gating(
     seq_len = 1
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
     g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
-    beta_output = torch.empty(1, batch, num_heads, dtype=torch.float32, device=b.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
     fused_gdn_gating_kernel[grid](
         g,
         beta_output,
