@@ -1,0 +1,308 @@
+# ============================================================
+# LIBRECHAT CONFIGURATION - POWERFUL LOCAL AI STACK
+# ============================================================
+
+version: 1.2.5
+
+# ============================================================
+# CACHE SETTINGS
+# ============================================================
+cache: true
+
+# ============================================================
+# REGISTRATION & AUTHENTICATION
+# ============================================================
+registration:
+  socialLogins: []
+  allowedDomains: []
+
+# ============================================================
+# MEMORY CONFIGURATION
+# ============================================================
+memory:
+  disabled: false
+  personalize: true
+  tokenLimit: 4000
+  messageWindowSize: 10
+  validKeys:
+    - user_preferences
+    - conversation_context
+    - learned_facts
+    - personal_information
+    - technical_knowledge
+    - project_context
+  agent:
+    provider: ollama
+    model: granite4:latest
+    baseURL: http://ollama:11434/v1
+    apiKey: ollama
+
+# ============================================================
+# ENDPOINTS - OLLAMA INTEGRATION
+# ============================================================
+endpoints:
+  # Main Ollama Endpoint
+  custom:
+    - name: "Ollama"
+      apiKey: "ollama"
+      baseURL: "http://ollama:11434/v1"
+      models:
+        default:
+          - "granite4:latest"
+          - "qwen3-embedding:4b"
+        fetch: true  # Auto-discover models
+      titleConvo: true
+      titleMethod: "completion"
+      titleModel: "current_model"
+      summarize: true
+      summaryModel: "current_model"
+      forcePrompt: false
+      modelDisplayLabel: "Ollama (Local)"
+      dropParams:
+        - "user"
+        - "frequency_penalty"
+        - "presence_penalty"
+      # Enable all capabilities
+      capabilities:
+        - "execute_code"
+        - "file_search"
+        - "artifacts"
+        - "context"
+        - "ocr"
+        - "chain"
+        - "web_search"
+
+# ============================================================
+# AGENTS CONFIGURATION
+# ============================================================
+agents:
+  disableBuilder: false
+  maxAgentActions: 25
+
+  # Agent capabilities
+  capabilities:
+    execute_code:
+      enabled: true
+      endpoint: "http://code.librechat.ai"
+
+    file_search:
+      enabled: true
+      ragAPI: "http://rag_api:8000"
+
+    artifacts:
+      enabled: true
+      showShadcnInstructions: true
+      customPromptMode: false
+
+    context:
+      enabled: true
+      ocr: true
+
+    chain:
+      enabled: true
+      maxChainDepth: 10
+
+    web_search:
+      enabled: true
+      providers:
+        - tavily
+        - google
+
+  # Built-in tools
+  tools:
+    - name: "wolfram"
+      enabled: true
+    - name: "calculator"
+      enabled: true
+    - name: "web-browser"
+      enabled: true
+    - name: "image-generation"
+      enabled: true
+      providers:
+        - "dalle-3"
+        - "stable-diffusion"
+
+  # Predefined agents
+  presets:
+    - id: "researcher"
+      name: "Research Assistant"
+      description: "Expert at web search, RAG, and memory recall"
+      model: "granite4:latest"
+      capabilities:
+        - "web_search"
+        - "file_search"
+        - "context"
+      systemPrompt: |
+        You are a meticulous research assistant. Always:
+        1. Search memory for relevant context
+        2. Use RAG to find supporting documents
+        3. Verify with web search when needed
+        4. Cite sources accurately
+        5. Save important findings to memory
+
+    - id: "coder"
+      name: "Code Expert"
+      description: "Programming assistant with code execution"
+      model: "granite4:latest"
+      capabilities:
+        - "execute_code"
+        - "file_search"
+        - "artifacts"
+      systemPrompt: |
+        You are an expert programmer. Always:
+        1. Recall user's tech stack preferences from memory
+        2. Search documentation via RAG
+        3. Write clean, tested code
+        4. Execute code to verify functionality
+        5. Generate interactive artifacts for demos
+
+    - id: "collaborator"
+      name: "Team Collaborator"
+      description: "Multi-agent workflow orchestrator"
+      model: "granite4:latest"
+      capabilities:
+        - "chain"
+        - "file_search"
+        - "web_search"
+        - "context"
+      systemPrompt: |
+        You orchestrate complex tasks by chaining specialized agents.
+        Break down requests into subtasks and delegate appropriately.
+
+    - id: "brainstormer"
+      name: "Creative Brainstormer"
+      description: "Ideas and visual artifacts generator"
+      model: "granite4:latest"
+      capabilities:
+        - "artifacts"
+        - "web_search"
+        - "context"
+      systemPrompt: |
+        You are a creative brainstorming partner.
+        Generate mind maps, diagrams, and interactive visualizations.
+        Use memory to build on previous ideas.
+
+# ============================================================
+# RAG API CONFIGURATION
+# ============================================================
+ragAPI:
+  enabled: true
+  url: "http://rag_api:8000"
+
+  # File upload settings
+  fileConfig:
+    endpoints:
+      - "ollama"
+      - "agents"
+    maxSize: 100  # MB
+    supportedMimeTypes:
+      - "application/pdf"
+      - "text/plain"
+      - "text/markdown"
+      - "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      - "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      - "text/csv"
+
+  # Retrieval settings
+  retrieval:
+    topK: 10
+    finalK: 4  # After reranking
+    useFullContext: false
+    similarityThreshold: 0.5
+
+# ============================================================
+# FILE HANDLING
+# ============================================================
+fileConfig:
+  serverFileSizeLimit: 100  # MB
+  avatarSizeLimit: 2  # MB
+
+  endpoints:
+    assistants:
+      fileLimit: 20
+      supportedMimeTypes:
+        - "image/*"
+        - "application/pdf"
+
+    openAI:
+      disabled: false
+
+    default:
+      totalSizeLimit: 500  # MB
+
+# ============================================================
+# INTERFACE CUSTOMIZATION
+# ============================================================
+interface:
+  privacyPolicy:
+    externalUrl: ""
+    openNewTab: true
+
+  termsOfService:
+    externalUrl: ""
+    openNewTab: true
+
+  endpointsMenu: true
+  modelSelect: true
+  parameters: true
+  sidePanel: true
+
+  # Branding
+  appTitle: "Local AI Stack"
+  customFooter: "Powered by LibreChat + mem0 + Qdrant + Ollama"
+
+# ============================================================
+# RATE LIMITING
+# ============================================================
+rateLimits:
+  conversationsImport:
+    ipMax: 100
+    ipWindowInMinutes: 60
+    userMax: 50
+    userWindowInMinutes: 60
+
+  fileUploads:
+    ipMax: 1000
+    ipWindowInMinutes: 60
+    userMax: 500
+    userWindowInMinutes: 60
+
+# ============================================================
+# LOGGING & TELEMETRY
+# ============================================================
+logging:
+  level: "info"
+  format: "json"
+
+violationLogs:
+  enabled: true
+
+# ============================================================
+# SECURITY
+# ============================================================
+moderation:
+  enabled: false  # Set to true if using moderation API
+
+# ============================================================
+# ADVANCED FEATURES
+# ============================================================
+artifacts:
+  enabled: true
+  showShadcnInstructions: true
+
+speech:
+  enabled: false  # Enable if you want TTS/STT
+
+# ============================================================
+# MODEL CONTEXT PROTOCOL (MCP)
+# ============================================================
+# mcpServers:
+#   filesystem:
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+#
+#   github:
+#     command: "npx"
+#     args: ["-y", "@modelcontextprotocol/server-github"]
+#     env:
+#       GITHUB_TOKEN: "your_github_token"

@@ -1,0 +1,246 @@
+# ============================================================
+# MEM0 / OPENMEMORY CONFIGURATION
+# ============================================================
+
+version: v1.1
+
+# ============================================================
+# LLM CONFIGURATION (Ollama - Granite4)
+# ============================================================
+llm:
+  provider: ollama
+  config:
+    model: granite4:latest
+    ollama_base_url: http://ollama:11434
+    temperature: 0.7
+    max_tokens: 4096
+    top_p: 0.9
+    # Memory extraction settings
+    system_prompt: |
+      Extract and structure important information from the conversation.
+      Focus on:
+      - User preferences and habits
+      - Important facts and decisions
+      - Technical requirements and constraints
+      - Personal context and background
+      - Project-specific information
+
+      Format as structured, searchable memories.
+
+# ============================================================
+# EMBEDDER CONFIGURATION (Qwen3-Embedding)
+# ============================================================
+embedder:
+  provider: ollama
+  config:
+    model: qwen3-embedding:4b
+    ollama_base_url: http://ollama:11434
+    embedding_dims: 4096
+    # Embedding model specific settings
+    truncate: false
+    options:
+      temperature: 0  # Deterministic embeddings
+
+# ============================================================
+# VECTOR STORE (Qdrant)
+# ============================================================
+vector_store:
+  provider: qdrant
+  config:
+    collection_name: mem0_memories
+    url: http://qdrant:6333
+    api_key: null  # No auth for local
+    on_disk: true
+    embedding_model_dims: 4096
+
+    # Qdrant-specific optimizations
+    quantization_config:
+      scalar:
+        type: int8
+        quantile: 0.99
+        always_ram: false
+
+    hnsw_config:
+      m: 16
+      ef_construct: 100
+      full_scan_threshold: 10000
+
+    # Payload indexing
+    payload_indexes:
+      - field_name: user_id
+        field_schema: keyword
+      - field_name: agent_id
+        field_schema: keyword
+      - field_name: category
+        field_schema: keyword
+      - field_name: created_at
+        field_schema: integer
+      - field_name: importance
+        field_schema: float
+
+# ============================================================
+# GRAPH STORE (Optional - Neo4j)
+# ============================================================
+# graph_store:
+#   provider: neo4j
+#   config:
+#     url: bolt://neo4j:7687
+#     username: neo4j
+#     password: your_secure_password
+#     database: neo4j
+#     # Graph memory features
+#     enable_relationship_extraction: true
+#     max_relationships_per_entity: 10
+
+# ============================================================
+# MEMORY SETTINGS
+# ============================================================
+memory:
+  # Deduplication
+  enable_deduplication: true
+  deduplication_threshold: 0.85  # Cosine similarity
+
+  # Update strategy
+  update_strategy: merge  # Options: merge, replace, append
+
+  # Memory lifecycle
+  auto_prune: true
+  prune_after_days: 180
+  max_memories_per_user: 10000
+
+  # Importance scoring
+  enable_importance_scoring: true
+  importance_factors:
+    - recency_weight: 0.3
+    - frequency_weight: 0.3
+    - semantic_weight: 0.4
+
+  # Categorization
+  auto_categorize: true
+  categories:
+    - user_preferences
+    - technical_knowledge
+    - project_context
+    - personal_information
+    - conversation_context
+    - learned_facts
+    - decisions_made
+    - action_items
+
+# ============================================================
+# SEARCH SETTINGS
+# ============================================================
+search:
+  default_limit: 5
+  max_limit: 20
+
+  # Hybrid search
+  enable_hybrid_search: true
+  hybrid_alpha: 0.7  # 0.7 = 70% semantic, 30% keyword
+
+  # Filters
+  enable_filters: true
+  filterable_fields:
+    - user_id
+    - agent_id
+    - category
+    - importance
+    - created_at
+
+  # Reranking
+  enable_reranking: false  # Use external reranker service instead
+  # reranker_endpoint: http://reranker:8001/rerank
+
+# ============================================================
+# MULTI-USER & MULTI-AGENT
+# ============================================================
+multi_tenancy:
+  enabled: true
+  isolation_mode: strict  # strict, shared, hybrid
+
+  # User-specific collections (optional)
+  # per_user_collections: false
+
+  # Agent memory sharing
+  agent_memory_sharing:
+    enabled: true
+    shared_categories:
+      - technical_knowledge
+      - project_context
+    private_categories:
+      - user_preferences
+      - personal_information
+
+# ============================================================
+# API SETTINGS
+# ============================================================
+api:
+  host: 0.0.0.0
+  port: 8080
+  workers: 4
+  timeout: 60
+
+  # CORS
+  cors_origins:
+    - http://librechat:3080
+    - http://localhost:3080
+
+  # Rate limiting
+  rate_limit:
+    enabled: true
+    requests_per_minute: 60
+    burst: 10
+
+  # Authentication (optional)
+  auth:
+    enabled: false
+    # jwt_secret: your_jwt_secret
+
+# ============================================================
+# LOGGING & MONITORING
+# ============================================================
+logging:
+  level: info  # debug, info, warning, error
+  format: json
+  output: stdout
+
+  # Telemetry
+  enable_telemetry: false
+
+  # Performance tracking
+  track_performance: true
+  log_slow_queries: true
+  slow_query_threshold_ms: 1000
+
+# ============================================================
+# OPTIMIZATION
+# ============================================================
+optimization:
+  # Caching
+  enable_cache: true
+  cache_backend: redis
+  cache_url: redis://redis:6379/0
+  cache_ttl: 3600  # 1 hour
+
+  # Batching
+  enable_batching: true
+  batch_size: 32
+  batch_timeout_ms: 100
+
+  # Async processing
+  async_processing: true
+  queue_backend: redis
+  worker_count: 2
+
+# ============================================================
+# BACKUP & RECOVERY
+# ============================================================
+backup:
+  enabled: true
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  retention_days: 30
+  backup_path: /app/storage/backups
+
+  # Snapshot settings
+  include_vectors: false  # Too large, rely on Qdrant snapshots
+  include_metadata: true
