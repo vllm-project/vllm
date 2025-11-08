@@ -232,9 +232,9 @@ def test_reasoning_parser():
             assert isinstance(line_dict, dict)
             assert line_dict["error"] is None
 
-            # Check that reasoning_content is present and not empty
-            reasoning_content = line_dict["response"]["body"]["choices"][0]["message"][
-                "reasoning_content"
+            # Check that reasoning is present and not empty
+            reasoning = line_dict["response"]["body"]["choices"][0]["message"][
+                "reasoning"
             ]
-            assert reasoning_content is not None
-            assert len(reasoning_content) > 0
+            assert reasoning is not None
+            assert len(reasoning) > 0
