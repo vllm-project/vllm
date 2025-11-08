@@ -9,8 +9,6 @@ from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
 
-from ...utils import create_new_process_for_each_test
-
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
 else:
@@ -106,7 +104,6 @@ def _get_test_sampling_params(
     ], n_list
 
 
-@create_new_process_for_each_test()
 def test_compatibility_with_skip_tokenizer_init(
     vllm_model_skip_tokenizer_init: VllmRunner,
     example_prompts: list[str],
@@ -215,7 +212,6 @@ def test_engine_metrics(vllm_runner, example_prompts):
         assert len(num_accepted_tokens_per_pos[0].values) == 5
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize("model", ["meta-llama/Llama-3.2-1B-Instruct"])
 def test_skip_tokenizer_initialization(model: str):
     # This test checks if the flag skip_tokenizer_init skips the initialization
