@@ -448,17 +448,21 @@ class LLM:
         # Tokenize the dataset
         tokenizer = self.get_tokenizer()
         self.set_tokenizer_pad_token(tokenizer.eos_token)
-        dataset = Dataset.from_list(train_dataset + eval_dataset)
+
+        if eval_dataset is not None:
+            data_list = train_dataset + eval_dataset
+        else:
+            data_list = train_dataset
+        dataset = Dataset.from_list(data_list)
         tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
 
         # Split the tokenized dataset into train and eval
         tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
-        tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
+        if eval_dataset is not None:
+            tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
 
         # TODO(girfan): Verify this with PEFT.
         num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
-        total_steps = num_steps_per_epoch * num_epochs
-        num_training_steps = math.ceil(total_steps / gradient_accumulation_steps)
 
         # num_examples = 800
         # batch_size = 4
@@ -481,6 +485,8 @@ class LLM:
             return outputs
 
         def _run_eval():
+            if eval_dataset is None:
+                return
             max_eval_batch_size = 8
             eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
             total_eval_steps = math.ceil(len(tokenized_eval_dataset) / eval_batch_size)
@@ -497,18 +503,20 @@ class LLM:
                 mean_loss = sum(eval_losses) / len(eval_losses)
                 logger.info(f"eval loss = {mean_loss:.6f}")
 
-        total_steps = (num_epochs * num_steps_per_epoch * gradient_accumulation_steps) // batch_size
+        total_steps = (num_epochs * num_steps_per_epoch // gradient_accumulation_steps)
         completed_steps = 0
 
         with tqdm(total=total_steps, desc="Training Progress") as pbar:
-            for epoch in range(num_epochs):
+            for _ in range(num_epochs):
                 train_iter = iter(tokenized_train_dataset)  # Reset per epoch
-                for step in range(num_steps_per_epoch):
-                    for batch in range(gradient_accumulation_steps):
+                for _ in range(0, num_steps_per_epoch, gradient_accumulation_steps):
+                    for _ in range(gradient_accumulation_steps):
                         _run_batch(train_iter, batch_size, lora_request, is_eval=False)
-                        completed_steps += 1
-                        pbar.update(1)
 
+                    pbar.update(1)
+                    completed_steps += 1
+
+                    if eval_steps is not None:
                         if completed_steps % eval_steps == 0:
                             _run_eval()
 

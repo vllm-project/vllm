@@ -152,7 +152,7 @@ class TrainingManager:
         self._last_logged_step: int = 0
 
         # TODO(girfan): Take the params from elsewhere.
-        self.training_state = TrainingState(grad_accumulation_steps=1)
+        self.training_state = TrainingState(grad_accumulation_steps=2)
 
         # # Register with LoRAModelManager
         # if hasattr(self.lora_manager, '_adapter_manager'):
@@ -231,7 +231,14 @@ class TrainingManager:
         self.training_state.reset_loss()
 
     def model_zero_grad(self):
-        self.model.zero_grad()
+        """Zero gradients for all trainable parameters.
+        
+        Note: We use optimizer.zero_grad() instead of model.zero_grad() because
+        the LoRA stacked tensors are not registered as nn.Parameters, so they
+        won't be found by model.parameters(). The optimizer has direct references
+        to these tensors and can zero their gradients correctly.
+        """
+        self.optimizer.zero_grad()
 
     def should_log(self) -> bool:
         return self.training_state.total_steps % self.log_interval == 0
@@ -377,6 +384,8 @@ class TrainingManager:
             if module_name not in lora_model.loras:
                 continue  # Skip modules that don't have LoRA loaded
 
+            logger.info(f"module_name: {module_name}")
+
             # Determine slice indices to train per module
             if isinstance(module, MergedQKVParallelLinearWithLoRA):
                 # Only use indices that exist in the stacked tensors
@@ -389,6 +398,8 @@ class TrainingManager:
 
             if not a_indices or not b_indices:
                 raise ValueError(f"No valid indices found for module {module_name}")
+
+            logger.info(f"a_indices: {a_indices}, b_indices: {b_indices}")
 
             # Process lora_a_stacked
             for idx in a_indices:
@@ -476,12 +487,6 @@ class TrainingManager:
 
         self.optimizer.step()
         self.scheduler.step()
-
-    def zero_grad(self) -> None:
-        """Zero out all gradients."""
-        # TODO(girfan): Zero grad of the model?
-        # self.model.zero_grad()
-        self.optimizer.zero_grad()
 
     def get_learning_rate(self) -> float:
         if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
