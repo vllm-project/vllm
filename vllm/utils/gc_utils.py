@@ -95,11 +95,6 @@ def freeze_gc_heap() -> None:
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
-    # Move objects in permanent generation back to the oldest generation
-    # in case the heap is already frozen.
-    # NOTE: This prevents cyclic references stay in the system when there're
-    # multiple freeze invocations.
-    gc.unfreeze()
     # Invoke GC collects for all generations to ensure objects are
     # cyclic-refrenence-free before gc.freeze
     gc.collect(0)
@@ -107,6 +102,16 @@ def freeze_gc_heap() -> None:
     gc.collect(2)
     # Freeze all GC tracked objects
     gc.freeze()
+
+
+def unfreeze_gc_heap() -> None:
+    """
+    Unfreezes GC heaps, which should be invoked in pair with freeze_gc_heap
+    to avoid freezed objects stay in memory when scope exits.
+    """
+    # Move objects in permanent generation back to the oldest generation
+    # in case the heap is already frozen.
+    gc.unfreeze()
 
 
 def maybe_attach_gc_debug_callback() -> None:

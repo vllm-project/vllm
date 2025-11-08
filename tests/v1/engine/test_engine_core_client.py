@@ -211,7 +211,6 @@ def test_engine_core_client(
             assert str(e_info.value) == "Call to echo method failed: help!"
 
 
-@create_new_process_for_each_test()
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_asyncio(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
@@ -363,7 +362,6 @@ def echo_dc_nested(
         return val
 
 
-@create_new_process_for_each_test()
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_return(
     monkeypatch: pytest.MonkeyPatch,
@@ -411,7 +409,6 @@ async def test_engine_core_client_util_method_custom_return(
             client.shutdown()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_custom_dict_return(
     monkeypatch: pytest.MonkeyPatch,
@@ -468,7 +465,6 @@ async def test_engine_core_client_util_method_custom_dict_return(
             client.shutdown()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.asyncio(loop_scope="function")
 async def test_engine_core_client_util_method_nested_structures(
     monkeypatch: pytest.MonkeyPatch,
@@ -578,7 +574,6 @@ async def test_engine_core_client_util_method_nested_structures(
             client.shutdown()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
     [(True, "tcp"), (False, "inproc")],
@@ -652,7 +647,6 @@ def test_kv_cache_events(
         subscriber.close()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "multiprocessing_mode,publisher_config",
@@ -748,7 +742,6 @@ async def test_kv_cache_events_dp(
         subscriber.close()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.timeout(20)
 def test_startup_failure(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m, pytest.raises(Exception) as e_info:

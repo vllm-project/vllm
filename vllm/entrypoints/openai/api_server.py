@@ -116,7 +116,7 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.utils.gc_utils import freeze_gc_heap, unfreeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -156,6 +156,7 @@ async def lifespan(app: FastAPI):
         try:
             yield
         finally:
+            unfreeze_gc_heap()
             if task is not None:
                 task.cancel()
     finally:
