@@ -27,6 +27,7 @@ from vllm.attention.utils.fa_utils import (
 
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (
+        flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
         reshape_and_cache_flash,
@@ -243,13 +244,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
-            if self.max_cudagraph_size > 992:
-                # This condition derives from FA3's internal heuristic.
-                # TODO(woosuk): Support larger cudagraph sizes.
-                raise ValueError(
-                    "Capture size larger than 992 is not supported for full cuda graph."
-                )
-
             self.scheduler_metadata = torch.zeros(
                 vllm_config.scheduler_config.max_num_seqs + 1,
                 dtype=torch.int32,
@@ -497,7 +491,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            assert self.vllm_flash_attn_version == 3, (
+            assert flash_attn_supports_sinks(), (
                 "Sinks are only supported in FlashAttention 3"
             )
             assert self.sinks.shape[0] == num_heads, (

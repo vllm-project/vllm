@@ -105,7 +105,7 @@ class Lfm2MoeSparseMoeBlock(nn.Module):
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -707,7 +707,7 @@ class Lfm2MoeForCausalLM(
         # Set MoE hyperparameters
         self.expert_weights = []
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers = []
         example_layer = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
@@ -736,22 +736,6 @@ class Lfm2MoeForCausalLM(
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
 
     def update_physical_experts_metadata(
         self,
