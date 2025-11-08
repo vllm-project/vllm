@@ -1003,15 +1003,7 @@ class OpenAIServingChat(OpenAIServing):
                         # handle tool calls after reasoning is done or when tool call
                         # tokens are detected
                         else:
-                            # If entering here due to tool call detection, mark
-                            # reasoning as ended and prepare state for tool parsing
-                            if not reasoning_end_arr[i]:
-                                reasoning_end_arr[i] = True
-                                if not added_content_delta_arr[i]:
-                                    added_content_delta_arr[i] = True
-                                    previous_text = ""
-                                    previous_token_ids = []
-
+                            reasoning_end_arr[i] = True
                             delta_token_ids = output_token_ids
                             # First time to tool call,
                             # add the remaining text and token ids
