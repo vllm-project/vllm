@@ -959,41 +959,22 @@ async def test_function_call_with_previous_input_messages(
     )
 
     # ============================================================
-    # Additional checks for issue #28262: Harmony channel metadata
+    # Test for issue #28262: parse_response_input channel metadata
     # ============================================================
+    from vllm.entrypoints.harmony_utils import parse_response_input
 
-    # The core bug in #28262 is that when Responses API output items
-    # are used as input (via function_call_output type), channel metadata
-    # is lost. Test this by making a third request using Responses API format.
-
-    # Make a third request using function_call_output format (not Chat format)
-    response_3 = await client.responses.create(
-        model=model_name,
-        input=[
-            {
-                "type": "function_call_output",
-                "call_id": function_call.call_id,
-                "output": result,
-            }
-        ],
-        tools=tools,
-        previous_response_id=response.id,
-        extra_body={"enable_response_messages": True},
+    # Test that function_call_output gets correct channel
+    tool_msg = parse_response_input(
+        response_msg={
+            "type": "function_call_output",
+            "call_id": function_call.call_id,
+            "output": str(result),
+        },
+        prev_responses=list(response.output),
     )
 
-    assert response_3 is not None
-    assert response_3.status == "completed"
-
-    # Check that tool output has commentary channel
-    has_tool_message_with_commentary = False
-    for msg_dict in response_3.input_messages:
-        msg = Message.from_dict(msg_dict)
-        if msg.author.role == "tool" and msg.channel == "commentary":
-            has_tool_message_with_commentary = True
-
-    # BUG: This assertion will FAIL with current code
-    # Issue #28262: function_call_output should be on commentary channel
-    assert has_tool_message_with_commentary, (
-        "Tool output (function_call_output) should have "
-        "channel='commentary' (issue #28262)"
+    # Issue #28262: function_call_output should have channel='commentary'
+    assert tool_msg.channel == "commentary", (
+        f"function_call_output should have channel='commentary', "
+        f"got '{tool_msg.channel}'"
     )
