@@ -58,25 +58,6 @@ logger = init_logger(__name__)
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
-    def init_request_rpc_mq(self) -> None:
-        if self.parallel_config.distributed_node_rank_within_dp == 0:
-            # For leader node within each dp rank,
-            # each dp will have its own leader multiproc executor.
-            max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
-            self.rpc_broadcast_mq = MessageQueue(
-                self.world_size,
-                self.local_world_size,
-                max_chunk_bytes=max_chunk_bytes,
-                connect_ip=self.parallel_config.distributed_master_ip,
-            )
-            self.scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
-        else:
-            # For headless multiproc executor, we don't need to establish
-            # rpc_broadcast_mq and output handle for worker proc since we don't accept
-            # requests retrieved through remote sync from remote driver.
-            self.rpc_broadcast_mq = None
-            self.scheduler_output_handle = None
-
     def __init__(self, vllm_config: VllmConfig, monitor_workers: bool = True):
         self.monitor_workers = monitor_workers
         super().__init__(vllm_config)
@@ -121,7 +102,7 @@ class MultiprocExecutor(Executor):
 
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
-        self.init_request_rpc_mq()
+        self._init_request_rpc_mq()
 
         # Create workers
         context = get_mp_context()
@@ -194,6 +175,25 @@ class MultiprocExecutor(Executor):
 
         self.output_rank = self._get_output_rank()
         self.has_connector = self.vllm_config.kv_transfer_config is not None
+
+    def _init_request_rpc_mq(self) -> None:
+        if self.parallel_config.distributed_node_rank_within_dp == 0:
+            # For leader node within each dp rank,
+            # each dp will have its own leader multiproc executor.
+            max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
+            self.rpc_broadcast_mq = MessageQueue(
+                self.world_size,
+                self.local_world_size,
+                max_chunk_bytes=max_chunk_bytes,
+                connect_ip=self.parallel_config.distributed_master_ip,
+            )
+            self.scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
+        else:
+            # For headless multiproc executor, we don't need to establish
+            # rpc_broadcast_mq and output handle for worker proc since we don't accept
+            # requests retrieved through remote sync from remote driver.
+            self.rpc_broadcast_mq = None
+            self.scheduler_output_handle = None
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
