@@ -338,17 +338,21 @@ class OpenPanguMLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # TODO: remove hard coding
-        rope_scaling = {
-            "beta_fast": 32,
-            "beta_slow": 1,
-            "factor": 1,
-            "mscale": 1.0,
-            "mscale_all_dim": 1.0,
-            "original_max_position_embeddings": max_position_embeddings,
-            "type": "yarn",
-            "rope_type": "deepseek_yarn",
-        }
+        rope_scaling_config = getattr(config, "rope_scaling", None)
+        if rope_scaling_config is not None:
+            rope_scaling = dict(rope_scaling_config)
+        else:
+            rope_scaling = {}
+        rope_scaling.setdefault("beta_fast", 32)
+        rope_scaling.setdefault("beta_slow", 1)
+        rope_scaling.setdefault("factor", 1)
+        rope_scaling.setdefault("mscale", 1.0)
+        rope_scaling.setdefault("mscale_all_dim", 1.0)
+        rope_scaling.setdefault("type", "yarn")
+        rope_scaling.setdefault(
+            "original_max_position_embeddings", max_position_embeddings
+        )
+        rope_scaling["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
