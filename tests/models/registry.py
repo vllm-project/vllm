@@ -219,7 +219,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         trust_remote_code=True,
     ),
-    "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
+    "DeepseekForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/deepseek-moe-16b-base",
+        trust_remote_code=True,
+    ),
     "DeepseekV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V2-Lite-Chat",
         trust_remote_code=True,
