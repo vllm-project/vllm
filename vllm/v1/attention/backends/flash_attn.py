@@ -43,6 +43,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -238,6 +239,10 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
+        self.dcp_kv_cache_interleave_size = (
+            self.parallel_config.dcp_kv_cache_interleave_size
+        )
+
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
@@ -352,8 +357,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 - common_attn_metadata.query_start_loc_cpu[:-1]
             )
             dcp_context_kv_lens_cpu = seq_lens_cpu - query_kv_lens_cpu
-            dcp_context_kv_lens_cpu = dcp_context_kv_lens_cpu // self.dcp_world_size + (
-                self.dcp_rank <= (dcp_context_kv_lens_cpu - 1) % self.dcp_world_size
+
+            dcp_context_kv_lens_cpu = get_dcp_local_seq_lens(
+                dcp_context_kv_lens_cpu,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.dcp_kv_cache_interleave_size,
             )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()

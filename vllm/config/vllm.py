@@ -608,6 +608,23 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
+        assert (
+            self.parallel_config.dcp_kv_cache_interleave_size
+            <= self.cache_config.block_size
+            and self.cache_config.block_size
+            % self.parallel_config.dcp_kv_cache_interleave_size
+            == 0
+        ), (
+            f"Block_size({self.cache_config.block_size}) should be "
+            "greater than or equal to and divisible by dcp_kv_cache_interleave_size "
+            f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+        )
+
+        assert (
+            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            or self.speculative_config is None
+        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
+
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()

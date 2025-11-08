@@ -35,6 +35,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -88,6 +89,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
+    get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
@@ -275,6 +277,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_multimodal_pruning_enabled = False
         self.max_model_len = model_config.max_model_len
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
+        self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -396,6 +399,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
+            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -1306,6 +1310,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
+
+        # update seq_lens of decode reqs under DCP.
+        if self.dcp_world_size > 1:
+            self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
+                self.seq_lens.cpu[:num_reqs],
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.parallel_config.dcp_kv_cache_interleave_size,
+            )
+            self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
