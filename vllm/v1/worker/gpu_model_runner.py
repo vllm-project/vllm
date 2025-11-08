@@ -3591,8 +3591,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     and not self.speculative_config.enforce_eager
                 )
 
-                # Note(gnovack) - We need to disable cudagraphs for one of the lora
-                # cases when cudagraph_specialize_lora is enabled.
+                # Note(gnovack) - We need to disable cudagraphs for one of the two
+                # lora cases when cudagraph_specialize_lora is enabled. This is a
+                # short term mitigation for issue mentioned in
+                # https://github.com/vllm-project/vllm/issues/28334
                 if self.compilation_config.cudagraph_specialize_lora and activate_lora:
                     use_cudagraphs = False
 
