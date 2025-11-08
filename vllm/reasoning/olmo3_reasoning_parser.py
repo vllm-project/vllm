@@ -115,7 +115,7 @@ class Olmo3ReasoningBuffer:
             if end_think_idx > 0:
                 # this covers the case there's content before
                 # the end of the reasoning block
-                return DeltaMessage(reasoning_content=pretext)
+                return DeltaMessage(reasoning=pretext)
 
         if self.state == Olmo3ReasoningState.REASONING:
             # we are inside reasoning block, return and empty
@@ -124,7 +124,7 @@ class Olmo3ReasoningBuffer:
                 text_buffer,
                 self.buffer,
             ) = self.buffer, ""
-            return DeltaMessage(reasoning_content=text_buffer)
+            return DeltaMessage(reasoning=text_buffer)
 
         if self.state == Olmo3ReasoningState.CONTENT:
             # we are outside reasoning block, return and empty
@@ -250,7 +250,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         # this id is not part of content, so just return [] here.
         return []
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
@@ -271,14 +271,14 @@ class Olmo3ReasoningParser(ReasoningParser):
 
         re_match = self.reasoning_regex.match(model_output)
         if re_match:
-            reasoning_content = re_match.group("reasoning") or None
+            reasoning = re_match.group("reasoning") or None
             content = re_match.group("content") or None
-            return reasoning_content, content
+            return reasoning, content
 
         # no reasoning content
         return None, model_output
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,

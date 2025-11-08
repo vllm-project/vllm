@@ -279,7 +279,7 @@ class StreamingXMLToolCallParser:
                     final_delta = DeltaMessage(
                         role=None,
                         content=None,
-                        reasoning_content=None,
+                        reasoning=None,
                         tool_calls=[
                             DeltaToolCall(
                                 index=self.tool_call_index - 1,

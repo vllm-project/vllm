@@ -102,7 +102,7 @@ def test_prepare_apply_chat_template_tools_and_messages(
     assert actual_request == expected_mistral_output
 
 
-# Tool use with list content and reasoning_content
+# Tool use with list content and reasoning
 @pytest.mark.parametrize(
     "openai_request,expected_mistral_output",
     [
@@ -115,7 +115,7 @@ def test_prepare_apply_chat_template_tools_and_messages(
                     },
                     {
                         "role": "assistant",
-                        "reasoning_content": None,
+                        "reasoning": None,
                         "content": None,
                         "tool_calls": [
                             {
