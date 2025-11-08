@@ -87,7 +87,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    create_fast_prefill_custom_backend,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
@@ -146,6 +145,8 @@ from .utils import (
     add_kv_sharing_layers_to_kv_cache_groups,
     bind_kv_cache,
     gather_mm_placeholders,
+    get_attn_backend_cls,
+    get_runner_only_attn_layers,
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
@@ -481,19 +482,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             dtype=np.int64,
         )
 
-        # Layer pairings for cross-layer KV sharing.
-        # If an Attention layer `layer_name` is in the keys of this dict, it
-        # means this layer will perform attention using the keys and values
-        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
-        self.shared_kv_cache_layers: dict[str, str] = {}
-        self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
-
-        self.kv_sharing_fast_prefill_logits_indices = None
-        if self.cache_config.kv_sharing_fast_prefill:
-            self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
-                self.max_num_tokens, dtype=torch.int32, device=self.device
-            )
-
         self.uniform_decode_query_len = (
             1
             if not self.speculative_config
@@ -514,11 +502,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         self.reorder_batch_threshold: int | None = None
-
-        # Attention layers that are only in the KVCacheConfig of the runner
-        # (e.g., KV sharing, encoder-only attention), but not in the
-        # KVCacheConfig of the scheduler.
-        self.runner_only_attn_layers: set[str] = set()
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
@@ -3081,6 +3064,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
 
+        # Attention layers that are only in the KVCacheConfig of the runner
+        # (e.g., KV sharing, encoder-only attention), but not in the
+        # KVCacheConfig of the scheduler.
+        self.runner_only_attn_layers: set[str] = get_runner_only_attn_layers(
+            self.vllm_config
+        )
+        self._init_kv_sharing_layers()
+
+        # Resolve cudagraph_mode
+        self._check_and_update_cudagraph_mode()
+
+        if self.dcp_world_size > 1:
+            layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+            for layer in layers.values():
+                assert layer.impl.need_to_return_lse_for_decode, (
+                    "DCP requires attention impls to return"
+                    " the softmax lse for decode, but the impl "
+                    f"{layer.impl.__class__.__name__} "
+                    "does not return the softmax lse for decode."
+                )
+
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
 
@@ -4047,113 +4051,125 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         self.maybe_remove_all_loras(self.lora_config)
 
-    def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
+    def _init_kv_sharing_layers(self) -> None:
+        """
+        Initialize the KV sharing layers.
+        """
+        # If an Attention layer `layer_name` is in the keys of this dict, it
+        # means this layer will perform attention using the keys and values
+        # from the KV cache of `shared_kv_cache_layers[layer_name]`.
+        self.shared_kv_cache_layers: dict[str, str] = {}
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+        for layer_name, attn_module in attn_layers.items():
+            if kv_tgt_layer := attn_module.kv_sharing_target_layer_name:
+                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+
+        # In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other
+        # similar KV sharing setups, only the layers that generate KV caches
+        # are involved in the prefill phase, enabling prefill to early exit.
+        # Layers in this set will be skipped during prefill.
+        self.kv_sharing_fast_prefill_eligible_layers: set[str] = set()
+        self.kv_sharing_fast_prefill_logits_indices = None
+
+        if self.cache_config.kv_sharing_fast_prefill:
+            self.kv_sharing_fast_prefill_logits_indices = torch.zeros(
+                self.max_num_tokens, dtype=torch.int32, device=self.device
+            )
+            for layer_name in reversed(attn_layers):
+                if layer_name in self.shared_kv_cache_layers:
+                    self.kv_sharing_fast_prefill_eligible_layers.add(layer_name)
+                else:
+                    break
+
+    def initialize_attn_backend(
+        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
+    ) -> None:
         """
         Initialize the attention backends and attention metadata builders.
         """
         assert len(self.attn_groups) == 0, "Attention backends are already initialized"
 
-        class AttentionGroupKey(NamedTuple):
-            attn_backend: type[AttentionBackend]
-            kv_cache_spec: KVCacheSpec
-
-        def get_attn_backends_for_group(
+        def split_attn_groups_from_kv_cache_group(
             kv_cache_group_spec: KVCacheGroupSpec,
-        ) -> tuple[dict[AttentionGroupKey, list[str]], set[type[AttentionBackend]]]:
-            layers = get_layers_from_vllm_config(
-                self.vllm_config, AttentionLayerBase, kv_cache_group_spec.layer_names
+        ) -> list[tuple[type[AttentionBackend], list[str], KVCacheSpec]]:
+            attn_backend_cls = get_attn_backend_cls(
+                self.vllm_config,
+                self.kv_sharing_fast_prefill_eligible_layers,
+                kv_cache_group_spec.layer_names,
             )
-            attn_backends = {}
             attn_backend_layers = defaultdict(list)
-            # Dedupe based on full class name; this is a bit safer than
-            # using the class itself as the key because when we create dynamic
-            # attention backend subclasses (e.g. ChunkedLocalAttention) unless
-            # they are cached correctly, there will be different objects per
-            # layer.
-            for layer_name in kv_cache_group_spec.layer_names:
-                attn_backend = layers[layer_name].get_attn_backend()
-
-                if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
-                    attn_backend = create_fast_prefill_custom_backend(
-                        "FastPrefill",
-                        attn_backend,
-                    )
-
+            for layer_name, attn_backend in attn_backend_cls.items():
+                # Dedupe based on full class name; this is a bit safer than
+                # using the class itself as the key because when we create dynamic
+                # attention backend subclasses (e.g. ChunkedLocalAttention) unless
+                # they are cached correctly, there will be different objects per
+                # layer.
                 full_cls_name = attn_backend.full_cls_name()
                 layer_kv_cache_spec = kv_cache_group_spec.kv_cache_spec
                 if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
                     layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
                 key = (full_cls_name, layer_kv_cache_spec)
-                attn_backends[key] = AttentionGroupKey(
-                    attn_backend, layer_kv_cache_spec
-                )
                 attn_backend_layers[key].append(layer_name)
-            return (
-                {attn_backends[k]: v for k, v in attn_backend_layers.items()},
-                set(group_key.attn_backend for group_key in attn_backends.values()),
-            )
+
+            splits: list[tuple[type[AttentionBackend], list[str], KVCacheSpec]] = []
+            for key, layer_names in attn_backend_layers.items():
+                splits.append((attn_backend_cls[layer_names[0]], layer_names, key[1]))
+            return splits
 
         def create_attn_groups(
-            attn_backends_map: dict[AttentionGroupKey, list[str]],
+            attn_backends_map: list[
+                tuple[type[AttentionBackend], list[str], KVCacheSpec]
+            ],
             kv_cache_group_id: int,
         ) -> list[AttentionGroup]:
             attn_groups: list[AttentionGroup] = []
-            for (attn_backend, kv_cache_spec), layer_names in attn_backends_map.items():
-                attn_group = AttentionGroup(
+            for (
+                attn_backend,
+                layer_names,
+                kv_cache_spec,
+            ) in attn_backends_map:
+                attn_group = AttentionGroup.create_with_metadata_builders(
                     attn_backend,
                     layer_names,
                     kv_cache_spec,
-                    kv_cache_group_id,
-                )
-
-                attn_groups.append(attn_group)
-            return attn_groups
-
-        attention_backend_maps = []
-        attention_backend_set: set[type[AttentionBackend]] = set()
-        for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-            attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
-            attention_backend_maps.append(attn_backends[0])
-            attention_backend_set.update(attn_backends[1])
-
-        # Resolve cudagraph_mode before actually initialize metadata_builders
-        self._check_and_update_cudagraph_mode(attention_backend_set)
-
-        for i, attn_backend_map in enumerate(attention_backend_maps):
-            self.attn_groups.append(create_attn_groups(attn_backend_map, i))
-
-    def initialize_metadata_builders(
-        self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
-    ) -> None:
-        """
-        Create the metadata builders for all KV cache groups and attn groups.
-        """
-        for kv_cache_group_id in range(len(kv_cache_config.kv_cache_groups)):
-            for attn_group in self.attn_groups[kv_cache_group_id]:
-                attn_group.create_metadata_builders(
                     self.vllm_config,
                     self.device,
-                    kernel_block_sizes[kv_cache_group_id]
-                    if kv_cache_group_id < len(kernel_block_sizes)
-                    else None,
+                    kv_cache_group_id,
+                    kernel_block_sizes[kv_cache_group_id],
                     num_metadata_builders=1
                     if not self.parallel_config.enable_dbo
                     else 2,
                 )
+                attn_groups.append(attn_group)
+            return attn_groups
+
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+            kv_cache_config.kv_cache_groups
+        ):
+            attn_group_splits = split_attn_groups_from_kv_cache_group(
+                kv_cache_group_spec
+            )
+            self.attn_groups.append(
+                create_attn_groups(attn_group_splits, kv_cache_group_id)
+            )
+
         # Calculate reorder batch threshold (if needed)
         # Note (tdoublep): do this *after* constructing builders,
         # because some of them change the threshold at init time.
         self.calculate_reorder_batch_threshold()
 
-    def _check_and_update_cudagraph_mode(
-        self, attention_backends: set[type[AttentionBackend]]
-    ) -> None:
+    def _check_and_update_cudagraph_mode(self) -> None:
         """
         Resolve the cudagraph_mode when there are multiple attention
         backends with potential conflicting CUDA graph support.
         Then initialize the cudagraph_dispatcher based on the resolved
         cudagraph_mode.
         """
+        attention_backends = set(
+            get_attn_backend_cls(
+                self.vllm_config, self.kv_sharing_fast_prefill_eligible_layers
+            ).values()
+        )
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_backend_name = None
 
@@ -4292,7 +4308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     @staticmethod
     def select_common_block_size(
-        kv_manager_block_size: int, attn_groups: list[AttentionGroup]
+        kv_manager_block_size: int, backends: list[type[AttentionBackend]]
     ) -> int:
         """
         Select a block size that is supported by all backends and is a factor of
@@ -4303,7 +4319,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         Args:
             kv_manager_block_size: Block size of KV cache
-            attn_groups: List of attention groups
+            backends: List of attention backends
 
         Returns:
             The selected block size
@@ -4332,8 +4348,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if not is_supported:
                     return False
             return True
-
-        backends = [group.backend for group in attn_groups]
 
         # Case 1: if the block_size of kv cache manager is supported by all backends,
         # return it directly
@@ -4379,6 +4393,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for kv_cache_group in kv_cache_config.kv_cache_groups
             if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
         ]
+        has_encoder_only_group = isinstance(
+            kv_cache_config.kv_cache_groups[-1].kv_cache_spec, EncoderOnlyAttentionSpec
+        )
+        if has_encoder_only_group:
+            # Encoder-only group is the last group and doesn't need kv cache.
+            kernel_block_sizes = kernel_block_sizes[:-1]
+            block_sizes = block_sizes[:-1]
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
             self.cache_config.block_size
@@ -4472,16 +4493,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # All layers in the UniformTypeKVCacheSpecs have the same type,
                 # Pick an arbitrary one to dispatch.
                 kv_cache_spec = next(iter(kv_cache_spec.kv_cache_specs.values()))
-            if isinstance(kv_cache_spec, EncoderOnlyAttentionSpec):
-                continue
+            # TODO in this PR: check whether we should skip encoder-only layers here
             elif isinstance(kv_cache_spec, AttentionSpec):
                 # This is an attention backend that supports virtual
                 # block splitting. Get the supported block sizes from
                 # all backends in the group.
-                attn_groups = self.attn_groups[kv_cache_group_id]
+                backends = get_attn_backend_cls(
+                    self.vllm_config,
+                    self.kv_sharing_fast_prefill_eligible_layers,
+                    kv_cache_group.layer_names,
+                )
                 kv_manager_block_size = kv_cache_group.kv_cache_spec.block_size
                 selected_kernel_size = self.select_common_block_size(
-                    kv_manager_block_size, attn_groups
+                    kv_manager_block_size, list(backends.values())
                 )
                 kernel_block_sizes.append(selected_kernel_size)
             elif isinstance(kv_cache_spec, MambaSpec):
@@ -4514,6 +4538,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         kv_caches: dict[str, torch.Tensor] = {}
         has_attn, has_mamba = False, False
+        # TODO in this PR: remove dependency on group.backend
         for group in self._kv_cache_spec_attn_group_iterator():
             kv_cache_spec = group.kv_cache_spec
             attn_backend = group.backend
@@ -4664,31 +4689,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
     def maybe_add_kv_sharing_layers_to_kv_cache_groups(
         self, kv_cache_config: KVCacheConfig
-    ) -> None:
+    ) -> KVCacheConfig:
         """
         Add layers that re-use KV cache to KV cache group of its target layer.
         Mapping of KV cache tensors happens in `initialize_kv_cache_tensors()`
         """
         if not self.shared_kv_cache_layers:
             # No cross-layer KV sharing, return
-            return
+            return kv_cache_config
 
         add_kv_sharing_layers_to_kv_cache_groups(
-            self.shared_kv_cache_layers,
-            kv_cache_config.kv_cache_groups,
-            self.runner_only_attn_layers,
+            self.shared_kv_cache_layers, kv_cache_config.kv_cache_groups
         )
 
-        if self.cache_config.kv_sharing_fast_prefill:
-            # In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other
-            # similar KV sharing setups, only the layers that generate KV caches
-            # are involved in the prefill phase, enabling prefill to early exit.
-            attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-            for layer_name in reversed(attn_layers):
-                if layer_name in self.shared_kv_cache_layers:
-                    self.kv_sharing_fast_prefill_eligible_layers.add(layer_name)
-                else:
-                    break
+        return kv_cache_config
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -4698,21 +4712,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             cache size of each layer
         """
         kv_cache_config = deepcopy(kv_cache_config)
+        kv_cache_config = self.maybe_add_runner_only_attn_layers_to_kv_cache_config(
+            kv_cache_config
+        )
         self.kv_cache_config = kv_cache_config
-        self.may_add_encoder_only_layers_to_kv_cache_config()
-        self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
-        self.initialize_attn_backend(kv_cache_config)
+
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention
         # backends for that group only supports block_size 64, we will return
         # kernel_block_size 64 and split the 256-token-block to 4 blocks with 64
         # tokens each.
         kernel_block_sizes = self._prepare_kernel_block_sizes(kv_cache_config)
-
-        # create metadata builders
-        self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
+        self.initialize_attn_backend(kv_cache_config, kernel_block_sizes)
 
         # Reinitialize need to after initialize_attn_backend
+        # TODO in this PR: do we still have this dependency?
         self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
@@ -4729,19 +4743,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             kv_transfer_group.register_kv_caches(kv_caches)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
-        if self.dcp_world_size > 1:
-            layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
-            for layer in layers.values():
-                assert layer.impl.need_to_return_lse_for_decode, (
-                    "DCP requires attention impls to return"
-                    " the softmax lse for decode, but the impl "
-                    f"{layer.impl.__class__.__name__} "
-                    "does not return the softmax lse for decode."
-                )
-
-    def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
+    def maybe_add_runner_only_attn_layers_to_kv_cache_config(
+        self, kv_cache_config: KVCacheConfig
+    ) -> KVCacheConfig:
         """
-        Add encoder-only layers to the KV cache config.
+        Add runner-only attention layers to the KV cache config
+        """
+        kv_cache_config = self.maybe_add_encoder_only_layers_to_kv_cache_config(
+            kv_cache_config
+        )
+        kv_cache_config = self.maybe_add_kv_sharing_layers_to_kv_cache_groups(
+            kv_cache_config
+        )
+        return kv_cache_config
+
+    def maybe_add_encoder_only_layers_to_kv_cache_config(
+        self, kv_cache_config: KVCacheConfig
+    ) -> KVCacheConfig:
+        """
+        Add encoder-only attention layers to the KV cache config.
         """
         block_size = self.vllm_config.cache_config.block_size
         encoder_only_attn_specs: dict[AttentionSpec, list[str]] = defaultdict(list)
@@ -4755,15 +4775,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     dtype=self.kv_cache_dtype,
                 )
                 encoder_only_attn_specs[attn_spec].append(layer_name)
-                self.runner_only_attn_layers.add(layer_name)
         if len(encoder_only_attn_specs) > 0:
             assert len(encoder_only_attn_specs) == 1, (
                 "Only support one encoder-only attention spec now"
             )
             spec, layer_names = encoder_only_attn_specs.popitem()
-            self.kv_cache_config.kv_cache_groups.append(
+            kv_cache_config.kv_cache_groups.append(
                 KVCacheGroupSpec(layer_names=layer_names, kv_cache_spec=spec)
             )
+        return kv_cache_config
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
@@ -4777,22 +4797,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         kv_cache_spec: dict[str, KVCacheSpec] = {}
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         for layer_name, attn_module in attn_layers.items():
-            if isinstance(attn_module, Attention) and (
-                kv_tgt_layer := attn_module.kv_sharing_target_layer_name
-            ):
-                # The layer doesn't need its own KV cache and will use that of
-                # the target layer. We skip creating a KVCacheSpec for it, so
-                # that KV cache management logic will act as this layer does
-                # not exist, and doesn't allocate KV cache for the layer. This
-                # enables the memory saving of cross-layer kv sharing, allowing
-                # a given amount of memory to accommodate longer context lengths
-                # or enable more requests to be processed simultaneously.
-                self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
+            if layer_name in self.runner_only_attn_layers:
+                # The layer doesn't need its own KV cache. We skip creating a
+                # KVCacheSpec for it, so that KV cache management logic will act as
+                # this layer does not exist, and doesn't allocate KV cache for the
+                # layer, which allows a given amount of memory to accommodate longer
+                # context lengths or enable more requests to be processed
+                # simultaneously for cases like cross-layer KV cache sharing.
                 continue
-            # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                 kv_cache_spec[layer_name] = spec
-
         return kv_cache_spec
 
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
