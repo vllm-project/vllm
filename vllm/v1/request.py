@@ -181,17 +181,17 @@ class Request:
         return len(self._output_token_ids)
 
     @property
-    def skip_reading_caching(self) -> bool:
+    def skip_reading_cache(self) -> bool:
         if (
             self.sampling_params is not None
-            and self.sampling_params.skip_reading_caching is not None
+            and self.sampling_params.skip_reading_cache is not None
         ):
-            return self.sampling_params.skip_reading_caching
+            return self.sampling_params.skip_reading_cache
         elif (
             self.pooling_params is not None
-            and self.pooling_params.skip_reading_caching is not None
+            and self.pooling_params.skip_reading_cache is not None
         ):
-            return self.pooling_params.skip_reading_caching
+            return self.pooling_params.skip_reading_cache
         return False
 
     def is_finished(self) -> bool:

@@ -212,9 +212,9 @@ class KVCacheManager:
 
         # When the request requires prompt logprobs or
         # When pooling model with all pooling
-        # we skip reading caching, but still can write to caching
+        # we skip reading cache, but still can write to cache
         # to accelerate following requests
-        if request.skip_reading_caching:
+        if request.skip_reading_cache:
             return self.create_kv_cache_blocks(computed_blocks), 0
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
