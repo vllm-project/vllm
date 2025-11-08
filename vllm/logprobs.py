@@ -32,7 +32,7 @@ LogprobsOnePosition = dict[int, Logprob]
 @dataclass
 class FlatLogprobs(MutableSequence[LogprobsOnePosition]):
     """
-    Flatten logprobs of a request into multiple primitive type lists.
+    Flat logprobs of a request into multiple primitive type lists.
 
     Compared to list[dict[int, Logprob]], this data structure reduced GC
     overhead significantly. As it flattened logprob information for
@@ -163,7 +163,7 @@ SampleLogprobs = FlatLogprobs | list[LogprobsOnePosition]
 
 def create_prompt_logprobs() -> PromptLogprobs:
     """Creates a container to store prompt logprobs for a request"""
-    logprobs = FlatLogprobs() if envs.VLLM_FLATTEN_LOGPROBS else []
+    logprobs = FlatLogprobs() if envs.VLLM_FLAT_LOGPROBS else []
     # NOTE: logprob of first prompt token is None.
     logprobs.append(None)
     return logprobs
@@ -171,7 +171,7 @@ def create_prompt_logprobs() -> PromptLogprobs:
 
 def create_sample_logprobs() -> SampleLogprobs:
     """Creates a container to store decode logprobs for a request"""
-    return FlatLogprobs() if envs.VLLM_FLATTEN_LOGPROBS else []
+    return FlatLogprobs() if envs.VLLM_FLAT_LOGPROBS else []
 
 
 def append_logprobs_for_next_position(
