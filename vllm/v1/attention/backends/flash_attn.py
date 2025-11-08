@@ -27,6 +27,7 @@ from vllm.attention.utils.fa_utils import (
 
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (
+        flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
         reshape_and_cache_flash,
@@ -62,7 +63,11 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
+        # NOTE(tdoublep): while in principle, FA supports
+        # MultipleOf(16), these are the block sizes that do not
+        # suffer from the NaN propagation problem described here:
+        # https://github.com/Dao-AILab/flash-attention/issues/1974
+        return [16, 32, 64]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:
@@ -486,7 +491,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            assert self.vllm_flash_attn_version == 3, (
+            assert flash_attn_supports_sinks(), (
                 "Sinks are only supported in FlashAttention 3"
             )
             assert self.sinks.shape[0] == num_heads, (
