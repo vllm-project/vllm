@@ -22,7 +22,7 @@ export TORCHINDUCTOR_CACHE_DIR=/root/.cache/inductor
 
 rm -rf /root/.cache/
 
-model_path=deepseek-ai/DeepSeek-V3
+model_path=/mnt/raid0/pretrained_model/deepseek-ai/DeepSeek-V3
 vllm serve $model_path \
     --tensor-parallel-size 8 \
     --max-num-batched-tokens 32768 \
@@ -31,6 +31,6 @@ vllm serve $model_path \
     --disable-log-requests \
     --gpu_memory_utilization 0.9 \
     --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
-    --block-size 1 \
     --async-scheduling \
+    --load-format fastsafetensors \
     2>&1 | tee server-deepseek-ai_DeepSeek-V3.log

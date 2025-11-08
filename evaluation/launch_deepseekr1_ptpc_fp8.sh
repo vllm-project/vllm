@@ -25,7 +25,8 @@ vllm serve $model_path \
   --disable-log-requests \
   --compilation-config '{"cudagraph_mode": "FULL_AND_PIECEWISE"}' \
   --gpu_memory_utilization 0.9 \
-  --block-size 1
+  --async-scheduling \
+  --load-format fastsafetensors
 
   #--enforce-eager \
 
