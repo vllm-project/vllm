@@ -3530,7 +3530,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
             self.query_start_loc.copy_to_gpu()
 
-            # Build attention metadata using the unified method
             attn_metadata, _ = self._build_attention_metadata(
                 total_num_scheduled_tokens=num_tokens,
                 max_num_scheduled_tokens=max_query_len,
