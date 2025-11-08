@@ -5,7 +5,7 @@ ray>=2.9
 cmake>=3.26.1
 packaging>=24.2
 setuptools-scm>=8
-setuptools>=77.0.3,<80.0.0
+setuptools>=77.0.3,<81.0.0
 wheel
 jinja2>=3.1.6
 datasets # for benchmark scripts
