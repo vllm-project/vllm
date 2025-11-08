@@ -1489,7 +1489,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return attn_metadata, spec_decode_common_attn_metadata
 
-
     def _compute_cascade_attn_prefix_lens(
         self,
         num_scheduled_tokens: np.ndarray,
