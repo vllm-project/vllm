@@ -957,3 +957,51 @@ async def test_function_call_with_previous_input_messages(
     assert (
         "aquarius" in output_text or "otter" in output_text or "tuesday" in output_text
     )
+
+    # ============================================================
+    # Additional checks for issue #28262: Harmony channel metadata
+    # ============================================================
+
+    # Check first response output messages have correct channel attributes
+    has_function_call_with_commentary = False
+    has_function_call_with_json = False
+
+    for msg_dict in response.output_messages:
+        msg = Message.from_dict(msg_dict)
+
+        # Check function call has commentary channel and json content_type
+        if (
+            msg.author.role == "assistant"
+            and msg.recipient
+            and msg.recipient.startswith("functions.")
+        ):
+            if msg.channel == "commentary":
+                has_function_call_with_commentary = True
+
+            if msg.content_type == "json":
+                has_function_call_with_json = True
+
+    # Assert the critical properties for function calls
+    assert has_function_call_with_commentary, (
+        "Function call output should have channel='commentary'"
+    )
+    assert has_function_call_with_json, (
+        "Function call output should have content_type='json'"
+    )
+
+    # Check second request input messages preserve channel metadata
+    has_tool_message_with_commentary = False
+
+    for msg_dict in response_2.input_messages:
+        msg = Message.from_dict(msg_dict)
+
+        # Check tool message (function output) has commentary channel
+        if msg.author.role == "tool" and msg.channel == "commentary":
+            has_tool_message_with_commentary = True
+
+    # BUG: This assertion will FAIL with current code
+    # Issue #28262: function_call_output should be on commentary channel
+    assert has_tool_message_with_commentary, (
+        "Tool output (function_call_output) should have "
+        "channel='commentary' (issue #28262)"
+    )
