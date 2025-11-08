@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from pickle import PickleBuffer
 from threading import Event
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import torch
@@ -609,7 +609,7 @@ class MessageQueue:
         max_chunks,
         reader_rank: int = 0,
         blocking: bool = False,
-    ):
+    ) -> tuple["MessageQueue", list[Handle]]:
         """
         Creates a MessageQueue for a process group with a single reader.
 
@@ -646,7 +646,7 @@ class MessageQueue:
         dist.gather_object(handle, handles, dst=reader_rank, group=pg)
         if blocking:
             buffer_io.wait_until_ready()
-        return (buffer_io, handles if handles is not None else [])
+        return buffer_io, cast(list[Handle], handles or [])
 
     @staticmethod
     def create_from_process_group(
@@ -667,19 +667,17 @@ class MessageQueue:
             global_ranks = list(range(pg.world_size))
         from vllm.distributed.parallel_state import in_the_same_node_as
 
-        status = in_the_same_node_as(pg, source_rank=writer_rank)
-        same_node_ranks = [i for i, s in enumerate(status) if s]
-        n_reader = group_world_size - 1
-        n_local_reader = len(same_node_ranks) - 1
-        local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
         if group_rank == writer_rank:
             if extra_writer_handle is not None:
                 buffer_io = MessageQueue.create_from_handle(
                     extra_writer_handle, group_rank
                 )
-                n_reader = group_world_size
-                n_local_reader = len(same_node_ranks)
             else:
+                status = in_the_same_node_as(pg, source_rank=writer_rank)
+                same_node_ranks = [i for i, s in enumerate(status) if s]
+                n_reader = group_world_size - 1
+                n_local_reader = len(same_node_ranks) - 1
+                local_reader_ranks = [i for i in same_node_ranks if i != writer_rank]
                 buffer_io = MessageQueue(
                     n_reader=n_reader,
                     n_local_reader=n_local_reader,

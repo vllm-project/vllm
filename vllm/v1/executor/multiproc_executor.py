@@ -11,7 +11,7 @@ import traceback
 import weakref
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cached_property, partial
 from multiprocessing.connection import Connection
@@ -55,16 +55,13 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
-EMPTY_LIST: list[MessageQueue | None] = field(default_factory=list)
-
-
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
     def init_request_rpc_mq(self) -> None:
         if self.parallel_config.distributed_node_rank_within_dp == 0:
-            # for leader node within each dp rank
-            # each dp will have its own leader multiproc executor
+            # For leader node within each dp rank,
+            # each dp will have its own leader multiproc executor.
             max_chunk_bytes = envs.VLLM_MQ_MAX_CHUNK_BYTES_MB * 1024 * 1024
             self.rpc_broadcast_mq = MessageQueue(
                 self.world_size,
@@ -74,9 +71,9 @@ class MultiprocExecutor(Executor):
             )
             self.scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         else:
-            # For headless multiproc executor, we don't need establish rpc_broadcast_mq
-            # and output handle for worker proc since we don't accept reaquests
-            # retrieve through remote sync from remote driver
+            # For headless multiproc executor, we don't need to establish
+            # rpc_broadcast_mq and output handle for worker proc since we don't accept
+            # requests retrieved through remote sync from remote driver.
             self.rpc_broadcast_mq = None
             self.scheduler_output_handle = None
 
@@ -152,30 +149,32 @@ class MultiprocExecutor(Executor):
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
 
-            # Wait for all local worker to be ready
+            # Wait for all local workers to be ready.
             self.workers = WorkerProc.wait_for_ready(unready_workers)
+
+            # Start background thread to monitor worker health if not in headless mode.
+            if self.monitor_workers:
+                self.start_worker_monitor()
 
             if self.parallel_config.distributed_node_size_within_dp > 1:
                 # In multi-node mode, only the leader worker will accept responses
-                # from all response mqs through rpc
+                # from all response mqs through rpc.
                 self.response_mqs = [
                     mq for mq in self.workers[0].rpc_response_mqs if mq is not None
                 ]
             else:
                 # In single node, we collect response from each
-                # localworker's response mqs through shm
+                # local worker's response mqs through shm
                 self.response_mqs = [w.worker_response_mq for w in self.workers]
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
 
-            # Wait for all input mqs to be ready
+            # Wait for all input mqs to be ready.
             if self.rpc_broadcast_mq is not None:
                 self.rpc_broadcast_mq.wait_until_ready()
-            # Wait for all remote response mqs to be ready
+            # Wait for all remote response mqs to be ready.
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
-            if self.monitor_workers:
-                self.start_worker_monitor()
             success = True
         finally:
             if not success:
@@ -460,10 +459,9 @@ class UnreadyWorkerProcHandle:
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int
-    worker_response_mq: MessageQueue | None = (
-        None  # The worker process writes to this MQ
-    )
-    rpc_response_mqs: list[MessageQueue | None] = EMPTY_LIST
+    # The worker process writes to this MQ
+    worker_response_mq: MessageQueue | None
+    rpc_response_mqs: list[MessageQueue | None]
     death_writer: Connection | None = None
 
     @classmethod
@@ -471,8 +469,7 @@ class WorkerProcHandle:
         cls,
         unready_handle: UnreadyWorkerProcHandle,
         worker_response_mq: MessageQueue | None,
-        rpc_response_mqs: list[MessageQueue | None] = EMPTY_LIST,
-        **kwargs,
+        rpc_response_mqs: list[MessageQueue | None],
     ) -> "WorkerProcHandle":
         return cls(
             proc=unready_handle.proc,
@@ -509,7 +506,7 @@ class WorkerProc:
                 blocking=False,
             )
             # Initializes remote message queue for sending the model output to the
-            # driver worker, exponsing rpc_response_handles for driver worker
+            # driver worker, exposing rpc_response_handles for driver worker
             # that include handles for all ranks
             self.worker_response_mq, self.rpc_response_handles = (
                 get_inner_dp_world_group().create_single_reader_mq_broadcasters(
