@@ -185,8 +185,12 @@ class KVCacheManager:
                 - A list of blocks that are computed for the request.
                 - The number of computed tokens.
         """
-
-        if not self.enable_caching:
+        # Prefix caching is disabled or
+        # When the request requires prompt logprobs or
+        # When pooling model with all pooling
+        # we skip reading cache, but still can write to cache
+        # to accelerate following requests
+        if not self.enable_caching or request.skip_reading_cache:
             return self.empty_kv_cache_blocks, 0
 
         # NOTE: When all tokens hit the cache, we must recompute the last token
@@ -209,13 +213,6 @@ class KVCacheManager:
                 num_hits=num_new_computed_tokens,
                 preempted=request.num_preemptions > 0,
             )
-
-        # When the request requires prompt logprobs or
-        # When pooling model with all pooling
-        # we skip reading cache, but still can write to cache
-        # to accelerate following requests
-        if request.skip_reading_cache:
-            return self.create_kv_cache_blocks(computed_blocks), 0
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
