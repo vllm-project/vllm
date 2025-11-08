@@ -268,8 +268,6 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
             compilation_config.cudagraph_capture_sizes is None
             and compilation_config.max_cudagraph_capture_size is None
         ):
-            # FIXME(woosuk): When using full cuda graph with FA3, the max
-            # supported size is 1024.
             compilation_config.max_cudagraph_capture_size = 1024
             logger.info(
                 "Overriding max cuda graph capture size to %d for performance.", 1024
