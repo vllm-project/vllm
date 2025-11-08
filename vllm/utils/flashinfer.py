@@ -43,9 +43,13 @@ def has_flashinfer() -> bool:
     if importlib.util.find_spec("flashinfer") is None:
         logger.debug_once("FlashInfer unavailable since package was not found")
         return False
+    # When not using flashinfer cubin,
     # Also check if nvcc is available since it's required to JIT compile flashinfer
-    if shutil.which("nvcc") is None:
-        logger.debug_once("FlashInfer unavailable since nvcc was not found")
+    if not envs.VLLM_HAS_FLASHINFER_CUBIN and shutil.which("nvcc") is None:
+        logger.debug_once(
+            "FlashInfer unavailable since nvcc was not found "
+            "and not using pre-downloaded cubins"
+        )
         return False
     return True
 
