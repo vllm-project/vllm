@@ -1366,7 +1366,9 @@ def fused_gdn_gating_kernel(
     tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
     # compute beta_output = sigmoid(b)
     blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
-    tl.store(beta_output + off, blk_beta_output.to(b.dtype.element_ty), mask=mask)
+    tl.store(
+        beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask
+    )
 
 
 def fused_gdn_gating(
