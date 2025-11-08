@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_TORCH_CUDA_PROFILE: bool = False
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
@@ -814,6 +815,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # VLLM_ALLOW_RUNTIME_LORA_UPDATING is enabled.
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
+    ),
+    # Enables torch CUDA profiling if set.
+    # On NVIDIA GPUs, this will start/stop cudaProfilerApi when triggered.
+    "VLLM_TORCH_CUDA_PROFILE": lambda: bool(
+        os.getenv("VLLM_TORCH_CUDA_PROFILE", "0") != "0"
     ),
     # Enables torch profiler if set.
     # Both AsyncLLM's CPU traces as well as workers'
