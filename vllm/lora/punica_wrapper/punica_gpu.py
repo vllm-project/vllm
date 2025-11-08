@@ -51,8 +51,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             self.max_loras, max_num_batched_tokens, device=device
         )
 
+        # When speculative decoding is enabled, max_num_samples is
+        # max_batches * (num_speculative_decoding_tokens + 1).
+        # This line can be optimized by replacing max_num_batched_tokens
+        # to  max_batches * (num_speculative_decoding_tokens + 1).
         self.prompt_mapping_meta = LoRAKernelMeta.make(
-            self.max_loras, max_batches, device=device
+            self.max_loras, max_num_batched_tokens, device=device
         )
 
     def update_metadata(

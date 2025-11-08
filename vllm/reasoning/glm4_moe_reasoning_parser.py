@@ -70,7 +70,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         else:
             return input_ids[input_ids.index(self.think_end_token_id) + 1 :]
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -84,7 +84,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
         For text <think>abc</think>xyz:
-        - 'abc' goes to reasoning_content
+        - 'abc' goes to reasoning
         - 'xyz' goes to content
         """
         # Skip single special tokens
@@ -98,10 +98,10 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
                 # <think> in previous, </think> in delta,
                 # extract reasoning content
                 end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[:end_index]
+                reasoning = delta_text[:end_index]
                 content = delta_text[end_index + len(self.think_end_token) :]
                 return DeltaMessage(
-                    reasoning_content=reasoning_content,
+                    reasoning=reasoning,
                     content=content if content else None,
                 )
             elif self.think_end_token_id in previous_token_ids:
@@ -111,36 +111,36 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
             else:
                 # <think> in previous, no </think> in previous or delta,
                 # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+                return DeltaMessage(reasoning=delta_text)
         elif self.think_start_token_id in delta_token_ids:
             if self.think_end_token_id in delta_token_ids:
                 # <think> in delta, </think> in delta, extract reasoning content
                 start_index = delta_text.find(self.think_start_token)
                 end_index = delta_text.find(self.think_end_token)
-                reasoning_content = delta_text[
+                reasoning = delta_text[
                     start_index + len(self.think_start_token) : end_index
                 ]
                 content = delta_text[end_index + len(self.think_end_token) :]
                 return DeltaMessage(
-                    reasoning_content=reasoning_content,
+                    reasoning=reasoning,
                     content=content if content else None,
                 )
             else:
                 # <think> in delta, no </think> in delta,
                 # reasoning content continues
-                return DeltaMessage(reasoning_content=delta_text)
+                return DeltaMessage(reasoning=delta_text)
         else:
             # thinking is disabled, just content
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
 
         For text <think>abc</think>xyz:
-        - 'abc' goes to reasoning_content
+        - 'abc' goes to reasoning
         - 'xyz' goes to content
 
         Returns:
@@ -165,7 +165,7 @@ class Glm4MoeModelReasoningParser(ReasoningParser):
             return None, model_output
 
         # Extract reasoning content from the model output.
-        reasoning_content, _, content = model_output.partition(self.think_end_token)
+        reasoning, _, content = model_output.partition(self.think_end_token)
 
         final_content = content or None
-        return reasoning_content, final_content
+        return reasoning, final_content

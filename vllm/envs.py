@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_TORCH_CUDA_PROFILE: bool = False
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
@@ -155,7 +156,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "throughput"
+    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "latency"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -815,6 +816,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
     ),
+    # Enables torch CUDA profiling if set.
+    # On NVIDIA GPUs, this will start/stop cudaProfilerApi when triggered.
+    "VLLM_TORCH_CUDA_PROFILE": lambda: bool(
+        os.getenv("VLLM_TORCH_CUDA_PROFILE", "0") != "0"
+    ),
     # Enables torch profiler if set.
     # Both AsyncLLM's CPU traces as well as workers'
     # traces (CPU & GPU) will be saved under this directory.
@@ -1218,7 +1224,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "latency":
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
     "VLLM_FLASHINFER_MOE_BACKEND": env_with_choices(
-        "VLLM_FLASHINFER_MOE_BACKEND", "throughput", ["throughput", "latency"]
+        "VLLM_FLASHINFER_MOE_BACKEND", "latency", ["throughput", "latency"]
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
@@ -1325,7 +1331,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
-        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass"],
+        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass"],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.

@@ -35,6 +35,7 @@ from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -88,6 +89,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
+    get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
@@ -275,6 +277,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.is_multimodal_pruning_enabled = False
         self.max_model_len = model_config.max_model_len
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
+        self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
@@ -396,6 +399,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
+            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -938,6 +942,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             mm_kwargs_combined.update(mm_kwargs_group)
 
@@ -1267,6 +1272,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices = query_start_loc[1:] - 1
             num_draft_tokens = None
             spec_decode_metadata = None
+            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
@@ -1293,7 +1299,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens
             )
             logits_indices = spec_decode_metadata.logits_indices
-
+            num_sampled_tokens = num_draft_tokens + 1
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
@@ -1304,6 +1310,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices_padded = self._prepare_kv_sharing_fast_prefill(
                 logits_indices
             )
+
+        # update seq_lens of decode reqs under DCP.
+        if self.dcp_world_size > 1:
+            self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
+                self.seq_lens.cpu[:num_reqs],
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.parallel_config.dcp_kv_cache_interleave_size,
+            )
+            self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
@@ -1444,7 +1460,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Hot-Swap lora model
         if self.lora_config:
-            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+            assert (
+                np.sum(num_sampled_tokens)
+                <= self.vllm_config.scheduler_config.max_num_batched_tokens
+            )
+            self.set_active_loras(
+                self.input_batch, num_scheduled_tokens, num_sampled_tokens
+            )
 
         return (
             attn_metadata,
@@ -1768,6 +1790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             curr_group_outputs = []
 
@@ -1794,6 +1817,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             device=self.device,
                             pin_memory=self.pin_memory,
                             merge_by_field_config=model.merge_by_field_config,
+                            multimodal_cpu_fields=model.multimodal_cpu_fields,
                         )
                     )
 
@@ -1936,6 +1960,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Add the grouped features to encoder_features dict
             # This allows the model to receive them as kwargs (e.g.,
@@ -3292,6 +3317,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 device=self.device,
                 pin_memory=self.pin_memory,
                 merge_by_field_config=model.merge_by_field_config,
+                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 
@@ -3385,6 +3411,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
+        num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         # Disable DP padding when running eager
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -3480,7 +3507,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(
-            self.lora_config, num_scheduled_tokens, activate_lora, remove_lora
+            self.lora_config,
+            num_scheduled_tokens,
+            num_sampled_tokens,
+            activate_lora,
+            remove_lora,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_after_padding <= self.max_num_tokens
@@ -3585,7 +3616,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                     and not self.speculative_config.enforce_eager
                 )
-                self.drafter.dummy_run(num_tokens, use_cudagraphs=use_cudagraphs)
+
+                # Note(gnovack) - We need to disable cudagraphs for one of the two
+                # lora cases when cudagraph_specialize_lora is enabled. This is a
+                # short term mitigation for issue mentioned in
+                # https://github.com/vllm-project/vllm/issues/28334
+                if self.compilation_config.cudagraph_specialize_lora and activate_lora:
+                    use_cudagraphs = False
+
+                self.drafter.dummy_run(
+                    num_tokens,
+                    use_cudagraphs=use_cudagraphs,
+                )
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
