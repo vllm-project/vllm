@@ -258,9 +258,9 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
         if structured_outputs_config.reasoning_parser == "":
             structured_outputs_config.reasoning_parser = "openai_gptoss"
 
-        # Increase the max capture size from 512 to 992 for performance.
+        # Increase the max capture size from 512 to 1024 for performance.
         # NOTE(woosuk): This will increase the number of CUDA graphs
-        # from 67 to 81.
+        # from 67 to 83.
         compilation_config = vllm_config.compilation_config
         # Only override when the user has not set either of
         # cudagraph_capture_sizes or max_cudagraph_capture_size.
@@ -268,11 +268,9 @@ class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
             compilation_config.cudagraph_capture_sizes is None
             and compilation_config.max_cudagraph_capture_size is None
         ):
-            # FIXME(woosuk): When using full cuda graph with FA3, the max
-            # supported size is 992.
-            compilation_config.max_cudagraph_capture_size = 992
+            compilation_config.max_cudagraph_capture_size = 1024
             logger.info(
-                "Overriding max cuda graph capture size to %d for performance.", 992
+                "Overriding max cuda graph capture size to %d for performance.", 1024
             )
 
 
