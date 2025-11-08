@@ -1,0 +1,392 @@
+version: '3.8'
+
+# ============================================================
+# POWERFUL LOCAL AI STACK
+# LibreChat + mem0/OpenMemory + Qdrant + Ollama
+# ============================================================
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+
+volumes:
+  # Qdrant persistence
+  qdrant_storage:
+  # Postgres data
+  postgres_data:
+  # Ollama models (using existing - see ollama service volumes)
+  # ollama_models:
+  # LibreChat uploads
+  librechat_uploads:
+  # mem0 storage
+  mem0_storage:
+
+services:
+  # ============================================================
+  # CORE INFRASTRUCTURE
+  # ============================================================
+
+  # Qdrant - Vector Database
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"  # HTTP API
+      - "6334:6334"  # gRPC API
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__STORAGE__PERFORMANCE__OPTIMIZERS_COUNT: 4
+      # Enable quantization
+      QDRANT__STORAGE__QUANTIZATION__ALWAYS_RAM: false
+      # Collection settings
+      QDRANT__COLLECTION__HNSW_CONFIG__M: 16
+      QDRANT__COLLECTION__HNSW_CONFIG__EF_CONSTRUCT: 100
+      # Persistence
+      QDRANT__STORAGE__ON_DISK_PAYLOAD: true
+      QDRANT__STORAGE__WAL_CAPACITY: 32768
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL - Relational + Vector (PGVector)
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    environment:
+      POSTGRES_DB: librechat
+      POSTGRES_USER: librechat
+      POSTGRES_PASSWORD: your_secure_password_here
+      # Performance tuning
+      POSTGRES_SHARED_BUFFERS: 256MB
+      POSTGRES_EFFECTIVE_CACHE_SIZE: 1GB
+      POSTGRES_MAX_CONNECTIONS: 200
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U librechat"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama - Local LLM Inference
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      # Using your existing Ollama models (no re-download!)
+      - C:\Users\carso\.ollama:/root/.ollama
+      # If above doesn't work on Windows, try: /c/Users/carso/.ollama:/root/.ollama
+    environment:
+      OLLAMA_HOST: 0.0.0.0:11434
+      OLLAMA_ORIGINS: "*"
+      # Performance
+      OLLAMA_NUM_PARALLEL: 2
+      OLLAMA_MAX_LOADED_MODELS: 3
+      # GPU (uncomment if you have GPU)
+      # OLLAMA_GPU_LAYERS: 35
+    networks:
+      - backend
+    # Uncomment for GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # AI SERVICES
+  # ============================================================
+
+  # mem0 / OpenMemory - Memory Layer
+  openmemory:
+    image: mem0ai/openmemory:latest
+    container_name: openmemory
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    volumes:
+      - mem0_storage:/app/storage
+      - ./mem0-config.yaml:/app/config.yaml
+    environment:
+      # Database connections
+      DATABASE_URL: postgresql://librechat:your_secure_password_here@postgres:5432/librechat
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: mem0_memories
+
+      # Ollama LLM
+      LLM_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      LLM_MODEL: granite4:latest
+
+      # Ollama Embeddings
+      EMBEDDER_PROVIDER: ollama
+      EMBEDDER_MODEL: qwen3-embedding:4b
+      EMBEDDER_DIMS: 4096
+
+      # Memory settings
+      MEMORY_STORE_PROVIDER: qdrant
+      GRAPH_STORE_ENABLED: false  # Set to true if using Neo4j
+
+      # API settings
+      API_PORT: 8080
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # LibreChat RAG API - Document Retrieval
+  rag_api:
+    image: ghcr.io/danny-avila/rag_api:latest
+    container_name: rag_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./rag-config:/app/config
+    environment:
+      # Database
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: librechat
+      DB_USER: librechat
+      DB_PASSWORD: your_secure_password_here
+
+      # Qdrant
+      VECTOR_DB_TYPE: qdrant
+      QDRANT_URL: http://qdrant:6333
+      COLLECTION_NAME: librechat_rag
+
+      # Ollama embeddings
+      EMBEDDINGS_PROVIDER: ollama
+      OLLAMA_BASE_URL: http://ollama:11434
+      EMBEDDINGS_MODEL: qwen3-embedding:4b
+
+      # RAG settings
+      CHUNK_SIZE: 512
+      CHUNK_OVERLAP: 50
+      RAG_PORT: 8000
+      RAG_USE_FULL_CONTEXT: false
+
+      # Retrieval
+      SIMILARITY_THRESHOLD: 0.5
+      TOP_K: 10
+      FINAL_K: 4  # After reranking
+
+      # Logging
+      LOG_LEVEL: info
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Custom Reranker Service (FastAPI)
+  reranker:
+    build:
+      context: ./reranker-service
+      dockerfile: Dockerfile
+    container_name: reranker
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      RERANKER_MODEL: dengcao/Qwen3-Reranker-4B
+      PORT: 8001
+      LOG_LEVEL: info
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # LIBRECHAT - MAIN INTERFACE
+  # ============================================================
+
+  librechat:
+    image: ghcr.io/danny-avila/librechat:latest
+    container_name: librechat
+    restart: unless-stopped
+    ports:
+      - "3080:3080"
+    volumes:
+      - ./librechat.yaml:/app/librechat.yaml
+      - ./librechat.env:/app/.env
+      - librechat_uploads:/app/uploads
+      - ./custom-config:/app/custom-config
+    environment:
+      # MongoDB (for LibreChat internal data)
+      MONGO_URI: mongodb://mongodb:27017/librechat
+
+      # External services
+      RAG_API_URL: http://rag_api:8000
+      MEM0_API_URL: http://openmemory:8080
+      RERANKER_API_URL: http://reranker:8001
+
+      # Security
+      JWT_SECRET: your_jwt_secret_here_change_this
+      CREDS_KEY: your_creds_key_here_change_this
+      CREDS_IV: your_creds_iv_here_change_this
+
+      # Features
+      ENABLE_AGENTS: true
+      ENABLE_RAG: true
+      ENABLE_MEMORY: true
+      ENABLE_ARTIFACTS: true
+
+      # Host
+      HOST: 0.0.0.0
+      PORT: 3080
+
+      # Logging
+      LOG_LEVEL: info
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      rag_api:
+        condition: service_healthy
+      openmemory:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+    networks:
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3080/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # MongoDB - LibreChat internal data
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - ./mongodb_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: librechat
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ============================================================
+  # REVERSE PROXY (Optional but recommended)
+  # ============================================================
+
+  nginx:
+    image: nginx:alpine
+    container_name: nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - librechat
+    networks:
+      - frontend
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ============================================================
+  # OPTIONAL SERVICES
+  # ============================================================
+
+  # Redis - Caching for reranker/embeddings
+  redis:
+    image: redis:alpine
+    container_name: redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Neo4j - Graph Memory (Optional, for advanced mem0 graph store)
+  # neo4j:
+  #   image: neo4j:latest
+  #   container_name: neo4j
+  #   restart: unless-stopped
+  #   ports:
+  #     - "7474:7474"  # HTTP
+  #     - "7687:7687"  # Bolt
+  #   volumes:
+  #     - ./neo4j_data:/data
+  #   environment:
+  #     NEO4J_AUTH: neo4j/your_secure_password
+  #     NEO4J_dbms_memory_pagecache_size: 512M
+  #     NEO4J_dbms_memory_heap_max__size: 1G
+  #   networks:
+  #     - backend

@@ -1,142 +1,409 @@
-<p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-dark.png">
-    <img alt="vLLM" src="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/source/assets/logos/vllm-logo-text-light.png" width=55%>
-  </picture>
-</p>
+# Powerful Local AI Stack
 
-<h3 align="center">
-Easy, fast, and cheap LLM serving for everyone
-</h3>
+Complete local AI setup with LibreChat, mem0/OpenMemory, Qdrant, and Ollama for research, collaboration, brainstorming, and coding.
 
-<p align="center">
-| <a href="https://docs.vllm.ai"><b>Documentation</b></a> | <a href="https://vllm.ai"><b>Blog</b></a> | <a href="https://arxiv.org/abs/2309.06180"><b>Paper</b></a> | <a href="https://discord.gg/jz7wjKhh6g"><b>Discord</b></a> | <a href="https://x.com/vllm_project"><b>Twitter/X</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack</b></a> |
-</p>
+## 🏗️ Architecture
 
----
-
-**vLLM x Snowflake Meetup (Wednesday, November 13th, 5:30-8PM PT) at Snowflake HQ, San Mateo**
-
-We are excited to announce the last in-person vLLM meetup of the year!
-Join the vLLM developers and engineers from Snowflake AI Research to chat about the latest LLM inference optimizations and your 2025 vLLM wishlist!
-Register [here](https://lu.ma/h0qvrajz) and be a part of the event!
-
----
-
-
-*Latest News* 🔥
-- [2024/10] We have just created a developer slack ([slack.vllm.ai](https://slack.vllm.ai)) focusing on coordinating contributions and discussing features. Please feel free to join us there!
-- [2024/10] Ray Summit 2024 held a special track for vLLM! Please find the opening talk slides from the vLLM team [here](https://docs.google.com/presentation/d/1B_KQxpHBTRa_mDF-tR6i8rWdOU5QoTZNcEg2MKZxEHM/edit?usp=sharing). Learn more from the [talks](https://raysummit.anyscale.com/flow/anyscale/raysummit2024/landing/page/sessioncatalog?tab.day=20241001&search.sessiontracks=1719251906298001uzJ2) from other vLLM contributors and users!
-- [2024/09] We hosted [the sixth vLLM meetup](https://lu.ma/87q3nvnh) with NVIDIA! Please find the meetup slides [here](https://docs.google.com/presentation/d/1wrLGwytQfaOTd5wCGSPNhoaW3nq0E-9wqyP7ny93xRs/edit?usp=sharing).
-- [2024/07] We hosted [the fifth vLLM meetup](https://lu.ma/lp0gyjqr) with AWS! Please find the meetup slides [here](https://docs.google.com/presentation/d/1RgUD8aCfcHocghoP3zmXzck9vX3RCI9yfUAB2Bbcl4Y/edit?usp=sharing).
-- [2024/07] In partnership with Meta, vLLM officially supports Llama 3.1 with FP8 quantization and pipeline parallelism! Please check out our blog post [here](https://blog.vllm.ai/2024/07/23/llama31.html).
-- [2024/06] We hosted [the fourth vLLM meetup](https://lu.ma/agivllm) with Cloudflare and BentoML! Please find the meetup slides [here](https://docs.google.com/presentation/d/1iJ8o7V2bQEi0BFEljLTwc5G1S10_Rhv3beed5oB0NJ4/edit?usp=sharing).
-- [2024/04] We hosted [the third vLLM meetup](https://robloxandvllmmeetup2024.splashthat.com/) with Roblox! Please find the meetup slides [here](https://docs.google.com/presentation/d/1A--47JAK4BJ39t954HyTkvtfwn0fkqtsL8NGFuslReM/edit?usp=sharing).
-- [2024/01] We hosted [the second vLLM meetup](https://lu.ma/ygxbpzhl) with IBM! Please find the meetup slides [here](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing).
-- [2023/10] We hosted [the first vLLM meetup](https://lu.ma/first-vllm-meetup) with a16z! Please find the meetup slides [here](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing).
-- [2023/08] We would like to express our sincere gratitude to [Andreessen Horowitz](https://a16z.com/2023/08/30/supporting-the-open-source-ai-community/) (a16z) for providing a generous grant to support the open-source development and research of vLLM.
-- [2023/06] We officially released vLLM! FastChat-vLLM integration has powered [LMSYS Vicuna and Chatbot Arena](https://chat.lmsys.org) since mid-April. Check out our [blog post](https://vllm.ai).
-
----
-## About
-vLLM is a fast and easy-to-use library for LLM inference and serving.
-
-vLLM is fast with:
-
-- State-of-the-art serving throughput
-- Efficient management of attention key and value memory with **PagedAttention**
-- Continuous batching of incoming requests
-- Fast model execution with CUDA/HIP graph
-- Quantizations: [GPTQ](https://arxiv.org/abs/2210.17323), [AWQ](https://arxiv.org/abs/2306.00978), INT4, INT8, and FP8.
-- Optimized CUDA kernels, including integration with FlashAttention and FlashInfer.
-- Speculative decoding
-- Chunked prefill
-
-**Performance benchmark**: We include a performance benchmark at the end of [our blog post](https://blog.vllm.ai/2024/09/05/perf-update.html). It compares the performance of vLLM against other LLM serving engines ([TensorRT-LLM](https://github.com/NVIDIA/TensorRT-LLM), [SGLang](https://github.com/sgl-project/sglang) and [LMDeploy](https://github.com/InternLM/lmdeploy)). The implementation is under [nightly-benchmarks folder](.buildkite/nightly-benchmarks/) and you can [reproduce](https://github.com/vllm-project/vllm/issues/8176) this benchmark using our one-click runnable script.
-
-vLLM is flexible and easy to use with:
-
-- Seamless integration with popular Hugging Face models
-- High-throughput serving with various decoding algorithms, including *parallel sampling*, *beam search*, and more
-- Tensor parallelism and pipeline parallelism support for distributed inference
-- Streaming outputs
-- OpenAI-compatible API server
-- Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Neuron.
-- Prefix caching support
-- Multi-lora support
-
-vLLM seamlessly supports most popular open-source models on HuggingFace, including:
-- Transformer-like LLMs (e.g., Llama)
-- Mixture-of-Expert LLMs (e.g., Mixtral)
-- Embedding Models (e.g. E5-Mistral)
-- Multi-modal LLMs (e.g., LLaVA)
-
-Find the full list of supported models [here](https://docs.vllm.ai/en/latest/models/supported_models.html).
-
-## Getting Started
-
-Install vLLM with `pip` or [from source](https://vllm.readthedocs.io/en/latest/getting_started/installation.html#build-from-source):
-
-```bash
-pip install vllm
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    LibreChat (Frontend)                      │
+│  Multi-Agent • Artifacts • Memory • RAG • Code Interpreter  │
+└─────────────────┬───────────────────────────────────────────┘
+                  │
+     ┌────────────┼────────────┬────────────┐
+     │            │            │            │
+┌────▼────┐  ┌───▼────┐  ┌───▼──────┐ ┌──▼─────┐
+│ Ollama  │  │  mem0  │  │ RAG API  │ │Reranker│
+│ Models  │  │ Memory │  │ PGVector │ │Service │
+└─────────┘  └───┬────┘  └────┬─────┘ └────────┘
+                 │            │
+            ┌────▼────────────▼────┐
+            │   Qdrant (Vectors)   │
+            └──────────────────────┘
 ```
 
-Visit our [documentation](https://vllm.readthedocs.io/en/latest/) to learn more.
-- [Installation](https://vllm.readthedocs.io/en/latest/getting_started/installation.html)
-- [Quickstart](https://vllm.readthedocs.io/en/latest/getting_started/quickstart.html)
-- [Supported Models](https://vllm.readthedocs.io/en/latest/models/supported_models.html)
+## 🎯 Features
 
-## Contributing
+### LibreChat
+- **Multi-Agent Orchestration**: Chain up to 10 specialized agents
+- **Native Memory System**: Persistent context across conversations
+- **Advanced RAG**: Semantic search with reranking
+- **Code Interpreter**: Execute code in 10+ languages
+- **Artifacts**: Generate React components, diagrams
+- **Web Search**: Real-time information retrieval
 
-We welcome and value any contributions and collaborations.
-Please check out [CONTRIBUTING.md](./CONTRIBUTING.md) for how to get involved.
+### mem0/OpenMemory
+- **Multi-Level Memory**: User, Session, Agent state
+- **Semantic Search**: Context-aware memory retrieval
+- **Self-Improving**: Continuous refinement
+- **Privacy-First**: Fully local, no external data
 
-## Sponsors
+### Qdrant
+- **Hybrid Search**: Dense + sparse + filtering
+- **Quantization**: 4-16x memory reduction
+- **High Performance**: HNSW indexing
 
-vLLM is a community project. Our compute resources for development and testing are supported by the following organizations. Thank you for your support!
+### Ollama Models
+- **LLM**: granite4:latest (128K context)
+- **Embedder**: qwen3-embedding:4b
+- **Reranker**: Qwen3-Reranker-4B
 
-<!-- Note: Please sort them in alphabetical order. -->
-<!-- Note: Please keep these consistent with docs/source/community/sponsors.md -->
+## 📋 Prerequisites
 
-- a16z
-- AMD
-- Anyscale
-- AWS
-- Crusoe Cloud
-- Databricks
-- DeepInfra
-- Dropbox
-- Google Cloud
-- Lambda Lab
-- NVIDIA
-- Replicate
-- Roblox
-- RunPod
-- Sequoia Capital
-- Skywork AI
-- Trainy
-- UC Berkeley
-- UC San Diego
-- ZhenFund
+- Docker 24.0+ with Docker Compose
+- 16GB+ RAM (32GB recommended)
+- 100GB+ free disk space
+- (Optional) NVIDIA GPU with drivers for acceleration
 
-We also have an official fundraising venue through [OpenCollective](https://opencollective.com/vllm). We plan to use the fund to support the development, maintenance, and adoption of vLLM.
+## 🚀 Quick Start
 
-## Citation
+### 1. Clone and Setup
 
-If you use vLLM for your research, please cite our [paper](https://arxiv.org/abs/2309.06180):
-```bibtex
-@inproceedings{kwon2023efficient,
-  title={Efficient Memory Management for Large Language Model Serving with PagedAttention},
-  author={Woosuk Kwon and Zhuohan Li and Siyuan Zhuang and Ying Sheng and Lianmin Zheng and Cody Hao Yu and Joseph E. Gonzalez and Hao Zhang and Ion Stoica},
-  booktitle={Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles},
-  year={2023}
+```bash
+# Create directory
+mkdir -p local-ai-stack
+cd local-ai-stack
+
+# Copy all configuration files to this directory
+# - docker-compose.yml
+# - librechat.yaml
+# - librechat.env
+# - mem0-config.yaml
+# - nginx.conf
+# - init-scripts/01-init-databases.sql
+# - reranker-service/
+```
+
+### 2. Configure Environment
+
+```bash
+# Edit librechat.env and change these values:
+# - JWT_SECRET (random string, 32+ chars)
+# - JWT_REFRESH_SECRET (random string, 32+ chars)
+# - CREDS_KEY (exactly 32 characters)
+# - CREDS_IV (exactly 16 characters)
+# - Database passwords
+
+# Generate random secrets:
+openssl rand -hex 32  # For JWT secrets
+openssl rand -hex 16  # For CREDS_KEY
+openssl rand -hex 8   # For CREDS_IV
+```
+
+### 3. Pull Ollama Models
+
+```bash
+# Start only Ollama first
+docker compose up -d ollama
+
+# Wait for Ollama to be ready
+docker compose exec ollama ollama pull granite4:latest
+docker compose exec ollama ollama pull qwen3-embedding:4b
+docker compose exec ollama ollama pull dengcao/Qwen3-Reranker-4B
+
+# Verify models
+docker compose exec ollama ollama list
+```
+
+### 4. Initialize Qdrant Collections
+
+```bash
+# Start Qdrant
+docker compose up -d qdrant
+
+# Wait 10 seconds for initialization
+sleep 10
+
+# Create collections (run the setup script)
+./scripts/init-qdrant.sh
+```
+
+### 5. Start All Services
+
+```bash
+# Start everything
+docker compose up -d
+
+# Check status
+docker compose ps
+
+# View logs
+docker compose logs -f librechat
+```
+
+### 6. Access the Stack
+
+- **LibreChat**: http://localhost:3080
+- **Qdrant Dashboard**: http://localhost:6333/dashboard
+- **Ollama API**: http://localhost:11434
+- **mem0 API**: http://localhost:8080
+- **RAG API**: http://localhost:8000
+
+## 📚 Usage Guide
+
+### 1. Register an Account
+
+1. Navigate to http://localhost:3080
+2. Click "Sign Up"
+3. Create your account
+
+### 2. Enable Memory
+
+1. Open Settings
+2. Enable "Personalization & Memory"
+3. Start chatting - memories will be automatically saved
+
+### 3. Use RAG (Chat with Files)
+
+1. Click the paperclip icon
+2. Upload documents (PDF, DOCX, TXT, etc.)
+3. Files are automatically indexed
+4. Ask questions about your documents
+
+### 4. Create Agents
+
+Use the built-in agent presets:
+
+- **Research Assistant**: Web search + RAG + memory recall
+- **Code Expert**: Code execution + documentation search
+- **Team Collaborator**: Multi-agent workflow orchestration
+- **Creative Brainstormer**: Artifacts + visual generation
+
+Or create custom agents in Settings → Agents
+
+### 5. Multi-Agent Chaining
+
+1. Create a conversation with the "Collaborator" agent
+2. It will automatically delegate to specialized sub-agents
+3. Monitor the agent chain in the conversation
+
+## 🔧 Advanced Configuration
+
+### GPU Acceleration
+
+Edit `docker-compose.yml`:
+
+```yaml
+ollama:
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  environment:
+    OLLAMA_GPU_LAYERS: 35
+```
+
+### Memory Categories
+
+Edit `mem0-config.yaml` to add custom categories:
+
+```yaml
+memory:
+  categories:
+    - user_preferences
+    - technical_knowledge
+    - project_context
+    - custom_category_here
+```
+
+### RAG Chunk Size
+
+Edit `librechat.env`:
+
+```bash
+CHUNK_SIZE=512  # Adjust based on your use case
+CHUNK_OVERLAP=50
+```
+
+### Qdrant Quantization
+
+For memory optimization, edit Qdrant collection configs in `scripts/init-qdrant.sh`:
+
+```python
+quantization_config = {
+    "scalar": {
+        "type": "int8",
+        "quantile": 0.99
+    }
 }
 ```
 
-## Contact Us
+## 🛠️ Troubleshooting
 
-* For technical questions and feature requests, please use Github issues or discussions.
-* For discussing with fellow users, please use Discord.
-* For coordinating contributions and development, please use Slack.
-* For security disclosures, please use Github's security advisory feature.
-* For collaborations and partnerships, please contact us at vllm-questions AT lists.berkeley.edu.
+### Services Not Starting
+
+```bash
+# Check logs
+docker compose logs [service_name]
+
+# Common issues:
+docker compose down
+docker volume prune  # WARNING: Deletes data
+docker compose up -d
+```
+
+### Ollama Models Not Loading
+
+```bash
+# Re-pull models
+docker compose exec ollama ollama pull granite4:latest
+
+# Check available models
+docker compose exec ollama ollama list
+
+# Restart Ollama
+docker compose restart ollama
+```
+
+### RAG Not Working
+
+```bash
+# Check RAG API logs
+docker compose logs rag_api
+
+# Verify PostgreSQL connection
+docker compose exec postgres psql -U librechat -c "SELECT version();"
+
+# Re-initialize database
+docker compose down postgres
+docker volume rm local-ai-stack_postgres_data
+docker compose up -d postgres
+```
+
+### Memory Not Persisting
+
+```bash
+# Check mem0 logs
+docker compose logs openmemory
+
+# Verify Qdrant connection
+curl http://localhost:6333/collections/mem0_memories
+
+# Reset memory store
+docker compose restart openmemory
+```
+
+### Out of Memory
+
+```bash
+# Reduce concurrent models in docker-compose.yml
+OLLAMA_MAX_LOADED_MODELS: 1  # Instead of 3
+
+# Enable Qdrant quantization (see Advanced Configuration)
+
+# Reduce chunk size for RAG
+CHUNK_SIZE=256  # Instead of 512
+```
+
+## 📊 Monitoring
+
+### View Resource Usage
+
+```bash
+docker stats
+```
+
+### Check Collection Status
+
+```bash
+# Qdrant collections
+curl http://localhost:6333/collections
+
+# PostgreSQL tables
+docker compose exec postgres psql -U librechat -c "\dt rag.*"
+```
+
+### Performance Metrics
+
+Check `analytics.query_logs` table:
+
+```sql
+docker compose exec postgres psql -U librechat -c "
+  SELECT query_type, AVG(latency_ms), COUNT(*)
+  FROM analytics.query_logs
+  GROUP BY query_type;
+"
+```
+
+## 🔒 Security Notes
+
+### For Production Use
+
+1. **Change all default passwords** in `librechat.env`
+2. **Enable HTTPS** in nginx.conf
+3. **Set up firewall rules**
+4. **Enable authentication** on all services
+5. **Use environment-specific secrets**
+
+### Network Isolation
+
+Services are isolated in backend/frontend networks. Only LibreChat is exposed via Nginx.
+
+## 🗂️ Backup & Recovery
+
+### Backup Data
+
+```bash
+# Backup volumes
+docker run --rm -v local-ai-stack_postgres_data:/data -v $(pwd)/backups:/backup alpine tar czf /backup/postgres_backup.tar.gz /data
+docker run --rm -v local-ai-stack_qdrant_storage:/data -v $(pwd)/backups:/backup alpine tar czf /backup/qdrant_backup.tar.gz /data
+docker run --rm -v local-ai-stack_ollama_models:/data -v $(pwd)/backups:/backup alpine tar czf /backup/ollama_backup.tar.gz /data
+
+# Backup configurations
+tar czf backups/configs_backup.tar.gz *.yaml *.env *.conf
+```
+
+### Restore Data
+
+```bash
+# Stop services
+docker compose down
+
+# Restore volumes
+docker run --rm -v local-ai-stack_postgres_data:/data -v $(pwd)/backups:/backup alpine tar xzf /backup/postgres_backup.tar.gz -C /
+docker run --rm -v local-ai-stack_qdrant_storage:/data -v $(pwd)/backups:/backup alpine tar xzf /backup/qdrant_backup.tar.gz -C /
+docker run --rm -v local-ai-stack_ollama_models:/data -v $(pwd)/backups:/backup alpine tar xzf /backup/ollama_backup.tar.gz -C /
+
+# Start services
+docker compose up -d
+```
+
+## 📈 Scaling
+
+### Horizontal Scaling
+
+For high-traffic scenarios:
+
+1. **Qdrant**: Use cluster mode
+2. **PostgreSQL**: Set up replication
+3. **Ollama**: Run multiple instances behind load balancer
+4. **LibreChat**: Scale with Docker Swarm or Kubernetes
+
+### Vertical Scaling
+
+- Increase container resource limits in `docker-compose.yml`
+- Adjust PostgreSQL shared_buffers and effective_cache_size
+- Tune Qdrant HNSW parameters (m, ef_construct)
+
+## 🤝 Contributing
+
+Feel free to submit issues and enhancement requests!
+
+## 📄 License
+
+This setup is provided as-is. Individual components have their own licenses:
+
+- LibreChat: MIT
+- mem0: Apache 2.0
+- Qdrant: Apache 2.0
+- Ollama: MIT
+
+## 🙏 Acknowledgments
+
+- [LibreChat](https://github.com/danny-avila/LibreChat)
+- [mem0](https://github.com/mem0ai/mem0)
+- [Qdrant](https://github.com/qdrant/qdrant)
+- [Ollama](https://github.com/ollama/ollama)
