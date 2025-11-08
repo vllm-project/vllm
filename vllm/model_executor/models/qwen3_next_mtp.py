@@ -23,6 +23,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen3_next import (
     Qwen3NextDecoderLayer,
     Qwen3NextRMSNorm,
+    QwenNextMixtureOfExperts,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import Qwen3NextConfig
@@ -226,7 +227,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class Qwen3NextMTP(nn.Module, SupportsPP):
+class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -265,6 +266,7 @@ class Qwen3NextMTP(nn.Module, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
+        self.set_moe_parameters()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

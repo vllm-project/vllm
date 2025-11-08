@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -109,15 +110,22 @@ class MultiConnector(KVConnectorBase_V1):
     - Save to all connectors.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
 
         self._connectors: list[KVConnectorBase_V1] = []
         self._ktc_kv_transfer_config = []
         for connector_cls, temp_config in self._get_connector_classes_and_configs(
             vllm_config
         ):
-            self._connectors.append(connector_cls(temp_config, role))
+            self._connectors.append(connector_cls(temp_config, role, kv_cache_config))
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         # A mapping from request id to the index of the connector chosen to

@@ -205,10 +205,6 @@ class TpuPlatform(Platform):
         return "vllm.distributed.device_communicators.tpu_communicator.TpuCommunicator"  # noqa
 
     @classmethod
-    def use_all_gather(cls) -> bool:
-        return True
-
-    @classmethod
     def validate_request(
         cls,
         prompt: PromptType,

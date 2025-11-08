@@ -113,7 +113,10 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "auto"])
-def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype):
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+def test_sparse_backend_decode_correctness(
+    dist_init, batch_name, kv_cache_dtype, tensor_parallel_size
+):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for sparse MLA decode test")
 
@@ -135,8 +138,11 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     total_cache_tokens = sum(batch_spec.seq_lens)
     block_size = 64
 
+    # Note: We use TP=1 to avoid multi-GPU requirements in CI.
+    # The test simulates head partitioning via mocked methods below.
     vllm_config = create_vllm_config(
         model_name="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=1,
         max_model_len=max_seqlen,
         num_gpu_blocks=max(2048, cdiv(total_cache_tokens, block_size) + 1),
         block_size=block_size,
@@ -156,7 +162,8 @@ def test_sparse_backend_decode_correctness(dist_init, batch_name, kv_cache_dtype
     )
     model_config.dtype = dtype
     model_config.get_num_attention_heads = MethodType(
-        lambda self, parallel_config: num_heads, model_config
+        lambda self, parallel_config: max(1, num_heads // tensor_parallel_size),
+        model_config,
     )
     model_config.get_num_kv_heads = MethodType(
         lambda self, parallel_config: 1, model_config

@@ -21,7 +21,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -1165,7 +1164,6 @@ class StreamingXMLToolCallParser:
         self.deferred_param_raw_value = ""
 
 
-@ToolParserManager.register_module("qwen3_xml")
 class Qwen3XMLToolParser(ToolParser):
     def __init__(self, tokenizer: AnyTokenizer):
         super().__init__(tokenizer)

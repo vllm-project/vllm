@@ -82,7 +82,11 @@ class DeepseekMLP(nn.Module):
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2, bias=False, quant_config=quant_config
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             intermediate_size,
@@ -90,6 +94,7 @@ class DeepseekMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             reduce_results=reduce_results,
+            prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
             raise ValueError(
@@ -239,6 +244,7 @@ class DeepseekAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.o_proj = RowParallelLinear(
@@ -246,6 +252,7 @@ class DeepseekAttention(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -292,6 +299,7 @@ class DeepseekDecoderLayer(nn.Module):
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        moe_layer_freq = getattr(config, "moe_layer_freq", 1)
         self.self_attn = DeepseekAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -306,7 +314,7 @@ class DeepseekDecoderLayer(nn.Module):
         if (
             config.n_routed_experts is not None
             and layer_idx >= config.first_k_dense_replace
-            and layer_idx % config.moe_layer_freq == 0
+            and layer_idx % moe_layer_freq == 0
         ):
             self.mlp = DeepseekMoE(
                 config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
