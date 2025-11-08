@@ -819,7 +819,7 @@ def get_config_file_name(
 ) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
     # Set device_name to H200 if a device from the H200 family is detected
-    if "H200" in device_name:
+    if "H200" in device_name.split("_"):
         device_name = "NVIDIA_H200"
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = (
