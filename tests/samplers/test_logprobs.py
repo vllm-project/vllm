@@ -4,7 +4,7 @@
 import pytest
 
 from vllm import SamplingParams
-from vllm.logprobs import FlattenLogprobs
+from vllm.logprobs import FlatLogprobs
 
 MODELS = ["distilbert/distilgpt2"]
 MAX_TOKENS = 5
@@ -44,12 +44,8 @@ def test_ranks(
         decode_tokens, _, decode_logprobs, prompt_logprobs = result
 
         # Ensure the return type of logprobs is accurate
-        assert isinstance(
-            prompt_logprobs, FlattenLogprobs if flatten_logprobs else list
-        )
-        assert isinstance(
-            decode_logprobs, FlattenLogprobs if flatten_logprobs else list
-        )
+        assert isinstance(prompt_logprobs, FlatLogprobs if flatten_logprobs else list)
+        assert isinstance(decode_logprobs, FlatLogprobs if flatten_logprobs else list)
 
         ########################
         # Check prompt logprobs

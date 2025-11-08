@@ -1464,10 +1464,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable FlattenLogprobs whose GC overhead is significantly smaller than
+    # Flag to enable FlatLogprobs whose GC overhead is significantly smaller than
     # the original list[dict[int, Logprob]] approach.
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
-    # FlattenLogprobs.
+    # FlatLogprobs.
     "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
 }
 

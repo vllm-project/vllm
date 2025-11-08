@@ -5,7 +5,7 @@
 import pytest
 
 from vllm.logprobs import (
-    FlattenLogprobs,
+    FlatLogprobs,
     Logprob,
     LogprobsOnePosition,
     append_logprobs_for_next_position,
@@ -32,7 +32,7 @@ def test_create_logprobs_flatten(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VLLM_FLATTEN_LOGPROBS", "1")
 
     prompt_logprobs = create_prompt_logprobs()
-    assert isinstance(prompt_logprobs, FlattenLogprobs)
+    assert isinstance(prompt_logprobs, FlatLogprobs)
     assert prompt_logprobs.start_indices == [0]
     assert prompt_logprobs.end_indices == [0]
     assert len(prompt_logprobs.token_ids) == 0
@@ -44,7 +44,7 @@ def test_create_logprobs_flatten(monkeypatch: pytest.MonkeyPatch) -> None:
     assert prompt_logprobs[0] == dict()
 
     sample_logprobs = create_sample_logprobs()
-    assert isinstance(sample_logprobs, FlattenLogprobs)
+    assert isinstance(sample_logprobs, FlatLogprobs)
     assert len(sample_logprobs.start_indices) == 0
     assert len(sample_logprobs.end_indices) == 0
     assert len(sample_logprobs.token_ids) == 0
@@ -106,7 +106,7 @@ def test_append_logprobs_for_next_position_flatten(
         rank=11,
         num_logprobs=-1,
     )
-    assert isinstance(logprobs, FlattenLogprobs)
+    assert isinstance(logprobs, FlatLogprobs)
     assert logprobs.start_indices == [0, 1]
     assert logprobs.end_indices == [1, 3]
     assert logprobs.token_ids == [1, 2, 3]
@@ -130,7 +130,7 @@ LOGPROBS_ONE_POSITION_2: LogprobsOnePosition = {
 
 
 def test_flatten_logprobs_append() -> None:
-    logprobs = FlattenLogprobs()
+    logprobs = FlatLogprobs()
     logprobs.append(LOGPROBS_ONE_POSITION_0)
     logprobs.append(LOGPROBS_ONE_POSITION_1)
     assert logprobs.start_indices == [0, 1]
@@ -150,7 +150,7 @@ def test_flatten_logprobs_append() -> None:
 
 
 def test_flatten_logprobs_extend() -> None:
-    logprobs = FlattenLogprobs()
+    logprobs = FlatLogprobs()
     # Extend with list[LogprobsOnePosition]
     logprobs.extend([LOGPROBS_ONE_POSITION_2, LOGPROBS_ONE_POSITION_0])
     assert logprobs.start_indices == [0, 3]
@@ -160,9 +160,9 @@ def test_flatten_logprobs_extend() -> None:
     assert logprobs.ranks == [40, 50, 60, 10]
     assert logprobs.decoded_tokens == ["40", "50", "60", "10"]
 
-    other_logprobs = FlattenLogprobs()
+    other_logprobs = FlatLogprobs()
     other_logprobs.extend([LOGPROBS_ONE_POSITION_1, LOGPROBS_ONE_POSITION_0])
-    # Extend with another FlattenLogprobs
+    # Extend with another FlatLogprobs
     logprobs.extend(other_logprobs)
     assert logprobs.start_indices == [0, 3, 4, 6]
     assert logprobs.end_indices == [3, 4, 6, 7]
@@ -173,7 +173,7 @@ def test_flatten_logprobs_extend() -> None:
 
 
 def test_flatten_logprobs_access() -> None:
-    logprobs = FlattenLogprobs()
+    logprobs = FlatLogprobs()
     logprobs.extend(
         [LOGPROBS_ONE_POSITION_1, LOGPROBS_ONE_POSITION_2, LOGPROBS_ONE_POSITION_0]
     )
