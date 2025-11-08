@@ -1268,6 +1268,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             logits_indices = query_start_loc[1:] - 1
             num_draft_tokens = None
             spec_decode_metadata = None
+            num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
@@ -1294,7 +1295,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens
             )
             logits_indices = spec_decode_metadata.logits_indices
-
+            num_sampled_tokens = num_draft_tokens + 1
             # For DECODE only cuda graph of some attention backends (e.g., GDN).
             self.num_decode_draft_tokens.np[:num_reqs] = num_decode_draft_tokens
             self.num_decode_draft_tokens.np[num_reqs:].fill(-1)
@@ -1445,7 +1446,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Hot-Swap lora model
         if self.lora_config:
-            self.set_active_loras(self.input_batch, num_scheduled_tokens)
+            assert (
+                np.sum(num_sampled_tokens)
+                <= self.vllm_config.scheduler_config.max_num_batched_tokens
+            )
+            self.set_active_loras(
+                self.input_batch, num_scheduled_tokens, num_sampled_tokens
+            )
 
         return (
             attn_metadata,
@@ -3390,6 +3397,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
         total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
+        num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         # Disable DP padding when running eager
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
@@ -3485,7 +3493,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             attn_metadata[layer_name] = attn_metadata_i
 
         with self.maybe_dummy_run_with_lora(
-            self.lora_config, num_scheduled_tokens, activate_lora, remove_lora
+            self.lora_config,
+            num_scheduled_tokens,
+            num_sampled_tokens,
+            activate_lora,
+            remove_lora,
         ):
             # Make sure padding doesn't exceed max_num_tokens
             assert num_tokens_after_padding <= self.max_num_tokens
