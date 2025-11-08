@@ -155,7 +155,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
-    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "throughput"
+    VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "latency"
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -220,6 +220,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_FLATTEN_LOGPROBS: bool = False
 
 
 def get_default_cache_root():
@@ -776,7 +777,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # If set, the OpenAI API server will stay alive even after the underlying
     # AsyncLLMEngine errors and stops serving requests
     "VLLM_KEEP_ALIVE_ON_ENGINE_DEATH": lambda: bool(
-        os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", 0)
+        int(os.getenv("VLLM_KEEP_ALIVE_ON_ENGINE_DEATH", "0"))
     ),
     # If the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN is set, it allows
     # the user to specify a max sequence length greater than
@@ -1217,7 +1218,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "latency":
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
     "VLLM_FLASHINFER_MOE_BACKEND": env_with_choices(
-        "VLLM_FLASHINFER_MOE_BACKEND", "throughput", ["throughput", "latency"]
+        "VLLM_FLASHINFER_MOE_BACKEND", "latency", ["throughput", "latency"]
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
@@ -1313,7 +1314,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, it means we pre-downloaded cubin files and flashinfer will
     # read the cubin files directly.
-    "VLLM_HAS_FLASHINFER_CUBIN": lambda: os.getenv("VLLM_HAS_FLASHINFER_CUBIN", False),
+    "VLLM_HAS_FLASHINFER_CUBIN": lambda: bool(
+        int(os.getenv("VLLM_HAS_FLASHINFER_CUBIN", "0"))
+    ),
     # Supported options:
     # - "flashinfer-cudnn": use flashinfer cudnn GEMM backend
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
@@ -1322,7 +1325,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
         None,
-        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass"],
+        ["flashinfer-cudnn", "flashinfer-trtllm", "flashinfer-cutlass", "cutlass"],
     ),
     # Controls garbage collection during CUDA graph capture.
     # If set to 0 (default), enables GC freezing to speed up capture time.
@@ -1449,8 +1452,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #                                      top 5 collected objects
     "VLLM_GC_DEBUG": lambda: os.getenv("VLLM_GC_DEBUG", ""),
     # Disables parallel execution of shared_experts via separate cuda stream
-    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: os.getenv(
-        "VLLM_DISABLE_SHARED_EXPERTS_STREAM", False
+    "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file
@@ -1461,6 +1464,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    # Flag to enable FlattenLogprobs whose GC overhead is significantly smaller than
+    # the original list[dict[int, Logprob]] approach.
+    # After enabled, PromptLogprobs and SampleLogprobs would populated as
+    # FlattenLogprobs.
+    "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
