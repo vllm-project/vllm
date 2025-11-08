@@ -212,9 +212,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         del self._logprobs_tensors
         del self._sampled_token_ids
 
-        valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+        valid_sampled_token_ids: list[np.ndarray] = [
+            row for row in self.sampled_token_ids_cpu.numpy()
+        ]
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -4859,4 +4861,4 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         pinned.copy_(sampled_token_ids, non_blocking=True)
         self.transfer_event.record()
         self.transfer_event.synchronize()
-        return [row for row in pinned]
+        return [row for row in pinned.numpy()]

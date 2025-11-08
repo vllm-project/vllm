@@ -898,9 +898,6 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
-        logger.info(f"===Jialin {len(model_runner_output.sampled_token_ids)=}")
-        if len(model_runner_output.sampled_token_ids) > 0:
-            logger.info(f"===Jialin {type(model_runner_output.sampled_token_ids[0])=}")
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -946,7 +943,7 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids: list[int] = (
-                sampled_token_ids[req_index] if sampled_token_ids else []
+                sampled_token_ids[req_index].tolist() if sampled_token_ids else []
             )
 
             scheduled_spec_token_ids = (
