@@ -642,10 +642,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
 
+            ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
             layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                 layer.w13_weight,
                 layer.w2_weight,
                 use_prepack=True,
+                experts_start_id=ep_rank_start,
             )
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
