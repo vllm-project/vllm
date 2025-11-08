@@ -962,14 +962,32 @@ async def test_function_call_with_previous_input_messages(
     # Additional checks for issue #28262: Harmony channel metadata
     # ============================================================
 
-    # The core bug in #28262 is that when response outputs become inputs
-    # in the next request, channel metadata is lost. Check this:
+    # The core bug in #28262 is that when Responses API output items
+    # are used as input (via function_call_output type), channel metadata
+    # is lost. Test this by making a third request using Responses API format.
+
+    # Make a third request using function_call_output format (not Chat format)
+    response_3 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": function_call.call_id,
+                "output": result,
+            }
+        ],
+        tools=tools,
+        previous_response_id=response.id,
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response_3 is not None
+    assert response_3.status == "completed"
+
+    # Check that tool output has commentary channel
     has_tool_message_with_commentary = False
-
-    for msg_dict in response_2.input_messages:
+    for msg_dict in response_3.input_messages:
         msg = Message.from_dict(msg_dict)
-
-        # Check tool message (function output) has commentary channel
         if msg.author.role == "tool" and msg.channel == "commentary":
             has_tool_message_with_commentary = True
 
