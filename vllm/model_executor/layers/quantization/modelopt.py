@@ -224,7 +224,10 @@ class ModelOptFp8Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
+        from vllm.attention.layer import (  # Avoid circular import
+            Attention,
+            MLAAttention,
+        )
 
         if isinstance(layer, LinearBase):
             if self.is_layer_excluded(prefix):
@@ -233,7 +236,7 @@ class ModelOptFp8Config(QuantizationConfig):
             if "vision_tower" in prefix or "vision_model" in prefix:
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
-        elif isinstance(layer, Attention):
+        elif isinstance(layer, (Attention, MLAAttention)):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
             return ModelOptFp8MoEMethod(self, layer)
@@ -891,7 +894,10 @@ class ModelOptNvFp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
+        from vllm.attention.layer import (  # Avoid circular import
+            Attention,
+            MLAAttention,
+        )
 
         skip_layer = self.is_layer_excluded(prefix)
         if isinstance(layer, LinearBase):
@@ -903,7 +909,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
             quant_method = ModelOptNvFp4LinearMethod(self)
             quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
             return quant_method
-        elif isinstance(layer, Attention):
+        elif isinstance(layer, (Attention, MLAAttention)):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
             if skip_layer:
@@ -949,6 +955,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
             self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
             assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
+            self.backend = "cutlass"
+            assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
 
         if self.backend == "none":
             raise ValueError(
