@@ -321,12 +321,12 @@ class Scheduler(SchedulerInterface):
                 )
                 if num_scheduled_spec_tokens > 0:
                     # Trim spec_token_ids list to num_scheduled_spec_tokens.
+                    del request.spec_token_ids[num_scheduled_spec_tokens:]
                     scheduled_spec_decode_tokens[request.request_id] = (
-                        request.spec_token_ids[:num_scheduled_spec_tokens]
+                        request.spec_token_ids
                     )
-                # After this step the speculative tokens will no longer be
-                # valid because the structured output state would have advanced.
-                # Clear the list to avoid reusing them.
+                # New spec tokens will be set in `update_draft_token_ids` before the
+                # next step when applicable.
                 request.spec_token_ids = []
 
             # Encoder-related.
