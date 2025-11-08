@@ -184,6 +184,7 @@ def get_user_message(content: str) -> Message:
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
     prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
+    next_msg: ResponseInputOutputItem | None = None,
 ) -> Message:
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
@@ -226,7 +227,19 @@ def parse_response_input(
         content = response_msg["content"]
         assert len(content) == 1
         msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
-        msg = msg.with_channel("analysis")
+        # Issue #28262: Reasoning channel should match the following message
+        # - If followed by function_call, use commentary channel
+        # - Otherwise, use analysis channel (default)
+        if next_msg is not None:
+            next_msg_dict = (
+                next_msg if isinstance(next_msg, dict) else next_msg.model_dump()
+            )
+            if next_msg_dict.get("type") == "function_call":
+                msg = msg.with_channel("commentary")
+            else:
+                msg = msg.with_channel("analysis")
+        else:
+            msg = msg.with_channel("analysis")
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")

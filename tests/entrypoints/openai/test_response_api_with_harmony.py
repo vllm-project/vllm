@@ -963,7 +963,7 @@ async def test_function_call_with_previous_input_messages(
     # ============================================================
     from vllm.entrypoints.harmony_utils import parse_response_input
 
-    # Test that function_call_output gets correct channel
+    # Test 1: function_call_output should have commentary channel
     tool_msg = parse_response_input(
         response_msg={
             "type": "function_call_output",
@@ -973,8 +973,39 @@ async def test_function_call_with_previous_input_messages(
         prev_responses=list(response.output),
     )
 
-    # Issue #28262: function_call_output should have channel='commentary'
     assert tool_msg.channel == "commentary", (
         f"function_call_output should have channel='commentary', "
         f"got '{tool_msg.channel}'"
     )
+
+    # Test 2: reasoning followed by function_call should have commentary channel
+    reasoning_output = None
+    for item in response.output:
+        if item.type == "reasoning":
+            reasoning_output = item
+            break
+
+    if reasoning_output:
+        reasoning_msg = parse_response_input(
+            response_msg=reasoning_output.model_dump(),
+            prev_responses=[],
+            next_msg=function_call.model_dump(),
+        )
+
+        assert reasoning_msg.channel == "commentary", (
+            f"reasoning before function_call should have channel='commentary', "
+            f"got '{reasoning_msg.channel}'"
+        )
+
+    # Test 3: reasoning without following function_call should have analysis channel
+    if reasoning_output:
+        reasoning_msg_alone = parse_response_input(
+            response_msg=reasoning_output.model_dump(),
+            prev_responses=[],
+            next_msg=None,
+        )
+
+        assert reasoning_msg_alone.channel == "analysis", (
+            f"reasoning without following message should have channel='analysis', "
+            f"got '{reasoning_msg_alone.channel}'"
+        )
