@@ -2422,14 +2422,17 @@ class FusedMoE(CustomOp):
                 if self.shared_experts_stream is not None:
                     # For chunked, we start the shared experts stream here
                     # (Note that no concurrency with the router/gate)
-                    self.shared_experts_stream.wait_stream(current_stream())
+                    main_stream = current_stream()
+                    self.shared_experts_stream.wait_stream(main_stream)
+
+                    staged_hidden_states.record_stream(self.shared_experts_stream)
 
                     with torch.cuda.stream(self.shared_experts_stream):
                         # Note that staged_hidden_states clone() is necessary
                         # here to avoid conflict with the main stream
-                        shared_output = self.shared_experts(
-                            staged_hidden_states.clone()
-                        )
+                        cloned_input = staged_hidden_states.clone()
+                        shared_output = self.shared_experts(cloned_input)
+                        shared_output.record_stream(main_stream)
                 else:
                     shared_output = self.shared_experts(staged_hidden_states)
 
@@ -2467,6 +2470,7 @@ class FusedMoE(CustomOp):
 
                 # Here we finish the shared experts stream
                 if self.shared_experts_stream is not None:
+                    # Wait for shared experts to complete before using the output
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (
@@ -2577,11 +2581,16 @@ class FusedMoE(CustomOp):
             assert self.shared_experts is not None
 
             if self.shared_experts_stream is not None:
+                main_stream = current_stream()
+                hidden_states.record_stream(self.shared_experts_stream)
+
                 # Run shared experts in parallel on a separate stream
                 with torch.cuda.stream(self.shared_experts_stream):
                     # Note that hidden_states clone() is necessary here to avoid
                     # conflict with the main stream
-                    shared_output = self.shared_experts(hidden_states.clone())
+                    cloned_input = hidden_states.clone()
+                    shared_output = self.shared_experts(cloned_input)
+                    shared_output.record_stream(main_stream)
             else:
                 shared_output = self.shared_experts(hidden_states)
         else:
