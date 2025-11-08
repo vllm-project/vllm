@@ -19,7 +19,7 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import (
     inductor_partition_rule_context,
-    resolve_defined_ops,
+    should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
@@ -303,7 +303,7 @@ class SplitItem:
 
 
 def split_graph(
-    graph: fx.GraphModule, resolved_ops: list[torch._ops.OpOverload]
+    graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
@@ -312,12 +312,8 @@ def split_graph(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        # Match node.target against resolved_ops
-        # node.target can be OpOverloadPacket, need to check .default
-        if node.op == "call_function" and (
-            node.target in resolved_ops
-            or (hasattr(node.target, "default") and node.target.default in resolved_ops)
-        ):
+
+        if should_split(node, splitting_ops):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
@@ -653,8 +649,7 @@ class VllmBackend:
         else:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
-        resolved_split_ops = resolve_defined_ops(fx_split_ops)
-        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
