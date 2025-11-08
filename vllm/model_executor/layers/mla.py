@@ -4,10 +4,12 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -151,6 +153,22 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
+
+        # Quantize q to FP8 after RoPE if FP8 cache is enabled
+        # This allows RoPE + Quant fusion via torch.compile pattern matching
+        if hasattr(self.mla_attn, 'kv_cache_dtype') and \
+           self.mla_attn.kv_cache_dtype.startswith("fp8"):
+            # Get q_scale from the attention layer
+            q_scale = getattr(self.mla_attn, '_q_scale', None)
+            if q_scale is not None:
+                # Quantize the entire q tensor (both nope and rope portions)
+                q_shape = q.shape
+                q_2d = q.reshape(q_shape[0], q_shape[1] * q_shape[2])
+                q_quantized, q_scale_out = ops.scaled_fp8_quant(
+                    q_2d,
+                    scale=q_scale,
+                )
+                q = q_quantized.reshape(q_shape)
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)

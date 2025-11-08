@@ -77,14 +77,15 @@ class RotaryEmbeddingBase(CustomOp):
         cache = torch.cat((cos, sin), dim=-1)
         return cache
 
-    def _match_cos_sin_cache_dtype(self, query: torch.Tensor) -> None:
-        # __setattr__ in nn.Module (called by `self.cos_sin_cache = ...`)
-        # is expensive, so avoid calling it if possible
+    def _match_cos_sin_cache_dtype(self, query: torch.Tensor) -> torch.Tensor:
+        # Return cache with matched dtype/device without modifying buffer
+        # This avoids buffer mutation during forward (forbidden in cudagraph mode)
         if (
             self.cos_sin_cache.device != query.device
             or self.cos_sin_cache.dtype != query.dtype
         ):
-            self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+            return self.cos_sin_cache.to(query.device, dtype=query.dtype)
+        return self.cos_sin_cache
 
 
 class RotaryEmbedding(RotaryEmbeddingBase):
@@ -149,7 +150,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
 
         from vllm import _custom_ops as ops
 
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
 
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
@@ -158,7 +159,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             query,
             key,
             self.head_size,
-            self.cos_sin_cache,
+            cos_sin_cache,
             self.is_neox_style,
         )
         return query, key
@@ -170,12 +171,12 @@ class RotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if self.is_rocm_triton_rotary_embedding_enabled:
-            self._match_cos_sin_cache_dtype(query)
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
             rocm_aiter_rotary_emb(
                 positions,
                 query,
                 key,
-                self.cos_sin_cache,
+                cos_sin_cache,
                 self.head_size,
                 self.rotary_dim,
                 self.is_neox_style,
@@ -191,7 +192,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         from vllm._ipex_ops import ipex_ops as ops
 
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         # ops.rotary_embedding() is an in-place operation
         # that updates the query and key tensors.
         if key is None:
@@ -205,7 +206,7 @@ class RotaryEmbedding(RotaryEmbeddingBase):
                 query,
                 key,
                 self.head_size,
-                self.cos_sin_cache,
+                cos_sin_cache,
                 self.is_neox_style,
             )
         return query, key
