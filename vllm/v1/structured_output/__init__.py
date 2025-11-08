@@ -269,9 +269,10 @@ class StructuredOutputManager:
                         and token is not None
                         and not structured_output_request.grammar.is_terminated()
                     ):
-                        assert structured_output_request.grammar.accept_tokens(
+                        accepted = structured_output_request.grammar.accept_tokens(
                             req_id, [token]
                         )
+                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
