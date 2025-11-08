@@ -34,6 +34,8 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
             assert output.num_cached_tokens == 0
 
         # test enable_prefix_caching plus all pooling
+        # we need to skip reading caching at this request by
+        # request.skip_reading_caching
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
             pooling_task="token_embed",
@@ -43,3 +45,32 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
             assert len(output.prompt_token_ids) == n
             assert len(output.outputs.data) == n
             assert output.num_cached_tokens == 0
+
+    with vllm_runner(
+        model,
+        max_model_len=128,
+        enforce_eager=True,
+        runner="pooling",
+        enable_chunked_prefill=False,
+        enable_prefix_caching=True,
+    ) as vllm_model:
+        # skip_reading_caching can still write to caching
+        # to accelerate following requests
+        pooling_outputs = vllm_model.llm.encode(
+            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            pooling_task="token_embed",
+        )
+
+        for n, output in zip(n_prompt_tokens, pooling_outputs):
+            assert len(output.prompt_token_ids) == n
+            assert len(output.outputs.data) == n
+            assert output.num_cached_tokens == 0
+
+        pooling_outputs = vllm_model.llm.encode(
+            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
+            pooling_task="embed",
+        )
+
+        for n, output in zip(n_prompt_tokens, pooling_outputs):
+            assert len(output.prompt_token_ids) == n
+            assert output.num_cached_tokens > 0
