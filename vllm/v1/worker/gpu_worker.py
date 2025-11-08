@@ -35,6 +35,7 @@ from vllm.model_executor import set_random_seed
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
+from vllm.profiler.gpu_profiler import CudaProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -116,6 +117,8 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
                 ),
             )
+        elif envs.VLLM_TORCH_CUDA_PROFILE:
+            self.profiler = CudaProfilerWrapper()
         else:
             self.profiler = None
 
@@ -593,7 +596,10 @@ class Worker(WorkerBase):
         else:
             self.profiler.stop()
             # only print profiler results on rank 0
-            if self.local_rank == 0:
+            if (
+                isinstance(self.profiler, torch.profiler.profile)
+                and self.local_rank == 0
+            ):
                 print(
                     self.profiler.key_averages().table(sort_by="self_cuda_time_total")
                 )
