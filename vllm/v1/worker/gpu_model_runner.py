@@ -8,8 +8,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
 from copy import deepcopy
-from functools import reduce
-from itertools import product
+from functools import partial, reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -73,7 +72,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
-from vllm.utils.math_utils import cdiv, round_up
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -505,7 +504,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
-        self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
+        self.cudagraph_dispatcher = CudagraphDispatcher(
+            self.vllm_config, is_drafter=False
+        )
 
         self.mm_budget = (
             MultiModalBudget(
@@ -1078,7 +1079,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         SpecDecodeMetadata | None,
         np.ndarray,
         CommonAttentionMetadata | None,
-        int,
+        BatchDescriptor,
         UBatchSlices | None,
         torch.Tensor | None,
         bool,
@@ -1205,16 +1206,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
-        uniform_decode = (
-            max_num_scheduled_tokens == self.uniform_decode_query_len
-        ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+        num_tokens_padded, uniform_decode, uniform_query_len = (
+            self._get_local_batch_description(
+                num_tokens_unpadded, num_reqs, max_num_scheduled_tokens
+            )
+        )
 
         # Disable DP padding when running eager to avoid excessive padding when
         # running prefills. This lets us set enforce_eager on the prefiller in
         # a P/D setup and still use CUDA graphs (enabled by this padding) on the
         # decoder.
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+
+        # For uniform decode batch with query length > 1, we may extend to non-uniform
+        # padding if there exists one dp rank that is non-uniform batch (i.e. can run
+        # into piecewise cudagraph), to resolve the conflicts where we may no have
+        # cudagraph for uniform-batch after dp-padding.
+        num_tokens_padded_extended = num_tokens_padded
+        disable_padding_extend = (
+            self.compilation_config.disable_cudagraph_uniform_alignment
+            or not self.compilation_config.cudagraph_mode.separate_routine()
+            or not uniform_decode
+            or uniform_query_len <= 1
+        )
+        if (
+            not disable_padding_extend
+            and num_tokens_padded < self.compilation_config.max_capture_size
+        ):
+            num_tokens_padded_extended = self.vllm_config.pad_for_cudagraph(
+                num_tokens_padded, uniform_aligned=False
+            )
 
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
@@ -1223,6 +1244,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             allow_dp_padding=allow_dp_padding,
             num_tokens_padded=num_tokens_padded,
             uniform_decode=uniform_decode,
+            try_disable_padding_extend=disable_padding_extend,
+            num_tokens_padded_extended=num_tokens_padded_extended,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
 
@@ -1468,13 +1491,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
 
+        dp_rank = self.parallel_config.data_parallel_rank
+        if ubatch_slices:
+            assert num_tokens_across_dp is not None
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+            self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+        elif num_tokens_across_dp is not None:
+            num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+        else:
+            num_input_tokens = num_tokens_padded
+
+        batch_descriptor = BatchDescriptor(
+            num_tokens=num_input_tokens,
+            uniform_decode=uniform_decode,
+            uniform_query_len=uniform_query_len,
+            has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+        )
+
         return (
             attn_metadata,
             logits_indices,
             spec_decode_metadata,
             num_scheduled_tokens,
             spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens,
+            batch_descriptor,
             ubatch_slices,
             num_tokens_across_dp,
             use_cascade_attn,
@@ -2133,27 +2173,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
         )
 
-    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and hasattr(self, "cudagraph_batch_sizes")
-            and self.cudagraph_batch_sizes
-            and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
-        ):
-            # Use CUDA graphs.
-            # Add padding to the batch size.
-            return self.vllm_config.pad_for_cudagraph(num_scheduled_tokens)
-
-        # Eager mode.
-        # Pad tokens to multiple of tensor_parallel_size when
-        # enabled collective fusion for SP
-        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if (
-            self.compilation_config.pass_config.enable_sequence_parallelism
-            and tp_size > 1
-        ):
-            return round_up(num_scheduled_tokens, tp_size)
-        return num_scheduled_tokens
+    def _get_local_batch_description(
+        self, num_scheduled_tokens: int, num_reqs: int, max_query_len: int
+    ) -> tuple[int, bool, int]:
+        """
+        Get local batch descriptions for before DP sync.
+        returns (num_tokens_after_padding, uniform_decode, uniform_query_len)
+        """
+        return self.cudagraph_dispatcher.get_local_batch_description(
+            num_scheduled_tokens, num_reqs, max_query_len
+        )
 
     def _preprocess(
         self,
@@ -2504,24 +2533,21 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     num_scheduled_tokens_np,
                     spec_decode_common_attn_metadata,
-                    max_query_len,
+                    batch_descriptor,
                     ubatch_slices,
                     num_tokens_across_dp,
                     use_cascade_attn,
                 ) = self._prepare_inputs(scheduler_output)
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            if ubatch_slices:
-                assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            else:
-                num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens
-                )
-
+            # cudagraph dispatching
+            (
+                cudagraph_runtime_mode,
+                batch_descriptor,
+            ) = self.cudagraph_dispatcher.dispatch(
+                batch_descriptor,
+                use_cascade_attn,
+            )
+            num_input_tokens = batch_descriptor.num_tokens
             (
                 input_ids,
                 inputs_embeds,
@@ -2530,18 +2556,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 model_kwargs,
             ) = self._preprocess(
                 scheduler_output, num_input_tokens, intermediate_tensors
-            )
-
-            uniform_decode = (max_query_len == self.uniform_decode_query_len) and (
-                num_scheduled_tokens == self.input_batch.num_reqs * max_query_len
-            )
-            batch_descriptor = BatchDescriptor(
-                num_tokens=num_input_tokens,
-                uniform_decode=uniform_decode,
-                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-            )
-            cudagraph_runtime_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(batch_descriptor, use_cascade_attn)
             )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
@@ -3328,6 +3342,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         cudagraph_runtime_mode: CUDAGraphMode | None = None,
         force_attention: bool = False,
         uniform_decode: bool = False,
+        uniform_query_len: int = 0,
         allow_microbatching: bool = True,
         skip_eplb: bool = False,
         is_profile: bool = False,
@@ -3351,6 +3366,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             force_attention: If True, always create attention metadata. Used to
                 warm up attention backend when mode is NONE.
             uniform_decode: If True, the batch is a uniform decode batch.
+            uniform_query_len: The query length for uniform decode batch.
+                Should be 0 when uniform_decode is False.
+            allow_microbatching: If True, allow microbatching for DBO.
             skip_eplb: If True, skip EPLB state update.
             is_profile: If True, this is a profile run.
             create_mixed_batch: If True, create a mixed batch with both decode
@@ -3377,6 +3395,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # routine of FA2 for pure decode, i.e., Flashdecode + an optimization
         # for GQA/MQA.
         max_query_len = self.uniform_decode_query_len if uniform_decode else num_tokens
+        if uniform_decode and uniform_query_len:
+            # allow skip this assertion when it is on a dummy execution on DP setup
+            assert max_query_len == uniform_query_len
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -3416,6 +3437,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # Disable DP padding when running eager
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
+        # make sure uniform-decode batch can safely hit a cudagraph when it is
+        # on a dummy execution for DP size>1.
+        num_tokens_padded_extended = total_num_scheduled_tokens
+        if (
+            total_num_scheduled_tokens
+            < self.vllm_config.compilation_config.max_capture_size
+        ):
+            num_tokens_padded_extended = self.vllm_config.pad_for_cudagraph(
+                total_num_scheduled_tokens, uniform_aligned=False
+            )
+
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
@@ -3425,6 +3457,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             allow_dp_padding=allow_dp_padding,
             num_tokens_padded=total_num_scheduled_tokens,
             uniform_decode=uniform_decode,
+            try_disable_padding_extend=True,
+            num_tokens_padded_extended=num_tokens_padded_extended,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
         num_tokens_after_padding = num_tokens
@@ -3558,6 +3592,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     BatchDescriptor(
                         num_tokens=num_tokens_after_padding,
                         uniform_decode=uniform_decode,
+                        uniform_query_len=uniform_query_len,
                         has_lora=activate_lora and self.lora_config is not None,
                     )
                 )
@@ -3610,24 +3645,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 hidden_states = outputs
 
-            if self.speculative_config and self.speculative_config.use_eagle():
+            # Only trigger drafter's dummy run for profile run. Otherwise, the
+            # dummy run logic of drafter is separated from the main model's
+            # dummy run.
+            if (
+                is_profile
+                and self.speculative_config
+                and self.speculative_config.use_eagle()
+            ):
                 assert isinstance(self.drafter, EagleProposer)
-                use_cudagraphs = (
-                    cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
-                    and not self.speculative_config.enforce_eager
-                )
-
-                # Note(gnovack) - We need to disable cudagraphs for one of the two
-                # lora cases when cudagraph_specialize_lora is enabled. This is a
-                # short term mitigation for issue mentioned in
-                # https://github.com/vllm-project/vllm/issues/28334
-                if self.compilation_config.cudagraph_specialize_lora and activate_lora:
-                    use_cudagraphs = False
-
-                self.drafter.dummy_run(
-                    num_tokens,
-                    use_cudagraphs=use_cudagraphs,
-                )
+                # no cudagraph for profile run
+                self.drafter.dummy_run(num_tokens)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
@@ -3927,26 +3955,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         with freeze_gc(), graph_capture(device=self.device):
             start_free_gpu_memory = torch.cuda.mem_get_info()[0]
             cudagraph_mode = self.compilation_config.cudagraph_mode
+            logger.info("Start capturing cudagraphs for main model...")
             assert cudagraph_mode is not None
 
-            if self.lora_config:
-                if self.compilation_config.cudagraph_specialize_lora:
-                    lora_cases = [True, False]
-                else:
-                    lora_cases = [True]
-            else:
-                lora_cases = [False]
-
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
-                cudagraph_runtime_mode = cudagraph_mode.mixed_mode()
-                # make sure we capture the largest batch size first
-                compilation_cases = list(
-                    product(reversed(self.cudagraph_batch_sizes), lora_cases)
+                capture_sizes, keys, runtime_mode = (
+                    self.cudagraph_dispatcher.get_capture_cases(
+                        uniform_decode=False, uniform_query_len=0
+                    )
                 )
-                self._capture_cudagraphs(
-                    compilation_cases,
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    uniform_decode=False,
+                self._capture_cudagraphs_with_callable(
+                    capture_sizes=capture_sizes,
+                    keys=keys,
+                    cudagraph_runtime_mode=runtime_mode,
+                    dummy_run_callable=partial(
+                        self._dummy_run, skip_eplb=True, remove_lora=False
+                    ),
                 )
 
             # Capture full cudagraph for uniform decode batches if we
@@ -3955,23 +3979,69 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
                 and cudagraph_mode.separate_routine()
             ):
-                max_num_tokens = (
-                    self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
-                )
-                decode_cudagraph_batch_sizes = [
-                    x
-                    for x in self.cudagraph_batch_sizes
-                    if max_num_tokens >= x >= self.uniform_decode_query_len
-                ]
-                compilation_cases_decode = list(
-                    product(reversed(decode_cudagraph_batch_sizes), lora_cases)
-                )
-                self._capture_cudagraphs(
-                    compilation_cases=compilation_cases_decode,
-                    cudagraph_runtime_mode=CUDAGraphMode.FULL,
-                    uniform_decode=True,
+                capture_sizes, keys, runtime_mode = (
+                    self.cudagraph_dispatcher.get_capture_cases(
+                        uniform_decode=True,
+                        uniform_query_len=self.uniform_decode_query_len,
+                    )
                 )
 
+                self._capture_cudagraphs_with_callable(
+                    capture_sizes=capture_sizes,
+                    keys=keys,
+                    cudagraph_runtime_mode=runtime_mode,
+                    dummy_run_callable=partial(
+                        self._dummy_run, skip_eplb=True, remove_lora=False
+                    ),
+                )
+            self.maybe_remove_all_loras(self.lora_config)
+
+            # Capture drafter cudagraphs.
+            # Note: Currently only PIECEWISE mode is supported for eagle
+            # drafter.
+            # TODO: add full cudagraph support for drafter.
+            if (
+                self.speculative_config
+                and self.speculative_config.use_eagle()
+                and not self.speculative_config.enforce_eager
+            ):
+                assert isinstance(self.drafter, EagleProposer)
+                logger.info("Start capturing cudagraphs for drafter...")
+                # when not enforce_eager, eagle drafter share the same cudagraph_mode
+                if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:
+                    capture_sizes, keys, runtime_mode = (
+                        self.drafter.cudagraph_dispatcher.get_capture_cases(
+                            uniform_decode=False, uniform_query_len=0
+                        )
+                    )
+                    self._capture_cudagraphs_with_callable(
+                        capture_sizes=capture_sizes,
+                        keys=keys,
+                        cudagraph_runtime_mode=runtime_mode,
+                        dummy_run_callable=self.drafter.dummy_run,
+                    )
+                # the following code would not be triggered at present since
+                # only PIECEWISE mode is supported. But it is kept and prepared
+                # for full cudagraphs.
+
+                # TODO: support multiple uniform_query_lens for drafter once
+                # Padded speculation is supported. i.e.,
+                # [1, self.uniform_decode_query_len] for drafter.
+                if (
+                    cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+                    and cudagraph_mode.separate_routine()
+                ):
+                    capture_sizes, keys, runtime_mode = (
+                        self.drafter.cudagraph_dispatcher.get_capture_cases(
+                            uniform_decode=True, uniform_query_len=1
+                        )
+                    )
+                    self._capture_cudagraphs_with_callable(
+                        capture_sizes=capture_sizes,
+                        keys=keys,
+                        cudagraph_runtime_mode=runtime_mode,
+                        dummy_run_callable=self.drafter.dummy_run,
+                    )
             torch.cuda.synchronize()
             end_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
@@ -3994,30 +4064,45 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         )
         return cuda_graph_size
 
-    def _capture_cudagraphs(
+    def _capture_cudagraphs_with_callable(
         self,
-        compilation_cases: list[tuple[int, bool]],
+        capture_sizes: list[int],
+        keys: list[BatchDescriptor],
         cudagraph_runtime_mode: CUDAGraphMode,
-        uniform_decode: bool,
+        dummy_run_callable: Any,
     ):
         assert (
             cudagraph_runtime_mode != CUDAGraphMode.NONE
             and cudagraph_runtime_mode.valid_runtime_modes()
         ), f"Invalid cudagraph runtime mode: {cudagraph_runtime_mode}"
+        assert len(keys) > 0, "keys must be non-empty"
+        assert len(capture_sizes) == len(keys), (
+            "capture_sizes and keys must have the same length"
+        )
+        uniform_decode = keys[0].uniform_decode
+        uniform_query_len = keys[0].uniform_query_len
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
-            compilation_cases = tqdm(
-                compilation_cases,
+            capture_sizes = tqdm(
+                capture_sizes,
                 disable=not self.load_config.use_tqdm_on_load,
                 desc="Capturing CUDA graphs ({}, {})".format(
-                    "decode" if uniform_decode else "mixed prefill-decode",
+                    f"decode(query_len={uniform_query_len})"
+                    if uniform_decode
+                    else "mixed prefill-decode",
                     cudagraph_runtime_mode.name,
                 ),
             )
 
         # We skip EPLB here since we don't want to record dummy metrics
-        for num_tokens, activate_lora in compilation_cases:
+        for num_tokens, key in zip(capture_sizes, keys):
+            assert (
+                key.uniform_decode == uniform_decode
+                and key.uniform_query_len == uniform_query_len
+                and key.num_tokens == num_tokens
+            ), "Inconsistent batch descriptor during cudagraph capture."
+
             # We currently only capture ubatched graphs when its a FULL
             # cudagraph, a uniform decode batch, and the number of tokens
             # is above the threshold. Otherwise we just capture a non-ubatched
@@ -4040,26 +4125,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # different from the case where `FULL` implies capture
                 # attention while `PIECEWISE` implies no attention.
                 force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                self._dummy_run(
+                dummy_run_callable(
                     num_tokens,
                     cudagraph_runtime_mode=CUDAGraphMode.NONE,
                     force_attention=force_attention,
                     uniform_decode=uniform_decode,
+                    uniform_query_len=uniform_query_len,
                     allow_microbatching=allow_microbatching,
-                    skip_eplb=True,
-                    remove_lora=False,
-                    activate_lora=activate_lora,
+                    activate_lora=key.has_lora,
                 )
-            self._dummy_run(
+            dummy_run_callable(
                 num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 uniform_decode=uniform_decode,
+                uniform_query_len=uniform_query_len,
                 allow_microbatching=allow_microbatching,
-                skip_eplb=True,
-                remove_lora=False,
-                activate_lora=activate_lora,
+                activate_lora=key.has_lora,
             )
-        self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -4283,6 +4365,27 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             self.compilation_config.cudagraph_mode, self.uniform_decode_query_len
         )
+
+        # At this moment, we assume the drafter and main model shares the
+        # same cudagraph_mode if not speculative_config.enforce_eager
+        if self.speculative_config and self.speculative_config.use_eagle():
+            assert isinstance(self.drafter, EagleProposer)
+            assert not cudagraph_mode.has_full_cudagraphs(), (
+                "Eagle drafter does not support full cudagraphs yet"
+            )
+            cudagraph_mode = (
+                self.compilation_config.cudagraph_mode
+                if not self.speculative_config.enforce_eager
+                else CUDAGraphMode.NONE
+            )
+            # uniform_query_len is 1 for drafter
+            # TODO: let uniform_query_lens = [1, self.uniform_decode_query_len]
+            # for drafter once Padded speculation is supported. See:
+            # https://github.com/vllm-project/vllm/issues/21984 for details
+            # and an implementation in https://github.com/vllm-project/vllm/pull/24539  # noqa: E501
+            self.drafter.cudagraph_dispatcher.initialize_cudagraph_keys(
+                cudagraph_mode, uniform_query_lens=1
+            )
 
     def calculate_reorder_batch_threshold(self) -> None:
         """

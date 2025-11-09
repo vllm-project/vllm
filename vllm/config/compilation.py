@@ -428,6 +428,36 @@ class CompilationConfig:
     max_num_seqs, and prevents capture of many large graphs (>512) that would
     greatly increase startup time with limited performance benefit.
     """
+    disable_cudagraph_uniform_alignment: bool = False
+    """Whether to disable uniformly alignment of cudagraph capture sizes for
+    uniform decode batch with query length>1 (i.e., for spec-decode). This flag
+    only takes effective when cudagraph_mode is FULL_DECODE_ONLY or 
+    FULL_AND_PIECEWISE.
+    
+    Uniform alignment make sure all capture sizes for uniform-decode batch 
+    are multiples of 1+num_speculative_tokens. This aligmnment is typically
+    useful for padded speculation (see #21984 for details), and is needed by
+    some attention backends to achieve their sota performance, which support
+    uniform-decode but no in a varible-length fashion.  However, we should 
+    realize here is a trade-off that while it is good for attention layer,
+    it may introduce slight regressions to other layers if these sizes after
+    alignment don't hit the multiple of 8.
+    
+    Note: for DP_size>1, the uniformity of sizes may be broken after dp_padding
+    sync. Therefore, we only ensure running full cudagraph of uniform-decode batch
+    of current rank if all dp ranks are uniform-decode batch. Otherwise, it would
+    fall back to piecewise cudagraphs, where the uniformity batch before padded 
+    should still be utilized by attention layers under eager exectution.
+    """
+    uniform_cudagraph_capture_sizes: list[int] | None = None
+    """
+    List for capture sizes for uniform decode for the main model. Its elements
+    should be multiples of uniform_decode_len(1 for common pure decode, or
+    1+num_speculative_tokens for speculative decode). 
+    Not configurable, computed after init
+    """
+    max_uniform_capture_size: int = field(default=None, init=False)  # type: ignore
+    """not configurable, computed after init"""
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
     bs_to_padded_graph_size: list[int] = field(
@@ -438,6 +468,11 @@ class CompilationConfig:
     Intuitively, bs_to_padded_graph_size should be dict[int, int].
     since we know all keys are in a range [0, max_cudagraph_capture_size],
     we can optimize it to list[int] for better lookup performance."""
+    bs_to_padded_graph_size_uniform: list[int] = field(
+        default=None,  # type: ignore
+        init=False,
+    )
+    """same as bs_to_padded_graph_size, but for uniform capture sizes"""
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
@@ -503,6 +538,7 @@ class CompilationConfig:
             "disabled_custom_ops": True,
             "compilation_time": True,
             "bs_to_padded_graph_size": True,
+            "bs_to_padded_graph_size_uniform": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
@@ -718,7 +754,8 @@ class CompilationConfig:
         """To complete the initialization after cudagraph related
         configs are set. This includes:
         - initialize compile_sizes
-        - pre-compute the mapping bs_to_padded_graph_size
+        - pre-compute the mapping bs_to_padded_graph_size and
+            bs_to_padded_graph_size_uniform
         """
 
         computed_compile_sizes = []
@@ -739,8 +776,14 @@ class CompilationConfig:
 
         # make sure the sizes are in ascending order
         self.cudagraph_capture_sizes.sort()
+        self.uniform_cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
+        if self.uniform_cudagraph_capture_sizes:
+            assert (
+                self.uniform_cudagraph_capture_sizes[-1]
+                == self.max_uniform_capture_size
+            )
 
         # pre-compute the mapping from batch size to padded graph size
         self.bs_to_padded_graph_size = [
@@ -755,6 +798,20 @@ class CompilationConfig:
                     self.bs_to_padded_graph_size[bs] = start
                 else:
                     self.bs_to_padded_graph_size[bs] = end
+
+        # pre-compute the mapping for uniform decode padding.
+        self.bs_to_padded_graph_size_uniform = [
+            0 for i in range(self.max_uniform_capture_size + 1)
+        ]
+        for end, start in zip(
+            self.uniform_cudagraph_capture_sizes + [self.max_uniform_capture_size + 1],
+            [0] + self.uniform_cudagraph_capture_sizes,
+        ):
+            for bs in range(start, end):
+                if bs == start:
+                    self.bs_to_padded_graph_size_uniform[bs] = start
+                else:
+                    self.bs_to_padded_graph_size_uniform[bs] = end
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is

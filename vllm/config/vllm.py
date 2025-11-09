@@ -201,12 +201,23 @@ class VllmConfig:
         ).hexdigest()[:10]
         return hash_str
 
-    def pad_for_cudagraph(self, batch_size: int) -> int:
-        # if batch_size > self.compilation_config.max_cudagraph_capture_size,
-        # it should raise an IndexError.
-        # the caller should make sure the batch_size is within the range,
-        # i.e., batch_size <= self.compilation_config.max_cudagraph_capture_size
-        return self.compilation_config.bs_to_padded_graph_size[batch_size]
+    def pad_for_cudagraph(self, batch_size: int, uniform_aligned: bool = False) -> int:
+        """Get the padded graph size for the batch size.
+        uniform_aligned: if True, means the padding batch size would be
+        divisible by the uniform_decode_len for the main model.
+        For drafter, caller should make sure uniform_aligned is False because
+        drafter's uniform_decode_len is 1.
+        """
+        if self.compilation_config.disable_cudagraph_uniform_alignment:
+            uniform_aligned = False
+        # if batch_size > max_cudagraph_capture_size (uniform_aligned=False)
+        # or batch_size > max_uniform_capture_size (uniform_aligned=True),
+        # it would raise an IndexError. So the caller should make sure the
+        #  batch_size is within the range
+        if not uniform_aligned:
+            return self.compilation_config.bs_to_padded_graph_size[batch_size]
+        else:
+            return self.compilation_config.bs_to_padded_graph_size_uniform[batch_size]
 
     def enable_trace_function_call_for_thread(self) -> None:
         """
@@ -817,7 +828,6 @@ class VllmConfig:
             - If batch size > largest `cudagraph_capture_sizes`, cudagraph will
             not be used.
         """
-
         if (
             self.model_config is not None
             and not self.model_config.enforce_eager
@@ -864,13 +874,40 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
-
+            uniform_decode_len = (
+                1
+                if not self.speculative_config
+                else 1 + self.speculative_config.num_speculative_tokens
+            )
+            max_num_decode_tokens = min(
+                max_num_tokens,
+                self.scheduler_config.max_num_seqs * uniform_decode_len,
+            )
+            if (
+                self.compilation_config.disable_cudagraph_uniform_alignment
+                or uniform_decode_len == 1
+            ):
+                uniform_cudagraph_capture_sizes = [
+                    x for x in cudagraph_capture_sizes if x < max_num_decode_tokens
+                ]
+            else:
+                uniform_cudagraph_capture_sizes = [
+                    size * uniform_decode_len
+                    for size in cudagraph_capture_sizes
+                    if size >= uniform_decode_len
+                    and size * uniform_decode_len <= max_num_decode_tokens
+                ]
             if (
                 self.parallel_config.tensor_parallel_size > 1
                 and self.compilation_config.pass_config.enable_sequence_parallelism
             ):
                 cudagraph_capture_sizes = self.update_sizes_for_sequence_parallelism(
                     cudagraph_capture_sizes
+                )
+                uniform_cudagraph_capture_sizes = (
+                    self.update_sizes_for_sequence_parallelism(
+                        uniform_cudagraph_capture_sizes
+                    )
                 )
 
             # user-specific compilation_config.max_cudagraph_capture_size get
@@ -916,10 +953,22 @@ class VllmConfig:
             # always write back the final sizes
             self.compilation_config.cudagraph_capture_sizes = cudagraph_capture_sizes
 
+            # set uniform_cudagraph_sizes related values.
+            self.compilation_config.max_uniform_capture_size = (
+                uniform_cudagraph_capture_sizes[-1]
+                if uniform_cudagraph_capture_sizes
+                else 0
+            )
+            self.compilation_config.uniform_cudagraph_capture_sizes = (
+                uniform_cudagraph_capture_sizes
+            )
+
         else:
             # no cudagraph in use
             self.compilation_config.max_cudagraph_capture_size = 0
             self.compilation_config.cudagraph_capture_sizes = []
+            self.compilation_config.max_uniform_capture_size = 0
+            self.compilation_config.uniform_cudagraph_capture_sizes = []
 
         # complete the remaining process.
         self.compilation_config.post_init_cudagraph_sizes()
