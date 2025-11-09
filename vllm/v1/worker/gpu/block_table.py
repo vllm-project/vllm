@@ -6,10 +6,9 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
-
-PAD_SLOT_ID = -1
 
 
 class BlockTables:
@@ -209,10 +208,7 @@ def _append_block_ids_kernel(
     num_new_blocks = end_idx - start_idx
 
     group_num_blocks_ptr = num_blocks_ptr + group_id * num_blocks_stride
-    if do_overwrite:
-        dst_start_idx = 0
-    else:
-        dst_start_idx = tl.load(group_num_blocks_ptr + req_idx)
+    dst_start_idx = tl.load(group_num_blocks_ptr + req_idx) if not do_overwrite else 0
     dst_end_idx = dst_start_idx + num_new_blocks
     tl.store(group_num_blocks_ptr + req_idx, dst_end_idx)
 
