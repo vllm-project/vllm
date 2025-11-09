@@ -11,6 +11,7 @@ import triton
 import triton.language as tl
 
 from vllm.utils import random_uuid
+from vllm.utils.math_utils import cdiv
 from vllm.v1.utils import CpuGpuBuffer
 
 
@@ -20,6 +21,7 @@ class InputBuffers:
         max_num_reqs: int,
         max_num_tokens: int,
         hidden_size: int,
+        vocab_size: int,
         dtype: torch.dtype,
         device: torch.device,
         pin_memory: bool,
@@ -34,6 +36,12 @@ class InputBuffers:
         self.positions = self._make_buffer(max_num_tokens, dtype=torch.int64)
         self.query_start_loc = self._make_buffer(max_num_reqs + 1, dtype=torch.int32)
         self.seq_lens = self._make_buffer(max_num_reqs, dtype=torch.int32)
+
+        # Structured outputs.
+        self.bitmask_indices = self._make_buffer(max_num_reqs, dtype=torch.int32)
+        self.grammar_bitmask = self._make_buffer(
+            max_num_reqs, cdiv(vocab_size, 32), dtype=torch.int32
+        )
 
     def _make_buffer(self, *args, dtype: torch.dtype) -> CpuGpuBuffer:
         return CpuGpuBuffer(
@@ -123,7 +131,7 @@ class InputBatch:
             seq_lens_np=seq_lens_np,
             input_ids=input_ids,
             positions=positions,
-            attn_metadata=None,
+            attn_metadata=None,  # type: ignore
             logits_indices=logits_indices,
         )
 

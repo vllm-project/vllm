@@ -4,6 +4,7 @@ import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 def apply_grammar_bitmask(
@@ -11,24 +12,27 @@ def apply_grammar_bitmask(
     req_ids: list[str],
     grammar_req_ids: list[str],
     grammar_bitmask: np.ndarray,
+    input_buffers: InputBuffers,
 ) -> None:
+    input_buffers.grammar_bitmask.np[: grammar_bitmask.shape[0]] = grammar_bitmask
+    input_buffers.grammar_bitmask.copy_to_gpu(grammar_bitmask.shape[0])
+
+    batch_size = logits.shape[0]
     grammar_req_id_to_idx = {req_id: i for i, req_id in enumerate(grammar_req_ids)}
     # logits -> bitmask mapping
     mapping = [grammar_req_id_to_idx.get(req_id, -1) for req_id in req_ids]
-    # TODO(woosuk): Make the below non-blocking.
-    mapping_tensor = torch.tensor(mapping, dtype=torch.int32, device=logits.device)
-    assert grammar_bitmask.dtype == np.int32
-    grammar_bitmask = torch.from_numpy(grammar_bitmask).to(logits.device)
+    input_buffers.bitmask_indices.np[:batch_size] = mapping
+    input_buffers.bitmask_indices.copy_to_gpu(batch_size)
 
     vocab_size = logits.shape[-1]
     BLOCK_SIZE = 8192
-    grid = (logits.shape[0], triton.cdiv(vocab_size, BLOCK_SIZE))
+    grid = (batch_size, triton.cdiv(vocab_size, BLOCK_SIZE))
     _apply_grammar_bitmask_kernel[grid](
         logits,
         logits.stride(0),
-        grammar_bitmask,
-        grammar_bitmask.stride(0),
-        mapping_tensor,
+        input_buffers.grammar_bitmask.gpu,
+        input_buffers.grammar_bitmask.gpu.stride(0),
+        input_buffers.bitmask_indices.gpu,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
     )
@@ -42,12 +46,12 @@ def _apply_grammar_bitmask_kernel(
     logits_stride,
     bitmask_ptr,
     bitmask_stride,
-    mapping_ptr,
+    bitmask_indices_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
     logits_idx = tl.program_id(0)
-    bitmask_idx = tl.load(mapping_ptr + logits_idx)
+    bitmask_idx = tl.load(bitmask_indices_ptr + logits_idx)
     if bitmask_idx == -1:
         # No bitmask to apply.
         return

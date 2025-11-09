@@ -89,7 +89,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
-        self.input_prep_event = torch.cuda.Event()
+        if self.use_async_scheduling:
+            self.input_prep_event = torch.cuda.Event()
+            self.structured_outputs_event = torch.cuda.Event()
+        else:
+            self.input_prep_event = None
+            self.structured_outputs_event = None
 
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
@@ -103,6 +108,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             hidden_size=self.hidden_size,
+            vocab_size=self.vocab_size,
             dtype=self.dtype,
             device=self.device,
             pin_memory=self.pin_memory,
@@ -485,12 +491,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         logits = self.model.compute_logits(sample_hidden_states)
         if grammar_output is not None:
             # Apply grammar bitmask to the logits in-place.
-            apply_grammar_bitmask(
-                logits,
-                input_batch.req_ids,
-                grammar_output.structured_output_request_ids,
-                grammar_output.grammar_bitmask,
-            )
+            with async_barrier(self.structured_outputs_event):
+                apply_grammar_bitmask(
+                    logits,
+                    input_batch.req_ids,
+                    grammar_output.structured_output_request_ids,
+                    grammar_output.grammar_bitmask,
+                    self.input_buffers,
+                )
         sampler_output = self.sampler(logits, sampling_metadata)
         return sampler_output
 
@@ -670,9 +678,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             use_cudagraph = False
             num_tokens_after_padding = num_tokens_after_dp_padding
 
-        with async_barrier(
-            self.input_prep_event if self.use_async_scheduling else None
-        ):
+        with async_barrier(self.input_prep_event):
             self.update_states(scheduler_output)
             if num_tokens_after_padding == 0:
                 # No need to run the model.
