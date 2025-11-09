@@ -91,6 +91,7 @@ def _normalize_rope_scaling_defaults(
 ) -> dict[str, Any]:
     """Return a DeepSeek-YaRN compatible rope_scaling dict."""
     rope_scaling = dict(rope_scaling_config) if rope_scaling_config is not None else {}
+    original_scaling_type = rope_scaling.get("type")
 
     rope_scaling.setdefault("beta_fast", 32)
     rope_scaling.setdefault("beta_slow", 1)
@@ -99,7 +100,11 @@ def _normalize_rope_scaling_defaults(
     rope_scaling.setdefault("mscale_all_dim", 1.0)
     rope_scaling.setdefault("type", "yarn")
     rope_scaling.setdefault("original_max_position_embeddings", max_position_embeddings)
-    rope_scaling.setdefault("rope_type", "deepseek_yarn")
+    if "rope_type" not in rope_scaling:
+        if original_scaling_type is not None:
+            rope_scaling["rope_type"] = original_scaling_type
+        else:
+            rope_scaling["rope_type"] = "deepseek_yarn"
 
     return rope_scaling
 
