@@ -191,9 +191,16 @@ def get_rope(
                 k: v
                 for k, v in rope_scaling.items()
                 if k
-                in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow")
+                in (
+                    "extrapolation_factor",
+                    "attn_factor",
+                    "beta_fast",
+                    "beta_slow",
+                    "apply_yarn_scaling",
+                )
             }
             if "mrope_section" in rope_scaling:
+                extra_kwargs.pop("apply_yarn_scaling", None)
                 rotary_emb = MRotaryEmbedding(
                     head_size,
                     rotary_dim,

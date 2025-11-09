@@ -130,6 +130,8 @@ class Qwen2_5OmniAudioFeatureInputs(TensorSchema):
         TensorShape("nmb", "tsl", dynamic_dims={"tsl"}),
     ]
 
+    audio_feature_lengths: Annotated[torch.Tensor, TensorShape("na")]
+
     feature_attention_mask: Annotated[
         torch.Tensor | list[torch.Tensor],
         TensorShape("na", "msl", dynamic_dims={"msl"}),
@@ -731,13 +733,6 @@ class Qwen2_5OmniConditionalGenerationMixin:
     ) -> torch.Tensor:
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
-
-        if audio_feature_lengths.shape[0] == 1:
-            audio_feature_lengths = audio_feature_lengths.squeeze(0)
-        elif audio_feature_lengths.shape[1] == 1:
-            audio_feature_lengths = audio_feature_lengths.squeeze(1)
-        else:
-            raise AssertionError(audio_feature_lengths.shape)
 
         audio_feat_lengths, audio_output_lengths = (
             self.audio_tower._get_feat_extract_output_lengths(audio_feature_lengths)

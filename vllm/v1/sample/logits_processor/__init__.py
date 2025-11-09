@@ -13,6 +13,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor as RequestLogitsProcessor
 from vllm.sampling_params import SamplingParams
+from vllm.utils.torch_utils import guard_cuda_initialization
 from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
@@ -72,8 +73,10 @@ def _load_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
                 entrypoint.name,
                 entrypoint.value,
             )
-            classes.append(entrypoint.load())
+            with guard_cuda_initialization():
+                classes.append(entrypoint.load())
         except Exception as e:
+            logger.error("Failed to load LogitsProcessor plugin %s: %s", entrypoint, e)
             raise RuntimeError(
                 f"Failed to load LogitsProcessor plugin {entrypoint}"
             ) from e
@@ -126,8 +129,15 @@ def _load_logitsprocs_by_fqcns(
 
         try:
             # Load module
-            module = importlib.import_module(module_path)
+            with guard_cuda_initialization():
+                module = importlib.import_module(module_path)
         except Exception as e:
+            logger.error(
+                "Failed to load %sth LogitsProcessor plugin %s: %s",
+                ldx,
+                logitproc,
+                e,
+            )
             raise RuntimeError(
                 f"Failed to load {ldx}th LogitsProcessor plugin {logitproc}"
             ) from e
@@ -204,6 +214,14 @@ def build_logitsprocs(
             BUILTIN_LOGITS_PROCESSORS, custom_logitsprocs_classes
         )
     )
+
+
+def validate_logits_processors_parameters(
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
+    sampling_params: SamplingParams,
+):
+    for logits_procs in _load_custom_logitsprocs(logits_processors):
+        logits_procs.validate_params(sampling_params)
 
 
 class AdapterLogitsProcessor(LogitsProcessor):

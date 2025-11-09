@@ -20,14 +20,22 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
 
 
 class LMCacheConnectorV1(KVConnectorBase_V1):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole):
-        super().__init__(vllm_config=vllm_config, role=role)
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
         assert vllm_config.kv_transfer_config is not None
         use_native = vllm_config.kv_transfer_config.get_from_extra_config(
             "use_native", False
