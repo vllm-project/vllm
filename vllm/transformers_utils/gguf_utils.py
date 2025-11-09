@@ -4,6 +4,13 @@
 
 from pathlib import Path
 
+import gguf
+from transformers import PretrainedConfig, SiglipVisionConfig
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 def detect_gguf_multimodal_gemma3(model: str) -> Path | None:
     """Check if GGUF model has multimodal projector file for Gemma3.
@@ -31,3 +38,126 @@ def detect_gguf_multimodal_gemma3(model: str) -> Path | None:
         return None
     except Exception:
         return None
+
+
+def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
+    """
+    Extract vision config parameters from mmproj.gguf metadata.
+
+    Reads vision encoder configuration from GGUF metadata fields instead of
+    using hardcoded values. This makes the implementation robust across
+    different Gemma3 model sizes and future variations.
+
+    Args:
+        mmproj_path: Path to mmproj.gguf file (str or Path)
+
+    Returns:
+        SiglipVisionConfig if extraction succeeds, None if required fields missing
+
+    Raises:
+        Exception: Exceptions from GGUF reading (file not found, corrupted,
+            etc.) propagate directly from gguf.GGUFReader.
+    """
+
+    reader = gguf.GGUFReader(str(mmproj_path))
+
+    # Extract vision config parameters from GGUF metadata
+    hidden_size = reader.get_field("clip.vision.embedding_length")
+    intermediate_size = reader.get_field("clip.vision.feed_forward_length")
+    num_hidden_layers = reader.get_field("clip.vision.block_count")
+    num_attention_heads = reader.get_field("clip.vision.attention.head_count")
+    image_size = reader.get_field("clip.vision.image_size")
+    patch_size = reader.get_field("clip.vision.patch_size")
+    layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
+
+    # Validate all required fields are present
+    if any(
+        field is None
+        for field in [
+            hidden_size,
+            intermediate_size,
+            num_hidden_layers,
+            num_attention_heads,
+            image_size,
+            patch_size,
+            layer_norm_eps,
+        ]
+    ):
+        logger.warning("Missing required vision config fields in mmproj.gguf")
+        return None
+
+    # Extract scalar values from GGUF field parts
+    config = SiglipVisionConfig(
+        hidden_size=int(hidden_size.parts[-1]),
+        intermediate_size=int(intermediate_size.parts[-1]),
+        num_hidden_layers=int(num_hidden_layers.parts[-1]),
+        num_attention_heads=int(num_attention_heads.parts[-1]),
+        image_size=int(image_size.parts[-1]),
+        patch_size=int(patch_size.parts[-1]),
+        layer_norm_eps=float(layer_norm_eps.parts[-1]),
+        # Parameters not in GGUF - use safe defaults
+        num_channels=3,  # Standard RGB
+        attention_dropout=0.0,  # No dropout during inference
+        num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
+        vision_use_head=False,  # Gemma3 doesn't use pooling head
+    )
+
+    logger.info("Extracted vision config from mmproj.gguf metadata")
+    return config
+
+
+def patch_hf_config_from_gguf(
+    model: str,
+    hf_config: PretrainedConfig,
+    architectures: list[str],
+) -> list[str]:
+    """Patch HF config for GGUF multimodal Gemma3 models.
+
+    If model has mmproj.gguf, patches the config:
+    - Forces Gemma3ForConditionalGeneration architecture
+    - Extracts and sets vision_config from mmproj.gguf
+    - Sets multimodal token indices
+
+    Args:
+        model: Model path string
+        hf_config: HuggingFace config to patch in-place
+        architectures: Original architecture list
+
+    Returns:
+        Updated architecture list (unchanged if not Gemma3 GGUF multimodal)
+    """
+    mmproj_path = detect_gguf_multimodal_gemma3(model)
+    if mmproj_path is not None:
+        is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
+        if is_gemma3:
+            architectures = ["Gemma3ForConditionalGeneration"]
+            hf_config.architectures = architectures
+            logger.info(
+                "Detected Gemma3 GGUF with mmproj.gguf, "
+                "forcing Gemma3ForConditionalGeneration"
+            )
+
+            # Initialize vision_config if not present
+            if (
+                not hasattr(hf_config, "vision_config")
+                or hf_config.vision_config is None
+            ):
+                vision_config = extract_vision_config_from_gguf(str(mmproj_path))
+
+                # Fail fast if extraction fails - indicates
+                # corrupted/incomplete GGUF
+                if vision_config is None:
+                    raise ValueError(
+                        "Failed to extract vision config from mmproj.gguf. "
+                        "This may indicate a corrupted or incomplete GGUF "
+                        "file. Please verify your mmproj.gguf file is valid."
+                    )
+
+                hf_config.vision_config = vision_config
+                hf_config.mm_tokens_per_image = 256
+                hf_config.image_token_index = 262144
+                # DO NOT set boi_token_index - let
+                # gemma3_mm.py fall back to 262143
+                hf_config.eoi_token_index = 256000
+
+    return architectures
