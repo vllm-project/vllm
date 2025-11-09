@@ -46,8 +46,6 @@ class CudaGraphManager:
             return {}
         if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
             raise NotImplementedError("Piecewise CUDA graphs are not supported")
-        if self.compilation_config.level != 0:
-            raise NotImplementedError("Dynamo is not used. Compilation level must be 0")
 
         padded_sizes: dict[int, int] = {}
         assert len(self.cudagraph_sizes) > 0
