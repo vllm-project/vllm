@@ -44,12 +44,19 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
   // Memory node binding
   if (numa_available() != -1) {
+    int mem_node_id = numa_node_of_cpu(omp_cpu_ids.front());
     std::set<int> node_ids;
     for (const auto& cpu_id : omp_cpu_ids) {
       int node_id = numa_node_of_cpu(cpu_id);
       if (node_id != -1) {
         node_ids.insert(node_id);
       }
+      TORCH_WARN(node_id == mem_node_id, "CPU ", cpu_id, " is on NUMA node ",
+                 node_id, ", but CPU ", omp_cpu_ids.front(),
+                 " is on NUMA node ", mem_node_id,
+                 ". All CPUs should be on the same NUMA node for optimal "
+                 "performance. Memory will be bound to NUMA node ",
+                 mem_node_id, ".");
     }
     // Concatenate all node_ids into a single comma-separated string
     if (!node_ids.empty()) {
@@ -63,15 +70,15 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
       bitmask* mask = numa_parse_nodestring(node_ids_str.c_str());
       bitmask* src_mask = numa_get_membind();
-      
+
       int pid = getpid();
-      
+
       if (mask && src_mask) {
         // move all existing pages to the specified numa node.
         *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
         int page_num = numa_migrate_pages(pid, src_mask, mask);
         if (page_num == -1) {
-          TORCH_WARN("numa_migrate_pages failed. errno: " + 
+          TORCH_WARN("numa_migrate_pages failed. errno: " +
                      std::to_string(errno));
         }
 
@@ -82,7 +89,7 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
         numa_free_nodemask(mask);
         numa_free_nodemask(src_mask);
       } else {
-        TORCH_WARN("numa_parse_nodestring or numa_get_membind failed. errno: " + 
+        TORCH_WARN("numa_parse_nodestring or numa_get_membind failed. errno: " +
                    std::to_string(errno));
       }
     }
