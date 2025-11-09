@@ -3035,7 +3035,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             time_after_load = time.perf_counter()
         self.model_memory_usage = m.consumed_memory
         logger.info_once(
-            "Model loading took %.4f GiB and %.6f seconds",
+            "Model loading took %.4f GiB memory and %.6f seconds",
             self.model_memory_usage / GiB_bytes,
             time_after_load - time_before_load,
             scope="local",
