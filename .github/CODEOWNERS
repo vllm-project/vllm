@@ -111,9 +111,14 @@ mkdocs.yaml @hmellor
 /vllm/attention/ops/rocm*.py @gshtras @tjtanaa
 /vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
 /csrc/rocm @gshtras @tjtanaa
-*rocm* @tjtanaa
-*quark* @tjtanaa
-*aiter* @tjtanaa
+/requirements/*rocm* @tjtanaa
+/tests/**/*rocm* @tjtanaa
+/docs/**/*rocm* @tjtanaa
+/vllm/**/*quark* @tjtanaa
+/tests/**/*quark* @tjtanaa
+/docs/**/*quark* @tjtanaa
+/vllm/**/*aiter* @tjtanaa
+/tests/**/*aiter* @tjtanaa
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche
