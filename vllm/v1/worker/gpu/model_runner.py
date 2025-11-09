@@ -34,6 +34,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
+from vllm.v1.worker.gpu.dp_utils import get_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -81,6 +82,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.hidden_size = self.model_config.get_hidden_size()
+
+        self.dp_size = self.parallel_config.data_parallel_size
+        self.dp_rank = self.parallel_config.data_parallel_rank
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
         self.output_copy_stream = torch.cuda.Stream(self.device)
@@ -364,8 +368,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def prepare_inputs(
         self,
         scheduler_output: SchedulerOutput,
-        use_cudagraph: bool,
-        padded_num_tokens: int | None,
+        num_tokens_after_padding: int,
     ) -> InputBatch:
         num_tokens = scheduler_output.total_num_scheduled_tokens
         assert num_tokens > 0
@@ -380,11 +383,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens = np.array(
             [scheduler_output.num_scheduled_tokens[i] for i in req_ids], dtype=np.int32
         )
-        if use_cudagraph:
-            assert padded_num_tokens is not None
-            num_tokens_after_padding = padded_num_tokens
-        else:
-            num_tokens_after_padding = num_tokens
 
         idx_mapping_list = [
             self.req_states.req_id_to_index[req_id] for req_id in req_ids
@@ -641,19 +639,33 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if scheduler_output.total_num_scheduled_tokens == 0:
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
-            padded_num_tokens = self.cudagraph_manager.get_cudagraph_size(
+            if self.dp_size == 1:
+                # No DP padding.
+                num_tokens_across_dp: torch.Tensor | None = None
+                num_tokens_after_padding = scheduler_output.total_num_scheduled_tokens
+            else:
+                # Get the number of tokens across DP, and pad to the maximum.
+                num_tokens_across_dp = get_num_tokens_across_dp(
+                    scheduler_output.total_num_scheduled_tokens,
+                    self.dp_size,
+                    self.dp_rank,
+                )
+                num_tokens_after_padding = int(num_tokens_across_dp.max().item())
+
+            num_tokens_after_padding = self.cudagraph_manager.get_cudagraph_size(
                 scheduler_output
             )
-            use_cudagraph = padded_num_tokens is not None
+            use_cudagraph = num_tokens_after_padding is not None
             input_batch = self.prepare_inputs(
                 scheduler_output,
-                use_cudagraph,
-                padded_num_tokens,
+                num_tokens_after_padding,
             )
+
+            # NOTE(woosuk): Sampling metadata should be built under the async
+            # barrier to avoid race conditions.
             pos = input_batch.positions[input_batch.logits_indices]
-            idx_mapping_np = input_batch.idx_mapping_np
             sampling_metadata = self.req_states.make_sampling_metadata(
-                idx_mapping_np, pos
+                input_batch.idx_mapping, pos
             )
 
         if self.lora_config:
@@ -670,6 +682,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_batch.attn_metadata,
             self.vllm_config,
             num_tokens=input_batch.num_tokens_after_padding,
+            num_tokens_across_dp=num_tokens_across_dp,
         ):
             if use_cudagraph:
                 # Run CUDA graph.
