@@ -1418,7 +1418,7 @@ class Scheduler(SchedulerInterface):
             )
 
         if reset_connector:
-            reset_successful = reset_successful and self.reset_connector_cache()
+            reset_successful = self.reset_connector_cache() and reset_successful
 
         return reset_successful
 
