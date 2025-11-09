@@ -42,6 +42,8 @@ def _get_cross_slot_mapping(
 ) -> torch.Tensor:
     """Get cross-attention slot mappings."""
 
+    encoder_seq_lens = np.atleast_1d(encoder_seq_lens)
+
     block_size = kv_cache_spec.block_size
     slot_mappings = []
 
