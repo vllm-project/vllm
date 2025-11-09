@@ -43,11 +43,12 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast, Processor
 # pydantic needs the TypedDict from typing_extensions
 from typing_extensions import Required, TypedDict
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
-from vllm.multimodal.utils import MediaConnector
+from vllm.multimodal.utils import MEDIA_CONNECTOR_REGISTRY, MediaConnector
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -806,7 +807,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
         multimodal_config = self._tracker.model_config.multimodal_config
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
-        self._connector = MediaConnector(
+
+        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
@@ -891,7 +894,8 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
         multimodal_config = self._tracker.model_config.multimodal_config
         media_io_kwargs = getattr(multimodal_config, "media_io_kwargs", None)
-        self._connector = MediaConnector(
+        self._connector: MediaConnector = MEDIA_CONNECTOR_REGISTRY.load(
+            envs.VLLM_MEDIA_CONNECTOR,
             media_io_kwargs=media_io_kwargs,
             allowed_local_media_path=tracker.allowed_local_media_path,
             allowed_media_domains=tracker.allowed_media_domains,
