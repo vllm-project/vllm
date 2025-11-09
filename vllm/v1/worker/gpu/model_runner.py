@@ -228,13 +228,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if self.dp_size == 1:
             num_tokens_across_dp: torch.Tensor | None = None
         else:
-            num_tokens_across_dp, _ = get_batch_metadata_across_dp(
-                num_tokens,
-                -1,  # Always eager mode here.
-                self.dp_size,
-                self.dp_rank,
+            num_tokens_across_dp = torch.full(
+                (self.dp_size,), num_tokens, dtype=torch.int32, device="cpu"
             )
-
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with (
             self.maybe_dummy_run_with_lora(
