@@ -599,7 +599,6 @@ steps:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - export VLLM_DISABLE_SHARED_EXPERTS_STREAM=1
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt --tp-size=1
 
 - label: OpenAI API correctness # 22min
