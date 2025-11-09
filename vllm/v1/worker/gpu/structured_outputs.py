@@ -22,7 +22,7 @@ def apply_grammar_bitmask(
 
     vocab_size = logits.shape[-1]
     BLOCK_SIZE = 8192
-    grid = (logits.shape[0], tl.cdiv(vocab_size, BLOCK_SIZE))
+    grid = (logits.shape[0], triton.cdiv(vocab_size, BLOCK_SIZE))
     _apply_grammar_bitmask_kernel[grid](
         logits,
         logits.stride(0),
