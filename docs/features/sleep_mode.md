@@ -96,8 +96,12 @@ And this is an example of how to sleep and wake up a model in level 2.
 
 ```bash
 curl -X POST 'http://localhost:8000/sleep?level=2'
+# Reallocate weights memory only
+curl -X POST 'http://localhost:8000/wake_up?tags=weights'
+# Load weights in-place
 curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: application/json' -d '{"method":"reload_weights"}'
-curl -X POST 'http://localhost:8000/wake_up'
+# Optional: reallocate KV cache
+curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
 #### HTTP endpoints
