@@ -673,6 +673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Consider DP padding and CUDA graph.
         if total_num_scheduled_tokens == 0:
+            # Special handling is needed for 0.
             cudagraph_size_before_dp = 0
         else:
             cudagraph_size_before_dp = self.cudagraph_manager.get_cudagraph_size(  # type: ignore
@@ -687,7 +688,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.dp_size,
             self.dp_rank,
         )
-        if all(cudagraph_size_across_dp > 0):
+        if all(cudagraph_size_across_dp >= 0):
             # If all ranks can use CUDA graph, pad to the maximum number of tokens
             # across DP and use CUDA graph.
             num_tokens_after_padding = int(cudagraph_size_across_dp.max().item())
