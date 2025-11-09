@@ -10,6 +10,7 @@ import torch
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
 )
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
@@ -22,6 +23,7 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.parallel_state import get_dcp_group
@@ -51,6 +53,7 @@ from vllm.v1.attention.backends.utils import (
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
+    get_dcp_local_seq_lens
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -332,10 +335,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         try:
             self.dcp_world_size = get_dcp_group().world_size
             self.dcp_rank = get_dcp_group().rank_in_group
+            self.dcp_kv_cache_interleave_size = vllm_config.parallel_config.dcp_kv_cache_interleave_size
         except AssertionError:
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+            self.dcp_kv_cache_interleave_size = 1
 
         self.num_qo_heads = (
             self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
@@ -435,9 +440,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout()
-            )
+            if self.dcp_world_size > 1:
+                self._prefill_wrapper = dict()
+                self._prefill_wrapper["context"] = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout()
+                )
+                self._prefill_wrapper["newtokens"] = BatchPrefillWithRaggedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout()
+                )
+            else:
+                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout()
+                )
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
@@ -504,13 +518,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        seq_lens_np = seq_lens_cpu.numpy()
         block_table_tensor = common_attn_metadata.block_table_tensor
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
 
         if self.dcp_world_size > 1:
-            seq_lens_np = seq_lens_np // self.dcp_world_size + (
-                self.dcp_rank < seq_lens_np % self.dcp_world_size
+            if num_prefills > 0:
+                qo_indptr_prefill_cpu = (
+                    qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
+                )
+                query_lens_prefill_cpu = qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+                seq_lens_cpu[num_decodes:] = seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
+
+            seq_lens_cpu = get_dcp_local_seq_lens(
+                seq_lens_cpu,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.dcp_kv_cache_interleave_size,
             )
+
+        seq_lens_np = seq_lens_cpu.numpy()
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
         use_cascade = common_prefix_len > 0
@@ -571,7 +597,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # write self.paged_kv_last_page_len_cpu inplace
         paged_kv_last_page_len_np = seq_lens_np % page_size
         self.paged_kv_last_page_len_np[:num_reqs] = np.where(
-            paged_kv_last_page_len_np == 0,
+            (paged_kv_last_page_len_np == 0) & (seq_lens_np != 0),
             page_size,
             paged_kv_last_page_len_np,
         )
@@ -648,7 +674,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             use_cascade=use_cascade,
         )
 
-        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
         paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[: 1 + num_reqs]
         paged_kv_last_page_len_cpu = self.paged_kv_last_page_len_cpu[:num_reqs]
 
@@ -692,77 +717,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
                 paged_kv_indptr_cpu = paged_kv_indptr_cpu[prefill_start:]
 
-                if self.dcp_world_size > 1:
-                    # init custom mask for interleave kv cache
-                    # |-------total_lens----------|
-                    # |--context_lens--|--q_lens--|
-                    # Example: dcp_size=2, dcp_rank=0
-                    # For a SINGLE prefill seq, q_lens=3, total_lens=5
-                    # k_lens on RANK1 is (5 - 1 - 0) // 2 + 1 = 3
-                    # mask.shape = [q_lens, k_lens] = [3,3]
-                    # mask [[True, True, False],
-                    #       [True, True, False],
-                    #       [True, True, True]]
-                    dcp_rank = self.dcp_rank
-                    dcp_size = self.dcp_world_size
-
-                    q_lens = (qo_indptr_cpu[1:] - qo_indptr_cpu[:-1]).to(
-                        dtype=torch.int64, device=self.device
-                    )
-                    total_lens = seq_lens_cpu[
-                        prefill_start : prefill_start + num_prefills
-                    ].to(dtype=torch.int64, device=self.device)
-                    context_lens = total_lens - q_lens
-                    # max indices for global sequences
-                    max_indices = total_lens - 1
-                    # if max_indices are smaller than dcp_rank,
-                    # current rank has no kv cache, is invalid,
-                    # the mask is skipped
-                    valid = max_indices >= dcp_rank
-                    assert torch.any(valid), "There is no valid sequence"
-
-                    # local kv lens on current dcp_rank
-                    k_lens = (
-                        torch.div(
-                            max_indices - dcp_rank, dcp_size, rounding_mode="floor"
-                        )
-                        + 1
-                    )
-                    k_lens = torch.where(valid, k_lens, torch.zeros_like(k_lens))
-                    # vectorize operation
-                    # obtain the max length of all prefill reqs
-                    max_q = int(q_lens[valid].max().item())
-                    max_k = int(k_lens[valid].max().item())
-                    # generate local q and k indices
-                    q_indices = torch.arange(max_q, device=self.device)
-                    k_indices = torch.arange(max_k, device=self.device)
-                    # valid q and k indices of each reqs
-                    valid_q = valid[:, None] & (q_indices[None, :] < q_lens[:, None])
-                    valid_k = valid[:, None] & (k_indices[None, :] < k_lens[:, None])
-                    # where global q_indices >= global k_indices,
-                    # the mask is True
-                    # global q_indices = context_lens + local q_indices
-                    # global k_indices = local k_indcies * dcp_size + dcp_rank
-                    # ====> local k_indcies must be smaller or equal k_upper
-                    # k_upper=(context_lens + local q_indices - dcp_rank) // dcp_size
-                    k_upper = torch.div(
-                        context_lens[:, None] + q_indices - dcp_rank,
-                        dcp_size,
-                        rounding_mode="floor",
-                    )
-                    k_upper = torch.where(
-                        valid_q,
-                        torch.clamp(k_upper, min=-1),
-                        k_upper.new_full(k_upper.shape, -1),
-                    )
-                    mask = (k_indices[None, None, :] <= k_upper[:, :, None]) & (
-                        k_upper[:, :, None] >= 0
-                    )
-                    valid_positions = valid_q[:, :, None] & valid_k[:, None, :]
-                    # flashinfer backend needs flattened format
-                    custom_mask = torch.masked_select(mask, valid_positions)
-                else:
-                    custom_mask = None
                 # Recompute max_q_len for the slice of requests we are using
                 # for prefills. This can be different from max_q_len when
                 # we have a non-uniform batch with some short decodes offloaded
@@ -771,25 +725,59 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.max_q_len_prefill = int(query_lens_prefill.max().item())
 
                 if not attn_metadata.prefill_use_trtllm:
-                    attn_metadata.prefill_wrapper.plan(
-                        qo_indptr_cpu.to(self.device),
-                        paged_kv_indptr_cpu.to(self.device),
-                        paged_kv_indices,
-                        paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
-                        self.num_qo_heads,
-                        self.num_kv_heads,
-                        self.head_dim,
-                        self.page_size,
-                        causal=custom_mask is None,
-                        custom_mask=custom_mask,
-                        sm_scale=self.sm_scale,
-                        window_left=self.window_left,
-                        logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
-                        kv_data_type=self.kv_cache_dtype,
-                        fixed_split_size=self.prefill_fixed_split_size,
-                        disable_split_kv=self.disable_split_kv,
-                    )
+                    if self.dcp_world_size > 1:
+                        assert type(attn_metadata.prefill_wrapper) == dict
+                        attn_metadata.prefill_wrapper["context"].plan(
+                            qo_indptr_cpu.to(self.device),
+                            paged_kv_indptr_cpu.to(self.device),
+                            paged_kv_indices,
+                            paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
+                            self.num_qo_heads * self.dcp_world_size,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.page_size,
+                            causal=False,  # This is contxet run
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                            fixed_split_size=self.prefill_fixed_split_size,
+                            disable_split_kv=self.disable_split_kv,
+                        )
+                        kv_query_indptr_cpu = qo_indptr_cpu.clone()
+                        attn_metadata.prefill_wrapper["newtokens"].plan(
+                            qo_indptr=qo_indptr_cpu.to(self.device, non_blocking=True),
+                            kv_indptr=kv_query_indptr_cpu.to(self.device, non_blocking=True),
+                            num_qo_heads=self.num_qo_heads,
+                            num_kv_heads=self.num_kv_heads,
+                            head_dim_qk=self.head_dim,
+                            head_dim_vo=self.head_dim,
+                            causal=True,  # This is newtokens run
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                        )
+                    else:
+                        attn_metadata.prefill_wrapper.plan(
+                            qo_indptr_cpu.to(self.device),
+                            paged_kv_indptr_cpu.to(self.device),
+                            paged_kv_indices,
+                            paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
+                            self.num_qo_heads,
+                            self.num_kv_heads,
+                            self.head_dim,
+                            self.page_size,
+                            causal=True,
+                            sm_scale=self.sm_scale,
+                            window_left=self.window_left,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                            fixed_split_size=self.prefill_fixed_split_size,
+                            disable_split_kv=self.disable_split_kv,
+                        )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
                         self.device, non_blocking=True
@@ -839,7 +827,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         paged_kv_indices,
                         self.paged_kv_last_page_len_cpu[:num_input_tokens],
                         seq_lens_cpu[:num_input_tokens],
-                        self.num_qo_heads,
+                        self.num_qo_heads * self.dcp_world_size,
                         self.num_kv_heads,
                         self.head_dim,
                         self.page_size,
@@ -1060,6 +1048,8 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
+        key = key[:num_actual_tokens]
+        value = value[:num_actual_tokens]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -1086,33 +1076,48 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
 
             if not attn_metadata.prefill_use_trtllm:
-                assert prefill_wrapper._window_left == self.window_left
-                assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
-                assert prefill_wrapper._sm_scale == self.scale
+                if self.dcp_world_size > 1:
+                    assert type(prefill_wrapper) == dict
+                    for _, prefill_wrapper_i in prefill_wrapper.items():
+                        assert prefill_wrapper_i._window_left == self.window_left
+                        assert prefill_wrapper_i._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                        assert prefill_wrapper_i._sm_scale == self.scale
+                else:
+                    assert prefill_wrapper._window_left == self.window_left
+                    assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._sm_scale == self.scale
 
                 if self.dcp_world_size > 1:
-                    prefill_query = get_dcp_group().all_gather(
+                    prefill_query_across_dcp = get_dcp_group().all_gather(
                         prefill_query.contiguous(), dim=1
                     )
 
-                    output_tmp = torch.empty_like(prefill_query)
-                    lse = torch.empty(
-                        (prefill_query.size(0), prefill_query.size(1)),
-                        dtype=torch.float32,
-                        device=prefill_query.device,
-                    )
-
-                    prefill_wrapper.run(
-                        prefill_query,
+                    output_context_tmp, lse_context_tmp = prefill_wrapper["context"].run(
+                        prefill_query_across_dcp,
                         kv_cache_permute,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
-                        out=output_tmp,
-                        lse=lse,
                         return_lse=True,
                     )
-                    output[num_decode_tokens:] = cp_lse_ag_out_rs(
-                        output_tmp, lse, get_dcp_group()
+                    output_context, lse_context = cp_lse_ag_out_rs(
+                        output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
+                    )
+                    lse_context = lse_context.transpose(0, 1).contiguous()
+
+                    output_query, lse_query = prefill_wrapper["newtokens"].run(
+                        prefill_query,
+                        key[num_decode_tokens:],
+                        value[num_decode_tokens:],
+                        return_lse=True,
+                    )
+                    lse_query = lse_query.transpose(0, 1).contiguous()
+
+                    merge_attn_states(
+                        output[num_decode_tokens:],
+                        output_context,
+                        lse_context,
+                        output_query,
+                        lse_query,
                     )
                 else:
                     assert prefill_wrapper._causal

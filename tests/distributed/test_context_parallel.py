@@ -38,7 +38,7 @@ class ParallelSetup(NamedTuple):
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: str | None = None
-    attn_backend: str = "FLASH_ATTN"
+    attn_backend: str | None = None
 
 
 @dataclass
@@ -58,7 +58,7 @@ class CPTestSettings:
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: str | None = None,
-        attn_backend: str = "FLASH_ATTN",
+        attn_backend: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -180,9 +180,12 @@ def _compare_cp_with_tp(
     if hf_overrides:
         common_args.extend(["--hf-overrides", json.dumps(hf_overrides)])
 
-    cp_env = tp_env = {
-        "VLLM_ATTENTION_BACKEND": attn_backend,
-    }
+    if not attn_backend:
+        cp_env = tp_env = {}
+    else:
+        cp_env = tp_env = {
+            "VLLM_ATTENTION_BACKEND": attn_backend,
+        }
 
     cp_args = [
         *common_args,
@@ -226,8 +229,8 @@ CP_TEXT_GENERATION_MODELS = {
         CPTestSettings.detailed(tp_base=2, dcp_kv_cache_interleave_size=64),
     ],
     "bigcode/gpt_bigcode-santacoder": [
-        CPTestSettings.detailed(attn_backend="FLASHINFER"),
-        CPTestSettings.detailed(tp_base=2, attn_backend="FLASHINFER"),
+        CPTestSettings.detailed(),
+        CPTestSettings.detailed(tp_base=2),
     ],
 }
 
