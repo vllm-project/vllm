@@ -37,8 +37,12 @@ class SamplingMetadata:
         assert num_reqs > 0
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         temperature[0] = 0.5
-        top_p = torch.full((num_reqs,), 0.95, dtype=torch.float32, device=device)
-        top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
+        # TODO(woosuk): Use top-p and top-k for dummy sampler.
+        # Currently, they are disabled because of memory usage.
+        # top_p = torch.full((num_reqs,), 0.95, dtype=torch.float32, device=device)
+        # top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
+        top_p = None
+        top_k = None
         seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         max_num_logprobs = 20
