@@ -37,7 +37,7 @@ from vllm.transformers_utils.config import (
     uses_mrope,
 )
 from vllm.transformers_utils.gguf_utils import (
-    detect_gguf_multimodal_gemma3,
+    detect_gguf_multimodal,
     patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
@@ -685,7 +685,7 @@ class ModelConfig:
         # GGUF multimodal: Set flag to initialize multimodal_config
         # when Gemma3 mmproj file is present
         is_gguf_multimodal = False
-        if detect_gguf_multimodal_gemma3(self.model):
+        if detect_gguf_multimodal(self.model):
             is_gemma3 = any(
                 "gemma3" in str(arch).lower() for arch in self.architectures
             )

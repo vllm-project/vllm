@@ -155,6 +155,8 @@ class GGUFModelLoader(BaseModelLoader):
 
         mapping = {}
 
+        # FIXME(Isotr0py, GGUF): Use automatic weights mapping:
+        # see: https://github.com/ggml-org/llama.cpp/blob/392e09a60852d0e879d4bbedd5ace3e6852f719e/gguf-py/gguf/constants.py#L1060-L1129
         # Multimodal Projector Mappings
         mapping["mm.input_projection.weight"] = (
             "multi_modal_projector.mm_input_projection_weight"
@@ -210,7 +212,10 @@ class GGUFModelLoader(BaseModelLoader):
         return mapping
 
     def _get_weights_iterator(
-        self, model_name_or_path: str, gguf_to_hf_name_map: dict[str, str]
+        self,
+        model_config: ModelConfig,
+        model_name_or_path: str,
+        gguf_to_hf_name_map: dict[str, str],
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """
         Iterate over GGUF model weights, loading from both main model file and
@@ -231,33 +236,14 @@ class GGUFModelLoader(BaseModelLoader):
         mmproj_files = list(model_dir.glob("mmproj*.gguf"))
         has_mmproj = len(mmproj_files) > 0
 
-        # Verify this is a Gemma3 model before applying multimodal logic.
-        # Safety guard: Only Gemma3 models should use this dual-file loading.
-        # Other multimodal models (Phi3V, LLaVA, etc.) have different weight
-        # structures and should not be affected.
-        is_gemma3_multimodal = False
-        if has_mmproj:
-            try:
-                reader = gguf.GGUFReader(model_name_or_path)
-                arch_field = reader.get_field("general.architecture")
-                if arch_field:
-                    arch = arch_field.parts[-1].tobytes().decode("utf-8")
-                    is_gemma3_multimodal = arch == "gemma3"
-                    if is_gemma3_multimodal:
-                        logger.info(
-                            "Detected Gemma3 multimodal GGUF model with "
-                            "mmproj file: %s",
-                            mmproj_files[0].name,
-                        )
-            except Exception as e:
-                logger.warning(
-                    "Failed to detect model architecture from GGUF: %s. "
-                    "Skipping mmproj loading.",
-                    e,
-                )
+        hf_config = model_config.hf_config
+        is_multimodal = has_mmproj and hasattr(hf_config, "vision_config")
 
-        if is_gemma3_multimodal:
-            # Gemma3 Multimodal: Load weights from TWO GGUF files
+        if is_multimodal:
+            # FIXME(Isotr0py): We only need to append MM proj's weights to
+            # backbone's weights.
+
+            # Multimodal: Load weights from TWO GGUF files
 
             # 1. Load language model weights from main GGUF file
             # Remap "model.*" → "language_model.model.*" to match
@@ -296,7 +282,7 @@ class GGUFModelLoader(BaseModelLoader):
         local_model_path = self._prepare_weights(model_config.model)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         model.load_weights(
-            self._get_weights_iterator(local_model_path, gguf_weights_map)
+            self._get_weights_iterator(model_config, local_model_path, gguf_weights_map)
         )
 
     def load_model(
