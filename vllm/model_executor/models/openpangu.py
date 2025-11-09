@@ -86,6 +86,29 @@ def check_ffn_act_fn(act_fn: str):
         )
 
 
+def _normalize_rope_scaling_defaults(
+    rope_scaling_config: dict[str, Any] | None, max_position_embeddings: int
+) -> dict[str, Any]:
+    """Return a DeepSeek-YaRN compatible rope_scaling dict."""
+    if rope_scaling_config is not None:
+        rope_scaling = dict(rope_scaling_config)
+    else:
+        rope_scaling = {}
+
+    rope_scaling.setdefault("beta_fast", 32)
+    rope_scaling.setdefault("beta_slow", 1)
+    rope_scaling.setdefault("factor", 1)
+    rope_scaling.setdefault("mscale", 1.0)
+    rope_scaling.setdefault("mscale_all_dim", 1.0)
+    rope_scaling.setdefault("type", "yarn")
+    rope_scaling.setdefault(
+        "original_max_position_embeddings", max_position_embeddings
+    )
+    rope_scaling.setdefault("rope_type", "deepseek_yarn")
+
+    return rope_scaling
+
+
 class OpenPanguMLP(nn.Module):
     def __init__(
         self,
@@ -339,20 +362,9 @@ class OpenPanguMLAAttention(nn.Module):
         )
 
         rope_scaling_config = getattr(config, "rope_scaling", None)
-        if rope_scaling_config is not None:
-            rope_scaling = dict(rope_scaling_config)
-        else:
-            rope_scaling = {}
-        rope_scaling.setdefault("beta_fast", 32)
-        rope_scaling.setdefault("beta_slow", 1)
-        rope_scaling.setdefault("factor", 1)
-        rope_scaling.setdefault("mscale", 1.0)
-        rope_scaling.setdefault("mscale_all_dim", 1.0)
-        rope_scaling.setdefault("type", "yarn")
-        rope_scaling.setdefault(
-            "original_max_position_embeddings", max_position_embeddings
+        rope_scaling = _normalize_rope_scaling_defaults(
+            rope_scaling_config, max_position_embeddings
         )
-        rope_scaling["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
@@ -532,6 +544,10 @@ class OpenPanguEmbeddedAttention(nn.Module):
         is_gguf = quant_config and quant_config.get_name() == "gguf"
         if is_gguf and config.model_type == "PanguEmbedded":
             is_neox_style = False
+
+        rope_scaling = _normalize_rope_scaling_defaults(
+            rope_scaling, self.max_position_embeddings
+        )
 
         self.rotary_emb = get_rope(
             self.head_dim,
