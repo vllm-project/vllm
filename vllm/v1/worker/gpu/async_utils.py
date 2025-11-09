@@ -30,7 +30,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         with torch.cuda.stream(self.copy_stream):
             self.copy_stream.wait_stream(default_stream)
 
-            # NOTE(woosuk): We should keep the CPU tensors unfreed, until the copy completes.
+            # NOTE(woosuk): We should keep the CPU tensors unfreed
+            # until the copy completes.
             self.sampled_token_ids = sampler_output.sampled_token_ids.to(
                 "cpu", non_blocking=True
             )
