@@ -22,9 +22,11 @@ def balanced_packing(
     """
     Pack n weighted objects to m packs, such that each bin contains exactly
     n/m objects and the weights of all packs are as balanced as possible.
+
     Parameters:
         weight: [X, n], the weight of each item
         num_packs: number of packs
+
     Returns:
         pack_index: [X, n], the pack index of each item
         rank_in_pack: [X, n], the rank of the item in the pack
@@ -35,7 +37,6 @@ def balanced_packing(
 
     device = weight.device
 
-    # Handle trivial case before conversion
     if groups_per_pack == 1:
         pack_index = torch.arange(
             weight.size(-1), dtype=torch.int64, device=device
