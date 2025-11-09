@@ -55,6 +55,7 @@ class ClientArgs(NamedTuple):
     verify_output: bool
     conversation_sampling: ConversationSampling
     request_rate: float
+    max_retries: int
 
 
 class RequestArgs(NamedTuple):
@@ -646,25 +647,30 @@ async def client_main(
                 )
                 time_of_last_turn[conv_id] = curr_time_sec
 
-            success = True
+            success = False
+
             try:
-                result = await send_turn(
-                    session,
-                    client_id,
-                    conv_id,
-                    messages,
-                    current_turn,
-                    tokenizer,
-                    req_args,
-                    args.print_content,
-                    args.verify_output,
-                )
-                if result is not None:
-                    result_queue.put(result)
-                else:
-                    # None means that the request failed,
-                    # and should not be added to the statistics.
-                    success = False
+                for _ in range(args.max_retries):
+                    result = await send_turn(
+                        session,
+                        client_id,
+                        conv_id,
+                        messages,
+                        current_turn,
+                        tokenizer,
+                        req_args,
+                        args.print_content,
+                        args.verify_output,
+                    )
+                    if result is not None:
+                        result_queue.put(result)
+                        success = True
+                        break
+
+                    if args.request_rate > 0:
+                        await poisson_sleep(args.request_rate, args.verbose)
+
+                if not success:
                     num_failures += 1
 
                     logger.warning(
@@ -803,6 +809,7 @@ def get_client_config(
         verify_output=args.verify_output,
         conversation_sampling=args.conversation_sampling,
         request_rate=args.request_rate,
+        max_retries=args.max_retries,
     )
 
     if args.limit_min_tokens > 0 or args.limit_max_tokens > 0:
@@ -1333,6 +1340,15 @@ async def main() -> None:
         default=0,
         help="Expected request rate (Poisson process) per client in requests/sec."
         "Set to 0 for no delay between requests.",
+    )
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=int(os.environ.get("VLLM_BENCH_MAX_RETRIES", "1")),
+        help="Maximum number of retry attempts for timed-out requests. "
+        "Default is 1 (no retries, current behavior). "
+        "Set to higher values to retry failed requests and maintain fair workload distribution. "
+        "Can also be set via VLLM_BENCH_MAX_RETRIES environment variable.",
     )
     parser.add_argument(
         "--conversation-sampling",
