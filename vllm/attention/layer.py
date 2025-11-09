@@ -1059,7 +1059,11 @@ def unified_mla_attention_fake(
 ) -> torch.Tensor:
     head_dim = q_nope.shape[-1] + q_pe.shape[-1]
     fake_shape = (*q_nope.shape[:-1], head_dim)
-    return torch.empty(fake_shape, dtype=q_nope.dtype, device=q_nope.device).contiguous()
+    return torch.empty(
+        fake_shape,
+        dtype=q_nope.dtype,
+        device=q_nope.device,
+    ).contiguous()
 
 
 direct_register_custom_op(
