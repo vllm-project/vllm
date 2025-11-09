@@ -511,23 +511,9 @@ class TrainingManager:
         # Save learning rate before update
         learning_rate = self.get_learning_rate()
 
-        # Weights of trainable parameters before update
-        trainable_params_before = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
-        trainable_params_before_weights = [p.data.clone() for p in trainable_params_before]
-
+        # Perform optimizer step and scheduler step
         self.optimizer.step()
         self.scheduler.step()
-
-        # Weights of trainable parameters after update
-        trainable_params_after = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
-        trainable_params_after_weights = [p.data.clone() for p in trainable_params_after]
-
-        # Compute changes in weights
-        weight_changes = {}
-        for name, before, after in zip(trainable_params_before, trainable_params_before_weights, trainable_params_after_weights):
-            weight_changes[name] = (after - before).norm().item()
-
-        logger.info(f"Weight changes: {weight_changes}")
 
         return learning_rate
 
