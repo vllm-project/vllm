@@ -3,3 +3,6 @@ accuracy_threshold: 0.45
 num_questions: 1319
 num_fewshot: 5
 max_model_len: 4096
+# Duo stream incompatabilbe with this model: https://github.com/vllm-project/vllm/issues/28220
+env:
+  VLLM_DISABLE_SHARED_EXPERTS_STREAM: "1"
