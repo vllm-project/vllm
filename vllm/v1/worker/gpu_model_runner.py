@@ -2473,6 +2473,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 per_req_logits = {}
                 all_logits = []
                 all_labels = []
+                all_input_ids = []
                 all_eval_losses = []
 
                 req_id_to_index = {}
@@ -2496,6 +2497,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     request_logits = logits[offset:offset + num_tokens]
                     per_req_logits[req_id] = request_logits
                     all_logits.append(request_logits)
+
+                    # Store input_ids for this request
+                    request_input_ids = input_ids[offset:offset + num_tokens]
+                    all_input_ids.append(request_input_ids)
 
                     # Get labels for this request
                     labels = req_state.labels
@@ -2531,6 +2536,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Create a single tensor for loss and logits for this batch
                 logits = torch.stack(all_logits, dim=0)
                 labels = torch.stack(all_labels, dim=0)
+                input_ids_tensor = torch.stack(all_input_ids, dim=0)
+
+                # Capture input tensors for debugging/comparison
+                self.training_manager.capture_input_tensors(input_ids_tensor, labels)
 
                 # TODO(girfan): Check if this is correct.
                 # https://github.com/huggingface/transformers/issues/41842

@@ -461,8 +461,8 @@ class LoRAModelManager:
         except ValueError:
             pass
 
-    def _add_adapter(self, lora: LoRAModel):
-        self._create_merged_loras_inplace(lora)
+    def _add_adapter(self, lora: LoRAModel, is_trainable: bool = False):
+        self._create_merged_loras_inplace(lora, is_trainable=is_trainable)
         self._registered_adapters[lora.id] = lora
 
     def pin_adapter(self, lora_id: int) -> bool:
@@ -666,7 +666,7 @@ class LoRAModelManager:
             prefix + "." + r if prefix else r for r in replacements
         ]
 
-    def _create_merged_loras_inplace(self, lora_model: LoRAModel) -> None:
+    def _create_merged_loras_inplace(self, lora_model: LoRAModel, is_trainable: bool = False) -> None:
         for module_name, new_module_names in self.packed_modules.items():
             replacement_loras: list[Optional[LoRALayerWeights]] = []
             replaced_module: set[str] = set()
@@ -690,7 +690,7 @@ class LoRAModelManager:
                 if lora_model.check_lora_name(module_name):
                     module_name = replaced_module_name
             lora_model.loras[module_name] = PackedLoRALayerWeights.pack(
-                replacement_loras)
+                replacement_loras, is_trainable=is_trainable)
             # Remove the modules that have been replaced.
             for module in replaced_module:
                 lora_model.loras.pop(module, None)
@@ -718,14 +718,14 @@ class LoRAModelManager:
         self._active_adapters.pop(adapter_id, None)
         return True
 
-    def add_adapter(self, adapter: LoRAModel) -> bool:
+    def add_adapter(self, adapter: LoRAModel, is_trainable: bool = False) -> bool:
         logger.debug("Adding lora. Model id: %d, "
                      "int id: %d", adapter.id, adapter.id)
         if adapter.id in self._registered_adapters:
             return False
         if len(self._registered_adapters) >= self.capacity:
             raise RuntimeError("No free adapter slots.")
-        self._add_adapter(adapter)
+        self._add_adapter(adapter, is_trainable=is_trainable)
         return True
 
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
@@ -771,12 +771,12 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
         """List all registered LoRAModels."""
         return dict(self._registered_adapters.cache)
 
-    def add_adapter(self, lora: LoRAModel) -> bool:
+    def add_adapter(self, lora: LoRAModel, is_trainable: bool = False) -> bool:
         """Add a LoRAModel to the manager."""
         logger.debug("Adding lora. Model id: %d, "
                      "int id: %d", lora.id, lora.id)
         if lora.id not in self._registered_adapters:
-            self._add_adapter(lora)
+            self._add_adapter(lora, is_trainable=is_trainable)
             was_added = True
         else:
             # We always touch to update the LRU cache order

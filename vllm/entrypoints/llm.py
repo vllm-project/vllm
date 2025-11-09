@@ -523,6 +523,11 @@ class LLM:
         # Run eval at the end
         _run_eval()
 
+        # Get captured tensors from training manager
+        training_manager = self.llm_engine.model_executor.driver_worker.model_runner.training_manager
+        captured_input_ids = training_manager.captured_input_ids
+        captured_labels = training_manager.captured_labels
+
         # TODO(girfan): Implement this.
         total_steps = 0
         train_losses = []
@@ -535,7 +540,9 @@ class LLM:
                 'num_epochs': num_epochs,
                 'final_train_loss': train_losses[-1]['loss'] if train_losses else None,
                 'final_eval_loss': eval_losses[-1]['eval_loss'] if eval_losses else None,
-            }
+            },
+            'captured_input_ids': captured_input_ids,
+            'captured_labels': captured_labels,
         }
 
     def _add_training_requests_from_iter(

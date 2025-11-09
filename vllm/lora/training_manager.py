@@ -109,7 +109,6 @@ class TrainingManager:
     """
     
     _instance = None
-    _initialized = False
 
     def __new__(cls, *args, **kwargs):
         if cls._instance is None:
@@ -124,10 +123,6 @@ class TrainingManager:
         device: torch.device,
         dtype: torch.dtype,
     ):
-        # Only initialize once
-        if self._initialized:
-            return
-
         self.model_runner = model_runner
         self.lora_manager = lora_manager
         self.lora_config = lora_config
@@ -156,12 +151,13 @@ class TrainingManager:
         self.log_interval: int = 50
         self._last_logged_step: int = 0
 
-        # Mark as initialized
-        self._initialized = True
+        # Captured tensors for debugging/comparison
+        self.captured_input_ids: Optional[torch.Tensor] = None
+        self.captured_labels: Optional[torch.Tensor] = None
 
     @classmethod
     def is_enabled(cls) -> bool:
-        return cls._instance is not None and cls._initialized
+        return cls._instance is not None
 
     @classmethod
     def get_instance(cls):
@@ -527,3 +523,8 @@ class TrainingManager:
             last_lr = last_lr.item()
 
         return last_lr
+
+    def capture_input_tensors(self, input_ids: torch.Tensor, labels: torch.Tensor):
+        """Capture input tensors for debugging/comparison purposes."""
+        self.captured_input_ids = input_ids.detach().clone()
+        self.captured_labels = labels.detach().clone()

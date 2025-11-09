@@ -151,7 +151,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
     @classmethod
     def pack(
-        cls, loras: GenericSequence[Optional["LoRALayerWeights"]]
+        cls, loras: GenericSequence[Optional["LoRALayerWeights"]], is_trainable: bool = False
     ) -> "PackedLoRALayerWeights":
         """Pack a list of LoRAs into a single LoRA.
 
@@ -161,7 +161,8 @@ class PackedLoRALayerWeights(LoRALayerWeights):
         for lora in loras:
             if lora is None:
                 continue
-            lora.optimize()
+            if not is_trainable:
+                lora.optimize()
         rank = first_lora.rank
         module_name = first_lora.module_name
         obj = cls(

@@ -256,7 +256,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
                                   LRUCacheLoRAModelManager)
                 self._adapter_manager.remove_oldest_adapter()
             # Then add the new adapter to the cache
-            loaded = self._adapter_manager.add_adapter(lora)
+            loaded = self._adapter_manager.add_adapter(lora, is_trainable=is_trainable)
         else:
             # If the lora is already loaded, just touch it to
             # update its position in the caches
