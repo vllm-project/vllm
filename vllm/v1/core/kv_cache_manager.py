@@ -230,9 +230,9 @@ class KVCacheManager:
         """
         
         # Add this debug logging
-        import traceback
-        logger.debug(f"allocate_slots called for request {request.request_id} with {num_new_tokens} new tokens")
-        logger.debug(f"Call stack:\n{''.join(traceback.format_stack())}")
+        # import traceback
+        # logger.debug(f"allocate_slots called for request {request.request_id} with {num_new_tokens} new tokens")
+        # logger.debug(f"Call stack:\n{''.join(traceback.format_stack())}")
         
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")

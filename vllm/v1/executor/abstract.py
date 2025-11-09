@@ -16,6 +16,8 @@ from vllm.executor.uniproc_executor import (  # noqa
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 
+from vllm.distributed.parallel_state import is_tknp_initialized
+
 FailureCallback = Callable[[], None]
 
 
@@ -109,5 +111,6 @@ class ExecutorWithExternalLauncher(ExecutorWithExternalLauncherV0, Executor):
         from vllm.distributed.parallel_state import get_world_group
         cpu_group = get_world_group().cpu_group
         memory_tensor = torch.tensor([memory], device="cpu", dtype=torch.int64)
-        dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
+        if not is_tknp_initialized():
+            dist.all_reduce(memory_tensor, group=cpu_group, op=dist.ReduceOp.MIN)
         return [memory_tensor.item()]

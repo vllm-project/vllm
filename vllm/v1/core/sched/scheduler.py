@@ -36,8 +36,16 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 
-logger = init_logger(__name__)
+import numpy as np
+from vllm.distributed.parallel_state import (
+    get_tknp_rank, 
+    get_tknp_world_size, 
+    get_tknp_group, 
+    is_tknp_initialized,
+    is_root_rank,
+)
 
+logger = init_logger(__name__)
 
 # TKNP-BEGIN: token parallel scheduling helper
 # class _TokenParallelSchedulerHelper:
@@ -104,6 +112,65 @@ logger = init_logger(__name__)
 #                                         num_scheduled_tokens=count))
 #         return allocations
 
+
+class TokenParallelScheduler:
+    
+    def __init__(self, vllm_config: VllmConfig):
+        self.vllm_config = vllm_config
+        self.parallel_config = vllm_config.parallel_config
+        self.tknp_world_size = get_tknp_world_size()
+        self.rank = get_tknp_rank()
+        # TODO: root rank will store different tokens, fix later
+        self.next_tknp_rank_assignment = 0  # For round-robin block assignment
+        
+        # token parallel data structures
+        self.req_to_tknp_rank: dict[str, int] = {}
+        self.tknp_tokens_per_rank_cache = np.zeros(self.tknp_world_size, dtype=np.int32)
+        self.tknp_reqs_per_rank = np.zeros(self.tknp_world_size, dtype=np.int32)
+
+    def assign_ranks(self, waiting_requests):
+        """
+        Assign token parallel ranks to new requests using block-wise assignment.
+        Updates self.req_to_tknp_rank cache.
+        
+        Args:
+            waiting_requests: The waiting queue containing new requests.
+        """
+        total_requests = len(waiting_requests)
+        block_size = max(1, total_requests // self.tknp_world_size) # TODO: fix continuous batching
+        for idx, requests in enumerate(waiting_requests):
+            req_id = requests.request_id
+            
+            # skip if already assigned
+            if req_id in self.req_to_tknp_rank:
+                continue
+
+            assigned_rank = (idx // block_size) % self.tknp_world_size
+            self.req_to_tknp_rank[req_id] = assigned_rank
+            self.tknp_reqs_per_rank[assigned_rank] += 1
+            self.tknp_tokens_per_rank_cache[assigned_rank] += len(requests.prompt_token_ids)
+        
+    def free_requests(self, request: Request):
+        """
+        Remove requests from token parallel scheduling cache when they are finished.
+        """
+        req_id = request.request_id
+        if req_id in self.req_to_tknp_rank:
+            assigned_rank = self.req_to_tknp_rank.pop(req_id)
+            self.tknp_reqs_per_rank[assigned_rank] -= 1
+            self.tknp_tokens_per_rank_cache[assigned_rank] -= len(request.prompt_token_ids)
+
+    def print_debug_info(self):
+        logger.info(f"[TokenParallelScheduler] Token parallel rank assignments: {self.req_to_tknp_rank}")
+        logger.info(f"[TokenParallelScheduler] Requests per rank: {self.tknp_reqs_per_rank}")
+        logger.info(f"[TokenParallelScheduler] Tokens per rank: {self.tknp_tokens_per_rank_cache}")
+
+    def tknp_allocations(self):
+        return TokenParallelAllocation(
+            req_to_tknp_rank=self.req_to_tknp_rank,
+            tknp_tokens_per_rank_cache=self.tknp_tokens_per_rank_cache,
+            tknp_reqs_per_rank=self.tknp_reqs_per_rank,
+        )
 
 # TKNP-END
 
@@ -231,9 +298,8 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
         )
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-        # TKNP-BEGIN: initialize token-parallel coordinator
-        # self._token_parallel = _TokenParallelSchedulerHelper(
-        #     self.parallel_config)
+        # TKNP-BEGIN: initialize token-parallel scheduler
+        self.token_parallel_scheduler = TokenParallelScheduler(vllm_config)
         # TKNP-END
 
     def schedule(self) -> SchedulerOutput:
@@ -390,7 +456,7 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
-        total_scheduled_requests = len(scheduled_running_reqs)
+        # total_scheduled_requests = len(scheduled_running_reqs)
         
         # TKNP 
         # logger.info(f"Token Parallel Scheduler: total_scheduled_requests = {total_scheduled_requests}")
@@ -412,10 +478,12 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
+            # print the total number of waiting requests 
+            # print("Current waiting requests:", self.waiting)
+            self.token_parallel_scheduler.assign_ranks(self.waiting)
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
-
                 request = self.waiting.peek_request()
 
                 # KVTransfer: skip request if still waiting for remote kvs.
@@ -518,7 +586,7 @@ class Scheduler(SchedulerInterface):
                         if num_new_tokens == 0:
                             # The request cannot be scheduled.
                             break
-
+                # allocate KV cache slots, TODO: tknp fix
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -634,12 +702,11 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens,
             req_to_new_block_ids,
         )
-        # TKNP-BEGIN: gather token-parallel metadata for this step
-        # self._token_parallel.mark_finished(self.finished_req_ids)
-        # token_parallel_allocations = self._token_parallel.build_step_allocations(
-        #     num_scheduled_tokens)
-        # TKNP-END
 
+        # self.token_parallel_scheduler.print_debug_info()
+        
+        token_parallel_allocations = self.token_parallel_scheduler.tknp_allocations() if is_tknp_initialized() else None
+        
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -656,7 +723,7 @@ class Scheduler(SchedulerInterface):
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
             structured_output_request_ids=structured_output_request_ids,
             grammar_bitmask=grammar_bitmask,
-            # token_parallel_allocations=token_parallel_allocations,
+            token_parallel_allocations=token_parallel_allocations,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1082,9 +1149,10 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
-        # TKNP-BEGIN: clear token-parallel assignment immediately on finish
-        # self._token_parallel.mark_finished((request_id, ))
-        # TKNP-END
+
+        # TKNP 
+        if is_tknp_initialized():
+            self.token_parallel_scheduler.free_requests(request)
 
         if not delay_free_blocks:
             self._free_blocks(request)
