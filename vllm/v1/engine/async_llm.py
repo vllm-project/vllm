@@ -153,8 +153,7 @@ class AsyncLLM(EngineClient):
 
         # Pause / resume state for async RL workflows.
         self._pause_cond = asyncio.Condition()
-        self._is_paused = False
-        self._pause_resume_lock = asyncio.Lock()  # Ensures pause/resume atomicity
+        self._paused = False
 
         self.output_handler: asyncio.Task | None = None
         try:
@@ -398,7 +397,7 @@ class AsyncLLM(EngineClient):
 
             # Wait until generation is resumed if the engine is paused.
             async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._is_paused)
+                await self._pause_cond.wait_for(lambda: not self._paused)
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
@@ -548,111 +547,51 @@ class AsyncLLM(EngineClient):
     async def pause_generation(
         self,
         *,
-        mode: str = "force",
+        wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
-    ) -> dict[str, Any]:
-        """Pause generation to allow model weight updates.
+    ) -> None:
+        """Pause generation to allow model weight updates. New generation/encoding requests are blocked until resume.
 
         Args:
-            mode: ``"force"`` immediately aborts running requests (default).
-                ``"gentle"`` waits for in-flight requests to finish.
+            wait_for_inflight_requests: When ``True`` waits for in-flight
+                requests to finish before pausing. When ``False`` (default),
+                immediately aborts any in-flight requests.
             clear_cache: Whether to clear KV cache and prefix cache after
                 draining. Set to ``False`` to preserve cache for faster resume.
                 Default is ``True`` (clear caches).
-
-        Returns:
-            A dictionary describing the pause status, including ``cache_cleared``
-            field indicating whether caches were cleared.
         """
 
-        if mode not in {"gentle", "force"}:
-            raise ValueError(f"Unsupported pause mode: {mode!r}")
+        async with self._pause_cond:
+            if self._paused:
+                return
+            self._paused = True
 
-        # Use lock to ensure atomicity with resume_generation
-        async with self._pause_resume_lock:
-            async with self._pause_cond:
-                if self._is_paused:
-                    return {
-                        "paused": True,
-                        "mode": mode,
-                        "message": "Already paused",
-                        "aborted_requests": 0,
-                        "cache_cleared": False,
-                    }
+        if not wait_for_inflight_requests:
+            request_ids = list(self.output_processor.request_states.keys())
+            if request_ids:
+                await self.abort(request_ids)
 
-                self._is_paused = True
+        # Wait for running requests to drain before clearing cache.
+        if self.output_processor.has_unfinished_requests():
+            await self.output_processor.wait_for_requests_drained()
 
-            start_time = time.perf_counter()
-            aborted_requests = 0
-            cache_cleared = False
+        # Clear cache
+        if clear_cache:
+            await self.reset_prefix_cache()
+            await self.reset_mm_cache()
 
-            try:
-                if mode == "force":
-                    # Get all tracked request IDs directly from output_processor
-                    request_ids = list(self.output_processor.request_states.keys())
-                    aborted_requests = len(request_ids)
-                    if request_ids:
-                        await self.abort(request_ids)
-
-                # Wait for all requests to drain before clearing cache
-                while (
-                    self.output_processor.has_unfinished_requests()
-                    or self.engine_core.dp_engines_running()
-                ):
-                    await asyncio.sleep(0.05)
-
-                # Clear cache if requested
-                if clear_cache:
-                    await self.reset_prefix_cache()
-                    await self.reset_mm_cache()
-                    cache_cleared = True
-
-                elapsed = time.perf_counter() - start_time
-                return {
-                    "paused": True,
-                    "mode": mode,
-                    "message": "Generation paused successfully",
-                    "elapsed_seconds": elapsed,
-                    "aborted_requests": aborted_requests,
-                    "cache_cleared": cache_cleared,
-                }
-
-            except Exception:
-                # If pause fails, reset state to allow future requests
-                async with self._pause_cond:
-                    self._is_paused = False
-                    self._pause_cond.notify_all()
-                # Re-raise the exception so API returns HTTP 500 with error details
-                raise
-
-    async def resume_generation(self) -> dict[str, Any]:
+    async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
 
-        # Use lock to ensure atomicity with pause_generation
-        async with self._pause_resume_lock:
-            async with self._pause_cond:
-                if not self._is_paused:
-                    return {
-                        "paused": False,
-                        "message": "Not paused",
-                    }
+        async with self._pause_cond:
+            self._paused = False
+            self._pause_cond.notify_all()  # Wake up all waiting requests
 
-                self._is_paused = False
-                self._pause_cond.notify_all()  # Wake up all waiting requests
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
 
-            return {
-                "paused": False,
-                "message": "Generation resumed",
-            }
-
-    async def get_pause_status(self) -> dict[str, Any]:
-        """Return the current pause status."""
-
-        num_unfinished = self.output_processor.get_num_unfinished_requests()
-        return {
-            "is_paused": self._is_paused,
-            "num_unfinished_requests": num_unfinished,
-        }
+        async with self._pause_cond:
+            return self._paused
 
     async def encode(
         self,
@@ -687,7 +626,7 @@ class AsyncLLM(EngineClient):
 
             # Respect pause state before accepting new requests.
             async with self._pause_cond:
-                await self._pause_cond.wait_for(lambda: not self._is_paused)
+                await self._pause_cond.wait_for(lambda: not self._paused)
 
             if tokenization_kwargs is None:
                 tokenization_kwargs = {}
@@ -842,7 +781,7 @@ class AsyncLLM(EngineClient):
             method, timeout, args, kwargs
         )
 
-    async def wait_for_requests_to_drain(self, drain_timeout: int = 300):
+    async def wait_for_requests_drained(self, drain_timeout: int = 300):
         """Wait for all requests to be drained."""
         start_time = time.time()
         while time.time() - start_time < drain_timeout:
@@ -880,7 +819,7 @@ class AsyncLLM(EngineClient):
             "Waiting for requests to drain before scaling up to %s engines...",
             new_data_parallel_size,
         )
-        await self.wait_for_requests_to_drain(drain_timeout)
+        await self.wait_for_requests_drained(drain_timeout)
         logger.info(
             "Requests have been drained, proceeding with scale to %s engines",
             new_data_parallel_size,
