@@ -179,6 +179,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.attn_backends,
             self.device,
         )
+        # Attention groups are not supported.
+        self.attn_groups = []  # type: ignore
 
     @torch.inference_mode()
     def _dummy_run(
