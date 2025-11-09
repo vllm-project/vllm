@@ -550,7 +550,10 @@ class AsyncLLM(EngineClient):
         wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
-        """Pause generation to allow model weight updates. New generation/encoding requests are blocked until resume.
+        """
+        Pause generation to allow model weight updates.
+
+        New generation/encoding requests are blocked until resume.
 
         Args:
             wait_for_inflight_requests: When ``True`` waits for in-flight
