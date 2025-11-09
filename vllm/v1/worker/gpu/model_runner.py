@@ -211,8 +211,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 input_batch.attn_metadata = attn_metadata
 
+        num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
         with self.maybe_dummy_run_with_lora(
-            self.lora_config, input_batch.num_scheduled_tokens
+            self.lora_config,
+            input_batch.num_scheduled_tokens,
+            num_sampled_tokens,
         ):
             with set_forward_context(
                 input_batch.attn_metadata,
