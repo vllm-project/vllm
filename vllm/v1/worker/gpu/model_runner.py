@@ -43,6 +43,7 @@ from vllm.v1.worker.gpu.input_batch import (
 )
 from vllm.v1.worker.gpu.sampler import Sampler, compute_prompt_logprobs
 from vllm.v1.worker.gpu.states import RequestState, SamplingMetadata
+from vllm.v1.worker.gpu.structured_outputs import apply_grammar_bitmask
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
@@ -478,9 +479,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
         sampling_metadata: SamplingMetadata,
+        grammar_output: GrammarOutput | None,
     ) -> SamplerOutput:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
+        if grammar_output is not None:
+            # Apply grammar bitmask to the logits in-place.
+            apply_grammar_bitmask(
+                logits,
+                input_batch.req_ids,
+                grammar_output.structured_output_request_ids,
+                grammar_output.grammar_bitmask,
+            )
         sampler_output = self.sampler(logits, sampling_metadata)
         return sampler_output
 
@@ -723,7 +733,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         hidden_states, input_batch, sampling_metadata = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
-        sampler_output = self.sample(hidden_states, input_batch, sampling_metadata)
+        sampler_output = self.sample(
+            hidden_states, input_batch, sampling_metadata, grammar_output
+        )
         prompt_logprobs_dict = self.compute_prompt_logprobs(hidden_states, input_batch)
         output = self.postprocess(
             sampler_output,
