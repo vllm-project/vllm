@@ -105,6 +105,7 @@ mkdocs.yaml @hmellor
 /vllm/attention/ops/triton_unified_attention.py @tdoublep
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
+/vllm/**/*rocm* @tjtanaa
 /docker/Dockerfile.rocm* @gshtras @tjtanaa
 /vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
 /vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
