@@ -673,13 +673,14 @@ class NixlConnectorWorker:
         attn_backend: type[AttentionBackend]
 
         def __post_init__(self):
-            # Figure out whether the first dimension of the cache is K/V 
+            # Figure out whether the first dimension of the cache is K/V
             # or num_blocks. This is used to register the memory regions correctly.
-            self.kv_cache_shape = self.attn_backend.get_kv_cache_shape(num_blocks=1, block_size=16, num_kv_heads=1, head_size=1)
-            backend_name = self.attn_backend.get_name()
-            attn_backend = AttentionBackendEnum[backend_name]
+            self.kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+            )
+            attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
             self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
-        
+
         @property
         def is_kv_layout_blocks_first(self) -> bool:
             # Non-MLA backends have 5 dims [2, num_blocks, H,N,D]
@@ -688,7 +689,9 @@ class NixlConnectorWorker:
         @property
         def split_k_and_v(self) -> bool:
             # Whether to register regions for K and V separately (when present).
-            return not (self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first)
+            return not (
+                self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first
+            )
 
         def tp_ratio(
             self,
