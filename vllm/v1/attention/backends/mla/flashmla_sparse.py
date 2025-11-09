@@ -461,7 +461,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
     def forward(
         self,
         layer: AttentionLayer,
-        q: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
@@ -490,11 +491,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         # Inputs and outputs may be padded for CUDA graphs
 
-        q = q[:num_actual_toks, ...]
+        q_nope = q_nope[:num_actual_toks, ...]
+        q_pe = q_pe[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
         # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
@@ -513,7 +514,7 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
         )
 
-        q = torch.cat([ql_nope, q_pe], dim=-1)
+        q_combined = torch.cat([ql_nope, q_pe], dim=-1)
 
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
@@ -528,11 +529,11 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         if self.kv_cache_dtype != "fp8_ds_mla":
             attn_out = self._forward_bf16_kv(
-                q, kv_cache, topk_indices_global, attn_metadata
+                q_combined, kv_cache, topk_indices_global, attn_metadata
             )
         else:
             attn_out = self._forward_fp8_kv(
-                q, kv_cache, topk_indices_global, attn_metadata
+                q_combined, kv_cache, topk_indices_global, attn_metadata
             )
 
         self._v_up_proj(attn_out, out=output[:num_actual_toks])

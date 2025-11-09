@@ -740,7 +740,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def forward(
         self,
-        q: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
@@ -752,17 +753,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
 
-            # Mirror Attention.forward scale calculation path
             if self.calculate_kv_scales and getattr(
                 attn_metadata, "enable_kv_scales_calculation", False
             ):
-                self.calc_kv_scales(q, kv_c_normed, k_pe)
+                self.calc_kv_scales((q_nope, q_pe), kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+                assert output_shape is not None, "output_shape must be provided."
+                output = torch.empty(
+                    output_shape, dtype=q_nope.dtype, device=q_nope.device
+                )
                 self.impl.forward(
                     self,
-                    q,
+                    q_nope,
+                    q_pe,
                     kv_c_normed,
                     k_pe,
                     self_kv_cache,
@@ -772,13 +776,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 return output
             else:
                 return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                    self, q_nope, q_pe, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+                assert output_shape is not None, "output_shape must be provided."
+                output = torch.empty(
+                    output_shape, dtype=q_nope.dtype, device=q_nope.device
+                )
                 torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
+                    q_nope,
+                    q_pe,
                     kv_c_normed,
                     k_pe,
                     output,
@@ -786,16 +794,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                # We can still access forward context to check calculation flag
                 if self.calculate_kv_scales:
                     forward_context = get_forward_context()
                     attn_metadata = forward_context.attn_metadata
                     if isinstance(attn_metadata, dict):
                         attn_metadata = attn_metadata[self.layer_name]
                     if getattr(attn_metadata, "enable_kv_scales_calculation", False):
-                        self.calc_kv_scales(q, kv_c_normed, k_pe)
+                        self.calc_kv_scales((q_nope, q_pe), kv_c_normed, k_pe)
                 return torch.ops.vllm.unified_mla_attention(
-                    q,
+                    q_nope,
+                    q_pe,
                     kv_c_normed,
                     k_pe,
                     self.layer_name,
@@ -806,7 +814,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.impl.process_weights_after_loading(act_dtype)
 
     def calc_kv_scales(
-        self, q: torch.Tensor, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
     ) -> None:
         """Optional scale calculation for MLA inputs.
 
@@ -817,9 +828,26 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_range = getattr(self, "k_range", torch.tensor(1.0))
         v_range = getattr(self, "v_range", torch.tensor(1.0))
 
-        self._q_scale.copy_(torch.abs(q).max() / q_range)
+        if isinstance(q, (tuple, list)):
+            q_nope, q_pe = q
+        else:
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+
+        device = q_nope.device
+        zero = torch.tensor(0.0, dtype=torch.float32, device=device)
+        q_abs_max = zero
+        if q_nope.numel() > 0:
+            q_abs_max = torch.max(q_abs_max, torch.abs(q_nope).max().to(torch.float32))
+        if q_pe.numel() > 0:
+            q_abs_max = torch.max(q_abs_max, torch.abs(q_pe).max().to(torch.float32))
+        kv_abs_max = zero
+        if kv_c_normed.numel() > 0:
+            kv_abs_max = torch.abs(kv_c_normed).max().to(torch.float32)
+
+        self._q_scale.copy_(q_abs_max / q_range)
         # kv_c_normed is the compressed KV representation; use it for k/v
-        kv_abs_max = torch.abs(kv_c_normed).max()
         self._k_scale.copy_(kv_abs_max / k_range)
         self._v_scale.copy_(kv_abs_max / v_range)
         self._q_scale_float = self._q_scale.item()
@@ -1000,7 +1028,8 @@ direct_register_custom_op(
 
 
 def unified_mla_attention(
-    q: torch.Tensor,
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
@@ -1013,19 +1042,24 @@ def unified_mla_attention(
         attn_metadata = attn_metadata[layer_name]
     self: MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = self.impl.forward(
+        self, q_nope, q_pe, kv_c_normed, k_pe, kv_cache, attn_metadata
+    )
 
     maybe_save_kv_layer_to_connector(layer_name, kv_cache)
     return output
 
 
 def unified_mla_attention_fake(
-    q: torch.Tensor,
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    return torch.empty_like(q).contiguous()
+    head_dim = q_nope.shape[-1] + q_pe.shape[-1]
+    fake_shape = (*q_nope.shape[:-1], head_dim)
+    return torch.empty(fake_shape, dtype=q_nope.dtype, device=q_nope.device).contiguous()
 
 
 direct_register_custom_op(
@@ -1038,7 +1072,8 @@ direct_register_custom_op(
 
 
 def unified_mla_attention_with_output(
-    q: torch.Tensor,
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
@@ -1055,7 +1090,8 @@ def unified_mla_attention_with_output(
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(
         self,
-        q,
+        q_nope,
+        q_pe,
         kv_c_normed,
         k_pe,
         kv_cache,
@@ -1069,7 +1105,8 @@ def unified_mla_attention_with_output(
 
 
 def unified_mla_attention_with_output_fake(
-    q: torch.Tensor,
+    q_nope: torch.Tensor,
+    q_pe: torch.Tensor,
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
