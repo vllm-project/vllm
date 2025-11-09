@@ -12,8 +12,8 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def detect_gguf_multimodal_gemma3(model: str) -> Path | None:
-    """Check if GGUF model has multimodal projector file for Gemma3.
+def detect_gguf_multimodal(model: str) -> Path | None:
+    """Check if GGUF model has multimodal projector file.
 
     Args:
         model: Model path string
@@ -61,6 +61,8 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
 
     reader = gguf.GGUFReader(str(mmproj_path))
 
+    # FIXME(Isotr0py, GGUF): Map from GGUF constants for standardization
+    # see: https://github.com/ggml-org/llama.cpp/blob/392e09a60852d0e879d4bbedd5ace3e6852f719e/gguf-py/gguf/constants.py#L261-L281
     # Extract vision config parameters from GGUF metadata
     hidden_size = reader.get_field("clip.vision.embedding_length")
     intermediate_size = reader.get_field("clip.vision.feed_forward_length")
@@ -126,7 +128,7 @@ def patch_hf_config_from_gguf(
     Returns:
         Updated architecture list (unchanged if not Gemma3 GGUF multimodal)
     """
-    mmproj_path = detect_gguf_multimodal_gemma3(model)
+    mmproj_path = detect_gguf_multimodal(model)
     if mmproj_path is not None:
         is_gemma3 = any("gemma3" in str(arch).lower() for arch in architectures)
         if is_gemma3:
