@@ -230,16 +230,14 @@ def parse_response_input(
         # Issue #28262: Reasoning channel should match the following message
         # - If followed by function_call, use commentary channel
         # - Otherwise, use analysis channel (default)
+        channel = "analysis"
         if next_msg is not None:
             next_msg_dict = (
                 next_msg if isinstance(next_msg, dict) else next_msg.model_dump()
             )
             if next_msg_dict.get("type") == "function_call":
-                msg = msg.with_channel("commentary")
-            else:
-                msg = msg.with_channel("analysis")
-        else:
-            msg = msg.with_channel("analysis")
+                channel = "commentary"
+        msg = msg.with_channel(channel)
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
