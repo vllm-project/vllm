@@ -7,7 +7,7 @@ import gguf
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
@@ -71,6 +71,9 @@ class GGUFModelLoader(BaseModelLoader):
         """
         config = model_config.hf_config
         model_type = config.model_type
+        is_multimodal = (
+            hasattr(config, "vision_config") and config.vision_config is not None
+        )
         gguf_to_hf_name_map = {}
         # hack: ggufs have a different name than transformers
         if model_type == "cohere":
@@ -120,10 +123,15 @@ class GGUFModelLoader(BaseModelLoader):
             raise RuntimeError(f"Unknown gguf model_type: {model_type}")
         num_layers = config.num_hidden_layers
         name_map = gguf.get_tensor_name_map(arch, num_layers)
+
+        auto_cls = (
+            AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
+        )
         with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(
+            dummy_model = auto_cls.from_config(
                 config, trust_remote_code=model_config.trust_remote_code
             )
+
         state_dict = dummy_model.state_dict()
 
         for hf_name in state_dict:
