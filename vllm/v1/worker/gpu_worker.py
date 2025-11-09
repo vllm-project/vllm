@@ -40,7 +40,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, memory_profiling
-from vllm.v1.core.sched.output import GrammarOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import (
@@ -58,7 +58,6 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-    from vllm.v1.core.sched.output import SchedulerOutput
 
 
 class Worker(WorkerBase):
@@ -611,7 +610,7 @@ class Worker(WorkerBase):
                 )
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        self.model_runner.execute_model(SchedulerOutput.make_empty(), dummy_run=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)

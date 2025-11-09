@@ -98,9 +98,9 @@ class BlockTables:
         # [num_reqs]
         req_indices: list[int],
         # [num_kv_cache_groups, num_reqs + 1]
-        cu_num_new_blocks: list[list[int]],
+        cu_num_new_blocks: tuple[list[int], ...],
         # [num_kv_cache_groups, num_new_blocks]
-        new_block_ids: list[list[int]],
+        new_block_ids: tuple[list[int], ...],
         # [num_reqs]
         overwrite: list[bool],
     ) -> None:
@@ -177,6 +177,10 @@ class BlockTables:
             PAD_ID=PAD_SLOT_ID,
             BLOCK_SIZE=1024,  # type: ignore
         )
+        return self.slot_mappings[:, :num_tokens]
+
+    def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
+        self.slot_mappings.fill_(PAD_SLOT_ID)
         return self.slot_mappings[:, :num_tokens]
 
 
