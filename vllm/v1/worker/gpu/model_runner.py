@@ -228,20 +228,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.attn_metadata = attn_metadata
 
         num_sampled_tokens = np.ones(input_batch.num_reqs, dtype=np.int32)
-        with self.maybe_dummy_run_with_lora(
-            self.lora_config,
-            input_batch.num_scheduled_tokens,
-            num_sampled_tokens,
-        ):
-            with set_forward_context(
+        with (
+            self.maybe_dummy_run_with_lora(
+                self.lora_config,
+                input_batch.num_scheduled_tokens,
+                num_sampled_tokens,
+            ),
+            set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=num_tokens,
-            ):
-                hidden_states = self.model(
-                    input_ids=input_batch.input_ids,
-                    positions=input_batch.positions,
-                )
+            ),
+        ):
+            hidden_states = self.model(
+                input_ids=input_batch.input_ids,
+                positions=input_batch.positions,
+            )
             sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
 
