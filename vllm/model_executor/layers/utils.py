@@ -106,6 +106,7 @@ def default_unquantized_gemm(
 def use_aiter_triton_gemm(n, m, k, dtype):
     if (
         envs.VLLM_ROCM_USE_AITER == 0
+        or envs.VLLM_ROCM_USE_AITER_TRITON_GEMM == 0
         # MI300's - fp8nuz=True
         or current_platform.is_fp8_fnuz()
         or dtype not in [torch.float16, torch.bfloat16]
