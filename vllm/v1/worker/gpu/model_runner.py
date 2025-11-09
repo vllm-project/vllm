@@ -249,7 +249,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
         )
         logits = self.model.compute_logits(hidden_states)
-        self.sampler.sample(logits, sampling_metadata)
+        self.sampler(logits, sampling_metadata)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
@@ -481,7 +481,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> SamplerOutput:
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         logits = self.model.compute_logits(sample_hidden_states)
-        sampler_output = self.sampler.sample(logits, sampling_metadata)
+        sampler_output = self.sampler(logits, sampling_metadata)
         return sampler_output
 
     def compute_prompt_logprobs(
@@ -637,38 +637,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     ) -> ModelRunnerOutput | None:
         assert intermediate_tensors is None
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if self.dp_size == 1:
+            # No DP padding.
+            num_tokens_across_dp: torch.Tensor | None = None
+            num_tokens_after_dp_padding = total_num_scheduled_tokens
+        else:
+            # Get the number of tokens across DP, and pad to the maximum.
+            num_tokens_across_dp = get_num_tokens_across_dp(
+                total_num_scheduled_tokens,
+                self.dp_size,
+                self.dp_rank,
+            )
+            num_tokens_after_dp_padding = int(num_tokens_across_dp.max().item())
+
+        # Get the CUDA graph size and pad the input.
+        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+            scheduler_output, num_tokens_after_dp_padding
+        )
+        if cudagraph_size is not None:
+            use_cudagraph = True
+            num_tokens_after_padding = cudagraph_size
+        else:
+            use_cudagraph = False
+            num_tokens_after_padding = num_tokens_after_dp_padding
 
         with async_barrier(
             self.input_prep_event if self.use_async_scheduling else None
         ):
             self.update_states(scheduler_output)
-            if total_num_scheduled_tokens == 0:
+            if num_tokens_after_padding == 0:
+                # No need to run the model.
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
-            if self.dp_size == 1:
-                # No DP padding.
-                num_tokens_across_dp: torch.Tensor | None = None
-                num_tokens_after_dp_padding = total_num_scheduled_tokens
-            else:
-                # Get the number of tokens across DP, and pad to the maximum.
-                num_tokens_across_dp = get_num_tokens_across_dp(
-                    total_num_scheduled_tokens,
-                    self.dp_size,
-                    self.dp_rank,
-                )
-                num_tokens_after_dp_padding = int(num_tokens_across_dp.max().item())
-
-            # Get the CUDA graph size and pad the input.
-            cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-                scheduler_output, num_tokens_after_dp_padding
-            )
-            if cudagraph_size is not None:
-                use_cudagraph = True
-                num_tokens_after_padding = cudagraph_size
-            else:
-                use_cudagraph = False
-                num_tokens_after_padding = num_tokens_after_dp_padding
-
+            # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(
                 scheduler_output,
                 num_tokens_after_padding,

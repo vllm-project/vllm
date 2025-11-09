@@ -67,6 +67,9 @@ class CudaGraphManager:
         if max(scheduler_output.num_scheduled_tokens.values()) > 1:
             # Prefill is included.
             return None
+        if num_tokens_after_dp_padding == 0:
+            # No work to do.
+            return None
         return self.padded_sizes.get(num_tokens_after_dp_padding)
 
     def capture_graph(
