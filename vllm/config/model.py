@@ -38,7 +38,7 @@ from vllm.transformers_utils.config import (
 )
 from vllm.transformers_utils.gguf_utils import (
     detect_gguf_multimodal,
-    patch_hf_config_from_gguf,
+    maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
 from vllm.transformers_utils.utils import maybe_model_redirect
@@ -514,6 +514,10 @@ class ModelConfig:
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
         )
+        hf_config = maybe_patch_hf_config_from_gguf(
+            self.model,
+            hf_config,
+        )
 
         self.hf_config = hf_config
         if dict_overrides:
@@ -529,12 +533,6 @@ class ModelConfig:
 
         architectures = self.architectures
         registry = self.registry
-
-        # GGUF multimodal: Force Gemma3ForConditionalGeneration architecture
-        # when mmproj file is present, before model resolution
-        architectures = patch_hf_config_from_gguf(
-            self.model, self.hf_config, architectures
-        )
 
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
