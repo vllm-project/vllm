@@ -685,8 +685,18 @@ async def client_main(
 
             except asyncio.exceptions.TimeoutError:
                 num_failures += 1
-                logger.exception(
-                    f"{Color.RED}Client {client_id} - Timeout during conversation ID {conv_id} (turn: {current_turn}){Color.RESET}"  # noqa: E501
+                logger.error(
+                    "%sClient %d - Timeout during conversation ID %s (turn: %d). "
+                    "Base timeout is %ss (set with --request-timeout-sec), but the "
+                    "effective timeout may be longer based on max_tokens. If this "
+                    "is unexpected, consider increasing the timeout or checking "
+                    "model performance.%s",
+                    Color.RED,
+                    client_id,
+                    conv_id,
+                    current_turn,
+                    req_args.timeout_sec,
+                    Color.RESET,
                 )
                 break  # Exit gracefully instead of raising an error
 
