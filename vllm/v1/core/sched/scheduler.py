@@ -1241,10 +1241,11 @@ class Scheduler(SchedulerInterface):
         return len(self.finished_req_ids) > 0
 
     def reset_prefix_cache(self, reset_connector: bool = False) -> bool:
-        reset_success = self.kv_cache_manager.reset_prefix_cache()
+        local_reset_success = self.kv_cache_manager.reset_prefix_cache()
+        connector_reset_success = True
         if reset_connector:
-            reset_success = reset_success and self.reset_connector_cache()
-        return reset_success
+            connector_reset_success = self.reset_connector_cache()
+        return local_reset_success and connector_reset_success
 
     def reset_connector_cache(self) -> bool:
         if self.connector is None:
