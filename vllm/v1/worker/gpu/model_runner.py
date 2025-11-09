@@ -587,7 +587,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def postprocess(
         self,
         sampler_output: SamplerOutput,
-        sampling_metadata: SamplingMetadata,
         prompt_logprobs_dict: dict[str, LogprobsTensors],
         input_batch: InputBatch,
     ) -> AsyncOutput | ModelRunnerOutput:
@@ -728,7 +727,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prompt_logprobs_dict = self.compute_prompt_logprobs(hidden_states, input_batch)
         output = self.postprocess(
             sampler_output,
-            sampling_metadata,
             prompt_logprobs_dict,
             input_batch,
         )
