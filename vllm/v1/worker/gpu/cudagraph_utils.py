@@ -30,6 +30,7 @@ class CudaGraphManager:
         self.device = device
 
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
@@ -105,12 +106,22 @@ class CudaGraphManager:
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
         )
+        if self.dp_size > 1:
+            num_tokens_across_dp = torch.full(
+                (self.dp_size,),
+                batch_size,
+                dtype=torch.int32,
+                device="cpu",
+            )
+        else:
+            num_tokens_across_dp = None
 
         # Warm up.
         with set_forward_context(
             attn_metadata,
             self.vllm_config,
             num_tokens=batch_size,
+            num_tokens_across_dp=num_tokens_across_dp,
         ):
             hidden_states = model(
                 input_ids=input_ids,
@@ -127,6 +138,7 @@ class CudaGraphManager:
                 attn_metadata,
                 self.vllm_config,
                 num_tokens=batch_size,
+                num_tokens_across_dp=num_tokens_across_dp,
             ),
             torch.cuda.graph(graph, self.pool),
         ):
