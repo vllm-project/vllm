@@ -2408,6 +2408,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         lora_request = scheduler_output.scheduled_new_reqs[0].lora_request
         assert all(req.lora_request == lora_request for req in scheduler_output.scheduled_new_reqs if req.is_training)
 
+        # Assert that all training requests have the same gradient accumulation steps
+        gradient_accumulation_steps = scheduler_output.scheduled_new_reqs[0].training_params.gradient_accumulation_steps
+        assert all(req.training_params and req.training_params.gradient_accumulation_steps == gradient_accumulation_steps for req in scheduler_output.scheduled_new_reqs if req.is_training)
+
+        # Assert that all training requests have the same number of training steps
+        num_training_steps = scheduler_output.scheduled_new_reqs[0].training_params.num_training_steps
+        assert all(req.training_params and req.training_params.num_training_steps == num_training_steps for req in scheduler_output.scheduled_new_reqs if req.is_training)
+
+        # Assert that all training requests have the same number of warmup steps
+        num_warmup_steps = scheduler_output.scheduled_new_reqs[0].training_params.num_warmup_steps
+        assert all(req.training_params and req.training_params.num_warmup_steps == num_warmup_steps for req in scheduler_output.scheduled_new_reqs if req.is_training)
+
+        # Set the training manager parameters
+        self.training_manager.gradient_accumulation_steps = gradient_accumulation_steps
+        self.training_manager.num_training_steps = num_training_steps
+        self.training_manager.num_warmup_steps = num_warmup_steps
+
         # Run the model WITHOUT torch.inference_mode() to enable gradients
         with (set_forward_context(
                 attn_metadata,
@@ -2538,16 +2555,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # Store eval loss
                     all_eval_losses.append(tr_loss.detach())
 
+            learning_rate = None
             if not is_eval_batch:
                 # Run the optimizer step if it is time to do so
                 if self.training_manager.should_run_optimizer_step():
-                    self.training_manager.optimizer_step()
+                    learning_rate = self.training_manager.optimizer_step()
                     self.training_manager.reset_steps()
                     self.training_manager.model_zero_grad()
 
                 # Log the training state if it is time to do so
                 if self.training_manager.should_log():
-                    self.training_manager.log()
+                    self.training_manager.log(learning_rate=learning_rate)
                     self.training_manager.reset_loss()
 
         training_loss = self.training_manager.loss

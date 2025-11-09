@@ -440,7 +440,7 @@ class LLM:
         learning_rate: float = 1e-4,
         gradient_accumulation_steps: int = 1,
         warmup_steps: int = 0,
-        max_length: int = None,
+        max_length: Optional[int] = None,
         # Evaluation configuration
         eval_dataset: Optional[Sequence[dict[str, Any]]] = None,
         eval_steps: Optional[int] = None,
@@ -461,8 +461,8 @@ class LLM:
         if eval_dataset is not None:
             tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
 
-        # TODO(girfan): Verify this with PEFT.
         num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
+        num_training_steps = num_steps_per_epoch * num_epochs
 
         # num_examples = 800
         # batch_size = 4
@@ -479,7 +479,7 @@ class LLM:
         # tr_loss is always accumulated and reset after eval
 
         def _run_batch(dataset_iter: Iterator, batch_size: int, lora_request: LoRARequest, is_eval: bool) -> list[RequestOutput]:
-            training_params = TrainingParams(is_eval=is_eval)
+            training_params = TrainingParams(is_eval=is_eval, gradient_accumulation_steps=gradient_accumulation_steps, num_training_steps=num_training_steps, num_warmup_steps=warmup_steps)
             request_ids = self._add_training_requests_from_iter(dataset_iter, batch_size, training_params, lora_request)
             outputs = self._run_engine(use_tqdm=use_tqdm)
             return outputs

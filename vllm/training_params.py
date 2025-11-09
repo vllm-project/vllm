@@ -3,8 +3,10 @@
 
 from dataclasses import dataclass
 
-# TODO(girfan): Check which ones we need and which can be removed
 @dataclass
 class TrainingParams:
     """Parameters for training requests."""
     is_eval: bool
+    gradient_accumulation_steps: int
+    num_training_steps: int
+    num_warmup_steps: int

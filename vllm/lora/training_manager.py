@@ -138,7 +138,6 @@ class TrainingManager:
         self.alpha = lora_config.lora_alpha
         self.target_modules = lora_config.training_target_modules
 
-        # Track trainable parameters and training state
         self.trainable_lora_ids: Set[int] = set()
         self.in_prog_lora_ids: Set[int] = set()
         self.trainable_lora_params: Dict[str, nn.Parameter] = {}
@@ -147,18 +146,16 @@ class TrainingManager:
         self.max_grad_norm: float = 1.0
         self.grad_norm: float = 0.0
 
+        self.training_state = TrainingState()
+
+        # Initially set to None, will be set when the first training request is added and must be the same for all training requests later
+        self._num_training_steps: Optional[int] = None
+        self._num_warmup_steps: Optional[int] = None
+
         # Logging
         self.log_interval: int = 50
         self._last_logged_step: int = 0
 
-        # TODO(girfan): Take the params from elsewhere.
-        self.training_state = TrainingState(grad_accumulation_steps=2)
-
-        # # Register with LoRAModelManager
-        # if hasattr(self.lora_manager, '_adapter_manager'):
-        #     self.lora_manager._adapter_manager._training_manager = self
-        #     logger.info("[TrainingManager] Registered with LoRAModelManager")
-        
         # Mark as initialized
         self._initialized = True
 
@@ -215,6 +212,34 @@ class TrainingManager:
         return self.model_runner
 
     @property
+    def grad_accumulation_steps(self) -> int:
+        return self.training_state.grad_accumulation_steps
+
+    @grad_accumulation_steps.setter
+    def grad_accumulation_steps(self, value: int):
+        self.training_state.grad_accumulation_steps = value
+
+    @property
+    def num_training_steps(self) -> int:
+        return self._num_training_steps
+
+    @num_training_steps.setter
+    def num_training_steps(self, value: int):
+        if self._num_training_steps is not None and value != self._num_training_steps:
+            raise ValueError("num_training_steps can only be set once")
+        self._num_training_steps = value
+
+    @property
+    def num_warmup_steps(self) -> int:
+        return self._num_warmup_steps
+
+    @num_warmup_steps.setter
+    def num_warmup_steps(self, value: int):
+        if self._num_warmup_steps is not None and value != self._num_warmup_steps:
+            raise ValueError("num_warmup_steps can only be set once")
+        self._num_warmup_steps = value
+
+    @property
     def loss(self) -> Optional[torch.Tensor]:
         return self.training_state.loss
 
@@ -232,28 +257,29 @@ class TrainingManager:
 
     def model_zero_grad(self):
         """Zero gradients for all trainable parameters.
-        
-        Note: We use optimizer.zero_grad() instead of model.zero_grad() because
-        the LoRA stacked tensors are not registered as nn.Parameters, so they
-        won't be found by model.parameters(). The optimizer has direct references
-        to these tensors and can zero their gradients correctly.
+
+        Manually zero the gradients of all LoRA stacked tensors since they
+        are not registered as nn.Parameters.
         """
+        for param_name, param_tensor in self.trainable_lora_params.items():
+            if param_tensor.grad is not None:
+                param_tensor.grad.zero_()
         self.optimizer.zero_grad()
 
     def should_log(self) -> bool:
         return self.training_state.total_steps % self.log_interval == 0
 
-    def log(self):
+    def log(self, learning_rate: Optional[float] = None):
         steps_since_last_log: int = self.training_state.total_steps - self._last_logged_step
         loss_value: float = self.training_state.loss / steps_since_last_log
-        learning_rate: float = self.get_learning_rate()
+        learning_rate: float = self.get_learning_rate() if learning_rate is None else learning_rate
         self._last_logged_step = self.training_state.total_steps
         logger.info(f"loss = {loss_value:.6f}, learning rate = {learning_rate:.6f}, grad norm = {self.grad_norm:.6f}")
 
     def should_run_optimizer_step(self) -> bool:
         # TODO(girfan): Maybe this check should be in the GPUModelRunner so we can access steps_in_epoch?
         # do_sync_step = (step + 1) % args.gradient_accumulation_steps == 0 or (step + 1) == steps_in_epoch
-        return self.training_state.steps % self.training_state.grad_accumulation_steps == 0 and self.training_state.steps > 0
+        return self.training_state.steps % self.grad_accumulation_steps == 0 and self.training_state.steps > 0
 
     # TODO(girfan): Cache this result?
     def get_qkv_indices_for_training(self) -> List[int]:
@@ -282,13 +308,9 @@ class TrainingManager:
 
         return enabled_indices
 
-    def _freeze_base_model(self) -> Dict[str, int]:
+    def _freeze_base_model(self):
         """Freeze all base model parameters (non-LoRA)."""
-        frozen_count = 0
-        total_count = 0
-
         for name, param in self.model.named_parameters():
-            total_count += 1
             # Check if this is a LoRA parameter (including stacked tensors)
             is_lora_param = any([
                 'lora_a' in name.lower(), 'lora_b' in name.lower(),
@@ -300,12 +322,7 @@ class TrainingManager:
                 raise ValueError(f"Base model parameter {name} is a LoRA parameter")
 
             param.requires_grad = False
-            frozen_count += 1
 
-        return {
-            'total': total_count,
-            'frozen': frozen_count,
-        }
 
     def is_registered_by_id(self, lora_id: int) -> bool:
         return lora_id in self.trainable_lora_ids or lora_id in self.in_prog_lora_ids
@@ -327,7 +344,8 @@ class TrainingManager:
 
     def lora_train(self, lora_request: LoRARequest):
         """Make the LoRA adapter trainable."""
-        _ = self._try_initialize_lora_for_training(lora_request)
+        self._try_initialize_lora_for_training(lora_request)
+        self._setup_optimizer_and_scheduler()
         self.model.train()
         if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
             self.optimizer.train()
@@ -336,11 +354,6 @@ class TrainingManager:
     def _try_initialize_lora_for_training(
         self,
         lora_request: LoRARequest,
-        learning_rate: float = 1e-4,
-        num_training_steps: int = 300,
-        num_warmup_steps: int = 100,
-        weight_decay: float = 0.0,
-        scheduler_type: str = "cosine",
     ):
         """Convert a loaded LoRA adapter to trainable parameters and setup optimizer."""
         lora_id = lora_request.lora_int_id
@@ -363,7 +376,7 @@ class TrainingManager:
         self.lora_manager.add_adapter(lora_request, is_trainable=True, trainable_slices=indices)
 
         # Freeze the base model
-        base_model_stats = self._freeze_base_model()
+        self._freeze_base_model()
 
         # Get LoRA model and stacked tensor index
         lora_adapters = self.lora_manager.list_adapters()
@@ -375,7 +388,6 @@ class TrainingManager:
             raise ValueError(f"LoRA adapter {lora_id} could not be retrieved")
 
         # Clear existing trainable parameters and make stacked tensors trainable
-        trainable_params = []
         self.trainable_lora_params.clear()
 
         # Make stacked tensors trainable
@@ -383,8 +395,6 @@ class TrainingManager:
             # Check if this module has loaded LoRA weights
             if module_name not in lora_model.loras:
                 continue  # Skip modules that don't have LoRA loaded
-
-            logger.info(f"module_name: {module_name}")
 
             # Determine slice indices to train per module
             if isinstance(module, MergedQKVParallelLinearWithLoRA):
@@ -399,55 +409,29 @@ class TrainingManager:
             if not a_indices or not b_indices:
                 raise ValueError(f"No valid indices found for module {module_name}")
 
-            logger.info(f"a_indices: {a_indices}, b_indices: {b_indices}")
-
             # Process lora_a_stacked
             for idx in a_indices:
                 stacked_tensor = module.lora_a_stacked[idx]
                 param_name = f"{module_name}.lora_a_stacked[{idx}]"
                 self.trainable_lora_params[param_name] = stacked_tensor
-                trainable_params.append(stacked_tensor)
 
             # Process lora_b_stacked
             for idx in b_indices:
                 stacked_tensor = module.lora_b_stacked[idx]
                 param_name = f"{module_name}.lora_b_stacked[{idx}]"
                 self.trainable_lora_params[param_name] = stacked_tensor
-                trainable_params.append(stacked_tensor)
-
-        # Setup optimizer
-        self.optimizer = torch.optim.AdamW(
-            trainable_params,
-            lr=learning_rate,
-            weight_decay=weight_decay,
-        )
-
-        # Setup scheduler
-        self.scheduler = self.setup_scheduler(
-            optimizer=self.optimizer,
-            num_training_steps=num_training_steps,
-            num_warmup_steps=num_warmup_steps,
-            scheduler_type=scheduler_type,
-        )
 
         # Mark the LoRA adapter as trainable
         self.trainable_lora_ids.add(lora_id)
         self.in_prog_lora_ids.remove(lora_id)
 
-        lora_stats = {
-            "trainable_params": len(trainable_params),
-        }
 
-        all_stats = lora_stats | base_model_stats
-
-        return all_stats
-
-    def setup_scheduler(
+    def _setup_scheduler(
         self,
         optimizer: torch.optim.Optimizer,
-        num_training_steps: int = 300,
-        num_warmup_steps: int = 100,
-        scheduler_type: str = "cosine",
+        num_training_steps: int,
+        num_warmup_steps: int,
+        scheduler_type: str,
     ):
         """Setup learning rate scheduler."""
         if scheduler_type == "cosine":
@@ -462,10 +446,48 @@ class TrainingManager:
             scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=num_training_steps)
         else:
             raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
-
         return scheduler
 
-    def optimizer_step(self):
+
+    def _setup_optimizer(self, weight_decay: float, learning_rate: float):
+        assert self.trainable_lora_params is not None
+        optimizer_grouped_parameters = [
+            {
+                "params": list(self.trainable_lora_params.values()),
+                "weight_decay": weight_decay,
+            }
+        ]
+        optimizer_kwargs = {
+            "lr": learning_rate,
+            "weight_decay": weight_decay,
+            "betas": (0.9, 0.999),
+            "eps": 1e-08,
+            "fused": True,
+        }
+        optimizer = torch.optim.AdamW(
+            optimizer_grouped_parameters,
+            **optimizer_kwargs,
+        )
+        return optimizer
+
+
+    def _setup_optimizer_and_scheduler(self, weight_decay: float = 0.0, learning_rate: float = 1e-4, scheduler_type: str = "cosine"):
+        if self.optimizer is not None and self.scheduler is not None:
+            return
+
+        self.optimizer = self._setup_optimizer(
+            weight_decay=weight_decay,
+            learning_rate=learning_rate,
+        )
+        self.scheduler = self._setup_scheduler(
+            optimizer=self.optimizer,
+            num_training_steps=self.num_training_steps,
+            num_warmup_steps=self.num_warmup_steps,
+            scheduler_type=scheduler_type,
+        )
+
+
+    def optimizer_step(self) -> float:
         """Perform optimizer step with optional gradient clipping."""
         if self.max_grad_norm is not None and self.max_grad_norm > 0:
             # Clip gradients to prevent exploding gradients during training
@@ -484,9 +506,30 @@ class TrainingManager:
                     param_norm = param.grad.data.norm(2)
                     total_norm += param_norm.item()**2
             total_norm = total_norm**0.5
+            self.grad_norm = total_norm
+
+        # Save learning rate before update
+        learning_rate = self.get_learning_rate()
+
+        # Weights of trainable parameters before update
+        trainable_params_before = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
+        trainable_params_before_weights = [p.data.clone() for p in trainable_params_before]
 
         self.optimizer.step()
         self.scheduler.step()
+
+        # Weights of trainable parameters after update
+        trainable_params_after = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
+        trainable_params_after_weights = [p.data.clone() for p in trainable_params_after]
+
+        # Compute changes in weights
+        weight_changes = {}
+        for name, before, after in zip(trainable_params_before, trainable_params_before_weights, trainable_params_after_weights):
+            weight_changes[name] = (after - before).norm().item()
+
+        logger.info(f"Weight changes: {weight_changes}")
+
+        return learning_rate
 
     def get_learning_rate(self) -> float:
         if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -498,58 +541,3 @@ class TrainingManager:
             last_lr = last_lr.item()
 
         return last_lr
-
-    def save_lora_checkpoint(
-        self,
-        lora_model: LoRAModel,
-        output_dir: str,
-        adapter_name: str = "adapter",
-    ) -> str:
-        """Save LoRA adapter weights to disk."""
-        os.makedirs(output_dir, exist_ok=True)
-
-        # Prepare tensors for saving
-        tensors = {}
-        for module_name, lora_weights in lora_model.loras.items():
-            base_name = f"base_model.model.{module_name}"
-
-            # Handle packed layers vs regular layers
-            if isinstance(lora_weights.lora_a, list):
-                # Packed layer - save each component separately
-                for i, (lora_a_tensor, lora_b_tensor) in enumerate(zip(lora_weights.lora_a, lora_weights.lora_b)):
-                    if lora_a_tensor is not None:
-                        tensor_cpu = lora_a_tensor.detach().cpu() if isinstance(lora_a_tensor, torch.nn.Parameter) else lora_a_tensor.cpu()
-                        tensors[f"{base_name}.lora_A.weight.{i}"] = tensor_cpu.contiguous()
-                    if lora_b_tensor is not None:
-                        tensor_cpu = lora_b_tensor.detach().cpu() if isinstance(lora_b_tensor, torch.nn.Parameter) else lora_b_tensor.cpu()
-                        tensors[f"{base_name}.lora_B.weight.{i}"] = tensor_cpu.contiguous()
-            else:
-                # Regular layer - save as single tensor
-                if lora_weights.lora_a is not None:
-                    tensor_cpu = lora_weights.lora_a.detach().cpu() if isinstance(lora_weights.lora_a, torch.nn.Parameter) else lora_weights.lora_a.cpu()
-                    tensors[f"{base_name}.lora_A.weight"] = tensor_cpu.contiguous()
-                if lora_weights.lora_b is not None:
-                    tensor_cpu = lora_weights.lora_b.detach().cpu() if isinstance(lora_weights.lora_b, torch.nn.Parameter) else lora_weights.lora_b.cpu()
-                    tensors[f"{base_name}.lora_B.weight"] = tensor_cpu.contiguous()
-
-        # Save adapter_config.json
-        config = {
-            "peft_type": "LORA",
-            "r": lora_model.rank,
-            "lora_alpha": self.alpha,
-            "lora_dropout": 0.0,
-            "target_modules": list(self.sub_modules),
-            "bias": "none",
-            "task_type": "CAUSAL_LM",
-        }
-
-        with open(os.path.join(output_dir, "adapter_config.json"), "w") as f:
-            json.dump(config, f, indent=2)
-
-        # Save weights
-        save_file(tensors, os.path.join(output_dir, "adapter_model.safetensors"))
-
-        logger.info(f"[TrainingManager] Saved LoRA adapter to {output_dir}")
-        logger.info(f"[TrainingManager] Saved {len(tensors)} tensors")
-
-        return output_dir

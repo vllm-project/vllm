@@ -2,12 +2,19 @@ from typing import Optional
 import torch
 
 class TrainingState:
-    def __init__(self, grad_accumulation_steps: int = 1):
-        self.grad_accumulation_steps: int = grad_accumulation_steps
-
+    def __init__(self):
+        self._grad_accumulation_steps: int = 1
         self._loss: torch.Tensor = torch.tensor(0.0)
         self._total_steps: int = 0
         self._steps: int = 0
+
+    @property
+    def grad_accumulation_steps(self) -> int:
+        return self._grad_accumulation_steps
+
+    @grad_accumulation_steps.setter
+    def grad_accumulation_steps(self, value: int):
+        self._grad_accumulation_steps = value
 
     @property
     def loss(self) -> float:

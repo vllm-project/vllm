@@ -43,7 +43,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         model_config: Optional[PretrainedConfig] = None,
     ) -> None:
         self.lora_config = lora_config
-        #
+
         if isinstance(self.base_layer, ReplicatedLinear):
             lora_a_out_size = lora_config.max_lora_rank
             lora_b_out_size = self.output_size
@@ -183,6 +183,10 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         # Group tokens by LoRA index
         unique_lora_ids = set(lora_indices.tolist())
 
+        scaling = self.lora_config.lora_alpha / self.lora_config.max_lora_rank
+        # TODO(girfan): We should use the ACTUAL rank of this LoRA, not max rank.
+        assert scaling == 2.0, f"Scaling factor is {scaling}, expected 2.0 (temp: matching PEFT example)"
+
         for lora_idx in unique_lora_ids:
             if lora_idx == -1:
                 continue
@@ -207,7 +211,7 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_output = lora_hidden @ lora_b.T  # [num_tokens, output_size]
 
                 slice_size = self.output_slices[slice_idx]
-                output[token_indices, output_offset:output_offset + slice_size] += lora_output
+                output[token_indices, output_offset:output_offset + slice_size] += lora_output * scaling
                 output_offset += slice_size
 
                 if self.lora_bias_stacked is not None and self.lora_bias_stacked[slice_idx] is not None:
