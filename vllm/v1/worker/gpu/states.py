@@ -37,10 +37,8 @@ class SamplingMetadata:
         assert num_reqs > 0
         temperature = torch.zeros(num_reqs, dtype=torch.float32, device=device)
         temperature[0] = 0.5
-        # TODO(woosuk): Use top-p and top-k for dummy sampler.
-        # Currently, they are disabled because of memory usage.
-        top_p = None
-        top_k = None
+        top_p = torch.full((num_reqs,), 0.95, dtype=torch.float32, device=device)
+        top_k = torch.full((num_reqs,), 20, dtype=torch.int32, device=device)
         seeds = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         pos = torch.zeros(num_reqs, dtype=torch.int64, device=device)
         max_num_logprobs = 20
@@ -204,7 +202,7 @@ class RequestState:
         seeds = self.seeds.copy_np_to_gpu(seeds)
 
         num_logprobs = self.num_logprobs[idx_mapping]
-        max_num_logprobs = int(np.max(num_logprobs))
+        max_num_logprobs: int | None = int(np.max(num_logprobs))
         if max_num_logprobs == -1:
             max_num_logprobs = None
 

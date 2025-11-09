@@ -21,7 +21,40 @@ class Sampler:
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
         self.logprobs_mode = logprobs_mode
 
-    def sample_token(
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> SamplerOutput:
+        if sampling_metadata.max_num_logprobs is not None:
+            if self.logprobs_mode == "processed_logprobs":
+                sampled, logits = self.sample(
+                    logits, sampling_metadata, return_logits=True
+                )
+            else:
+                assert self.logprobs_mode == "raw_logprobs"
+                sampled, _ = self.sample(logits, sampling_metadata, return_logits=False)
+
+            logprobs_tensors = compute_topk_logprobs(
+                logits,
+                sampling_metadata.max_num_logprobs,
+                sampled,
+            )
+        else:
+            sampled, _ = self.sample(logits, sampling_metadata, return_logits=False)
+            logprobs_tensors = None
+
+        # These are GPU tensors.
+        sampler_output = SamplerOutput(
+            # The sampled tokens are expanded to 2D tensor with shape
+            # [num_requests, 1], where each row represents one generated
+            # token per request.
+            sampled_token_ids=sampled.view(-1, 1),
+            logprobs_tensors=logprobs_tensors,
+        )
+        return sampler_output
+
+    def sample(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
@@ -35,7 +68,6 @@ class Sampler:
         )
 
         probs = torch.softmax(logits, dim=-1, dtype=torch.float32)
-
         sampled = gumbel_sample(
             probs,
             sampling_metadata.temperature,
@@ -44,43 +76,6 @@ class Sampler:
         )
         sampled = sampled.to(torch.int64)
         return sampled, logits if return_logits else None
-
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> SamplerOutput:
-        if sampling_metadata.max_num_logprobs is not None:
-            if self.logprobs_mode == "processed_logprobs":
-                sampled, logits = self.sample_token(
-                    logits, sampling_metadata, return_logits=True
-                )
-            else:
-                assert self.logprobs_mode == "raw_logprobs"
-                sampled, _ = self.sample_token(
-                    logits, sampling_metadata, return_logits=False
-                )
-
-            logprobs_tensors = compute_topk_logprobs(
-                logits,
-                sampling_metadata.max_num_logprobs,
-                sampled,
-            )
-        else:
-            sampled, _ = self.sample_token(
-                logits, sampling_metadata, return_logits=False
-            )
-            logprobs_tensors = None
-
-        # These are GPU tensors.
-        sampler_output = SamplerOutput(
-            # The sampled tokens are expanded to 2D tensor with shape
-            # [num_requests, 1], where each row represents one generated
-            # token per request.
-            sampled_token_ids=sampled.view(-1, 1),
-            logprobs_tensors=logprobs_tensors,
-        )
-        return sampler_output
 
 
 @triton.jit
@@ -162,13 +157,13 @@ def _topk_log_softmax_kernel(
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=float("-inf"))
         max_val = tl.max(tl.maximum(logits, max_val))
-    max_val = max_val.to(tl.float32)
+    max_val = max_val.to(tl.float32)  # type: ignore
 
     se = 0.0
     for i in range(0, vocab_size, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         logits = tl.load(row_ptr + block, mask=block < vocab_size, other=0.0)
-        # NOTE(woosuk): Make sure that logits and all following operations are in float32.
+        # NOTE(woosuk): Make sure that logits and all following operations use FP32.
         logits = logits.to(tl.float32)
         e = tl.exp(logits - max_val)
         e = tl.where(block < vocab_size, e, 0.0)
