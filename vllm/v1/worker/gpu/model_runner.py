@@ -279,6 +279,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def reset_mm_cache(self) -> None:
         pass
 
+    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
+        # SP is not supported yet.
+        return num_scheduled_tokens
+
     @torch.inference_mode()
     def capture_model(self) -> int:
         if not self.cudagraph_manager.needs_capture():
