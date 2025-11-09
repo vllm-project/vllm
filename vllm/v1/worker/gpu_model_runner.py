@@ -3459,6 +3459,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups
             ):
+                encoder_seq_lens: np.ndarray | None = None
+                if self.model_config.is_encoder_decoder:
+                    encoder_seq_lens = np.zeros(num_reqs, dtype=np.int32)
+                    encoder_seq_lens[0] = self.max_encoder_len
                 common_attn_metadata = CommonAttentionMetadata(
                     query_start_loc=self.query_start_loc.gpu[: num_reqs + 1],
                     query_start_loc_cpu=self.query_start_loc.cpu[: num_reqs + 1],
@@ -3478,9 +3482,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         kv_cache_group_id
                     ].slot_mapping.gpu[:num_tokens],
                     causal=True,
-                    dcp_local_seq_lens=self.dcp_local_seq_lens.gpu[:num_reqs]
-                    if self.dcp_world_size > 1
-                    else None,
+                    encoder_seq_lens=encoder_seq_lens,
                 )
                 for attn_group in self.attn_groups[kv_cache_group_id]:
                     if ubatch_slices is not None:
