@@ -34,7 +34,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
-from vllm.v1.worker.gpu.dp_utils import get_num_tokens_across_dp
+from vllm.v1.worker.gpu.dp_utils import get_batch_metadata_across_dp
 from vllm.v1.worker.gpu.input_batch import (
     InputBatch,
     InputBuffers,
@@ -650,6 +650,58 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return async_output
         return async_output.get_output()
 
+    def get_cudagraph_and_dp_padding(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> tuple[int, bool, torch.Tensor | None]:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if self.dp_size == 1:
+            # No DP. Only consider CUDA graphs.
+            if total_num_scheduled_tokens == 0:
+                # Special case: no tokens to run.
+                return 0, False, None
+
+            cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+                scheduler_output, total_num_scheduled_tokens
+            )
+            if cudagraph_size is not None:
+                # Use CUDA graph.
+                return cudagraph_size, True, None
+            else:
+                # Fall back to eager mode.
+                return total_num_scheduled_tokens, False, None
+
+        # Consider DP padding and CUDA graph.
+        if total_num_scheduled_tokens == 0:
+            cudagraph_size_before_dp = 0
+        else:
+            cudagraph_size_before_dp = self.cudagraph_manager.get_cudagraph_size(  # type: ignore
+                scheduler_output, total_num_scheduled_tokens
+            )
+            if cudagraph_size_before_dp is None:
+                cudagraph_size_before_dp = -1
+
+        (
+            num_tokens_across_dp,
+            cudagraph_size_across_dp,
+        ) = get_batch_metadata_across_dp(
+            total_num_scheduled_tokens,
+            cudagraph_size_before_dp,
+            self.dp_size,
+            self.dp_rank,
+        )
+        if all(cudagraph_size_across_dp > 0):
+            # If all ranks can use CUDA graph, pad to the maximum number of tokens
+            # across DP and use CUDA graph.
+            num_tokens_after_padding = int(cudagraph_size_across_dp.max().item())
+            use_cudagraph = True
+        else:
+            # If any of the ranks cannot use CUDA graph, use eager mode for all ranks.
+            # No padding is needed.
+            num_tokens_after_padding = total_num_scheduled_tokens
+            use_cudagraph = False
+        return num_tokens_after_padding, use_cudagraph, num_tokens_across_dp
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -657,30 +709,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: Any | None = None,
     ) -> ModelRunnerOutput | None:
         assert intermediate_tensors is None
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if self.dp_size == 1:
-            # No DP padding.
-            num_tokens_across_dp: torch.Tensor | None = None
-            num_tokens_after_dp_padding = total_num_scheduled_tokens
-        else:
-            # Get the number of tokens across DP, and pad to the maximum.
-            num_tokens_across_dp = get_num_tokens_across_dp(
-                total_num_scheduled_tokens,
-                self.dp_size,
-                self.dp_rank,
-            )
-            num_tokens_after_dp_padding = int(num_tokens_across_dp.max().item())
-
-        # Get the CUDA graph size and pad the input.
-        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-            scheduler_output, num_tokens_after_dp_padding
+        num_tokens_after_padding, use_cudagraph, num_tokens_across_dp = (
+            self.get_cudagraph_and_dp_padding(scheduler_output)
         )
-        if cudagraph_size is not None:
-            use_cudagraph = True
-            num_tokens_after_padding = cudagraph_size
-        else:
-            use_cudagraph = False
-            num_tokens_after_padding = num_tokens_after_dp_padding
 
         with async_barrier(self.input_prep_event):
             self.update_states(scheduler_output)
