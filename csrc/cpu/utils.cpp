@@ -63,15 +63,15 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
       bitmask* mask = numa_parse_nodestring(node_ids_str.c_str());
       bitmask* src_mask = numa_get_membind();
-      
+
       int pid = getpid();
-      
+
       if (mask && src_mask) {
         // move all existing pages to the specified numa node.
         *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
         int page_num = numa_migrate_pages(pid, src_mask, mask);
         if (page_num == -1) {
-          TORCH_WARN("numa_migrate_pages failed. errno: " + 
+          TORCH_WARN("numa_migrate_pages failed. errno: " +
                      std::to_string(errno));
         }
 
@@ -82,7 +82,7 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
         numa_free_nodemask(mask);
         numa_free_nodemask(src_mask);
       } else {
-        TORCH_WARN("numa_parse_nodestring or numa_get_membind failed. errno: " + 
+        TORCH_WARN("numa_parse_nodestring or numa_get_membind failed. errno: " +
                    std::to_string(errno));
       }
     }
