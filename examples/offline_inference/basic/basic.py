@@ -16,7 +16,10 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", compilation_config={"level": 0, "cudagraph_mode": "full_decode_only"})
+    llm = LLM(
+        model="facebook/opt-125m",
+        compilation_config={"cudagraph_mode": "full_decode_only"},
+    )
     # Generate texts from the prompts.
     # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
