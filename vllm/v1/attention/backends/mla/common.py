@@ -1833,7 +1833,10 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 )
             else:
                 context_output, context_lse = self._compute_prefill_context(
-                    q, kv_c_and_k_pe_cache, attn_metadata, k_scale
+                    q,
+                    kv_c_and_k_pe_cache,
+                    attn_metadata,
+                    k_scale,
                 )
 
             output = torch.empty_like(suffix_output)
@@ -1864,8 +1867,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     def forward(
         self,
         layer: AttentionLayer,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         k_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
@@ -1910,6 +1912,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         # Inputs and outputs may be padded for CUDA graphs
         output_padded = output
         output = output[:num_actual_toks, ...]
+        if isinstance(q, tuple):
+            q_nope, q_pe = q
+        else:
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+
         q_nope = q_nope[:num_actual_toks, ...]
         q_pe = q_pe[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
