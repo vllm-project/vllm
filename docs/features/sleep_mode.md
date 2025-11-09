@@ -13,6 +13,9 @@ Key benefits:
 !!! note
     This feature is only supported on CUDA platform.
 
+!!! note
+    For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
+
 ## Sleep levels
 
 Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update.
@@ -50,7 +53,7 @@ llm.wake_up(tags=["weights"])
 # Load weights in-place
 llm.collective_rpc("reload_weights")
 
-# Optional: reallocate KV cache
+# Reallocate KV cache
 llm.wake_up(tags=["kv_cache"])
 ```
 
@@ -100,7 +103,7 @@ curl -X POST 'http://localhost:8000/sleep?level=2'
 curl -X POST 'http://localhost:8000/wake_up?tags=weights'
 # Load weights in-place
 curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: application/json' -d '{"method":"reload_weights"}'
-# Optional: reallocate KV cache
+# Reallocate KV cache
 curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
 ```
 
