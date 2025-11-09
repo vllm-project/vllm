@@ -631,31 +631,39 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         intermediate_tensors: Any | None = None,
     ) -> ModelRunnerOutput | None:
         assert intermediate_tensors is None
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         with async_barrier(
             self.input_prep_event if self.use_async_scheduling else None
         ):
             self.update_states(scheduler_output)
-            if scheduler_output.total_num_scheduled_tokens == 0:
+            if total_num_scheduled_tokens == 0:
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
             if self.dp_size == 1:
                 # No DP padding.
                 num_tokens_across_dp: torch.Tensor | None = None
-                num_tokens_after_padding = scheduler_output.total_num_scheduled_tokens
+                num_tokens_after_dp_padding = total_num_scheduled_tokens
             else:
                 # Get the number of tokens across DP, and pad to the maximum.
                 num_tokens_across_dp = get_num_tokens_across_dp(
-                    scheduler_output.total_num_scheduled_tokens,
+                    total_num_scheduled_tokens,
                     self.dp_size,
                     self.dp_rank,
                 )
-                num_tokens_after_padding = int(num_tokens_across_dp.max().item())
+                num_tokens_after_dp_padding = int(num_tokens_across_dp.max().item())
 
-            num_tokens_after_padding = self.cudagraph_manager.get_cudagraph_size(
-                scheduler_output
+            # Get the CUDA graph size and pad the input.
+            cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
+                scheduler_output, num_tokens_after_dp_padding
             )
-            use_cudagraph = num_tokens_after_padding is not None
+            if cudagraph_size is not None:
+                use_cudagraph = True
+                num_tokens_after_padding = cudagraph_size
+            else:
+                use_cudagraph = False
+                num_tokens_after_padding = num_tokens_after_dp_padding
+
             input_batch = self.prepare_inputs(
                 scheduler_output,
                 num_tokens_after_padding,
@@ -665,7 +673,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # barrier to avoid race conditions.
             pos = input_batch.positions[input_batch.logits_indices]
             sampling_metadata = self.req_states.make_sampling_metadata(
-                input_batch.idx_mapping, pos
+                input_batch.idx_mapping_np, pos
             )
 
         if self.lora_config:

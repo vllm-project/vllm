@@ -59,11 +59,15 @@ class CudaGraphManager:
     def needs_capture(self) -> bool:
         return len(self.padded_sizes) > 0
 
-    def get_cudagraph_size(self, scheduler_output: SchedulerOutput) -> int | None:
+    def get_cudagraph_size(
+        self,
+        scheduler_output: SchedulerOutput,
+        num_tokens_after_dp_padding: int,
+    ) -> int | None:
         if max(scheduler_output.num_scheduled_tokens.values()) > 1:
             # Prefill is included.
             return None
-        return self.padded_sizes.get(scheduler_output.total_num_scheduled_tokens)
+        return self.padded_sizes.get(num_tokens_after_dp_padding)
 
     def capture_graph(
         self,
