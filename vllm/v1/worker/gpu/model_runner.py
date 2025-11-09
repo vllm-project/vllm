@@ -17,7 +17,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import DeviceMemoryProfiler
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -628,7 +628,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: SchedulerOutput,
         intermediate_tensors: Any | None = None,
-    ) -> AsyncOutput | ModelRunnerOutput:
+    ) -> ModelRunnerOutput | None:
         assert intermediate_tensors is None
 
         with async_barrier(
@@ -681,6 +681,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     input_ids=input_batch.input_ids,
                     positions=input_batch.positions,
                 )
+
+        self.execute_model_state = hidden_states, input_batch, sampling_metadata
+        return None
+
+    @torch.inference_mode()
+    def sample_tokens(
+        self,
+        grammar_output: GrammarOutput | None,
+    ) -> AsyncOutput | ModelRunnerOutput:
+        assert self.execute_model_state is not None
+        hidden_states, input_batch, sampling_metadata = self.execute_model_state
+        self.execute_model_state = None  # type: ignore
 
         sampler_output = self.sample(hidden_states, input_batch, sampling_metadata)
         prompt_logprobs_dict = self.compute_prompt_logprobs(hidden_states, input_batch)
