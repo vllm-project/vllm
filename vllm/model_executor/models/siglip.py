@@ -418,7 +418,7 @@ class SiglipAttention(nn.Module):
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
         if attn_cls == EncoderOnlyAttention:
-            self.attn = attn_cls(
+            self.attn = EncoderOnlyAttention(
                 self.num_heads_per_partition,
                 self.head_dim,
                 self.scale,
