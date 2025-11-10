@@ -7,18 +7,14 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, DeltaMessage
 from vllm.logger import init_logger
-from vllm.reasoning import (
-    DeepSeekR1ReasoningParser,
-    ReasoningParser,
-    ReasoningParserManager,
-)
+from vllm.reasoning import ReasoningParser
+from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 
 from .identity_reasoning_parser import IdentityReasoningParser
 
 logger = init_logger(__name__)
 
 
-@ReasoningParserManager.register_module("deepseek_v3")
 class DeepSeekV3ReasoningParser(ReasoningParser):
     """
     V3 parser that delegates to either DeepSeekR1ReasoningParser or
@@ -42,12 +38,12 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         return self._parser.extract_content_ids(input_ids)
 
-    def extract_reasoning_content(
+    def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest
     ) -> tuple[str | None, str | None]:
-        return self._parser.extract_reasoning_content(model_output, request)
+        return self._parser.extract_reasoning(model_output, request)
 
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,
@@ -56,7 +52,7 @@ class DeepSeekV3ReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        return self._parser.extract_reasoning_content_streaming(
+        return self._parser.extract_reasoning_streaming(
             previous_text,
             current_text,
             delta_text,
