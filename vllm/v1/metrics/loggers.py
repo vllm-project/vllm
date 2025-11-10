@@ -919,7 +919,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         if type == "cache_config":
             name = "vllm:cache_config_info"
             documentation = "Information of the LLMEngine CacheConfig"
-        assert name is not None, f"Unknown metrics info type {type}"
+        
+        if name is None:
+            raise ValueError(
+                f"Unknown metrics info type '{type}'. "
+                f"Supported types: 'cache_config'"
+            )
 
         # Info type metrics are syntactic sugar for a gauge permanently set to 1
         # Since prometheus multiprocessing mode does not support Info, emulate
