@@ -1113,6 +1113,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
 
         layer.w13_weight.data = layer.w13_weight.data.view(torch.int32)
         layer.w2_weight.data = layer.w2_weight.data.view(torch.int32)
+        ep_rank_start = self.moe_config.ep_rank * self.moe_config.num_local_experts
         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
             layer.w13_weight,
             layer.w2_weight,
@@ -1121,6 +1122,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
             w13_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
             is_mxfp4=True,
+            experts_start_id=ep_rank_start,
         )
 
     def apply(
