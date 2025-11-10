@@ -62,7 +62,11 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         return self.post_process(collected_output, request_id, **kwargs)
 
     @abstractmethod
-    def parse_request(self, request: Any) -> IOProcessorInput:
+    def parse_request(
+        self,
+        request: Any,
+        has_preprocess_partial: bool = False,
+    ) -> IOProcessorInput:
         raise NotImplementedError
 
     def validate_or_generate_params(
@@ -75,3 +79,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         self, plugin_output: IOProcessorOutput
     ) -> IOProcessorResponse:
         raise NotImplementedError
+
+    def get_modified_lora_request(self, engine_prompts, lora_request):
+        # FIXME - clean this up, unify sync/async
+        return lora_request
