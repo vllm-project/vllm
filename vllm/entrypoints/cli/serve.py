@@ -112,20 +112,13 @@ def run_headless(args: argparse.Namespace):
     signal.signal(signal.SIGINT, signal_handler)
 
     if parallel_config.distributed_node_rank_within_dp > 0:
-        from vllm.version import __version__ as VLLM_VERSION
-
-        # TODO do we need to load plugins in this process? I don't think so
-        # load_general_plugins()
-
         # Run headless workers (for multi-node PP/TP).
         host = parallel_config.distributed_master_ip
         head_node_address = f"{host}:{parallel_config.distributed_master_port}"
         logger.info(
-            "Launching vLLM (v%s) headless multiproc executor, "
+            "Launching vLLM headless multiproc executor, "
             "with head node address %s for torch.distributed process group.",
-            VLLM_VERSION,
             head_node_address,
-            vllm_config,
         )
 
         executor = MultiprocExecutor(vllm_config, monitor_workers=False)

@@ -501,7 +501,7 @@ class WorkerProc:
             # When multi-node
             # Initialize remote MessageQueue for receiving SchedulerOutput cross node
             self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
-                extra_writer_handle=input_shm_handle,
+                external_writer_handle=input_shm_handle,
                 # we will wait until ready later
                 blocking=False,
             )

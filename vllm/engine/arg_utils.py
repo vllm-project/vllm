@@ -396,6 +396,7 @@ class EngineArgs:
     data_parallel_address: str | None = None
     data_parallel_rpc_port: int | None = None
     data_parallel_hybrid_lb: bool = False
+    data_parallel_external_lb: bool = False
     data_parallel_backend: str = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     all2all_backend: str | None = ParallelConfig.all2all_backend
@@ -808,7 +809,14 @@ class EngineArgs:
             help='Backend for data parallel, either "mp" or "ray".',
         )
         parallel_group.add_argument(
-            "--data-parallel-hybrid-lb", **parallel_kwargs["data_parallel_hybrid_lb"]
+            "--data-parallel-hybrid-lb",
+            "-dph",
+            **parallel_kwargs["data_parallel_hybrid_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-external-lb",
+            "-dpe",
+            **parallel_kwargs["data_parallel_external_lb"],
         )
         parallel_group.add_argument(
             "--enable-expert-parallel", **parallel_kwargs["enable_expert_parallel"]
@@ -1427,6 +1435,9 @@ class EngineArgs:
         assert not headless or not self.data_parallel_hybrid_lb, (
             "data_parallel_hybrid_lb is not applicable in headless mode"
         )
+        assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
+            "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
+        )
 
         assert (
             self.data_parallel_backend == "mp" or not self.distributed_node_size > 1
@@ -1446,10 +1457,14 @@ class EngineArgs:
                 f"world_size={world_size} must be divisible by "
                 f"distributed_node_size={self.distributed_node_size}."
             )
+            assert self.distributed_node_rank < self.distributed_node_size, (
+                f"distributed_node_rank={self.distributed_node_rank} must be less than "
+                f"distributed_node_size={self.distributed_node_size}."
+            )
             inferred_data_parallel_rank = (
                 self.distributed_node_rank * local_world_size
             ) // world_size_within_dp
-            if self.data_parallel_size > 1 and self.data_parallel_size_local is None:
+            if self.data_parallel_size > 1 and self.data_parallel_external_lb:
                 self.data_parallel_rank = inferred_data_parallel_rank
                 logger.info(
                     "Inferred data_parallel_rank %d from distributed_node_rank"
@@ -1457,11 +1472,23 @@ class EngineArgs:
                     self.data_parallel_rank,
                     self.distributed_node_rank,
                 )
-        data_parallel_external_lb = self.data_parallel_rank is not None
+            elif self.data_parallel_size_local is None:
+                # Infer data parallel size local for internal dplb:
+                self.data_parallel_size_local = max(
+                    local_world_size // world_size_within_dp, 1
+                )
+        data_parallel_external_lb = (
+            self.data_parallel_external_lb or self.data_parallel_rank is not None
+        )
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
+            assert self.data_parallel_rank is not None, (
+                "data_parallel_rank or distributed_node_rank must be spefified if "
+                "data_parallel_external_lb is enable."
+            )
             assert self.data_parallel_size_local in (1, None), (
-                "data_parallel_size_local must be 1 when data_parallel_rank is set"
+                "data_parallel_size_local must be 1 or None when data_parallel_rank "
+                "is set"
             )
             data_parallel_size_local = 1
             # Use full external lb if we have local_size of 1.
@@ -1475,6 +1502,11 @@ class EngineArgs:
 
             if self.data_parallel_hybrid_lb and data_parallel_size_local == 1:
                 # Use full external lb if we have local_size of 1.
+                logger.warning(
+                    "data_parallel_hybrid_lb is not eligible when "
+                    "data_parallel_size_local = 1, autoswitch to "
+                    "data_parallel_external_lb."
+                )
                 data_parallel_external_lb = True
                 self.data_parallel_hybrid_lb = False
 
