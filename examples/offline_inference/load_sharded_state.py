@@ -11,7 +11,7 @@ python save_sharded_state.py \
     --model /path/to/load \
     --quantization deepspeedfp \
     --tensor-parallel-size 8 \
-    --output /path/to/save/sharded/modele
+    --output /path/to/save/sharded/model
 
 python load_sharded_state.py \
     --model /path/to/saved/sharded/model \
