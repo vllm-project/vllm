@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     biased_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
@@ -1213,6 +1214,7 @@ class FusedMoE(CustomOp):
         zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
+        routing_method_type: int | None = None,
     ):
         super().__init__()
 
@@ -1396,6 +1398,24 @@ class FusedMoE(CustomOp):
             raise ValueError(
                 "Only softmax scoring function is supported for non-grouped topk."
             )
+
+        # ToDo: Better logic to determine the routing method type
+        if routing_method_type is not None:
+            self.routing_method_type = routing_method_type
+        else:
+            if scoring_func == "sigmoid":
+                if self.use_grouped_topk:
+                    self.routing_method_type = RoutingMethodType.DeepSeekV3
+                elif self.top_k == 1:
+                    self.routing_method_type = RoutingMethodType.Llama4
+            elif self.scoring_func == "softmax":
+                self.routing_method_type = (
+                    RoutingMethodType.Renormalize
+                    if not self.renormalize
+                    else RoutingMethodType.RenormalizeNaive
+                )
+            else:
+                self.routing_method_type = RoutingMethodType.TopK
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
             num_experts=self.global_num_experts,
