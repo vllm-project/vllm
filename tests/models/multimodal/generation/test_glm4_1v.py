@@ -10,7 +10,7 @@ from vllm.attention.backends.registry import _MHA_Backend
 from vllm.multimodal.utils import encode_image_base64
 from vllm.platforms import current_platform
 
-MODEL_NAME = "Kwai-Keye/Keye-VL-8B-Preview"
+MODEL_NAME = "zai-org/GLM-4.1V-9B-Thinking"
 
 QUESTION = "What is the content of each image?"
 
@@ -20,19 +20,11 @@ QUESTION = "What is the content of each image?"
     "mm_encoder_attn_backend",
     [None] + current_platform.get_supported_vit_attn_backends(),
 )
-def test_keye_vl_vit_attn_backend_functionality(
+def test_glm4_1v_vit_attn_backend_vit_attn_backend_functionality(
     image_assets,
     question: str,
-    mm_encoder_attn_backend: _MHA_Backend | None,
+    mm_encoder_attn_backend: _MHA_Backend,
 ):
-    if mm_encoder_attn_backend is not None and mm_encoder_attn_backend not in {
-        _MHA_Backend.FLASH_ATTN,
-        _MHA_Backend.XFORMERS,
-        _MHA_Backend.VLLM_FLASH_ATTN,
-        _MHA_Backend.ROCM_AITER_FA,
-    }:
-        pytest.skip(f"Keye-VL does not support {mm_encoder_attn_backend} backend now.")
-
     images = [asset.pil_image for asset in image_assets]
 
     image_urls = [
@@ -42,8 +34,8 @@ def test_keye_vl_vit_attn_backend_functionality(
     engine_args = EngineArgs(
         model=MODEL_NAME,
         trust_remote_code=True,
-        max_model_len=8192,
-        max_num_seqs=5,
+        max_model_len=32768,
+        max_num_seqs=2,
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_encoder_attn_backend=mm_encoder_attn_backend,
     )

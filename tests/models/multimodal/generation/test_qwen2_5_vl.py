@@ -3,7 +3,9 @@
 
 import pytest
 
+from vllm.attention.backends.registry import _MHA_Backend
 from vllm.multimodal.video import sample_frames_from_video
+from vllm.platforms import current_platform
 
 from ....conftest import VIDEO_ASSETS
 
@@ -34,6 +36,9 @@ VIDEO_PROMPTS = VIDEO_ASSETS.prompts(
 @pytest.mark.parametrize("num_frames", [16])
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize(
+    "encoder_attn_backend", [None] + current_platform.get_supported_vit_attn_backends()
+)
 def test_qwen2_5_vl_evs_functionality(
     vllm_runner,
     video_assets,
@@ -42,6 +47,7 @@ def test_qwen2_5_vl_evs_functionality(
     num_frames: int,
     dtype: str,
     max_tokens: int,
+    encoder_attn_backend: _MHA_Backend | None,
 ) -> None:
     """Test EVS (Efficient Video Sampling) functionality with different
     pruning rates.
@@ -66,6 +72,7 @@ def test_qwen2_5_vl_evs_functionality(
         limit_mm_per_prompt={"video": 1},
         tensor_parallel_size=1,
         video_pruning_rate=video_pruning_rate,
+        mm_encoder_attn_backend=encoder_attn_backend,
     ) as vllm_model:
         # Generate output - this should not crash
         outputs = vllm_model.generate_greedy(prompts, max_tokens, videos=videos)

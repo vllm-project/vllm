@@ -15,7 +15,7 @@ from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import _Backend, _MHA_Backend
     from vllm.config import ModelConfig, VllmConfig
     from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
@@ -25,6 +25,7 @@ else:
     VllmConfig = None
     PoolingParams = None
     _Backend = None
+    _MHA_Backend = None
 
 logger = init_logger(__name__)
 
@@ -111,6 +112,15 @@ class TpuPlatform(Platform):
     @classmethod
     def inference_mode(cls):
         return torch.no_grad()
+
+    @classmethod
+    def get_supported_vit_attn_backends(cls) -> list["_MHA_Backend"]:
+        from vllm.attention.backends.registry import _MHA_Backend
+
+        return [
+            _MHA_Backend.TORCH_SDPA,
+            _MHA_Backend.PALLAS,  # currently only is used in LLama4 VL model
+        ]
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
