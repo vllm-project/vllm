@@ -169,10 +169,6 @@ class Request:
         return self.structured_output_request is not None
 
     @property
-    def is_output_corrupted(self) -> bool:
-        return self.num_nans_in_logits > 0
-
-    @property
     def num_tokens(self) -> int:
         return len(self._all_token_ids)
 
