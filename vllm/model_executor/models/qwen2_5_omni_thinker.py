@@ -927,8 +927,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         image_grid_thw: list[list[int]] | torch.Tensor,
         video_grid_thw: list[list[int]] | torch.Tensor,
         second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
@@ -1125,7 +1123,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         mrope_position_delta = (
             torch.cat(llm_pos_ids_list, dim=1).max() + 1 - len(src_item)
         )
-        llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions, mrope_position_delta
 

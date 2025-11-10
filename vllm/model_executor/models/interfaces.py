@@ -995,8 +995,6 @@ class SupportsMRoPE(Protocol):
         image_grid_thw: list[list[int]] | torch.Tensor | None,
         video_grid_thw: list[list[int]] | torch.Tensor | None,
         second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
@@ -1012,8 +1010,6 @@ class SupportsMRoPE(Protocol):
             image_grid_thw: Image grid dimensions (t, h, w)
             video_grid_thw: Video grid dimensions (t, h, w)
             second_per_grid_ts: Seconds per grid timestep for videos
-            context_len: Context length
-            seq_len: Sequence length
             audio_feature_lengths: Audio feature lengths for multimodal models
             use_audio_in_video: Whether to use audio in video for interleaving
 
