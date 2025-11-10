@@ -675,16 +675,21 @@ class NixlConnectorWorker:
         def __post_init__(self):
             # Figure out whether the first dimension of the cache is K/V
             # or num_blocks. This is used to register the memory regions correctly.
-            self.kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+            kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                 num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
             )
+            # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
+            # we just mock num_blocks to 1 for the dimension check below.
+            self._is_kv_layout_blocks_first = (
+                len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+            )
+
             attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
             self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
 
         @property
         def is_kv_layout_blocks_first(self) -> bool:
-            # Non-MLA backends have 5 dims [2, num_blocks, H,N,D]
-            return len(self.kv_cache_shape) == 5 and self.kv_cache_shape[0] == 1
+            return self._is_kv_layout_blocks_first
 
         @property
         def split_k_and_v(self) -> bool:
