@@ -390,10 +390,12 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
 
-        if image_grid_thw:
-            image_grid_thw = torch.stack(image_grid_thw)
-        if video_grid_thw:
-            video_grid_thw = torch.stack(video_grid_thw)
+        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
+            image_grid_thw
+        )
+        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
+            video_grid_thw
+        )
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),

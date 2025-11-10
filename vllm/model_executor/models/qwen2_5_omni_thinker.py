@@ -950,10 +950,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
         use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
 
-        if image_grid_thw:
-            image_grid_thw = torch.stack(image_grid_thw)
-        if video_grid_thw:
-            video_grid_thw = torch.stack(video_grid_thw)
+        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
+            image_grid_thw
+        )
+        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
+            video_grid_thw
+        )
 
         # TODO(fyabc): refactor and share more code with
         #  _vl_get_input_positions_tensor.
