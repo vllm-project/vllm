@@ -628,16 +628,14 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.topk_indices_buffer = indexer.topk_indices_buffer
         self.padding = 128 if current_platform.is_device_capability(100) else 64
 
-        vllm_config = get_current_vllm_config()
-        assert vllm_config is not None and vllm_config.model_config is not None
-        prefill_workspace_size = get_prefill_workspace_size(
-            vllm_config.model_config.max_model_len
-        )
-
-        self.prefill_workspace_shape = (prefill_workspace_size, head_size)
-
         if kv_cache_dtype == "fp8_ds_mla":
             # Reserve workspace during initialization
+            vllm_config = get_current_vllm_config()
+            assert vllm_config is not None and vllm_config.model_config is not None
+            prefill_workspace_size = get_prefill_workspace_size(
+                vllm_config.model_config.max_model_len
+            )
+            self.prefill_workspace_shape = (prefill_workspace_size, head_size)
             self.prefill_bf16_workspace = current_workspace_manager().get_simultaneous(
                 (self.prefill_workspace_shape, torch.bfloat16)
             )
