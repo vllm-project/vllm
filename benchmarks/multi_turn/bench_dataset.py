@@ -418,6 +418,10 @@ def generate_conversations(
             data = file.read()
             tokens_in_file = tokenizer.encode(data, add_special_tokens=False)
             list_of_tokens.extend(tokens_in_file)
+        logger.info(
+            f"Loaded {len(tokens_in_file)} tokens from file {filename}, "
+            f"total tokens so far: {len(list_of_tokens)}"
+        )
 
     conversations: ConversationsMap = {}
     conv_id = 0
