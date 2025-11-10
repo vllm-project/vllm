@@ -370,15 +370,16 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        all_keys = {
-            "image_grid_thw",
-            "video_grid_thw",
-            "second_per_grid_ts",
-            "audio_feature_lengths",
-            "use_audio_in_video",
-        }
-
-        kwargs = MultiModalFeatureSpec.gather_kwargs(mm_features, all_keys)
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {
+                "image_grid_thw",
+                "video_grid_thw",
+                "second_per_grid_ts",
+                "audio_feature_lengths",
+                "use_audio_in_video",
+            },
+        )
         if any(
             v
             for k, v in kwargs.items()
@@ -386,8 +387,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         ):
             raise NotImplementedError("Transformers backend only supports images.")
 
-        image_grid_thw = torch.tensor(kwargs.get("image_grid_thw", []))
-        video_grid_thw = torch.tensor(kwargs.get("video_grid_thw", []))
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+
+        if image_grid_thw:
+            image_grid_thw = torch.stack(image_grid_thw)
+        if video_grid_thw:
+            video_grid_thw = torch.stack(video_grid_thw)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
