@@ -42,10 +42,6 @@ class FlashAttnMLABackend(MLACommonBackend):
         return "FLASH_ATTN_MLA"
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:
-        return FlashAttnMLAMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
         return FlashAttnMLAMetadataBuilder
 
