@@ -346,6 +346,7 @@ class W8A8BlockFp8LinearOp:
             weight,
             input_scale,
             weight_scale,
+            list(self.weight_group_shape),
             output_dtype=input_2d.dtype,
         )
 
