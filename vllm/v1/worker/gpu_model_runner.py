@@ -2748,7 +2748,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         if not self.use_async_scheduling:
             return output
-        with record_function_or_nullcontext("gpu_model_runner: AsyncGPUModelRunnerOutput"):
+        with record_function_or_nullcontext(
+            "gpu_model_runner: AsyncGPUModelRunnerOutput"
+        ):
             async_output = AsyncGPUModelRunnerOutput(
                 model_runner_output=output,
                 sampled_token_ids=sampler_output.sampled_token_ids,
@@ -2756,7 +2758,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
             )
-        with record_function_or_nullcontext("gpu_model_runner: set_async_sampled_token_ids"):
+        with record_function_or_nullcontext(
+            "gpu_model_runner: set_async_sampled_token_ids"
+        ):
             # Save ref of sampled_token_ids CPU tensor if the batch contains
             # any requests with sampling params that that require output ids.
             self.input_batch.set_async_sampled_token_ids(

@@ -370,14 +370,18 @@ class EngineCore:
         if self.scheduler.has_requests():
             with record_function_or_nullcontext("core step_with_batch_queue: schedule"):
                 scheduler_output = self.scheduler.schedule()
-            with record_function_or_nullcontext("core step_with_batch_queue: execute_model"):
+            with record_function_or_nullcontext(
+                "core step_with_batch_queue: execute_model"
+            ):
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if scheduler_output.pending_structured_output_tokens:
-                with record_function_or_nullcontext("core step_with_batch_queue: pending_structured_output_tokens"):
+                with record_function_or_nullcontext(
+                    "core step_with_batch_queue: pending_structured_output_tokens"
+                ):
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
                     deferred_scheduler_output = scheduler_output
@@ -386,15 +390,21 @@ class EngineCore:
                         exec_result = exec_future.result()
                         assert exec_result is None
             else:
-                with record_function_or_nullcontext("core step_with_batch_queue: get_grammar_bitmask"):
+                with record_function_or_nullcontext(
+                    "core step_with_batch_queue: get_grammar_bitmask"
+                ):
                     # We aren't waiting for any tokens, get any grammar output immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+                    grammar_output = self.scheduler.get_grammar_bitmask(
+                        scheduler_output
+                    )
                 # Block-wait for execute to return (continues running async on the GPU).
                 with self.log_error_detail(scheduler_output):
                     exec_result = exec_future.result()
 
                 if exec_result is None:
-                     with record_function_or_nullcontext("core step_with_batch_queue: sample_tokens"):
+                    with record_function_or_nullcontext(
+                        "core step_with_batch_queue: sample_tokens"
+                    ):
                         # Call sample tokens.
                         future = self.model_executor.sample_tokens(
                             grammar_output, non_block=True
@@ -423,7 +433,9 @@ class EngineCore:
             future, scheduler_output = batch_queue.pop()
             with self.log_error_detail(scheduler_output):
                 model_output = future.result()
-        with record_function_or_nullcontext("core step_with_batch_queue: update_from_output"):
+        with record_function_or_nullcontext(
+            "core step_with_batch_queue: update_from_output"
+        ):
             engine_core_outputs = self.scheduler.update_from_output(
                 scheduler_output, model_output
             )
@@ -432,13 +444,17 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            with record_function_or_nullcontext("core step_with_batch_queue: deferred_scheduler_output"):
+            with record_function_or_nullcontext(
+                "core step_with_batch_queue: deferred_scheduler_output"
+            ):
                 # We now have the tokens needed to compute the bitmask for the
                 # deferred request. Get the bitmask and call sample tokens.
                 grammar_output = self.scheduler.get_grammar_bitmask(
                     deferred_scheduler_output
                 )
-                future = self.model_executor.sample_tokens(grammar_output, non_block=True)
+                future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True
+                )
                 batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
