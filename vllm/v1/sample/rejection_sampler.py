@@ -24,6 +24,7 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
 
+
 class RejectionSampler(nn.Module):
     """
     The implementation strictly follows the algorithm described in
@@ -216,7 +217,6 @@ class RejectionSampler(nn.Module):
         Returns:
             A list of lists of token IDs.
         """
-
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
         valid_mask = (output_token_ids_np != PLACEHOLDER_TOKEN_ID) & (
