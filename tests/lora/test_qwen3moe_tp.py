@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
+# NOTE To avoid overloading the CI pipeline, this test script will not
+# be triggered on CI and is primarily intended for local testing and verification.
+
 import vllm
 from vllm.lora.request import LoRARequest
 
