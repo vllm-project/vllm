@@ -1426,9 +1426,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         temporal_conv_size = hf_config.temporal_conv_size
         llm_pos_ids_list: list = []
 
-        if not (image_grid_thw is None and video_grid_thw is None):
+        if len(image_grid_thw) or len(video_grid_thw):
             if isinstance(image_grid_thw, torch.Tensor):
                 image_grid_thw = image_grid_thw.tolist()
+            if isinstance(video_grid_thw, torch.Tensor):
+                video_grid_thw = video_grid_thw.tolist()
 
             input_token_type: list[str] = []
             video_check_flg = False

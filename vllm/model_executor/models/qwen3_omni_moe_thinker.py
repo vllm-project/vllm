@@ -1440,19 +1440,14 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             raise ValueError("_omni3_get_input_positions_tensor expects 1D input_ids")
 
         seq_len = input_ids.shape[0]
-        if audio_feature_lengths is not None and not isinstance(
-            audio_feature_lengths, torch.Tensor
-        ):
-            audio_feature_lengths = torch.as_tensor(
+
+        if isinstance(audio_feature_lengths, list):
+            audio_feature_lengths = torch.tensor(
                 audio_feature_lengths, dtype=torch.long
             )
-        if second_per_grid_ts is None:
-            if video_grid_thw is not None and video_grid_thw.numel() > 0:
-                second_per_grids = torch.ones(
-                    video_grid_thw.shape[0], dtype=torch.float32
-                )
-            else:
-                second_per_grids = torch.tensor([], dtype=torch.float32)
+
+        if len(video_grid_thw):
+            second_per_grids = torch.ones(len(video_grid_thw), dtype=torch.float32)
         else:
             second_per_grids = torch.tensor(second_per_grid_ts, dtype=torch.float32)
 
