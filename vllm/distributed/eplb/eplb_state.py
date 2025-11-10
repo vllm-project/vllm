@@ -153,6 +153,62 @@ class EplbModelState:
     model_name: str
     model: MixtureOfExperts
 
+    """
+    Asynchronous process manager.
+    """
+    _async_processor: EPLBProcess | None = None
+    """
+    Number of iterations to wait before applying a redistribution plan.
+    """
+    num_wait_worker_iterations: int = 0
+    """
+    A gate to trigger asynchronous expert load rebalancing and weight transfer.
+    """
+    enable_async: bool = False
+    """
+    Arguments passed to expert mapper strategy
+    """
+    expert_mapper_args: ExpertMapperArgs | None = None
+    """"
+    Arguments passed to expert rebalancing task
+    """
+    rebalance_task_args: RebalanceTaskArgs | None = None
+    """
+    Tensor used as apreallocated workspace for torch.distributed.all_gather_into_tensor.
+    It stores each ranks's local expert load to avoid reallocation and to enable
+    efficient global aggregation.
+    """
+    _gather_buffer: torch.Tensor | None = None
+    """
+    Records the current moe layer being precessed for expert weight transfer.
+    """
+    cur_layer_id: int = -1
+    """
+    Number of Mixture-of-Experts (MoE) layers in the model.
+    """
+    num_moe_layers: int = 0
+    """
+    A two-dimensional list storing temporary tensor buffers for expert weight
+    communication. Each inner list corresponds to a layer, and each element represents
+    a buffer tensor used during transfer or update operations.
+    """
+    buffer_tensor_list: list[list[torch.Tensor]] = field(default_factory=list)
+    """
+    A list of tuples representing the experts to be received. Each tuple contains
+    (local_expert_id, buffer_tensor_id) indicating where the received weights should
+    be placed.
+    """
+    recv_expert_list: list[tuple[int, int]] = field(default_factory=list)
+    """
+    A list storing pending communication operations (send/receive tasks)
+    for expert weight transfer.
+    """
+    comm_op_list: list[Any] = field(default_factory=list)
+    """
+    A list to which the communication requests will be appended.
+    """
+    reqs: list[Any] = field(default_factory=list)
+
 
 class EplbState:
     """
@@ -190,73 +246,6 @@ class EplbState:
         This is a constant and is taken from the config.
         """
         self.expert_rearrangement_step_interval: int = 0
-
-    num_wait_worker_iterations: int = 0
-    """
-    Number of iterations to wait before applying a redistribution plan.
-    """
-
-    _async_processor: EPLBProcess | None = None
-    """
-    Asynchronous process manager.
-    """
-
-    enable_async: bool = False
-    """
-    A gate to trigger asynchronous expert load rebalancing and weight transfer.
-    """
-
-    expert_mapper_args: ExpertMapperArgs | None = None
-    """
-    Arguments passed to expert mapper strategy
-    """
-
-    rebalance_task_args: RebalanceTaskArgs | None = None
-    """"
-    Arguments passed to expert rebalancing task
-    """
-
-    _gather_buffer: torch.Tensor | None = None
-    """
-    Tensor used as apreallocated workspace for torch.distributed.all_gather_into_tensor.
-    It stores each ranks's local expert load to avoid reallocation and to enable
-    efficient global aggregation.
-    """
-
-    cur_layer_id: int = -1
-    """
-    Records the current moe layer being precessed for expert weight transfer.
-    """
-
-    num_moe_layers: int = 0
-    """
-    Number of Mixture-of-Experts (MoE) layers in the model.
-    """
-
-    buffer_tensor_list: list[list[torch.Tensor]] = field(default_factory=list)
-    """
-    A two-dimensional list storing temporary tensor buffers for expert weight
-    communication. Each inner list corresponds to a layer, and each element represents
-    a buffer tensor used during transfer or update operations.
-    """
-
-    recv_expert_list: list[tuple[int, int]] = field(default_factory=list)
-    """
-    A list of tuples representing the experts to be received. Each tuple contains
-    (local_expert_id, buffer_tensor_id) indicating where the received weights should
-    be placed.
-    """
-
-    comm_op_list: list[Any] = field(default_factory=list)
-    """
-    A list storing pending communication operations (send/receive tasks)
-    for expert weight transfer.
-    """
-
-    reqs: list[Any] = field(default_factory=list)
-    """
-    A list to which the communication requests will be appended.
-    """
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -473,7 +462,7 @@ class EplbState:
             self.expert_rearrangement_step = 0
         expert_mapper_args = ExpertMapperArgs(
             model.num_moe_layers,
-            parallel_config.eplb_config.expert_mapper_policy,
+            self.parallel_config.eplb_config.expert_mapper_policy,
             None,
         )
 
@@ -483,13 +472,13 @@ class EplbState:
             logical_replica_count,
             expert_load_pass,
             expert_load_window,
-            num_wait_worker_iterations=(
-                parallel_config.eplb_config.num_wait_worker_iterations
-            ),
-            enable_async=parallel_config.eplb_config.enable_async,
-            expert_mapper_args=expert_mapper_args,
             model_config.model,
             model,
+            num_wait_worker_iterations=(
+                self.parallel_config.eplb_config.num_wait_worker_iterations
+            ),
+            enable_async=self.parallel_config.eplb_config.enable_async,
+            expert_mapper_args=expert_mapper_args,
         )
 
     def __post_init__(self) -> None:
@@ -596,14 +585,28 @@ class EplbState:
                 >= self.expert_rearrangement_step_interval
             ):
                 self.expert_rearrangement_step = 0
-                self.rearrange(model)
+                self.rearrange()
         else:
             if self.rebalance_expert_weight_flag():
                 global_expert_load = self.compute_and_set_moe_load()
                 ep_group = get_ep_group().device_group
-                num_replicas, num_groups, num_nodes, num_gpus = (
-                    self.prepare_rebalance_env(model=model, ep_group=ep_group)
-                )
+                # TODO(bowen): Treat differently for prefill and decode nodes
+                eplb_model_state = next(iter(self.model_states.values()))
+                model = eplb_model_state.model
+                num_replicas = model.num_physical_experts
+                num_groups = model.num_expert_groups
+                num_nodes = get_node_count()
+                num_gpus = ep_group.size()
+
+                if num_gpus % num_nodes != 0:
+                    self.num_nodes = 1
+                    logger.warning_once(
+                        "num_gpus % num_nodes != 0, "
+                        "not using hierarchical rearrangement algorithm.\n"
+                        "num_gpus=%s, num_nodes=%s",
+                        num_gpus,
+                        num_nodes,
+                    )
                 self.rebalance_task_args = RebalanceTaskArgs(
                     global_expert_load.cpu(),
                     num_replicas,
@@ -979,48 +982,6 @@ class EplbState:
         for eplb_model_state in self.model_states.values():
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
-
-    def prepare_rebalance_env(
-        self,
-        model: MixtureOfExperts,
-        ep_group,
-        rank_mapping: dict[int, int] | None = None,
-    ) -> tuple[int, int, int, int]:
-        """
-        Compute effective (num_replicas, num_groups, num_nodes, num_gpus) for
-        expert rebalancing under the current EP topology and optional rank_mapping.
-
-        Returns:
-            (num_replicas, num_groups, num_nodes, num_gpus)
-        """
-        # TODO(bowen): Treat differently for prefill and decode nodes
-        num_replicas = model.num_physical_experts
-        num_groups = model.num_expert_groups
-        if rank_mapping is not None and len(rank_mapping) == ep_group.size():
-            # NOTE(yongji): scale down, we need to rebalance the experts on
-            # remaining GPUs, transfer the experts while we haven't shutdown
-            # the GPUs to be released.
-            cpu_group = get_ep_group().cpu_group
-            num_nodes = _node_count_with_rank_mapping(cpu_group, rank_mapping)
-            num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
-            num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
-        else:
-            num_nodes = get_node_count()
-            num_gpus = ep_group.size()
-
-        if num_gpus % num_nodes != 0:
-            self.num_nodes = 1
-            logger.warning_once(
-                "num_gpus % num_nodes != 0, "
-                "not using hierarchical rearrangement algorithm.\n"
-                "num_gpus=%s, num_nodes=%s",
-                num_gpus,
-                num_nodes,
-            )
-
-        return num_replicas, num_groups, num_nodes, num_gpus
 
     def step_before_forward(self, model) -> None:
         """
