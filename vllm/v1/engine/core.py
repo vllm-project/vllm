@@ -285,6 +285,7 @@ class EngineCore:
                 "Got kv_transfer_params, but no KVConnector found. "
                 "Disabling KVTransfer for this request."
             )
+
         self.scheduler.add_request(request)
 
     def abort_requests(self, request_ids: list[str]):

@@ -376,7 +376,7 @@ class VllmConfig:
                         "Currently, async scheduling is only supported "
                         "with EAGLE/MTP kind of speculative decoding"
                     )
-                elif self.speculative_config.disable_padded_drafter_batch:
+                if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
                         "async scheduling for EAGLE/MTP kind of speculative "
                         "decoding is enabled, but disable_padded_drafter_batch=True "
@@ -576,8 +576,8 @@ class VllmConfig:
                         "to 'spawn'."
                     )
 
-            if self.model_config.logits_processors and (
-                self.scheduler_config.async_scheduling
+            if (
+                self.model_config.logits_processors
                 and self.speculative_config is not None
             ):
                 raise ValueError(

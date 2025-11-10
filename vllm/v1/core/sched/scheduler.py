@@ -295,9 +295,7 @@ class Scheduler(SchedulerInterface):
                     self.encoder_cache_manager.free(preempted_req)
                     preempted_req.status = RequestStatus.PREEMPTED
                     preempted_req.num_computed_tokens = 0
-                    preempted_req.num_output_placeholders = 0
                     preempted_req.num_preemptions += 1
-                    preempted_req.spec_token_ids.clear()
                     if self.log_stats:
                         preempted_req.record_event(
                             EngineCoreEventType.PREEMPTED, scheduled_timestamp

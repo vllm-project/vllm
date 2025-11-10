@@ -49,10 +49,9 @@ class AsyncScheduler(Scheduler):
         new_token_ids, stopped = super()._update_request_with_output(
             request, new_token_ids
         )
-        # num_output_placeholders == 0 can happen when a request is preempted.
-        if request.num_output_placeholders > 0:
-            # Update the number of output placeholders.
-            request.num_output_placeholders -= len(new_token_ids)
+
+        # Update the number of output placeholders.
+        request.num_output_placeholders -= len(new_token_ids)
         assert request.num_output_placeholders >= 0
 
         # Cache the new tokens. Preempted requests should be skipped.
