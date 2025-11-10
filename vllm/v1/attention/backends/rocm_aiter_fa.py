@@ -31,15 +31,11 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 if current_platform.is_rocm():
     import aiter
-    from aiter.ops.triton.utils.device_info import get_num_sms
 
     from vllm.triton_utils import tl, triton
 
     def block_size(x, head_dim):
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
-
-    def num_programs(head_dim):
-        return min(head_dim, get_num_sms())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(
@@ -143,7 +139,7 @@ if current_platform.is_rocm():
         page_size = key_cache.shape[1]
         num_heads = key_cache.shape[2]
 
-        NUM_PRGMS = num_programs(total_tokens)
+        NUM_PRGMS = total_tokens
         BLOCK_SIZE = block_size(key_cache, head_dim)
         grid = lambda meta: (NUM_PRGMS,)
         cp_mha_gather_cache_kernel[grid](
