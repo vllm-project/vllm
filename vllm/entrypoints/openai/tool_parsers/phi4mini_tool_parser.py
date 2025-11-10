@@ -145,6 +145,12 @@ class Phi4MiniJsonToolParser(ToolParser):
             if parsable_arr.endswith(self.bot_end_token):
                 # if the end token is present, remove it
                 parsable_arr = parsable_arr[: -len(self.bot_end_token)]
+            # strip underscores that may have been added by the
+            # partial JSON parser to make the JSON valid
+            parsable_arr = parsable_arr.removeprefix("__").removesuffix("__")
+            if not parsable_arr.strip():
+                logger.debug("No parsable content after bot token yet")
+                return None
 
             # tool calls are generated in an array, so do partial JSON
             # parsing on the entire array
