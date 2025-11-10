@@ -617,8 +617,8 @@ class VllmConfig:
                 % self.parallel_config.dcp_kv_cache_interleave_size
                 == 0
             ), (
-                f"Block_size({self.cache_config.block_size}) should be "
-                "greater than or equal to and divisible by dcp_kv_cache_interleave_size "
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by dcp_kv_cache_interleave_size "
                 f"({self.parallel_config.dcp_kv_cache_interleave_size})."
             )
 
