@@ -625,8 +625,6 @@ class GLM4VForCausalLM(
         hf_config: PretrainedConfig,
         image_grid_thw: list[list[int]] | torch.Tensor,
         video_grid_thw: list[list[int]] | torch.Tensor,
-        context_len: int = 0,
-        seq_len: int | None = None,
         second_per_grid_ts: list[float] | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
@@ -758,7 +756,6 @@ class GLM4VForCausalLM(
             llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1))
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        llm_positions = llm_positions[:, context_len:seq_len]
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
         return llm_positions, mrope_position_delta
 

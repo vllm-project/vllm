@@ -1417,8 +1417,6 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         image_grid_thw: list[list[int]] | torch.Tensor | None,
         video_grid_thw: list[list[int]] | torch.Tensor | None,
         second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
         audio_feature_lengths: torch.Tensor | None = None,
         use_audio_in_video: bool = False,
     ) -> tuple[torch.Tensor, int]:
