@@ -319,6 +319,14 @@ class W8A8BlockFp8LinearOp:
         if input_scale is not None:
             q_input = input_2d
 
+            return rocm_aiter_ops.gemm_w8a8_blockscale(
+                q_input,
+                weight,
+                input_scale,
+                weight_scale,
+                input_2d.dtype,
+            )
+
         # MI350 case uses triton kernel
         if (
             not current_platform.is_fp8_fnuz()
