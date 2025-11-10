@@ -190,7 +190,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.attn_groups = []  # type: ignore
 
     def prepare_dummy_attn_metadata(self, input_batch: InputBatch) -> None:
-        block_tables = self.block_tables.gather_block_tables(input_batch.idx_mapping)
+        block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
             input_batch.num_tokens
         )
