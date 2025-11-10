@@ -176,7 +176,10 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         max_seqlen_k = attn_metadata.max_seq_len
         block_table = attn_metadata.block_table
 
-        descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1] if key is not None else self.num_kv_heads)
+        descale_shape = (
+            cu_seqlens_q.shape[0] - 1,
+            key.shape[1] if key is not None else self.num_kv_heads,
+        )
 
         self.unified_attention(
             q=query[:num_actual_tokens],
