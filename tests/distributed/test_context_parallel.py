@@ -30,6 +30,7 @@ class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     dcp_size: int
+    dcp_kv_cache_interleave_size: int
     eager_mode: bool
     chunked_prefill: bool
 
@@ -52,6 +53,7 @@ class CPTestSettings:
         tp_base: int = 4,
         pp_base: int = 1,
         dcp_base: int = 1,
+        dcp_kv_cache_interleave_size: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: str | None = None,
@@ -66,6 +68,7 @@ class CPTestSettings:
                                 tp_size=tp_base,
                                 pp_size=pp_multiplier * pp_base,
                                 dcp_size=int(dcp_multiplier * tp_base),
+                                dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
                                 eager_mode=eager_mode_val,
                                 chunked_prefill=chunked_prefill_val,
                             )
@@ -108,6 +111,7 @@ def _compare_cp_with_tp(
         tp_size,
         pp_size,
         dcp_size,
+        dcp_kv_cache_interleave_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -180,6 +184,8 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--decode-context-parallel-size",
         str(dcp_size),
+        "--dcp-kv-cache-interleave-size",
+        str(dcp_kv_cache_interleave_size),
         "--distributed-executor-backend",
         distributed_backend,
     ]
@@ -207,6 +213,7 @@ CP_TEXT_GENERATION_MODELS = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
+        CPTestSettings.detailed(tp_base=2, dcp_kv_cache_interleave_size=64),
     ],
     "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
