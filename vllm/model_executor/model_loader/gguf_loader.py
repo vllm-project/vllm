@@ -121,8 +121,15 @@ class GGUFModelLoader(BaseModelLoader):
                 break
         if arch is None:
             raise RuntimeError(f"Unknown gguf model_type: {model_type}")
-        num_layers = config.num_hidden_layers
-        name_map = gguf.get_tensor_name_map(arch, num_layers)
+        text_num_layers = config.get_text_config().num_hidden_layers
+        text_name_map = gguf.get_tensor_name_map(arch, text_num_layers)
+
+        if is_multimodal:
+            mm_proj_arch = gguf.MODEL_ARCH.CLIP_VISION
+            vision_num_layers = config.vision_config.num_hidden_layers
+            vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
+        else:
+            vision_name_map = None
 
         auto_cls = (
             AutoModelForImageTextToText if is_multimodal else AutoModelForCausalLM
@@ -133,11 +140,65 @@ class GGUFModelLoader(BaseModelLoader):
             )
 
         state_dict = dummy_model.state_dict()
+        if hf_checkpoint_map := getattr(
+            dummy_model, "_checkpoint_conversion_mapping", None
+        ):
+
+            def revert_hf_rename(name: str) -> str:
+                for original_name, hf_name in hf_checkpoint_map.items():
+                    if hf_name in name:
+                        name = name.replace(hf_name, original_name).lstrip("^")
+                return name
+
+            state_dict = {
+                revert_hf_rename(name): tensor for name, tensor in state_dict.items()
+            }
+
+        # For Gemma3 multimodal, the registered HF names in gguf-py is wrong,
+        # Remap it manually. See:
+        # https://github.com/ggml-org/llama.cpp/blob/f117be185ef1b76129e51d26676354af253bf664/gguf-py/gguf/tensor_mapping.py#L1379-L1381
+        MM_PROJ_MAP = {
+            "multi_modal_projector.mm_input_projection_weight": "multi_modal_projector.mm_input_projection",  # noqa: E501
+        }
+
+        def find_hf_name_in_tensor_map(hf_name: str) -> str | None:
+            if hf_name.endswith((".weight", ".bias")):
+                name, suffix = hf_name.rsplit(".", 1)
+            else:
+                name, suffix = hf_name, "weight"
+            gguf_name = None
+            # 1st: search mm_proj for multimodal
+            if vision_name_map is not None:
+                name_to_map = MM_PROJ_MAP.get(name, name)
+                gguf_name = vision_name_map.get_name(name_to_map)
+            # 2nd: search text backbone
+            if gguf_name is None:
+                gguf_name = text_name_map.get_name(name)
+            if gguf_name is None:
+                return None
+            return gguf_name + "." + suffix
 
         for hf_name in state_dict:
-            name, suffix = hf_name.rsplit(".", 1)
-            gguf_name = name_map.get_name(name)
-            gguf_to_hf_name_map[f"{gguf_name}.{suffix}"] = hf_name
+            gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
+            # Multimodal may have extra prefix which will cause lookup failure,
+            # so try removing prefix and lookup again.
+            # TODO(Isotr0py): Prefix with more than one "."?
+            if gguf_name_with_suffix is None:
+                gguf_name_with_suffix = find_hf_name_in_tensor_map(
+                    hf_name.split(".", 1)[-1]
+                )
+            if (
+                gguf_name_with_suffix is None
+                and hf_name not in gguf_to_hf_name_map.values()
+            ):
+                raise RuntimeError(
+                    f"Failed to to map gguf name for HF param: {hf_name}"
+                )
+            logger.debug(
+                "Map GGUF name %s to HF param %s", gguf_name_with_suffix, hf_name
+            )
+            if gguf_name_with_suffix is not None:
+                gguf_to_hf_name_map[gguf_name_with_suffix] = hf_name
         return gguf_to_hf_name_map
 
     def _create_mmproj_tensor_mapping(self, mmproj_path: str) -> dict[str, str]:
@@ -267,6 +328,8 @@ class GGUFModelLoader(BaseModelLoader):
 
             # 2. Load vision tower + projector weights from mmproj.gguf
             mmproj_path = str(mmproj_files[0])
+            # TODO(Isotr0py): Remove hardcoded mapping by using
+            # automatic mapping from gguf-py
             mmproj_mapping = self._create_mmproj_tensor_mapping(mmproj_path)
 
             logger.info(
