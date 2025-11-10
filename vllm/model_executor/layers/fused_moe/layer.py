@@ -1676,6 +1676,7 @@ class FusedMoE(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.quant_method is not None
 
+        self.ensure_moe_quant_config_init()
         self.ensure_dp_chunking_init()
 
         has_separate_shared_experts = (
