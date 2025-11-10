@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -15,14 +16,13 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     biased_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
-)
-from vllm.model_executor.layers.fused_moe.moe_method_base import FusedMoEMethodBase
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled,
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -49,7 +49,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
 
@@ -206,13 +207,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Padding the weight for better performance on ROCm
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
-        # Lazy import to avoid importing triton.
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            shuffle_weights,
-        )
 
         if self.rocm_aiter_moe_enabled:
-            shuffled_w13, shuffled_w2 = shuffle_weights(
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 

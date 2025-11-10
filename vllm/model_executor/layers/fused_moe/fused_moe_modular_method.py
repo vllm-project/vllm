@@ -10,11 +10,13 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.fused_moe.moe_method_base import FusedMoEMethodBase
 
 logger = init_logger(__name__)
 
