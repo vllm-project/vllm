@@ -2453,6 +2453,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     **model_kwargs,
                 )
 
+                # save model_output to a csv file
+                import pandas as pd
+                df = pd.DataFrame({
+                    "model_output": model_output.flatten().tolist(),
+                })
+                df.to_csv(f"vllm_model_output.csv", index=False)
+                ss
+
                 # For training, model_output should be hidden states
                 hidden_states = model_output
 
@@ -2554,8 +2562,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 if not is_eval_batch:
+                    # import csv
+                    # with open('vllm_weights.csv', 'w') as f:
+                    #     writer = csv.writer(f)
+                    #     writer.writerow(['parameter', 'weight'])
+                    #     for param in self.training_manager.optimizer.param_groups[0]['params']:
+                    #         if param.data is not None:
+                    #             writer.writerow([param.name, param.data.flatten().tolist()])
+
                     # Backward pass
                     tr_loss.backward()
+
+                    # with open('vllm_gradients.csv', 'w') as f:
+                    #     writer = csv.writer(f)
+                    #     writer.writerow(['parameter', 'gradient'])
+                    #     for param in self.training_manager.optimizer.param_groups[0]['params']:
+                    #         if param.grad is not None:
+                    #             writer.writerow([param.name, param.grad.flatten().tolist()])
 
                     # Add loss and step the training manager
                     self.training_manager.add_loss(tr_loss.detach())
@@ -2569,6 +2592,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Run the optimizer step if it is time to do so
                 if self.training_manager.should_run_optimizer_step():
                     learning_rate = self.training_manager.optimizer_step()
+
+                    # import csv
+                    # with open('vllm_weights_after_optimizer_step.csv', 'w') as f:
+                    #     writer = csv.writer(f)
+                    #     writer.writerow(['parameter', 'weight'])
+                    #     for param in self.training_manager.optimizer.param_groups[0]['params']:
+                    #         if param.data is not None:
+                    #             writer.writerow([param.name, param.data.flatten().tolist()])
+                    # ss
+
                     self.training_manager.reset_steps()
                     self.training_manager.model_zero_grad()
 

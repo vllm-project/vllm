@@ -59,6 +59,45 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     maybe_prefix)
 
 
+IS_TRAINING = False
+IS_LOGGED = False
+
+
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+    """Applies Rotary Position Embedding to the query and key tensors.
+
+    Args:
+        q (`torch.Tensor`): The query tensor.
+        k (`torch.Tensor`): The key tensor.
+        cos (`torch.Tensor`): The cosine part of the rotary embedding.
+        sin (`torch.Tensor`): The sine part of the rotary embedding.
+        position_ids (`torch.Tensor`, *optional*):
+            Deprecated and unused.
+        unsqueeze_dim (`int`, *optional*, defaults to 1):
+            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
+            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
+            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
+            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
+            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
+            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
+    Returns:
+        `tuple(torch.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    return q_embed, k_embed
+
+
+
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -211,9 +250,54 @@ class LlamaAttention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        global IS_TRAINING
+        global IS_LOGGED
+
+        if IS_TRAINING:
+            print("IS_TRAINING is True")
+
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        # save q, k, v to a csv file
+        if IS_TRAINING and not IS_LOGGED:
+            print(f"q: {q.shape} {self.q_size}")
+            print(f"k: {k.shape} {self.kv_size}")
+            print(f"v: {v.shape} {self.kv_size}")
+
+            import pandas as pd
+            df = pd.DataFrame({
+                "q": q.flatten().tolist(),
+            })
+            df.to_csv(f"vllm_q_before.csv", index=False)
+
+        # Debug: Extract cos/sin to compare with PEFT
+        if IS_TRAINING and not IS_LOGGED:
+            positions_flat = positions.flatten()
+            num_tokens = positions_flat.shape[0]
+            cos_sin = self.rotary_emb.cos_sin_cache.index_select(0, positions_flat)
+            cos_vllm, sin_vllm = cos_sin.chunk(2, dim=-1)
+            print(f"vLLM cos shape: {cos_vllm.shape}, first few values: {cos_vllm[0, :5]}")
+            print(f"vLLM sin shape: {sin_vllm.shape}, first few values: {sin_vllm[0, :5]}")
+            print(f"vLLM positions: {positions_flat[:10]}")
+        
         q, k = self.rotary_emb(positions, q, k)
+
+        # cos, sin = positions
+        # q, k = apply_rotary_pos_emb(q, k, cos, sin)
+
+        if IS_TRAINING and not IS_LOGGED:
+            # save q, k to a csv file
+            print(f"vLLM q shape after RoPE: {q.shape}")
+            print(f"vLLM q first few values: {q[0, :5]}")
+            import pandas as pd
+            df = pd.DataFrame({
+                "q": q.flatten().tolist(),
+            })
+            df.to_csv(f"vllm_q_after.csv", index=False)
+            IS_LOGGED = True
+            ss
+
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -535,6 +619,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
+        self.girfan_temp = False
 
         self.model = self._init_model(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"),
@@ -597,6 +682,24 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         inputs_embeds: Optional[torch.Tensor] = None,
         is_lora_training: bool = False,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        global IS_TRAINING
+
+        # save input_ids to a csv file
+        # check if all input_ids are zero
+        if not torch.all(input_ids == 0):
+            import pandas as pd
+            # print(f"input_ids shape: {input_ids.shape}")
+            # df = pd.DataFrame({
+            #     "input_ids": input_ids.flatten().tolist(),
+            # })
+            # df.to_csv(f"vllm_input_ids.csv", index=False)
+            # load input_ids from transformers_input_ids.csv
+            df = pd.read_csv(f"transformers_input_ids.csv")
+            input_ids = torch.tensor(df["input_ids"].tolist(), device='cuda')
+            assert self.girfan_temp == False, "Girfan temp is already True"
+            self.girfan_temp = True
+            IS_TRAINING = True
+
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds, is_lora_training=is_lora_training)
         return model_output

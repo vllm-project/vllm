@@ -21,6 +21,8 @@ from .utils import _get_lora_device
 
 logger = init_logger(__name__)
 
+IS_LOGGED = False
+
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
@@ -178,6 +180,28 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     # TODO(girfan): Add tests to verify if this is functionally correct and matches punica.
     def _training_apply(self, x: torch.Tensor, output: torch.Tensor) -> torch.Tensor:
+        # save q_old, k_old, v_old to separate csv files
+        global IS_LOGGED
+
+        # if not IS_LOGGED:
+        #     import pandas as pd
+
+        #     q_old, k_old, v_old = output.split([2048, 512, 512], dim=-1)
+        #     df = pd.DataFrame({
+        #         "q": q_old.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_q_old.csv", index=False)
+            
+        #     df = pd.DataFrame({
+        #         "k": k_old.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_k_old.csv", index=False)
+
+        #     df = pd.DataFrame({
+        #         "v": v_old.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_v_old.csv", index=False)
+
         lora_indices = self.punica_wrapper.token_lora_indices
 
         # Group tokens by LoRA index
@@ -207,16 +231,54 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 lora_b = self.lora_b_stacked[slice_idx][lora_idx, 0, :, :]  # [output_size, rank]
 
                 # Batch operation: [num_tokens, hidden_dim] @ [hidden_dim, rank] @ [rank, output_size]
+                # This matches PEFT's computation: result = result + lora_B(lora_A(x)) * scaling
                 lora_hidden = x_batch @ lora_a.T  # [num_tokens, rank]
                 lora_output = lora_hidden @ lora_b.T  # [num_tokens, output_size]
+                lora_output_scaled = lora_output * scaling  # Apply scaling to match PEFT
 
                 slice_size = self.output_slices[slice_idx]
-                output[token_indices, output_offset:output_offset + slice_size] += lora_output * scaling
+
+                print(f"Updating output indices: {token_indices}")
+                print(f"Updating output offset: {output_offset} to {output_offset + slice_size}")
+                print(f"Updating slice size: {slice_size}")
+
+                output[token_indices, output_offset:output_offset + slice_size] += lora_output_scaled
                 output_offset += slice_size
 
                 if self.lora_bias_stacked is not None and self.lora_bias_stacked[slice_idx] is not None:
                     bias = self.lora_bias_stacked[slice_idx][lora_idx, 0, :]
                     output[token_indices, output_offset-slice_size:output_offset] += bias
+
+                # if not IS_LOGGED:
+                #     import pandas as pd
+
+                #     q_old, k_old, v_old = output.split([2048, 512, 512], dim=-1)
+                #     df = pd.DataFrame({
+                #         "q": q_old.flatten().tolist(),
+                #     })
+                #     df.to_csv(f"vllm_q_one_accumulation.csv", index=False)
+
+                #     df = pd.DataFrame({
+                #         "lora_a": lora_a.flatten().tolist(),
+                #     })
+                #     df.to_csv(f"vllm_lora_a_{slice_idx}_{lora_idx}.csv", index=False)
+
+                #     df = pd.DataFrame({
+                #         "lora_b": lora_b.flatten().tolist(),
+                #     })
+                #     df.to_csv(f"vllm_lora_b_{slice_idx}_{lora_idx}.csv", index=False)
+
+                #     df = pd.DataFrame({
+                #         "x": x_batch.flatten().tolist(),
+                #     })
+                #     df.to_csv(f"vllm_x_batch_{slice_idx}_{lora_idx}.csv", index=False)
+
+                #     df = pd.DataFrame({
+                #         "q": lora_output_scaled.flatten().tolist(),
+                #     })
+                #     df.to_csv(f"vllm_lora_output_scaled_{slice_idx}_{lora_idx}.csv", index=False)
+
+                #     IS_LOGGED = True
 
         return output
 

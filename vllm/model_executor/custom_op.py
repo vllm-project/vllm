@@ -11,7 +11,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 
-DYNAMIC_DISPATCH_CUSTOM_OPS = ["rms_norm"]
+DYNAMIC_DISPATCH_CUSTOM_OPS = ["rms_norm", "rotary_embedding"] # TODO: Remove "rotary_embedding" from the list?
 
 
 logger = init_logger(__name__)
