@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
+    VLLM_TORCH_CUDA_PROFILE: bool = False
     VLLM_TORCH_PROFILER_DIR: str | None = None
     VLLM_TORCH_PROFILER_RECORD_SHAPES: bool = False
     VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: bool = False
@@ -108,10 +109,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_ROCM_USE_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
+    VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -816,6 +818,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_LORA_RESOLVER_CACHE_DIR": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_CACHE_DIR", None
     ),
+    # Enables torch CUDA profiling if set.
+    # On NVIDIA GPUs, this will start/stop cudaProfilerApi when triggered.
+    "VLLM_TORCH_CUDA_PROFILE": lambda: bool(
+        os.getenv("VLLM_TORCH_CUDA_PROFILE", "0") != "0"
+    ),
     # Enables torch profiler if set.
     # Both AsyncLLM's CPU traces as well as workers'
     # traces (CPU & GPU) will be saved under this directory.
@@ -920,8 +927,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter rope.
     # By default is disabled.
-    "VLLM_ROCM_USE_TRITON_ROPE": lambda: (
-        os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
@@ -938,6 +945,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
         in ("true", "1")
+    ),
+    # Whether to use aiter triton kernels for gemm ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
@@ -1583,9 +1595,10 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_ROCM_USE_TRITON_ROPE",
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
+        "VLLM_ROCM_USE_AITER_TRITON_GEMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",

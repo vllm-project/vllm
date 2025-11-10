@@ -289,6 +289,7 @@ class LLMEngine:
             engine_core_timestamp=outputs.timestamp,
             iteration_stats=iteration_stats,
         )
+        self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
         self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
