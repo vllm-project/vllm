@@ -1367,6 +1367,23 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+        if getattr(self.config, "im_patch_id", None):
+            visual_token_ids = [
+                token_id
+                for token_id in [
+                    self.config.im_patch_id,
+                    getattr(self.config, "image_start_token_id", None),
+                    getattr(self.config, "image_end_token_id", None),
+                    getattr(self.config, "video_start_token_id", None),
+                    getattr(self.config, "video_end_token_id", None),
+                ]
+                if token_id is not None
+            ]
+            self._visual_token_ids_tensor_cache = torch.tensor(
+                visual_token_ids, dtype=torch.long
+            )
+        else:
+            self._visual_token_ids_tensor_cache = None
 
     def compute_logits(
         self,
@@ -1399,27 +1416,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         """Set mask for visual tokens (image/video patches and delimiters)."""
-        if getattr(self.config, "im_patch_id", None) is None:
+        if self._visual_token_ids_tensor_cache is None:
             self.visual_token_mask = None
             return
-
-        # Cache the visual token IDs tensor to avoid recreating it
-        if not hasattr(self, "_visual_token_ids_tensor_cache"):
-            visual_token_ids = [
-                token_id
-                for token_id in [
-                    self.config.im_patch_id,
-                    getattr(self.config, "image_start_token_id", None),
-                    getattr(self.config, "image_end_token_id", None),
-                    getattr(self.config, "video_start_token_id", None),
-                    getattr(self.config, "video_end_token_id", None),
-                ]
-                if token_id is not None
-            ]
-            self._visual_token_ids_tensor_cache = torch.tensor(
-                visual_token_ids, dtype=torch.long
-            )
-
         # Create tensor on the correct device
         visual_token_ids_tensor = self._visual_token_ids_tensor_cache.to(
             device=input_ids.device,
