@@ -2415,6 +2415,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             [0] if spec_decode_metadata and logprobs_tensors else None
         )
         for req_idx in range(num_sampled_tokens):
+            sampled_ids: np.ndarray | None
             if self.use_async_scheduling:
                 sampled_ids = (
                     np.array([-1]) if req_idx not in invalid_req_indices_set else None
@@ -2422,14 +2423,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
-            num_sampled_ids: int = sampled_ids.shape[0] if sampled_ids else 0
+            num_sampled_ids: int = (
+                sampled_ids.shape[0] if sampled_ids is not None else 0
+            )
 
             if cu_num_accepted_tokens is not None:
                 cu_num_accepted_tokens.append(
                     cu_num_accepted_tokens[-1] + num_sampled_ids
                 )
 
-            if not sampled_ids:
+            if sampled_ids is None or num_sampled_ids == 0:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
