@@ -4,9 +4,6 @@
 KV cache helper for store.
 """
 
-import contextlib
-from collections.abc import Sequence
-from concurrent.futures import CancelledError, Future
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -219,43 +216,6 @@ class KVOutputAggregator:
         )
 
         return output
-
-    def async_aggregate(
-        self,
-        output_future: Future[Sequence[ModelRunnerOutput | None]],
-        output_rank: int = 0,
-    ) -> Future[ModelRunnerOutput | None]:
-        """Takes a future that resolves to a list of outputs and returns a future
-        which resolves to a single aggregated output."""
-        result_future: Future[ModelRunnerOutput | None] = Future()
-
-        def callback(fut):
-            if result_future.done():
-                return
-            try:
-                result_future.set_result(self.aggregate(fut.result(), output_rank))
-            except CancelledError:
-                result_future.cancel()
-            except Exception as e:
-                result_future.set_exception(e)
-
-        output_future.add_done_callback(callback)
-
-        from vllm.v1.executor.multiproc_executor import FutureWrapper
-
-        if isinstance(output_future, FutureWrapper):
-            # Due to the threadless implementation of multiproc FutureWrapper,
-            # we must block on the delegate future's result() method.
-            delegate_result = result_future.result
-
-            def result(timeout=None):
-                with contextlib.suppress(Exception):
-                    output_future.result(timeout=timeout)
-                return delegate_result()
-
-            result_future.result = result  # type: ignore[method-assign]
-
-        return result_future
 
 
 def _make_src_and_dst_indices(
