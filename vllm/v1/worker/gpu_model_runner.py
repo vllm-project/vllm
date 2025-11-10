@@ -2655,45 +2655,45 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                 )
 
-                dp_rank = self.parallel_config.data_parallel_rank
-                if ubatch_slices:
-                    assert num_tokens_across_dp is not None
-                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                    self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-                elif num_tokens_across_dp is not None:
-                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                else:
-                    num_input_tokens = self._get_num_input_tokens(
-                        total_num_scheduled_tokens
-                    )
-
-                (
-                    input_ids,
-                    inputs_embeds,
-                    positions,
-                    intermediate_tensors,
-                    model_kwargs,
-                ) = self._preprocess(
-                    scheduler_output, num_input_tokens, intermediate_tensors
-                )
-
-                uniform_decode = (
-                    max_num_scheduled_tokens == self.uniform_decode_query_len
-                ) and (
+            dp_rank = self.parallel_config.data_parallel_rank
+            if ubatch_slices:
+                assert num_tokens_across_dp is not None
+                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+            elif num_tokens_across_dp is not None:
+                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+            else:
+                num_input_tokens = self._get_num_input_tokens(
                     total_num_scheduled_tokens
-                    == self.input_batch.num_reqs * max_num_scheduled_tokens
                 )
-                batch_descriptor = BatchDescriptor(
-                    num_tokens=num_input_tokens,
-                    uniform_decode=uniform_decode,
-                    has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+
+            (
+                input_ids,
+                inputs_embeds,
+                positions,
+                intermediate_tensors,
+                model_kwargs,
+            ) = self._preprocess(
+                scheduler_output, num_input_tokens, intermediate_tensors
+            )
+
+            uniform_decode = (
+                max_num_scheduled_tokens == self.uniform_decode_query_len
+            ) and (
+                total_num_scheduled_tokens
+                == self.input_batch.num_reqs * max_num_scheduled_tokens
+            )
+            batch_descriptor = BatchDescriptor(
+                num_tokens=num_input_tokens,
+                uniform_decode=uniform_decode,
+                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+            )
+            cudagraph_runtime_mode, batch_descriptor = (
+                self.cudagraph_dispatcher.dispatch(
+                    batch_descriptor,
+                    use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
-                cudagraph_runtime_mode, batch_descriptor = (
-                    self.cudagraph_dispatcher.dispatch(
-                        batch_descriptor,
-                        use_cascade_attn=cascade_attn_prefix_lens is not None,
-                    )
-                )
+            )
 
             use_padded_batch_for_eagle = (
                 self.speculative_config is not None
