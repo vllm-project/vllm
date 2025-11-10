@@ -642,10 +642,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
 
+            ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
             layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                 layer.w13_weight,
                 layer.w2_weight,
                 use_prepack=True,
+                experts_start_id=ep_rank_start,
             )
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
@@ -915,7 +917,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             or logical_replica_count is not None
         ):
             raise NotImplementedError("Expert load balancing is not supported for XPU.")
-        assert custom_routing_function is None
         return layer.ipex_fusion(
             x,
             use_grouped_topk,
@@ -924,6 +925,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             renormalize,
             topk_group,
             num_expert_group,
+            custom_routing_function=custom_routing_function,
         )
 
     def forward_tpu(
@@ -1178,7 +1180,7 @@ class FusedMoE(CustomOp):
         hidden_size: Input hidden state size of the transformer
         intermediate_size: Intermediate size of the experts
         params_dtype: Data type for the parameters.
-        reduce_results: Whether to all all_reduce on the output of the layer
+        reduce_results: Whether to all_reduce on the output of the layer
         renormalize: Whether to renormalize the logits in the fused_moe kernel
         quant_config: Quantization configure.
         enable_eplb: Whether to enable expert parallelism load balancer.

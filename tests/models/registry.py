@@ -219,7 +219,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         trust_remote_code=True,
     ),
-    "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
+    "DeepseekForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/deepseek-moe-16b-base",
+        trust_remote_code=True,
+    ),
     "DeepseekV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V2-Lite-Chat",
         trust_remote_code=True,
@@ -899,27 +902,27 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
 
 _TRANSFORMERS_BACKEND_MODELS = {
     "TransformersEmbeddingModel": _HfExamplesInfo(
-        "BAAI/bge-base-en-v1.5", min_transformers_version="5.0.0"
+        "BAAI/bge-base-en-v1.5", min_transformers_version="5.0.0.dev"
     ),
     "TransformersForSequenceClassification": _HfExamplesInfo(
         "papluca/xlm-roberta-base-language-detection",
-        min_transformers_version="5.0.0",
+        min_transformers_version="5.0.0.dev",
     ),
     "TransformersForCausalLM": _HfExamplesInfo(
         "hmellor/Ilama-3.2-1B", trust_remote_code=True
     ),
     "TransformersMultiModalForCausalLM": _HfExamplesInfo("BAAI/Emu3-Chat-hf"),
     "TransformersMoEForCausalLM": _HfExamplesInfo(
-        "allenai/OLMoE-1B-7B-0924", min_transformers_version="5.0.0"
+        "allenai/OLMoE-1B-7B-0924", min_transformers_version="5.0.0.dev"
     ),
     "TransformersMultiModalMoEForCausalLM": _HfExamplesInfo(
-        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="5.0.0"
+        "Qwen/Qwen3-VL-30B-A3B-Instruct", min_transformers_version="5.0.0.dev"
     ),
     "TransformersMoEEmbeddingModel": _HfExamplesInfo(
-        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
+        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0.dev"
     ),
     "TransformersMoEForSequenceClassification": _HfExamplesInfo(
-        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0"
+        "Qwen/Qwen3-30B-A3B", min_transformers_version="5.0.0.dev"
     ),
     "TransformersMultiModalEmbeddingModel": _HfExamplesInfo("google/gemma-3-4b-it"),
     "TransformersMultiModalForSequenceClassification": _HfExamplesInfo(
