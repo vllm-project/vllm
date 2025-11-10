@@ -471,8 +471,8 @@ steps:
   - vllm/
   - tests/compile
   commands:
-  - pytest -v -s compile/test_full_graph.py
-    # Limit to no custom ops to reduce running time 
+  - pytest -v -s compile/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
+    # Limit to no custom ops to reduce running time
     # Wrap with quotes to escape yaml and avoid starting -k string with a -
   - "pytest -v -s compile/test_fusions_e2e.py -k 'TRITON and -quant_fp8'"
 
@@ -951,10 +951,13 @@ steps:
   - vllm/model_executor/layers/activation.py
   - vllm/model_executor/layers/quantization/input_quant_fp8.py
   - tests/compile/test_fusions_e2e.py
+  - tests/compile/test_full_graph.py
   commands:
     - nvidia-smi
     # Run all e2e fusion tests
     - pytest -v -s tests/compile/test_fusions_e2e.py
+    # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
+    - pytest -v -s tests/compile/test_full_graph.py::test_fp8_kv_scale_compile
 
 - label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
