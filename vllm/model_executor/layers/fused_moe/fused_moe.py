@@ -1173,6 +1173,7 @@ def grouped_topk(
         and current_platform.is_cuda()
         and num_expert_group <= 32
         and topk <= 32
+        and e_score_correction_bias is not None
     ):
         return fused_grouped_topk(
             hidden_states=hidden_states,
@@ -1321,24 +1322,13 @@ def fused_grouped_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    e_score_correction_bias: torch.Tensor | None,
+    e_score_correction_bias: torch.Tensor,
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
     routed_scaling_factor: float = 1.0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
-
-    # allow None bias by substituting a zero vector
-    bias = (
-        e_score_correction_bias.to(gating_output.dtype)
-        if e_score_correction_bias is not None
-        else torch.zeros(
-            gating_output.shape[-1],
-            device=gating_output.device,
-            dtype=gating_output.dtype,
-        )
-    )
 
     if scoring_func == "sigmoid":
         # Fully fused kernel path for sigmoid
@@ -1349,7 +1339,7 @@ def fused_grouped_topk(
             topk,
             renormalize,
             routed_scaling_factor,
-            bias,
+            e_score_correction_bias,
             1,  # scoring_func=1 for sigmoid
         )
     elif scoring_func == "softmax":
@@ -1363,7 +1353,7 @@ def fused_grouped_topk(
             topk,
             renormalize,
             routed_scaling_factor,
-            bias,
+            e_score_correction_bias,
             0,  # scoring_func=0 (no activation, scores already computed)
         )
     else:
