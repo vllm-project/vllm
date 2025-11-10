@@ -1159,6 +1159,12 @@ def maybe_roundup_hidden_size(
     return hidden_size
 
 
+def pp(msg, t):
+    # print(f"{msg} {t.shape}")
+    # print(f"{msg} {t.shape} {t}")
+    pass
+
+
 @CustomOp.register("fused_moe")
 class FusedMoE(CustomOp):
     """FusedMoE layer for MoE models.
@@ -1258,6 +1264,8 @@ class FusedMoE(CustomOp):
             dp_size_=dp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
+
+        logger.debug("FusedMoEParallelConfig = %s", str(self.moe_parallel_config))
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
@@ -1432,6 +1440,8 @@ class FusedMoE(CustomOp):
 
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
+
+        logger.debug("FusedMoEConfig = %s", self.moe_config)
 
         def _get_quant_method() -> FusedMoEMethodBase:
             """
@@ -2357,7 +2367,7 @@ class FusedMoE(CustomOp):
             )
 
         if self.shared_experts is None:
-            if current_platform.is_tpu():
+            if True or current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
                 fused_output = self.forward_impl(hidden_states, router_logits)
@@ -2368,7 +2378,7 @@ class FusedMoE(CustomOp):
                 )
             return fused_output[..., :og_hidden_states]
         else:
-            if current_platform.is_tpu():
+            if True or current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
                 # will switch to using the moe_forward custom op.
                 shared_output, fused_output = self.forward_impl(
@@ -2398,7 +2408,9 @@ class FusedMoE(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.batched_hidden_states is not None
         assert self.batched_router_logits is not None
-        assert self.batched_hidden_states.dtype == full_hidden_states.dtype
+        assert self.batched_hidden_states.dtype == full_hidden_states.dtype, (
+            f"{self.batched_hidden_states.dtype} == {full_hidden_states.dtype}"
+        )
         assert self.batched_router_logits.dtype == full_router_logits.dtype
         # Check size compatibility.
         assert self.batched_hidden_states.size(-1) == full_hidden_states.size(-1)
@@ -2596,6 +2608,8 @@ class FusedMoE(CustomOp):
             self.quant_method, FusedMoEModularMethod
         )
 
+        logger.debug("NAIVE = %s", do_naive_dispatch_combine)
+
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
         if has_separate_shared_experts:
@@ -2620,10 +2634,14 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
+            pp("BEFORE HIDDEN", hidden_states)
+
             if do_naive_dispatch_combine:
                 hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
+
+            pp("AFTER HIDDEN", hidden_states)
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
@@ -2671,13 +2689,16 @@ class FusedMoE(CustomOp):
                 states: torch.Tensor, do_combine: bool = True
             ) -> torch.Tensor:
                 if do_naive_dispatch_combine and do_combine:
+                    pp("PRE-COMBINE = ", states)
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
+                    pp("POST-COMBINE = ", states)
 
                 if (
                     not self.is_sequence_parallel
                     and self.reduce_results
                     and (self.tp_size > 1 or self.ep_size > 1)
                 ):
+                    print("REDUCE_RESULTS")
                     states = self.maybe_all_reduce_tensor_model_parallel(states)
 
                 return states
