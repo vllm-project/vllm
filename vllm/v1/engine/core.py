@@ -385,7 +385,8 @@ class EngineCore:
                     # We need to defer sampling until we have processed the model output
                     # from the prior step.
                     deferred_scheduler_output = scheduler_output
-                    # Block-wait for execute to return (continues running async on the GPU).
+                    # Block-wait for execute to return
+                    # (continues running async on the GPU).
                     with self.log_error_detail(scheduler_output):
                         exec_result = exec_future.result()
                         assert exec_result is None
@@ -393,7 +394,8 @@ class EngineCore:
                 with record_function_or_nullcontext(
                     "core step_with_batch_queue: get_grammar_bitmask"
                 ):
-                    # We aren't waiting for any tokens, get any grammar output immediately.
+                    # We aren't waiting for any tokens, get any grammar
+                    # output immediately.
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
