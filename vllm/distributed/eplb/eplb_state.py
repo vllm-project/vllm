@@ -153,6 +153,8 @@ class EplbModelState:
     model_name: str
     model: MixtureOfExperts
 
+
+class EplbAsyncState:
     """
     Asynchronous process manager.
     """
@@ -219,6 +221,7 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
+        self.async_states: EplbAsyncState
         """
         Current step in the sliding window.
 
@@ -474,6 +477,8 @@ class EplbState:
             expert_load_window,
             model_config.model,
             model,
+        )
+        self.async_states = EplbAsyncState(
             num_wait_worker_iterations=(
                 self.parallel_config.eplb_config.num_wait_worker_iterations
             ),
@@ -483,8 +488,10 @@ class EplbState:
 
     def __post_init__(self) -> None:
         # Initialize asynchronous process manager
-        if self.enable_async:
-            self._async_processor = EPLBProcess(target_func=rebalance_experts)
+        if self.async_states.enable_async:
+            self.async_states._async_processor = EPLBProcess(
+                target_func=rebalance_experts
+            )
 
     def step(
         self,
@@ -574,7 +581,7 @@ class EplbState:
             if self.expert_load_window_step >= self.expert_load_window_size:
                 self.expert_load_window_step = 0
 
-        if not self.enable_async:
+        if not self.async_states.enable_async:
             # Step the expert rearrangement step
             # Note that even if this is a dummy step, we still increment the
             # rearrangement step and perform rearrangement to ensure all ranks are
@@ -607,20 +614,20 @@ class EplbState:
                         num_gpus,
                         num_nodes,
                     )
-                self.rebalance_task_args = RebalanceTaskArgs(
+                self.async_states.rebalance_task_args = RebalanceTaskArgs(
                     global_expert_load.cpu(),
                     num_replicas,
                     num_groups,
                     num_nodes,
                     num_gpus,
                 )
-                input_args = self.rebalance_task_args
+                input_args = self.async_states.rebalance_task_args
 
-                assert self.expert_mapper_args is not None, (
+                assert self.async_states.expert_mapper_args is not None, (
                     "expert_mapper_args is not initialized"
                 )
-                self.expert_mapper_args.phyhsical_to_logical_map = (
-                    self.physical_to_logical_map.cpu()
+                self.async_states.expert_mapper_args.phyhsical_to_logical_map = (
+                    self.model_states.physical_to_logical_map.cpu()
                 )
                 expert_mapper_args = self.expert_mapper_args
 
@@ -1140,70 +1147,73 @@ class EplbState:
         Returns:
             The gathered MoE load tenso with shape (num_moe_layers, num_logical_expert).
         """
-        local_load = self.expert_load_pass.clone()
+        for eplb_model_state in self.model_states.values():
+            local_load = eplb_model_state.expert_load_pass.clone()
 
-        if torch.distributed.is_initialized():
-            ep_group = get_ep_group().device_group
-            self.device = local_load.device
-            ep_world_size = ep_group.size()
+            if torch.distributed.is_initialized():
+                ep_group = get_ep_group().device_group
+                self.device = local_load.device
+                ep_world_size = ep_group.size()
 
-            if (
-                self._gather_buffer is None
-                or self._gather_buffer.shape[0] != ep_world_size
-                or tuple(self._gather_buffer.shape[1:]) != tuple(local_load.shape)
-            ):
-                shape = (ep_world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(
-                    shape, dtype=local_load.dtype, device=self.device
+                if (
+                    self.async_states._gather_buffer is None
+                    or self.async_states._gather_buffer.shape[0] != ep_world_size
+                    or tuple(self.async_states._gather_buffer.shape[1:]) != tuple(
+                        local_load.shape
+                    )
+                ):
+                    shape = (ep_world_size, *local_load.shape)
+                    self.async_states._gather_buffer = torch.empty(
+                        shape, dtype=local_load.dtype, device=self.device
+                    )
+
+                torch.distributed.all_gather_into_tensor(
+                    self.async_states._gather_buffer, local_load, group=ep_group
+                )
+                moe_load = self.async_states._gather_buffer.permute(1, 0, 2)
+                L, W, E_local = moe_load.shape
+                physical_view = moe_load.permute(0, 2, 1).reshape(L, W * E_local)
+                physical_to_logical_map = eplb_model_state.physical_to_logical_map.to(
+                    device=self.device, dtype=torch.long
+                )
+                if hasattr(self, "logical_to_physical_map"):
+                    num_logical_experts = eplb_model_state.logical_to_physical_map.shape[1]
+                else:
+                    num_logical_experts = int(physical_to_logical_map.max().item()) + 1
+
+                global_expert_load = torch.zeros(
+                    L, num_logical_experts, dtype=physical_view.dtype, device=self.device
+                )
+                global_expert_load.scatter_add_(
+                    dim=1, index=physical_to_logical_map, src=physical_view
                 )
 
-            torch.distributed.all_gather_into_tensor(
-                self._gather_buffer, local_load, group=ep_group
-            )
-            moe_load = self._gather_buffer.permute(1, 0, 2)
-            L, W, E_local = moe_load.shape
-            physical_view = moe_load.permute(0, 2, 1).reshape(L, W * E_local)
-            physical_to_logical_map = self.physical_to_logical_map.to(
-                device=self.device, dtype=torch.long
-            )
-            if hasattr(self, "logical_to_physical_map"):
-                num_logical_experts = self.logical_to_physical_map.shape[1]
+                return global_expert_load
             else:
-                num_logical_experts = int(physical_to_logical_map.max().item()) + 1
+                moe_load = local_load.unsqueeze(1)  # (L, 1, E_local)
 
-            global_expert_load = torch.zeros(
-                L, num_logical_experts, dtype=physical_view.dtype, device=self.device
-            )
-            global_expert_load.scatter_add_(
-                dim=1, index=physical_to_logical_map, src=physical_view
-            )
+                L, _, E_local = moe_load.shape
+                physical_view = moe_load.permute(0, 2, 1).reshape(L, E_local)
+
+                physical_to_logical_map = eplb_model_state.physical_to_logical_map.to(
+                    device=moe_load.device, dtype=torch.long
+                )
+                if hasattr(self, "logical_to_physical_map"):
+                    num_logical_experts = eplb_model_state.logical_to_physical_map.shape[1]
+                else:
+                    num_logical_experts = int(physical_to_logical_map.max().item()) + 1
+
+                global_expert_load = torch.zeros(
+                    L,
+                    num_logical_experts,
+                    dtype=physical_view.dtype,
+                    device=moe_load.device,
+                )
+                global_expert_load.scatter_add_(
+                    dim=1, index=physical_to_logical_map, src=physical_view
+                )
 
             return global_expert_load
-        else:
-            moe_load = local_load.unsqueeze(1)  # (L, 1, E_local)
-
-            L, _, E_local = moe_load.shape
-            physical_view = moe_load.permute(0, 2, 1).reshape(L, E_local)
-
-            physical_to_logical_map = self.physical_to_logical_map.to(
-                device=moe_load.device, dtype=torch.long
-            )
-            if hasattr(self, "logical_to_physical_map"):
-                num_logical_experts = self.logical_to_physical_map.shape[1]
-            else:
-                num_logical_experts = int(physical_to_logical_map.max().item()) + 1
-
-            global_expert_load = torch.zeros(
-                L,
-                num_logical_experts,
-                dtype=physical_view.dtype,
-                device=moe_load.device,
-            )
-            global_expert_load.scatter_add_(
-                dim=1, index=physical_to_logical_map, src=physical_view
-            )
-
-        return global_expert_load
 
     def rebalance_task(self, input_args, expert_mapper_args) -> None:
         # Submit task to asynchronous process
