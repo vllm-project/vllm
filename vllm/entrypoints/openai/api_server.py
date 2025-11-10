@@ -648,10 +648,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        logger.debug(
-            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
-        )
-        return JSONResponse(content=generator.model_dump(exclude_none=True))
+        resp = generator.model_dump(exclude_none=True)
+        logger.debug("Anthropic Messages Response: %s", resp)
+        return JSONResponse(content=resp)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -1281,10 +1280,16 @@ async def invocations(raw_request: Request):
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning(
+    logger.warning_once(
         "Torch Profiler is enabled in the API server. This should ONLY be "
         "used for local development!"
     )
+elif envs.VLLM_TORCH_CUDA_PROFILE:
+    logger.warning_once(
+        "CUDA Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!"
+    )
+if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
 
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
