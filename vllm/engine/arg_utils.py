@@ -1726,7 +1726,6 @@ class EngineArgs:
                 )
                 _raise_unsupported_error(feature_name=name)
 
-
     def _set_default_args(
         self, usage_context: UsageContext, model_config: ModelConfig
     ) -> None:
