@@ -1176,6 +1176,48 @@ class OpenAIServing:
         )
         return engine_request, tokenization_kwargs
 
+    async def _apply_input_processor_plugin(
+        self,
+        request,
+        request_id,
+        lora_request,
+        preprocess_partial,
+        engine_client,
+        processor,
+    ):
+        if self.io_processor is None:
+            raise AssertionError("Could not apply input plugin - no IO Processor!")
+
+        validated_req_or_prompt = self.io_processor.parse_request(
+            request,
+            preprocess_partial is not None,
+        )
+
+        # HACK - depending on the plugin, validated_prompt may actually be
+        # a request still since it's cleaner to call async preprocessors
+        # from the async method
+        engine_prompts = await self.io_processor.pre_process_async(
+            prompt=validated_req_or_prompt,
+            request_id=request_id,
+            preprocess_partial=preprocess_partial,
+            lora_request=lora_request,
+            engine_client=engine_client,
+            processor=processor,
+        )
+        # We should let this be handled by the plugin too, and default to not changing
+        # Check if the engine prompts have
+        return engine_prompts
+
+    async def _apply_output_processor_plugin(self, result_generator, request_id):
+        if self.io_processor is None:
+            raise AssertionError("Could not apply output plugin - no IO Processor!")
+
+        output = await self.io_processor.post_process_async(
+            model_output=result_generator,
+            request_id=request_id,
+        )
+        return self.io_processor.output_to_response(output)
+
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
