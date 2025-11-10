@@ -3,6 +3,7 @@
 import dataclasses
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
@@ -165,7 +166,7 @@ def test_schedule_partial_requests():
         req_id_to_index=req_to_index,
         # Only the first request has a sampled token id because
         # the rest requests are still being prefilled.
-        sampled_token_ids=[[0], [], []],
+        sampled_token_ids=[np.array([0]), np.array([]), np.array([])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -212,7 +213,7 @@ def test_no_mm_input_chunking():
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[] for _ in range(len(requests))],
+        sampled_token_ids=[np.array([]) for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -272,7 +273,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[] for _ in range(len(requests))],
+        sampled_token_ids=[np.array([]) for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -296,7 +297,8 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     model_runner_output = ModelRunnerOutput(
         req_ids=[request.request_id for request in requests],
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0], [0]] + [[] for _ in range(len(requests) - 2)],
+        sampled_token_ids=[np.array([0]), np.array([0])]
+        + [np.array([]) for _ in range(len(requests) - 2)],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -343,8 +345,8 @@ def test_stop_via_update_from_output():
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
         sampled_token_ids=[
-            [EOS_TOKEN_ID],
-            [10, 11],
+            np.array([EOS_TOKEN_ID]),
+            np.array([10, 11]),
         ],  # First request hits EOS, second continues
         logprobs=None,
         prompt_logprobs_dict={},
@@ -388,7 +390,10 @@ def test_stop_via_update_from_output():
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
-        sampled_token_ids=[[10, 42, 12], [13, 14]],  # First request hits stop token
+        sampled_token_ids=[
+            np.array([10, 42, 12]),
+            np.array([13, 14]),
+        ],  # First request hits stop token
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -432,7 +437,10 @@ def test_stop_via_update_from_output():
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
-        sampled_token_ids=[[10, 11, 12], [13]],  # First request exceeds max_tokens
+        sampled_token_ids=[
+            np.array([10, 11, 12]),
+            np.array([13]),
+        ],  # First request exceeds max_tokens
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -471,7 +479,7 @@ def test_stop_via_update_from_output():
     model_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
-        sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
+        sampled_token_ids=[np.array([EOS_TOKEN_ID, 10, 11])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -612,7 +620,7 @@ def test_schedule_concurrent_batches(
     model_runner_output = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -629,7 +637,7 @@ def test_schedule_concurrent_batches(
     model_runner_output = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
         req_id_to_index={requests[1].request_id: 0},
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -666,7 +674,7 @@ def test_preempt_during_execution():
     model_runner_output0 = ModelRunnerOutput(
         req_ids=[requests[0].request_id],
         req_id_to_index={requests[0].request_id: 0},
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -683,7 +691,7 @@ def test_preempt_during_execution():
     model_runner_output1 = ModelRunnerOutput(
         req_ids=[requests[1].request_id],
         req_id_to_index={requests[1].request_id: 0},
-        sampled_token_ids=[[42]],
+        sampled_token_ids=[np.array([42])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -700,14 +708,18 @@ def test_preempt_during_execution():
 @pytest.mark.parametrize(
     "spec_tokens,output_tokens,expected",
     [
-        ([[1, 2, 3]], [[1, 2, 3, 4]], (1, 3, 3, [1, 1, 1])),  # perfect match
-        ([[1, 2, 3]], [[1, 5]], (1, 3, 1, [1, 0, 0])),  # early mismatch
-        ([[1, 2], [3]], [[1, 2, 5], [3, 4]], (2, 3, 3, [2, 1])),  # multiple sequences
-        ([[1]], [[1, 2]], (1, 1, 1, [1])),  # single token sequence
-        ([[]], [[5]], (0, 0, 0, [0])),  # empty sequence
+        ([[1, 2, 3]], [np.array([1, 2, 3, 4])], (1, 3, 3, [1, 1, 1])),  # perfect match
+        ([[1, 2, 3]], [np.array([1, 5])], (1, 3, 1, [1, 0, 0])),  # early mismatch
+        (
+            [[1, 2], [3]],
+            [np.array([1, 2, 5]), np.array([3, 4])],
+            (2, 3, 3, [2, 1]),
+        ),  # multiple sequences
+        ([[1]], [np.array([1, 2])], (1, 1, 1, [1])),  # single token sequence
+        ([[]], [np.array([5])], (0, 0, 0, [0])),  # empty sequence
         (
             [[1, 2, 3], [4, 5, 6]],
-            [[1, 2, 7], [4, 8]],
+            [np.array([1, 2, 7]), np.array([4, 8])],
             (2, 6, 3, [2, 1, 0]),
         ),  # multiple mismatches
     ],
@@ -741,7 +753,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     model_runner_output = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[0] for _ in range(len(requests))],
+        sampled_token_ids=[np.array([0]) for _ in range(len(requests))],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -924,7 +936,7 @@ def test_kv_connector_basic():
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[1000]] * len(req_ids),
+        sampled_token_ids=[np.array([1000])] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -974,7 +986,7 @@ def test_kv_connector_basic():
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[1000]] * len(req_ids),
+        sampled_token_ids=[np.array([1000])] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1044,7 +1056,7 @@ def test_external_prefix_cache_metrics():
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=[r.request_id for r in requests],
         req_id_to_index={r.request_id: i for i, r in enumerate(requests)},
-        sampled_token_ids=[[1000]] * NUM_REQUESTS,
+        sampled_token_ids=[np.array([1000])] * NUM_REQUESTS,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1109,7 +1121,7 @@ def test_kv_connector_unable_to_allocate():
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[1000]] * len(req_ids),
+        sampled_token_ids=[np.array([1000])] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1194,7 +1206,7 @@ def test_kv_connector_handles_preemption():
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[1000]] * len(req_ids),
+        sampled_token_ids=[np.array([1000])] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1287,7 +1299,7 @@ def make_output(scheduler: Scheduler):
     return ModelRunnerOutput(
         req_ids=[req.request_id for req in scheduler.running],
         req_id_to_index={req.request_id: i for i, req in enumerate(scheduler.running)},
-        sampled_token_ids=[[1000]] * len(scheduler.running),
+        sampled_token_ids=[np.array([1000])] * len(scheduler.running),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1637,7 +1649,7 @@ def test_priority_scheduling_preemption():
         req_id_to_index={
             req.request_id: i for i, req in enumerate(low_priority_requests)
         },
-        sampled_token_ids=[[100] for _ in low_priority_requests],
+        sampled_token_ids=[np.array([100]) for _ in low_priority_requests],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1706,7 +1718,7 @@ def test_priority_scheduling_no_preemption_when_space_available():
         req_id_to_index={
             req.request_id: i for i, req in enumerate(low_priority_requests)
         },
-        sampled_token_ids=[[100] for _ in low_priority_requests],
+        sampled_token_ids=[np.array([100]) for _ in low_priority_requests],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -1952,7 +1964,7 @@ def test_priority_scheduling_heap_property():
             model_output = ModelRunnerOutput(
                 req_ids=[req.req_id],
                 req_id_to_index={req.req_id: 0},
-                sampled_token_ids=[[100]],
+                sampled_token_ids=[np.array([100])],
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[],
@@ -2030,7 +2042,7 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
     model_output = ModelRunnerOutput(
         req_ids=[request_low.request_id],
         req_id_to_index={request_low.request_id: 0},
-        sampled_token_ids=[[100]],
+        sampled_token_ids=[np.array([100])],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -2061,7 +2073,7 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
-        sampled_token_ids=[[100] for _ in requests],
+        sampled_token_ids=[np.array([100]) for _ in requests],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -2087,7 +2099,7 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
-        sampled_token_ids=[[], [100]],
+        sampled_token_ids=[np.array([]), np.array([100])],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
