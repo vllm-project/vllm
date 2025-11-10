@@ -66,6 +66,7 @@ from vllm.outputs import (
     RequestOutput,
     ScoringRequestOutput,
 )
+from vllm.plugins.io_processors.interface import IOProcessorPluginType
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -358,16 +359,10 @@ class LLM:
         params,
     ):
         """Apply the input side of the custom IO processor if there is one."""
-        if self.io_processor is None:
-            if isinstance(prompts, dict) and "data" in prompts:
-                # Previously this was what we used to distinguish IOProcessor
-                # prompts with pooling, but now we just pass everything to the
-                # input processor if there is one. We warn in this situation
-                # as it's likely a mistake.
-                logger.warning(
-                    "No IOProcessor is installed, but the prompt contains"
-                    " a 'data' key; did you mean to install an IOProcessor?"
-                )
+        if (
+            self.io_processor is None
+            or self.io_processor.plugin_type == IOProcessorPluginType.OUTPUT_ONLY
+        ):
             return (prompts, lora_request)
 
         user_lora_request = lora_request
@@ -396,12 +391,6 @@ class LLM:
                 prompts, user_lora_request
             )
         return prompts, lora_request
-
-    def _apply_output_processor_plugin(self, model_outputs):
-        """Apply the output side of the custom IO processor if there is one."""
-        if self.io_processor is None:
-            return model_outputs
-        return self.io_processor.post_process(model_output=model_outputs)
 
     def _get_params(self, params):
         """Applies the custom io processor to get the sampling params.
@@ -516,7 +505,30 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
         model_outputs = self.engine_class.validate_outputs(outputs, RequestOutput)
-        return self._apply_output_processor_plugin(model_outputs)
+
+        if (
+            self.io_processor is not None
+            and self.io_processor.plugin_type != IOProcessorPluginType.INPUT_ONLY
+        ):
+            # get the post-processed model outputs
+            processed_outputs = self.io_processor.post_process(
+                model_output=model_outputs
+            )
+
+            return [
+                RequestOutput(
+                    request_id="",
+                    outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
+                    prompt_token_ids=[],
+                    prompt_logprobs=None,
+                    prompt=None,
+                    finished=True,
+                )
+            ]
+        return model_outputs
 
     def _get_modality_specific_lora_reqs(
         self,
@@ -1138,7 +1150,27 @@ class LLM:
             outputs, PoolingRequestOutput
         )
 
-        return self._apply_output_processor_plugin(model_outputs)
+        if (
+            self.io_processor is not None
+            and self.io_processor.plugin_type != IOProcessorPluginType.INPUT_ONLY
+        ):
+            # get the post-processed model outputs
+            processed_outputs = self.io_processor.post_process(
+                model_output=model_outputs
+            )
+
+            return [
+                PoolingRequestOutput[Any](
+                    request_id="",
+                    outputs=processed_outputs,
+                    num_cached_tokens=getattr(
+                        processed_outputs, "num_cached_tokens", 0
+                    ),
+                    prompt_token_ids=[],
+                    finished=True,
+                )
+            ]
+        return model_outputs
 
     def embed(
         self,
