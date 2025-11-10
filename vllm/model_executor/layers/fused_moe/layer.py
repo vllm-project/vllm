@@ -2585,6 +2585,7 @@ class FusedMoE(CustomOp):
             return self.forward_impl_chunked(
                 hidden_states, router_logits, has_separate_shared_experts
             )
+
         do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
             self.quant_method, FusedMoEModularMethod
         )
@@ -2617,6 +2618,7 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
+
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
