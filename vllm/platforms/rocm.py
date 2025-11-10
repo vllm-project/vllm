@@ -77,6 +77,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
+    "0x744c": "AMD_Radeon_RX7900XTX",
 }
 
 # Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
