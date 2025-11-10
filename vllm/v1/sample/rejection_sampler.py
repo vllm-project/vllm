@@ -200,8 +200,6 @@ class RejectionSampler(nn.Module):
             accepted_tokens.to(torch.int64),
         )
 
-
-
     @staticmethod
     def parse_output(
         output_token_ids: torch.Tensor,
