@@ -620,7 +620,6 @@ def main(args: argparse.Namespace):
         E = config.thinker_config.text_config.num_experts
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
-        shard_intermediate_size = 2 * intermediate_size // args.tp_size
         hidden_size = config.thinker_config.text_config.hidden_size
     else:
         # Support for llama4
