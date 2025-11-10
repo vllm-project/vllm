@@ -1085,3 +1085,59 @@ def test_abort_requests(runner: str, dummy_test_vectors):
 
     for request in requests:
         output_processor.abort_requests([request.request_id])
+
+
+@pytest.mark.parametrize(
+    "request_output_kind", [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY]
+)
+def test_propagate_back_engine_core_additional_outputs(
+    request_output_kind: RequestOutputKind, dummy_test_vectors
+):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+    engine_core = MockEngineCore(
+        tokens_list=dummy_test_vectors.generation_tokens,
+        additional_outputs={"foo": "bar"},
+    )
+
+    # Make N requests.
+    requests = [
+        EngineCoreRequest(
+            request_id=f"request-{idx}",
+            prompt_token_ids=prompt_tokens,
+            mm_features=None,
+            eos_token_id=None,
+            arrival_time=0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            sampling_params=SamplingParams(
+                skip_special_tokens=False,
+                spaces_between_special_tokens=False,
+                output_kind=request_output_kind,
+                stop=[],
+                include_stop_str_in_output=False,
+            ),
+            pooling_params=None,
+        )
+        for idx, prompt_tokens in enumerate(dummy_test_vectors.prompt_tokens)
+    ]
+
+    # Add requests to the detokenizer.
+    for request, prompt in zip(requests, dummy_test_vectors.prompt_strings):
+        output_processor.add_request(request, prompt)
+
+    while True:
+        # Mock output from the EngineCore.
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        # Step the Detokenizer.
+        processed_outputs = output_processor.process_outputs(outputs)
+        request_outputs = processed_outputs.request_outputs
+        requests_to_abort = processed_outputs.reqs_to_abort
+        assert len(requests_to_abort) == 0
+
+        # Update tracking.
+        for request_output in request_outputs:
+            assert request_output.additional_outputs == {"foo": "bar"}

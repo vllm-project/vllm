@@ -3,7 +3,7 @@
 
 import random
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import Any, TypeAlias
 
 import torch
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -342,6 +342,7 @@ class MockEngineCore:
         eos_token_id: int | None = None,
         stop_token_ids: list[int] | None = None,
         ignore_eos: bool = False,
+        additional_outputs: dict[str, Any] | None = None,
     ) -> None:
         self.num_requests = len(tokens_list)
         self.tokens_list = tokens_list
@@ -354,6 +355,7 @@ class MockEngineCore:
         self.eos_token_id = eos_token_id
         self.stop_token_ids = stop_token_ids
         self.ignore_eos = ignore_eos
+        self.additional_outputs = additional_outputs
 
     def get_outputs(self) -> list[EngineCoreOutput]:
         do_logprobs = self.do_logprobs
@@ -389,6 +391,7 @@ class MockEngineCore:
                     new_token_ids=[new_token_id],
                     new_logprobs=logprobs,
                     new_prompt_logprobs_tensors=prompt_logprobs,
+                    additional_outputs=self.additional_outputs,
                 )
                 if token_idx == len(token_ids) - 1:
                     output.finish_reason = FinishReason.LENGTH
