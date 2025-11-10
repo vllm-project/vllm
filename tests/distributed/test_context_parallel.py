@@ -264,7 +264,7 @@ def test_cp_generation(
         model_id == "bigcode/gpt_bigcode-santacoder"
         and torch.cuda.get_device_capability() != (9, 0)
     ):
-        pytest.skip(reason="MCP+DCP requires compute capability of 9.0")
+        pytest.skip(reason="GQA+DCP requires compute capability of 9.0")
 
     _compare_cp_with_tp(
         model_id,
