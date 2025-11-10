@@ -22,9 +22,15 @@ import argparse
 import json
 import os
 import time
+from contextlib import nullcontext
 
 import torch
 import torch.distributed as dist
+from torch.profiler import (
+    ProfilerActivity,
+    profile,
+    tensorboard_trace_handler,
+)
 
 from vllm.distributed.eplb.rebalance_execute import (
     rearrange_expert_weights_inplace,
@@ -71,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=10,
         help="Number of rearrangement timing iterations",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory to write torch.profiler traces (CPU+CUDA). "
+            "When set, timing is skipped."
+        ),
     )
     return parser.parse_args()
 
@@ -347,29 +362,57 @@ def main() -> None:
     torch.cuda.synchronize()
     dist.barrier()
 
-    # Measure multiple iterations
-    times: list[float] = []
-    for _ in range(max(1, int(args.num_iters))):
-        if rank == 0:
-            torch.cuda.synchronize()
-            t0 = time.perf_counter()
+    # Measure multiple iterations (single code path with optional profiling)
+    measure_time = args.profile_dir is None
+    activities = [ProfilerActivity.CPU]
+    if torch.cuda.is_available():
+        activities.append(ProfilerActivity.CUDA)
 
-        rearrange_expert_weights_inplace(
-            old_global_expert_indices=old_global_map,
-            new_global_expert_indices=new_global_map,
-            expert_weights=expert_weights,  # type: ignore[arg-type]
-            ep_group=ep_group,
-            is_profile=False,
-            rank_mapping=None,
+    if args.profile_dir:
+        os.makedirs(args.profile_dir, exist_ok=True)
+        out_dir = os.path.join(args.profile_dir, f"rank{rank}")
+        os.makedirs(out_dir, exist_ok=True)
+        profiler_cm = profile(
+            activities=activities,
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+            with_modules=True,
+            on_trace_ready=tensorboard_trace_handler(out_dir),
         )
+    else:
+        profiler_cm = nullcontext()
 
-        dist.barrier()
-        if rank == 0:
-            torch.cuda.synchronize()
-            t1 = time.perf_counter()
-            times.append(t1 - t0)
+    times: list[float] = []
+    with profiler_cm as prof:
+        for _ in range(max(1, int(args.num_iters))):
+            if measure_time and rank == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                t0 = time.perf_counter()
 
-    if rank == 0 and times:
+            rearrange_expert_weights_inplace(
+                old_global_expert_indices=old_global_map,
+                new_global_expert_indices=new_global_map,
+                expert_weights=expert_weights,  # type: ignore[arg-type]
+                ep_group=ep_group,
+                is_profile=False,
+                rank_mapping=None,
+            )
+
+            dist.barrier()
+            if measure_time and rank == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                times.append(t1 - t0)
+            if not measure_time:
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                # prof is a torch.profiler.profile object here
+                prof.step()  # type: ignore[attr-defined]
+
+    if measure_time and rank == 0 and times:
         mean_time = sum(times) / len(times)
         print(
             f"Rearrange timings (ms): mean={mean_time * 1000:.2f} | "
