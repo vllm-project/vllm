@@ -944,8 +944,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 "use_audio_in_video",
             },
         )
-        image_grid_thw = kwargs.get("image_grid_thw", [])
-        video_grid_thw = kwargs.get("video_grid_thw", [])
+        image_grid_thw = torch.tensor(kwargs.get("image_grid_thw", []))
+        video_grid_thw = torch.tensor(kwargs.get("video_grid_thw", []))
         second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
         audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
         use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
@@ -966,11 +966,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         tokens_per_second = getattr(
             thinker_config.vision_config, "tokens_per_second", 25
         )
-
-        if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw)
-        if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw)
 
         src_item = input_tokens
         audio_seqlens = audio_feature_lengths
