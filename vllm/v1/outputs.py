@@ -30,16 +30,23 @@ class LogprobsLists(NamedTuple):
         if self.cu_num_generated_tokens:
             start = self.cu_num_generated_tokens[start_req_idx]
             end = self.cu_num_generated_tokens[end_req_idx]
+            # Recompute cumulative array starting from 0
+            cu_num_offset = self.cu_num_generated_tokens[start_req_idx]
+            sliced_cu_num_generated_tokens = [
+                cu_num - cu_num_offset
+                for cu_num in self.cu_num_generated_tokens[
+                    start_req_idx : end_req_idx + 1
+                ]
+            ]
         else:
             start = start_req_idx
             end = end_req_idx
+            sliced_cu_num_generated_tokens = None
         return LogprobsLists(
             self.logprob_token_ids[start:end],
             self.logprobs[start:end],
             self.sampled_token_ranks[start:end],
-            self.cu_num_generated_tokens[start_req_idx:end_req_idx]
-            if self.cu_num_generated_tokens
-            else None,
+            sliced_cu_num_generated_tokens,
         )
 
 
@@ -57,6 +64,15 @@ class LogprobsTensors(NamedTuple):
             self.logprobs.tolist(),
             self.selected_token_ranks.tolist(),
             cu_num_generated_tokens,
+        )
+
+    def to_cpu_nonblocking(self) -> "LogprobsTensors":
+        if self.logprob_token_ids.device.type == "cpu":
+            return self
+        return LogprobsTensors(
+            self.logprob_token_ids.to("cpu", non_blocking=True),
+            self.logprobs.to("cpu", non_blocking=True),
+            self.selected_token_ranks.to("cpu", non_blocking=True),
         )
 
     @staticmethod

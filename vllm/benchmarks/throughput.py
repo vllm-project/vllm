@@ -21,6 +21,7 @@ from vllm.benchmarks.datasets import (
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
+    MultiModalConversationDataset,
     PrefixRepetitionRandomDataset,
     RandomDataset,
     SampleRequest,
@@ -221,6 +222,7 @@ async def run_vllm_async(
                     detokenize=not disable_detokenize,
                 )
             )
+            prompts.append(prompt)
             lora_requests.append(request.lora_request)
 
         generators = []
@@ -366,6 +368,11 @@ def get_requests(args, tokenizer):
         elif args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = InstructCoderDataset
             common_kwargs["dataset_split"] = "train"
+        elif args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = MultiModalConversationDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["enable_multimodal_chat"] = True
         elif args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS:
             dataset_cls = ConversationDataset
             common_kwargs["dataset_subset"] = args.hf_subset
@@ -455,6 +462,7 @@ def validate_args(args):
     elif args.dataset_name == "hf":
         if args.dataset_path in (
             VisionArenaDataset.SUPPORTED_DATASET_PATHS.keys()
+            | MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             | ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm-chat", (

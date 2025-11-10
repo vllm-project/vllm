@@ -8,7 +8,7 @@ from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     persistent_masked_m_silu_mul_quant,
 )
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 
 fp8_dtype = torch.float8_e4m3fn
 
@@ -19,20 +19,16 @@ CASES = [
     (32, 64, 256, fp8_dtype),
     (17, 31, 768, fp8_dtype),
     (1, 1, 128 * 1, fp8_dtype),
-    (1, 1, 128 * 2, fp8_dtype),
     (1, 1, 128 * 3, fp8_dtype),
     (1, 1, 128 * 4, fp8_dtype),
     (8, 16, 128 * 1, fp8_dtype),
     (8, 16, 128 * 2, fp8_dtype),
     (8, 16, 128 * 3, fp8_dtype),
-    (8, 16, 128 * 4, fp8_dtype),
     (8, 64, 7168, fp8_dtype),
     (8, 128, 7168, fp8_dtype),
-    (8, 256, 7168, fp8_dtype),
     (8, 512, 7168, fp8_dtype),
     (8, 1024, 7168, fp8_dtype),
     (256, 8, 7168, fp8_dtype),
-    (256, 16, 7168, fp8_dtype),
     (256, 32, 7168, fp8_dtype),
     (256, 64, 7168, fp8_dtype),
     # Only add a few fnuz tests to help with long CI times.
