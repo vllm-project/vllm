@@ -9,7 +9,7 @@
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
-/vllm/multimodal @DarkLight1337 @ywang96 @NickLucche
+/vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson
 /vllm/lora @jeejeelee
 /vllm/reasoning @aarnphm @chaunceyjiang
@@ -105,11 +105,21 @@ mkdocs.yaml @hmellor
 /vllm/attention/ops/triton_unified_attention.py @tdoublep
 
 # ROCm related: specify owner with write access to notify AMD folks for careful code review
-/docker/Dockerfile.rocm* @gshtras
-/vllm/v1/attention/backends/rocm*.py @gshtras
-/vllm/v1/attention/backends/mla/rocm*.py @gshtras
-/vllm/attention/ops/rocm*.py @gshtras
-/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras
+/vllm/**/*rocm* @tjtanaa
+/docker/Dockerfile.rocm* @gshtras @tjtanaa
+/vllm/v1/attention/backends/rocm*.py @gshtras @tjtanaa
+/vllm/v1/attention/backends/mla/rocm*.py @gshtras @tjtanaa
+/vllm/attention/ops/rocm*.py @gshtras @tjtanaa
+/vllm/model_executor/layers/fused_moe/rocm*.py @gshtras @tjtanaa
+/csrc/rocm @gshtras @tjtanaa
+/requirements/*rocm* @tjtanaa
+/tests/**/*rocm* @tjtanaa
+/docs/**/*rocm* @tjtanaa
+/vllm/**/*quark* @tjtanaa
+/tests/**/*quark* @tjtanaa
+/docs/**/*quark* @tjtanaa
+/vllm/**/*aiter* @tjtanaa
+/tests/**/*aiter* @tjtanaa
 
 # TPU
 /vllm/v1/worker/tpu* @NickLucche
