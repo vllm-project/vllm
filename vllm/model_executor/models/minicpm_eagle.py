@@ -332,10 +332,8 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             start_layer=target_layer_num,
         )
 
-        unpadded_vocab_size = config.vocab_size
-
         self.lm_head = ParallelLMHead(
-            unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
@@ -344,7 +342,7 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.scale_width = self.config.hidden_size / self.config.dim_model_base
 
-        self.logits_processor = LogitsProcessor(unpadded_vocab_size, config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )

@@ -528,7 +528,6 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.logits_processor = LogitsProcessor(
             config.vocab_size,
-            config.vocab_size,
             scale=1 / self.config.logits_scaling,
         )
 

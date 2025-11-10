@@ -555,9 +555,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            config.vocab_size, self.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object

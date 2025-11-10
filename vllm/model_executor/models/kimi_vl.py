@@ -359,9 +359,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             self.language_model.make_empty_intermediate_tensors
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            config.vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
     def _parse_and_validate_image_input(
