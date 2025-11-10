@@ -520,7 +520,6 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
 
         if get_pp_group().is_last_rank:
-            (config.vocab_size,) = config.vocab_size
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
                 config.hidden_size,

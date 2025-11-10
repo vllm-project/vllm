@@ -346,7 +346,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=sub_vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        (config.vocab_size,) = config.text_config.vocab_size
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,

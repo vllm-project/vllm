@@ -676,7 +676,6 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         self.CONCAT_FFN = True
 
-        (config.vocab_size,) = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         self.model = MiniMaxText01Model(

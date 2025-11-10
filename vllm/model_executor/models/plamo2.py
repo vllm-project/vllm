@@ -824,10 +824,8 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.vocab_size = self.config.vocab_size
-        (config.vocab_size,) = self.config.vocab_size
-        num_embeddings = ((self.vocab_size + 15) // 16) * 16
         self.lm_head = ParallelLMHead(
-            num_embeddings,
+            self.vocab_size,
             self.config.hidden_size,
             prefix=f"{prefix}.lm_head",
         )

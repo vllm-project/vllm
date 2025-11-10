@@ -547,7 +547,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.pad_token_id = (
             self.config.pad_token_id if self.config.pad_token_id is not None else -1
         )
-        (config.vocab_size,) = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.text_config.hidden_size,

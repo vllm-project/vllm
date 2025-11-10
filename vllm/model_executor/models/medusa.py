@@ -69,11 +69,10 @@ class Medusa(nn.Module):
         )
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size
-        (config.vocab_size,) = self.truncated_vocab_size
 
         if getattr(config, "original_lm_head", False):
             self.lm_head = ParallelLMHead(
-                config.vocab_size,
+                self.truncated_vocab_size,
                 config.hidden_size,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
