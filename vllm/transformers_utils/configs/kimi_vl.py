@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/moonshotai/Kimi-VL-A3B-Instruct/blob/main/configuration_kimi_vl.py
 
-from transformers import DeepseekV2Config
+from transformers import DeepseekV2Config as HFDeepseekV2Config
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.transformers_utils.configs.moonvit import MoonViTConfig
 
+class DeepseekV2Config(HFDeepseekV2Config):
+    use_mla: bool = True
 
 class KimiVLConfig(PretrainedConfig):
     model_type = "kimi_vl"
