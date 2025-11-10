@@ -889,7 +889,11 @@ class VllmConfig:
                 # We add 1 because the bounds checks in the compiler are
                 # exclusive and we want to include the max_token_num in the
                 # compile range
-                computed_compile_ranges_split_points.append(max_token_num + 1)
+                if (
+                    max_num_batched_tokens is not None
+                    and max_token_num < max_num_batched_tokens
+                ):
+                    computed_compile_ranges_split_points.append(max_token_num + 1)
 
         if compilation_config.compile_ranges_split_points is not None:
             for x in compilation_config.compile_ranges_split_points:

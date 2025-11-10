@@ -14,7 +14,7 @@ import torch.distributed
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
@@ -398,12 +398,27 @@ class Worker(WorkerBase):
         # but users still want to compile for better performance,
         # e.g. for the max-num-batched token size in chunked prefill.
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
-        if not self.model_config.enforce_eager:
+
+        if (
+            not self.model_config.enforce_eager
+            or self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+        ):
             warmup_sizes = [
                 x
                 for x in warmup_sizes
                 if x not in self.vllm_config.compilation_config.cudagraph_capture_sizes
             ]
+        compile_ranges = self.vllm_config.compilation_config.get_compile_ranges()
+
+        # For each compile_range, if none of the batch sizes
+        # in warmup_sizes or cudagraph_capture_sizes are in the range,
+        # add the start of the range to ensure compilation/warmup.
+        all_sizes = set(self.vllm_config.compilation_config.cudagraph_capture_sizes)
+        all_sizes.update(warmup_sizes)
+        for compile_range in compile_ranges:
+            if not any(compile_range.contains(x) for x in all_sizes):
+                warmup_sizes.append(compile_range.start)
+
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)

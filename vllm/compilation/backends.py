@@ -22,6 +22,7 @@ from vllm.compilation.partition_rules import (
     resolve_defined_ops,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
+from vllm.config.utils import Range
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -83,7 +84,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: dict[tuple[tuple[int, int] | None, int, str], Any] = dict()
+        self.cache: dict[tuple[Range | None, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -92,7 +93,7 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, compile_range: tuple[int, int] | None = None):
+    def compile_context(self, compile_range: Range | None = None):
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
@@ -152,7 +153,7 @@ class CompilerManager:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
     ) -> Callable | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
@@ -187,7 +188,7 @@ class CompilerManager:
         compilation_config: CompilationConfig,
         graph_index: int = 0,
         num_graphs: int = 1,
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -206,6 +207,7 @@ class CompilerManager:
                 # there can be multiple graphs due to piecewise compilation.
                 now = time.time()
                 elapsed = now - compilation_start_time
+                compilation_config.compilation_time += elapsed
                 if compile_range is None:
                     logger.info(
                         "Directly load the compiled graph(s) for dynamic shape "
@@ -231,7 +233,7 @@ class CompilerManager:
             if compile_range is None:
                 maybe_key += "dynamic_shape"
             else:
-                maybe_key += f"{compile_range[0]}_{compile_range[1]}"
+                maybe_key += f"{compile_range.start}_{compile_range.end}"
             maybe_key += f"_subgraph_{graph_index}"
         with self.compile_context(compile_range):
             compiled_graph, handle = self.compiler.compile(

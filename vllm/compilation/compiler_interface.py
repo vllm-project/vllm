@@ -16,6 +16,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
+from vllm.config.utils import Range
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
@@ -63,7 +64,7 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         """
@@ -99,7 +100,7 @@ class CompilerInterface:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
     ) -> Callable:
         """
         Load the compiled function from the handle.
@@ -213,7 +214,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         compilation_counter.num_inductor_compiles += 1
@@ -223,8 +224,8 @@ class InductorStandaloneAdaptor(CompilerInterface):
         set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
-        if isinstance(compile_range, tuple):
-            if compile_range[0] == compile_range[1]:
+        if compile_range is not None:
+            if compile_range.is_single_size():
                 dynamic_shapes = "from_example_inputs"
             else:
                 dynamic_shapes = "from_graph"
@@ -254,7 +255,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
     ) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
@@ -318,7 +319,7 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         compilation_counter.num_inductor_compiles += 1
@@ -515,7 +516,7 @@ class InductorAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
     ) -> Callable:
         assert isinstance(handle, tuple)
         assert isinstance(handle[0], str)
@@ -612,7 +613,7 @@ class InductorAdaptor(CompilerInterface):
 
 
 def set_inductor_config(config, compile_range):
-    if isinstance(compile_range, tuple) and compile_range[0] == compile_range[1]:
+    if compile_range is not None and compile_range.is_single_size():
         # for a specific batch size, tuning triton kernel parameters
         # can be beneficial
         config["max_autotune"] = envs.VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE
@@ -633,7 +634,7 @@ class EagerAdaptor(CompilerInterface):
         graph: fx.GraphModule,
         example_inputs: list[Any],
         compiler_config: dict[str, Any],
-        compile_range: tuple[int, int] | None = None,
+        compile_range: Range | None = None,
         key: str | None = None,
     ) -> tuple[Callable | None, Any | None]:
         compilation_counter.num_eager_compiles += 1

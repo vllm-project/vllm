@@ -10,6 +10,7 @@ import torch.fx as fx
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
+from vllm.config.compilation import Range
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -17,7 +18,7 @@ logger = init_logger(__name__)
 
 @dataclasses.dataclass
 class RangeEntry:
-    compile_range: tuple[int, int]
+    compile_range: Range
     compiled: bool = False
     runnable: Callable = None  # type: ignore
 
@@ -61,12 +62,6 @@ class PiecewiseBackend:
         log_string = f"PiecewiseBackend: compile_sizes: {self.compile_sizes}"
         logger.debug_once(log_string)
 
-        self.is_in_range = (
-            lambda x, range: range[0] <= x < range[1]
-            if range[0] < range[1]
-            else x == range[0]
-        )
-
         self.first_run_finished = False
 
         self.sym_shape_indices = sym_shape_indices
@@ -75,15 +70,15 @@ class PiecewiseBackend:
         # self.concrete_size_entries: dict[int, RangeEntry] = {}
 
         # the entries for ranges that we need to either
-        self.range_entries: dict[tuple[int, int], RangeEntry] = {}
+        self.range_entries: dict[Range, RangeEntry] = {}
 
         # to_be_compiled_ranges tracks the remaining ranges to compile,
         # and updates during the compilation process, so we need to copy it
-        self.to_be_compiled_ranges: set[tuple[int, int]] = set(self.compile_ranges)
+        self.to_be_compiled_ranges: set[Range] = set(self.compile_ranges)
 
         # We only keep compilation management inside this class directly.
         for size in self.compile_sizes:
-            range = (size, size)
+            range = Range(start=size, end=size)
             self.range_entries[range] = RangeEntry(
                 compile_range=range,
             )
@@ -122,7 +117,6 @@ class PiecewiseBackend:
         return fake_example_inputs
 
     def _maybe_compile_for_range_entry(self, range_entry: RangeEntry, args) -> Any:
-        is_compile_size = lambda range: range[0] == range[1]
         if not range_entry.compiled:
             range_entry.compiled = True
             self.to_be_compiled_ranges.remove(range_entry.compile_range)
@@ -131,7 +125,7 @@ class PiecewiseBackend:
             # fakify for range, real args for concrete size
             args = (
                 self.fakify_args(args)
-                if not is_compile_size(range_entry.compile_range)
+                if not range_entry.compile_range.is_single_size()
                 else args
             )
             range_entry.runnable = self.vllm_backend.compiler_manager.compile(
@@ -158,13 +152,18 @@ class PiecewiseBackend:
             return range_entry.runnable(*args)
         runtime_shape = args[self.sym_shape_indices[0]]
 
+        # First we try to find the range entry for the concrete compile size
+        # If not found, we search for the range entry
+        # that contains the runtime shape.
         range_found = False
         if runtime_shape in self.compile_sizes:
-            range_entry = self.range_entries[(runtime_shape, runtime_shape)]
+            range_entry = self.range_entries[
+                Range(start=runtime_shape, end=runtime_shape)
+            ]
             range_found = True
         else:
             for range in self.compile_ranges:
-                if self.is_in_range(runtime_shape, range):
+                if range.contains(runtime_shape):
                     range_entry = self.range_entries[range]
                     range_found = True
                     break

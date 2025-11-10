@@ -14,7 +14,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import config
+from vllm.config.utils import Range, config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -945,7 +945,7 @@ class CompilationConfig:
                     op,
                 )
 
-    def get_compile_ranges(self) -> list[tuple[int, int]]:
+    def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""
         if self.compile_ranges_split_points is None:
             return []
@@ -953,7 +953,7 @@ class CompilationConfig:
         compile_ranges = []
         for i, s in enumerate(split_points):
             if i == 0:
-                compile_ranges.append((1, s))
+                compile_ranges.append(Range(start=1, end=s))
             else:
-                compile_ranges.append((split_points[i - 1], s))
+                compile_ranges.append(Range(start=split_points[i - 1], end=s))
         return compile_ranges

@@ -127,6 +127,8 @@ class PostGradPassManager(CustomGraphPass):
         for pass_ in self.passes:
             state["passes"].append(pass_.uuid())
         state["passes"].append(self.fix_functionalization.uuid())
-        state["compile_range"] = get_pass_context().compile_range
+        compile_range = get_pass_context().compile_range
+        if compile_range is not None:
+            state["compile_range"] = str(compile_range)
 
         return InductorPass.hash_dict(state)

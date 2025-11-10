@@ -3,12 +3,11 @@
 import torch
 from torch import fx as fx
 from torch import nn
-from torch.library import Library
 
+import tests.compile.silly_attention  # noqa
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.inductor_pass import (
-    CustomGraphPass,
     InductorPass,
     get_pass_context,
 )
@@ -18,10 +17,8 @@ from vllm.config import (
 )
 from vllm.config.compilation import CompilationConfig, CompilationMode
 from vllm.config.scheduler import SchedulerConfig
+from vllm.config.utils import Range
 from vllm.forward_context import set_forward_context
-
-# create a library to hold the custom op
-silly_lib = Library("silly", "FRAGMENT")  # noqa
 
 BATCH_SIZE = 64
 MLP_SIZE = 128
@@ -49,24 +46,34 @@ def run_model(vllm_config: VllmConfig, model: nn.Module, batch_sizes: list[int])
             model(torch.randn(batch_size, MLP_SIZE).cuda())
 
 
-class PostGradPassManagerCheckRanges(CustomGraphPass):
-    def __init__(self, ranges: list[tuple[int, int]]):
+class PostGradPassManagerCheckRanges(InductorPass):
+    def __init__(self, ranges: list[Range]):
         self.ranges = ranges
+        self.num_calls = 0
 
     def __call__(self, graph: fx.Graph):
         compile_range = get_pass_context().compile_range
         assert compile_range in self.ranges, (
             f"Compile range {compile_range} not in {self.ranges}"
         )
+        self.num_calls += 1
 
     def uuid(self) -> str:
         state = {
-            "ranges": self.ranges,
+            "ranges": [str(range) for range in self.ranges],
+            "current_compile_range": str(get_pass_context().compile_range),
         }
         return InductorPass.hash_dict(state)
 
 
 def test_compile_ranges():
+    post_grad_pass_manager = PostGradPassManagerCheckRanges(
+        [
+            Range(start=1, end=8),
+            Range(start=8, end=32),
+            Range(start=32, end=8193),
+        ]
+    )
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -74,22 +81,21 @@ def test_compile_ranges():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             compile_ranges_split_points=[8, 32],
+            inductor_compile_config={
+                "post_grad_custom_post_pass": post_grad_pass_manager
+            },
         ),
-        inductor_compile_config={
-            "post_grad_custom_post_pass": PostGradPassManagerCheckRanges(
-                [(1, 8), (8, 32), (32, 2049)]
-            )
-        },
     )
 
     with set_current_vllm_config(vllm_config):
         model = TestModel(vllm_config=vllm_config, prefix="").eval().cuda()
-    batch_sizes = [1, 16, 48]
-    # A has support_torch_compile
-    with compilation_counter.expect(
-        num_graphs_seen=1,
-        num_piecewise_graphs_seen=1,
-        num_backend_compilations=3,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-    ):
-        run_model(vllm_config, model, batch_sizes)
+        batch_sizes = [1, 16, 48]
+        # A has support_torch_compile
+        with compilation_counter.expect(
+            num_graphs_seen=1,
+            num_piecewise_graphs_seen=1,
+            num_backend_compilations=3,
+            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        ):
+            run_model(vllm_config, model, batch_sizes)
+        assert post_grad_pass_manager.num_calls == 3
