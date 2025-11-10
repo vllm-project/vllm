@@ -515,7 +515,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             config, "output_multiplier_scale", DEFAULT_OUTPUT_MULTIPLIER_SCALE
         )
         self.logits_processor = LogitsProcessor(
-            config.vocab_size, config.vocab_size, self.output_multiplier_scale
+            config.vocab_size, scale=self.output_multiplier_scale
         )
 
         self.make_empty_intermediate_tensors = (

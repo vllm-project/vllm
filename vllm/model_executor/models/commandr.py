@@ -427,7 +427,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
 
         self.quant_config = quant_config
         self.logits_processor = LogitsProcessor(
-            config.vocab_size, config.vocab_size, scale=config.logit_scale
+            config.vocab_size, scale=config.logit_scale
         )
         self.model = CohereModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")

@@ -411,9 +411,7 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                 config.hidden_size,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
-            self.logits_processor = LogitsProcessor(
-                config.vocab_size, config.vocab_size
-            )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
 
