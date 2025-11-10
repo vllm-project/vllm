@@ -1607,6 +1607,7 @@ def compute_hash() -> str:
         "VLLM_USE_FBGEMM",
         "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE",
         "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL",
+        "VLLM_ALLREDUCE_USE_SYMM_MEM",
     ]
     for key in environment_variables_to_hash:
         # if this goes out of sync with environment_variables,
