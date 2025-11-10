@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -312,8 +313,6 @@ class W8A8BlockFp8LinearOp:
         weight_scale: torch.Tensor,
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from vllm._aiter_ops import rocm_aiter_ops
-
         assert self.act_quant_group_shape == GroupShape(1, 128)
 
         n, k = weight.shape
