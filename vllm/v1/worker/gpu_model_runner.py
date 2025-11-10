@@ -2682,8 +2682,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         scheduler_output, self.vllm_config
                     )
 
-            # should_run_drafter was already synchronized in coordinate_batch_across_dp
-            # during _prepare_inputs (for has_tokens) or above (for 0-token DP ranks)
             use_padded_batch_for_eagle = (
                 self.speculative_config is not None
                 and self.speculative_config.use_eagle()
