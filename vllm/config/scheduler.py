@@ -4,7 +4,7 @@
 import hashlib
 from collections.abc import Callable
 from dataclasses import InitVar
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
@@ -17,6 +17,10 @@ from vllm.utils import (
     MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
     POOLING_MODEL_MAX_NUM_BATCHED_TOKENS,
 )
+from vllm.utils.import_utils import resolve_obj_by_qualname
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.interface import SchedulerInterface
 
 logger = init_logger(__name__)
 
@@ -125,7 +129,7 @@ class SchedulerConfig:
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
-    scheduler_cls: str | type[object] = "vllm.v1.core.sched.scheduler.Scheduler"
+    scheduler_cls: str | type[object] = Field(default=None)
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
@@ -137,10 +141,10 @@ class SchedulerConfig:
     """
 
     async_scheduling: bool = False
-    """EXPERIMENTAL: If set to True, perform async scheduling. This may help
-    reduce the CPU overheads, leading to better latency and throughput. However,
-    async scheduling is currently not supported with some features such as
-    structured outputs, speculative decoding, and pipeline parallelism.
+    """If set to True, perform async scheduling. This helps to avoid gaps in
+    GPU utilization, leading to better latency and throughput.
+    Async scheduling is currently not supported with some features such as
+    speculative decoding and pipeline parallelism.
     """
 
     enable_schedule_capacity_profiling: bool = False
@@ -148,6 +152,28 @@ class SchedulerConfig:
     This tracks both the token demand (from running and waiting requests) and
     the memory capacity limit (based on available KV cache memory). Statistics
     will be logged at shutdown showing the distribution of bottlenecks."""
+
+    def get_scheduler_cls(self) -> type["SchedulerInterface"]:
+        if self.scheduler_cls is None:
+            if self.async_scheduling:
+                from vllm.v1.core.sched.async_scheduler import AsyncScheduler
+
+                return AsyncScheduler
+            from vllm.v1.core.sched.scheduler import Scheduler
+
+            return Scheduler
+
+        # This warning can be removed once the Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that
+        # implement it
+        logger.warning_once(
+            "Using custom scheduler class %s. This scheduler interface is "
+            "not public and compatibility may not be maintained.",
+            self.scheduler_cls,
+        )
+        if not isinstance(self.scheduler_cls, str):
+            return cast(type["SchedulerInterface"], self.scheduler_cls)
+        return resolve_obj_by_qualname(self.scheduler_cls)
 
     def compute_hash(self) -> str:
         """
@@ -173,6 +199,8 @@ class SchedulerConfig:
         "max_num_seqs",
         "max_model_len",
         "enable_chunked_prefill",
+        "scheduler_cls",
+        "async_scheduling",
         mode="wrap",
     )
     @classmethod
@@ -256,9 +284,6 @@ class SchedulerConfig:
                 self.max_long_partial_prefills,
                 self.long_prefill_token_threshold,
             )
-
-        if self.async_scheduling:
-            self.scheduler_cls = "vllm.v1.core.sched.async_scheduler.AsyncScheduler"
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
