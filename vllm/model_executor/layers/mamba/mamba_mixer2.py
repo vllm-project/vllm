@@ -426,6 +426,9 @@ class MambaMixer2(MambaBase, CustomOp):
         # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
         # and `set_weight_attrs` doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
+        self.conv_weights = self.conv1d.weight.view(
+            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
+        )
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
@@ -457,6 +460,17 @@ class MambaMixer2(MambaBase, CustomOp):
 
         self.norm = Mixer2RMSNormGated(
             intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
+        )
+
+        # - get hidden_states, B and C after depthwise convolution.
+        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
+            hidden_states_B_C,
+            [
+                self.intermediate_size // self.tp_size,
+                self.groups_ssm_state_size // self.tp_size,
+                self.groups_ssm_state_size // self.tp_size,
+            ],
+            dim=-1,
         )
 
         compilation_config = get_current_vllm_config().compilation_config
@@ -559,27 +573,12 @@ class MambaMixer2(MambaBase, CustomOp):
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
-        conv_weights = self.conv1d.weight.view(
-            self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
-
-        # - get hidden_states, B and C after depthwise convolution.
-        split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
-            hidden_states_B_C,
-            [
-                self.intermediate_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-                self.groups_ssm_state_size // self.tp_size,
-            ],
-            dim=-1,
-        )
-
         if attn_metadata is None:
             # profile run
             hidden_states_B_C = (
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()
-            hidden_states, _B, _C = split_hidden_states_B_C_fn(hidden_states_B_C)
+            hidden_states, _B, _C = self.split_hidden_states_B_C_fn(hidden_states_B_C)
             return hidden_states
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
@@ -665,7 +664,7 @@ class MambaMixer2(MambaBase, CustomOp):
             )  # this is the form that causal-conv see
             hidden_states_B_C_p = causal_conv1d_fn(
                 x,
-                conv_weights,
+                self.conv_weights,
                 self.conv1d.bias,
                 activation=self.activation,
                 conv_states=conv_state,
@@ -680,7 +679,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 query_start_loc=query_start_loc_p,
             ).transpose(0, 1)[:num_prefill_tokens]
 
-            hidden_states_p, B_p, C_p = split_hidden_states_B_C_fn(hidden_states_B_C_p)
+            hidden_states_p, B_p, C_p = self.split_hidden_states_B_C_fn(
+                hidden_states_B_C_p
+            )
 
             # 3. State Space Model sequence transformation
             initial_states = None
@@ -822,7 +823,7 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states_B_C_d = causal_conv1d_update(
                 hidden_states_B_C_d,
                 conv_state,
-                conv_weights,
+                self.conv_weights,
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
@@ -830,7 +831,9 @@ class MambaMixer2(MambaBase, CustomOp):
                 initial_state_idx=block_idx_last_computed_token_d,
             )
 
-            hidden_states_d, B_d, C_d = split_hidden_states_B_C_fn(hidden_states_B_C_d)
+            hidden_states_d, B_d, C_d = self.split_hidden_states_B_C_fn(
+                hidden_states_B_C_d
+            )
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
