@@ -18,7 +18,6 @@ from transformers import (
     SiglipVisionConfig,
 )
 
-from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.config import VllmConfig
@@ -382,7 +381,6 @@ class SiglipAttention(nn.Module):
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
-        attn_type: AttentionType | None = None,
     ) -> None:
         super().__init__()
 
@@ -417,23 +415,12 @@ class SiglipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        if attn_cls == EncoderOnlyAttention:
-            self.attn = EncoderOnlyAttention(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-                attn_type=attn_type,
-            )
-        elif attn_cls == MultiHeadAttention:
-            self.attn = MultiHeadAttention(
-                self.num_heads_per_partition,
-                self.head_dim,
-                self.scale,
-                prefix=f"{prefix}.attn",
-            )
-        else:
-            raise ValueError(f"Invalid attention class: {attn_cls}")
+        self.attn = attn_cls(
+            self.num_heads_per_partition,
+            self.head_dim,
+            self.scale,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
@@ -496,7 +483,6 @@ class SiglipEncoderLayer(nn.Module):
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
-        attn_type: AttentionType | None = None,
     ) -> None:
         super().__init__()
 
@@ -507,7 +493,6 @@ class SiglipEncoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attn_cls=attn_cls,
-            attn_type=attn_type,
         )
         self.layer_norm1 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
@@ -544,7 +529,6 @@ class SiglipEncoder(nn.Module):
         *,
         prefix: str = "",
         attn_cls: type[EncoderOnlyAttention] | type[MultiHeadAttention],
-        attn_type: AttentionType | None = None,
     ) -> None:
         super().__init__()
 
@@ -562,7 +546,6 @@ class SiglipEncoder(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                     attn_cls=attn_cls,
-                    attn_type=attn_type,
                 )
                 for layer_idx in range(num_hidden_layers)
             ]
@@ -607,7 +590,6 @@ class SiglipTextTransformer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.encoder",
             attn_cls=EncoderOnlyAttention,
-            attn_type=AttentionType.ENCODER_ONLY,
         )
 
         self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -1079,15 +1061,21 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             ]
         )
 
-        # Flip each sequence individually
-        flipped_features = []
-        for i in range(len(boundary_indices) - 1):
-            start_idx = boundary_indices[i]
-            end_idx = boundary_indices[i + 1]
-            sequence = features[start_idx:end_idx]
-            flipped_features.append(torch.flip(sequence, [0]))
+        # For each sequence [start, end), position i flips to: start + end - 1 - i
+        lengths = boundary_indices[1:] - boundary_indices[:-1]
+        starts = boundary_indices[:-1]
+        ends = boundary_indices[1:]
 
-        return torch.cat(flipped_features, dim=0)
+        # Assign sequence ID to each element
+        sequence_ids = torch.arange(
+            len(lengths), device=features.device
+        ).repeat_interleave(lengths)
+
+        # Calculate flipped indices for all positions at once
+        current_positions = torch.arange(len(features), device=features.device)
+        flip_indices = starts[sequence_ids] + ends[sequence_ids] - 1 - current_positions
+
+        return features[flip_indices]
 
     def get_image_features(
         self,
