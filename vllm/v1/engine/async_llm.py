@@ -508,6 +508,8 @@ class AsyncLLM(EngineClient):
                             processed_outputs.reqs_to_abort
                         )
 
+                    output_processor.update_scheduler_stats(outputs.scheduler_stats)
+
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in
                     # background thread once Prometheus overhead is non-trivial.

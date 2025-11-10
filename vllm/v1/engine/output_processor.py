@@ -22,7 +22,12 @@ from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.metrics.stats import IterationStats, LoRARequestStates, RequestStateStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    LoRARequestStates,
+    RequestStateStats,
+    SchedulerStats,
+)
 
 
 class RequestOutputCollector:
@@ -310,7 +315,7 @@ class OutputProcessor:
         self.tokenizer = tokenizer
         self.request_states: dict[str, RequestState] = {}
         self.parent_requests: dict[str, ParentRequest] = {}
-        self.lora_states = LoRARequestStates()
+        self.lora_states = LoRARequestStates(log_stats)
         self.tracer: Tracer | None = None
 
     def get_num_unfinished_requests(self):
@@ -334,7 +339,7 @@ class OutputProcessor:
         for request_id in request_ids:
             req_state = self.request_states.pop(request_id, None)
             if req_state is not None:
-                self.lora_states.abort_request(req_state)
+                self.lora_states.request_finished(request_id, req_state.lora_name)
                 request_ids_to_abort.append(request_id)
                 # Produce final abort output.
                 if req_state.queue is not None and (
@@ -382,7 +387,6 @@ class OutputProcessor:
             log_stats=self.log_stats,
         )
         self.request_states[request_id] = req_state
-        self.lora_states.add_request(req_state)
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
 
@@ -484,12 +488,14 @@ class OutputProcessor:
                 )
                 if self.tracer:
                     self.do_tracing(engine_core_output, req_state, iteration_stats)
-        self.lora_states.update_iteration_stats(iteration_stats)
 
         return OutputProcessorOutput(
             request_outputs=request_outputs,
             reqs_to_abort=reqs_to_abort,
         )
+
+    def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
+        self.lora_states.update_scheduler_stats(scheduler_stats)
 
     def do_tracing(
         self,
@@ -564,8 +570,6 @@ class OutputProcessor:
         if iteration_stats is None:
             return
 
-        lora_stats = self.lora_states.get_stats(req_state)
-
         assert engine_core_timestamp is not None
         assert req_state.stats is not None
         iteration_stats.update_from_output(
@@ -574,7 +578,8 @@ class OutputProcessor:
             req_state.is_prefilling,
             req_state.prompt_len,
             req_state.stats,
-            lora_stats,
+            self.lora_states,
+            req_state.lora_name,
         )
 
     def _update_stats_from_finished(
@@ -596,7 +601,7 @@ class OutputProcessor:
             max_tokens_param=req_state.max_tokens_param,
             req_stats=req_state.stats,
         )
-        self.lora_states.finish_request(req_state)
+        self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens
