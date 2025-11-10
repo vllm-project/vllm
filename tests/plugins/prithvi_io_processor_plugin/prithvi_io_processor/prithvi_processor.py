@@ -248,7 +248,9 @@ class PrithviMultimodalDataProcessor(IOProcessor):
         self.requests_cache: dict[str, dict[str, Any]] = {}
         self.indices = DEFAULT_INPUT_INDICES
 
-    def parse_request(self, request: Any) -> IOProcessorInput:
+    def parse_request(
+        self, request: Any, has_preprocess_partial: bool = False
+    ) -> IOProcessorInput:
         if type(request) is dict:
             image_prompt = ImagePrompt(**request)
             return image_prompt
