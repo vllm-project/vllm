@@ -540,7 +540,7 @@ class MambaMixer2(MambaBase, CustomOp):
 
         return output
 
-    def forward_cuda(
+    def conv_ssm_forward(
         self,
         hidden_states_B_C: torch.Tensor,
         dt: torch.Tensor,
@@ -909,7 +909,7 @@ def mamba_mixer2(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states_B_C=hidden_states_B_C, dt=dt, output=output)
+    self.conv_ssm_forward(hidden_states_B_C=hidden_states_B_C, dt=dt, output=output)
 
 
 def mamba_mixer2_fake(
