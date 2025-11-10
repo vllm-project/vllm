@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
+from functools import partial
 from typing import Final
 
 import jinja2
@@ -178,6 +179,9 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
         try:
             lora_request = self._maybe_get_adapters(
                 request, supports_default_mm_loras=True
@@ -218,47 +222,40 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 tool_dicts = [tool.model_dump() for tool in request.tools]
 
-            if not self.use_harmony:
-                # Common case.
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
+            preprocess_partial = partial(
+                self._preprocess_chat_cmpl_request,
+                tokenizer=tokenizer,
+                tool_dicts=tool_dicts,
+                tool_parser=tool_parser,
+            )
+            if self.io_processor is not None:
                 (
                     conversation,
                     request_prompts,
                     engine_prompts,
-                ) = await self._preprocess_chat(
+                ) = await self._apply_input_processor_plugin(
                     request,
-                    tokenizer,
-                    request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    tool_dicts=tool_dicts,
-                    documents=request.documents,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    tool_parser=tool_parser,
-                    add_special_tokens=request.add_special_tokens,
+                    request_id,
+                    lora_request,
+                    preprocess_partial,
+                    self.engine_client,
+                    self.processor,
+                )
+                # Patch the LoRA request if needed based on new engine prompts
+                lora_request = self.io_processor.get_modified_lora_request(
+                    engine_prompts,
+                    lora_request,
                 )
             else:
-                # For GPT-OSS.
                 (
                     conversation,
                     request_prompts,
                     engine_prompts,
-                ) = self._make_request_with_harmony(request)
+                ) = await preprocess_partial(request)
+
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(f"{e} {e.__cause__}")
-
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -282,14 +279,24 @@ class OpenAIServingChat(OpenAIServing):
 
                 sampling_params: SamplingParams | BeamSearchParams
                 if request.use_beam_search:
+                    if self.io_processor is not None:
+                        logger.warning(
+                            "IO Processor Plugins do not currently support beam search"
+                        )
                     sampling_params = request.to_beam_search_params(
                         max_tokens, self.default_sampling_params
                     )
-                else:
-                    sampling_params = request.to_sampling_params(
-                        max_tokens,
-                        self.model_config.logits_processor_pattern,
-                        self.default_sampling_params,
+
+                # TODO - align pooling behavior, since this was not previously passed
+                sampling_params = request.to_sampling_params(
+                    max_tokens,
+                    self.model_config.logits_processor_pattern,
+                    self.default_sampling_params,
+                )
+
+                if self.io_processor is not None:
+                    sampling_params = self.io_processor.validate_or_generate_params(
+                        request, sampling_params
                     )
 
                 self._log_inputs(
@@ -322,6 +329,7 @@ class OpenAIServingChat(OpenAIServing):
                         priority=request.priority,
                     )
 
+                    # NOTE: the engine client handles the io processor piece here
                     generator = self.engine_client.generate(
                         engine_request,
                         sampling_params,
@@ -341,6 +349,12 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
+        # FIXME - maybe make IO processors optional for input or output
+        # if self.io_processor is not None:
+        #     if request.stream:
+        #         logger.warning("IO Processor Plugins do not support streaming")
+        #     return await self._apply_output_processor_plugin(
+        #       result_generator, request_id)
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
@@ -371,6 +385,45 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
+
+    async def _preprocess_chat_cmpl_request(
+        self, request, tokenizer, tool_dicts, tool_parser
+    ):
+        if not self.use_harmony:
+            # Common case.
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
+            (
+                conversation,
+                request_prompts,
+                engine_prompts,
+            ) = await self._preprocess_chat(
+                request,
+                tokenizer,
+                request.messages,
+                chat_template=request.chat_template or self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                add_generation_prompt=request.add_generation_prompt,
+                continue_final_message=request.continue_final_message,
+                tool_dicts=tool_dicts,
+                documents=request.documents,
+                chat_template_kwargs=request.chat_template_kwargs,
+                tool_parser=tool_parser,
+                add_special_tokens=request.add_special_tokens,
+            )
+        else:
+            # For GPT-OSS.
+            (
+                conversation,
+                request_prompts,
+                engine_prompts,
+            ) = self._make_request_with_harmony(request)
+        return (conversation, request_prompts, engine_prompts)
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:
