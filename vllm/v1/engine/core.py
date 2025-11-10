@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
@@ -27,9 +28,7 @@ from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
-    freeze_gc_heap,
     maybe_attach_gc_debug_callback,
-    reset_gc_heap,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
@@ -201,10 +200,7 @@ class EngineCore:
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
-        freeze_gc_heap()
-
-    def __del__(self) -> None:
-        reset_gc_heap()
+        # freeze_gc_heap()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -631,6 +627,9 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+
+        gc.collect()
+        gc.freeze()
 
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
