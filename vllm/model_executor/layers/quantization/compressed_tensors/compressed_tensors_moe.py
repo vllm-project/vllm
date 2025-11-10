@@ -1337,6 +1337,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 f"{WNA16_SUPPORTED_BITS}",
             )
         self.quant_type = WNA16_SUPPORTED_TYPES_MAP[self.num_bits]
+        self.use_marlin = True
 
     def create_weights(
         self,
