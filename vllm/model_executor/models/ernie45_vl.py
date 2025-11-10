@@ -1404,7 +1404,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             return
 
         # Cache the visual token IDs tensor to avoid recreating it
-        if not hasattr(self, "_visual_token_ids_cache"):
+        if not hasattr(self, "_visual_token_ids_tensor_cache"):
             visual_token_ids = [
                 token_id for token_id in [
                     self.config.im_patch_id,
@@ -1414,14 +1414,15 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     getattr(self.config, "video_end_token_id", None)
                 ] if token_id is not None
             ]
-            self._visual_token_ids_cache = visual_token_ids
+            self._visual_token_ids_tensor_cache = torch.tensor(
+                visual_token_ids, dtype=torch.long)
 
         # Create tensor on the correct device
-        visual_token_ids_tensor = torch.tensor(
-            self._visual_token_ids_cache,
-            dtype=input_ids.dtype, 
-            device=input_ids.device
+        visual_token_ids_tensor = self._visual_token_ids_tensor_cache.to(
+            device=input_ids.device,
+            dtype=input_ids.dtype,
         )
+
         
         self.visual_token_mask = torch.isin(
             input_ids, 
