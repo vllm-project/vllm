@@ -1635,7 +1635,7 @@ class Glm4vForConditionalGeneration(
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
         llm_pos_ids_list: list = []
 
-        if len(image_grid_thw) or len(video_grid_thw):
+        if image_grid_thw or video_grid_thw:
             input_token_type: list[str] = []
             video_check_flg = False
             for token in input_tokens:
