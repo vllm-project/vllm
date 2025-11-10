@@ -118,12 +118,12 @@ class PassConfig:
     Unspecified will fallback to default values 
     which are compute capability and world size dependent.
         FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
-            "9.0": {
+            90: {
                 2: 64,  # 64MB
                 4: 2,  # 2MB
                 8: 1,  # 1MB
             },
-            "10.0": {
+            100: {
                 2: 64,  # 64MB
                 4: 32,  # 32MB
                 8: 1,  # 1MB
@@ -151,8 +151,10 @@ class PassConfig:
         from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
         from vllm.platforms import current_platform
 
+        if not current_platform.is_cuda():
+            return {}
         return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
-            current_platform.get_device_capability().as_version_str(), {}
+            current_platform.get_device_capability().to_int(), {}
         )
 
     def uuid(self):
@@ -194,6 +196,7 @@ class CompilationConfig:
         - [`backend`][vllm.config.CompilationConfig.backend]
         - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+        - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
     - CudaGraph capture:
         - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
@@ -313,6 +316,9 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    compile_mm_encoder: bool = True
+    """Whether or not to compile the multimodal encoder.
+    Currently, this only works for `Qwen2_5_vl`."""
 
     # Inductor capture
     use_inductor: bool | None = None

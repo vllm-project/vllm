@@ -642,10 +642,12 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         if current_platform.is_xpu():
             import intel_extension_for_pytorch as ipex
 
+            ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
             layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
                 layer.w13_weight,
                 layer.w2_weight,
                 use_prepack=True,
+                experts_start_id=ep_rank_start,
             )
         elif current_platform.is_cpu():
             from vllm.model_executor.layers.fused_moe import cpu_fused_moe
@@ -2116,6 +2118,14 @@ class FusedMoE(CustomOp):
         self.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
         self.logical_replica_count = logical_replica_count[moe_layer_idx]
 
+    def get_sp_ctx(self):
+        ctx = get_forward_context()
+        return (
+            ctx.dp_metadata.sp_local_sizes(self.sp_size)
+            if ctx.dp_metadata
+            else nullcontext()
+        )
+
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
             self.quant_method.moe_quant_config = (
@@ -2334,22 +2344,20 @@ class FusedMoE(CustomOp):
             self.quant_method, FusedMoEModularMethod
         )
 
-        ctx = get_forward_context()
-        sp_ctx = (
-            ctx.dp_metadata.sp_local_sizes(self.sp_size)
-            if ctx.dp_metadata
-            else nullcontext()
-        )
-
+        sp_ctx = self.get_sp_ctx()
         with sp_ctx:
             if do_naive_dispatch_combine:
                 hidden_states, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
 
-            def reduce_output(
-                states: torch.Tensor, do_combine: bool = True
-            ) -> torch.Tensor:
+        def reduce_output(
+            states: torch.Tensor, do_combine: bool = True
+        ) -> torch.Tensor:
+            # Reinitialize the context manager
+            # as it was reset in the forward_impl.
+            sp_ctx = self.get_sp_ctx()
+            with sp_ctx:
                 if do_naive_dispatch_combine and do_combine:
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
 
@@ -2362,41 +2370,39 @@ class FusedMoE(CustomOp):
                     states = self.maybe_all_reduce_tensor_model_parallel(states)
                 return states
 
-            if self.shared_experts is None:
-                if current_platform.is_tpu():
-                    # TODO: Once the OOM issue for the TPU backend is resolved, we
-                    # will switch to using the moe_forward custom op.
-                    fused_output = self.forward_impl(hidden_states, router_logits)
-                    assert not isinstance(fused_output, tuple)
-                else:
-                    fused_output = torch.ops.vllm.moe_forward(
-                        hidden_states, router_logits, self.layer_name
-                    )
-                if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                    assert isinstance(fused_output, tuple)
-                    fused_output, zero_expert_result = fused_output
-                    return (reduce_output(fused_output) + zero_expert_result)[
-                        ..., :og_hidden_states
-                    ]
-                else:
-                    return reduce_output(fused_output)[..., :og_hidden_states]
+        if self.shared_experts is None:
+            if current_platform.is_tpu():
+                # TODO: Once the OOM issue for the TPU backend is resolved, we
+                # will switch to using the moe_forward custom op.
+                fused_output = self.forward_impl(hidden_states, router_logits)
+                assert not isinstance(fused_output, tuple)
             else:
-                if current_platform.is_tpu():
-                    # TODO: Once the OOM issue for the TPU backend is resolved, we
-                    # will switch to using the moe_forward custom op.
-                    shared_output, fused_output = self.forward_impl(
-                        hidden_states, router_logits
-                    )
-                else:
-                    shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
-                        hidden_states, router_logits, self.layer_name
-                    )
-                return (
-                    reduce_output(shared_output, do_combine=False)[
-                        ..., :og_hidden_states
-                    ],
-                    reduce_output(fused_output)[..., :og_hidden_states],
+                fused_output = torch.ops.vllm.moe_forward(
+                    hidden_states, router_logits, self.layer_name
                 )
+            if self.zero_expert_num is not None and self.zero_expert_num > 0:
+                assert isinstance(fused_output, tuple)
+                fused_output, zero_expert_result = fused_output
+                return (reduce_output(fused_output) + zero_expert_result)[
+                    ..., :og_hidden_states
+                ]
+            else:
+                return reduce_output(fused_output)[..., :og_hidden_states]
+        else:
+            if current_platform.is_tpu():
+                # TODO: Once the OOM issue for the TPU backend is resolved, we
+                # will switch to using the moe_forward custom op.
+                shared_output, fused_output = self.forward_impl(
+                    hidden_states, router_logits
+                )
+            else:
+                shared_output, fused_output = torch.ops.vllm.moe_forward_shared(
+                    hidden_states, router_logits, self.layer_name
+                )
+            return (
+                reduce_output(shared_output, do_combine=False)[..., :og_hidden_states],
+                reduce_output(fused_output)[..., :og_hidden_states],
+            )
 
     def forward_cuda(
         self,
@@ -2623,12 +2629,7 @@ class FusedMoE(CustomOp):
         else:
             shared_output = None
 
-        ctx = get_forward_context()
-        sp_ctx = (
-            ctx.dp_metadata.sp_local_sizes(self.sp_size)
-            if ctx.dp_metadata
-            else nullcontext()
-        )
+        sp_ctx = self.get_sp_ctx()
 
         with sp_ctx:
             # Matrix multiply.
