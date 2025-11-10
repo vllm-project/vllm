@@ -15,9 +15,6 @@
  */
 
 #include <cmath>
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include <type_traits>
 
@@ -334,23 +331,6 @@ void launchFusedQKNormRope(void* qkv, int const num_tokens,
 }
 }  // namespace tensorrt_llm::kernels
 
-#define DISPATCH_QKV_AND_CACHE_DTYPES(qkv_type, ...)                         \
-  [&] {                                                                      \
-    auto cache_dtype = cos_sin_cache.scalar_type();                          \
-    if (cache_dtype == torch::kFloat) {                                      \
-      tensorrt_llm::kernels::launchFusedQKNormRope<qkv_type, float>(         \
-          __VA_ARGS__);                                                      \
-    } else if (cache_dtype == torch::kHalf) {                                \
-      tensorrt_llm::kernels::launchFusedQKNormRope<qkv_type, c10::Half>(     \
-          __VA_ARGS__);                                                      \
-    } else if (cache_dtype == torch::kBFloat16) {                            \
-      tensorrt_llm::kernels::launchFusedQKNormRope<qkv_type, c10::BFloat16>( \
-          __VA_ARGS__);                                                      \
-    } else {                                                                 \
-      TORCH_CHECK(false, "Unsupported cos_sin_cache dtype: ", cache_dtype);  \
-    }                                                                        \
-  }()
-
 void fused_qk_norm_rope(
     torch::Tensor& qkv,       // Combined QKV tensor [num_tokens,
                               // (num_heads_q+num_heads_k+num_heads_v)*head_dim]
@@ -402,25 +382,20 @@ void fused_qk_norm_rope(
 
   auto stream = at::cuda::getCurrentCUDAStream(qkv.get_device());
 
-  auto qkv_dtype = qkv.scalar_type();
-
-  if (qkv_dtype == torch::kHalf) {
-    DISPATCH_QKV_AND_CACHE_DTYPES(
-        c10::Half, qkv.data_ptr(), static_cast<int>(num_tokens),
-        static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
-        static_cast<int>(num_heads_v), static_cast<int>(head_dim),
-        static_cast<float>(eps), q_weight.data_ptr(), k_weight.data_ptr(),
-        cos_sin_cache.data_ptr(), !is_neox,
-        reinterpret_cast<int64_t const*>(position_ids.data_ptr()), stream);
-  } else if (qkv_dtype == torch::kBFloat16) {
-    DISPATCH_QKV_AND_CACHE_DTYPES(
-        c10::BFloat16, qkv.data_ptr(), static_cast<int>(num_tokens),
-        static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
-        static_cast<int>(num_heads_v), static_cast<int>(head_dim),
-        static_cast<float>(eps), q_weight.data_ptr(), k_weight.data_ptr(),
-        cos_sin_cache.data_ptr(), !is_neox,
-        reinterpret_cast<int64_t const*>(position_ids.data_ptr()), stream);
-  } else {
-    TORCH_CHECK(false, "Unsupported QKV dtype: ", qkv_dtype);
-  }
+  VLLM_DISPATCH_HALF_TYPES(qkv.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
+    using qkv_scalar_t = scalar_t;
+    VLLM_DISPATCH_FLOATING_TYPES(
+        cos_sin_cache.scalar_type(), "fused_qk_norm_rope_kernel", [&] {
+          using cache_scalar_t = scalar_t;
+          tensorrt_llm::kernels::launchFusedQKNormRope<qkv_scalar_t,
+                                                       cache_scalar_t>(
+              qkv.data_ptr(), static_cast<int>(num_tokens),
+              static_cast<int>(num_heads_q), static_cast<int>(num_heads_k),
+              static_cast<int>(num_heads_v), static_cast<int>(head_dim),
+              static_cast<float>(eps), q_weight.data_ptr(), k_weight.data_ptr(),
+              cos_sin_cache.data_ptr(), !is_neox,
+              reinterpret_cast<int64_t const*>(position_ids.data_ptr()),
+              stream);
+        });
+  });
 }
