@@ -36,10 +36,6 @@ class AiterMLABackend(MLACommonBackend):
         return AiterMLAImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["AiterMLAMetadata"]:
-        return AiterMLAMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
         return AiterMLAMetadataBuilder
 

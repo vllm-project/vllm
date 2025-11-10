@@ -201,7 +201,6 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
-    AttentionMetadata,
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
@@ -306,10 +305,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return MLACommonMetadata
 
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:

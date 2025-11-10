@@ -11,7 +11,6 @@ from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
@@ -89,10 +88,6 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlashAttentionMetadata
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:

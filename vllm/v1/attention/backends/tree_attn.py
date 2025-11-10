@@ -12,7 +12,6 @@ from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     MultipleOf,
 )
@@ -63,10 +62,6 @@ class TreeAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["TreeAttentionImpl"]:
         return TreeAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return TreeAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(

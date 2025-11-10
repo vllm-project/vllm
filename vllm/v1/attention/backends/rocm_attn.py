@@ -10,7 +10,6 @@ import torch
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
 )
 from vllm.attention.ops.chunked_prefill_paged_decode import chunked_prefill_paged_decode
@@ -181,10 +180,6 @@ class RocmAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:
         return RocmAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return RocmAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
