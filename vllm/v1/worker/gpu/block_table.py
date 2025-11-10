@@ -156,6 +156,9 @@ class BlockTables:
         )
         return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
 
+    def get_dummy_block_tables(self, num_reqs: int) -> tuple[torch.Tensor, ...]:
+        return tuple(block_table[:num_reqs] for block_table in self.input_block_tables)
+
     def compute_slot_mappings(
         self,
         query_start_loc: torch.Tensor,
