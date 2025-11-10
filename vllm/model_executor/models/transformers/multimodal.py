@@ -370,12 +370,22 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        # TODO: Support keys from other modalities like:
-        # second_per_grid_ts, audio_feature_lengths, use_audio_in_video
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw", "video_grid_thw"},
-        )
+        all_keys = {
+            "image_grid_thw",
+            "video_grid_thw",
+            "second_per_grid_ts",
+            "audio_feature_lengths",
+            "use_audio_in_video",
+        }
+
+        kwargs = MultiModalFeatureSpec.gather_kwargs(mm_features, all_keys)
+        if any(
+            v
+            for k, v in kwargs.items()
+            if k not in {"image_grid_thw", "video_grid_thw"}
+        ):
+            raise NotImplementedError("Transformers backend only supports images.")
+
         image_grid_thw = torch.tensor(kwargs.get("image_grid_thw", []))
         video_grid_thw = torch.tensor(kwargs.get("video_grid_thw", []))
 
