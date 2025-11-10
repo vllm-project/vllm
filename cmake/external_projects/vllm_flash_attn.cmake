@@ -37,8 +37,9 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG a893712401d70362fbb299cd9c4b3476e8e9ed54
+          # temporary until vllm-project/flash-attention#105 is merged
+          GIT_REPOSITORY https://github.com/AlpinDale/flash-attention.git
+          GIT_TAG 3e16ec5054dca0b5f62ff58e76977d07e24ac55f
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

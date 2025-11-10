@@ -579,6 +579,30 @@ def get_vllm_version() -> str:
     return version
 
 
+def _has_sm90_or_higher() -> bool:
+    """Check if any CUDA architecture in TORCH_CUDA_ARCH_LIST is sm_90 or higher."""
+    arch_list = os.getenv("TORCH_CUDA_ARCH_LIST", "")
+    if not arch_list:
+        try:
+            if torch.cuda.is_available():
+                capability = torch.cuda.get_device_capability(0)
+                return capability[0] >= 9
+        except Exception as e:
+            logger.warning("Failed to get device capability: %s", e)
+        return False
+
+    archs = arch_list.split()
+    for arch_str in archs:
+        arch_str = arch_str.split("+")[0].split("-")[0]
+        try:
+            arch_float = float(arch_str)
+            if arch_float >= 9.0:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
 def get_requirements() -> list[str]:
     """Get Python package dependencies from requirements.txt."""
     requirements_dir = ROOT_DIR / "requirements"
@@ -634,8 +658,10 @@ if _is_hip():
 
 if _is_cuda():
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
-    if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
-        # FA3 requires CUDA 12.3 or later
+    if _has_sm90_or_higher() and (
+        envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3")
+    ):
+        # FA3 requires CUDA 12.3 or later and Hopper architecture
         ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa3_C"))
         # Optional since this doesn't get built (produce an .so file) when
         # not targeting a hopper system
