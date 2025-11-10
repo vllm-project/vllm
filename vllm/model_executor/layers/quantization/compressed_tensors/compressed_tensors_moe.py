@@ -969,7 +969,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             )
         else:
             logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
-            return TritonOrDeepGemmExperts(self.moe_quant_config, allow_deep_gemm=True)
+            return TritonOrDeepGemmExperts(
+                self.moe_quant_config,
+                allow_deep_gemm=(
+                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
+                ),
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
