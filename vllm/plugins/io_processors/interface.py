@@ -110,5 +110,4 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
         )
 
     def get_modified_lora_request(self, engine_prompts, lora_request):
-        # FIXME - clean this up, unify sync/async
         return lora_request

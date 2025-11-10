@@ -365,12 +365,6 @@ class LLM:
         ):
             return (prompts, lora_request)
 
-        user_lora_request = lora_request
-        lora_request = self._get_modality_specific_lora_reqs(
-            prompts,
-            user_lora_request,
-        )
-
         # Validate the request data is valid for the loaded plugin
         validated_prompt = self.io_processor.parse_request(prompts)
 
@@ -382,14 +376,13 @@ class LLM:
             llm_engine=self.llm_engine,
             processor=self.processor,
         )
-
-        # reset the lora request unless it's one the user explicitly gave,
-        # because plugins may submit their own requests to the engine,
-        # which may change the modality.
-        if user_lora_request is None:
-            lora_request = self._get_modality_specific_lora_reqs(
-                prompts, user_lora_request
-            )
+        # NOTE: if prompts change modality, and the LoRA is modality specific,
+        # it's up to the plugin to correct it based on the preprocessed engine
+        # prompts. This should be a rare case.
+        lora_request = self.io_processor.get_modified_lora_request(
+            prompts,
+            lora_request,
+        )
         return prompts, lora_request
 
     def _get_params(self, params):
@@ -487,6 +480,11 @@ class LLM:
             sampling_params
             if sampling_params is not None
             else self.get_default_sampling_params
+        )
+
+        lora_request = self._get_modality_specific_lora_reqs(
+            prompts,
+            lora_request,
         )
 
         prompts, lora_request = self._apply_input_processor_plugin(
