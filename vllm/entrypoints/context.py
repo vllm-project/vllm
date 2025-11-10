@@ -263,7 +263,7 @@ class ParsableContext(ConversationContext):
         last_message = self.parser.chat_completion_messages[-1]["content"][-1]
         if isinstance(last_message, FunctionCall):
             # HACK: figure out which tools are MCP tools
-            if last_message.name == "code_interpreter":
+            if last_message.name == "code_interpreter" or last_message.name == "python":
                 return True
 
         return False
@@ -276,7 +276,7 @@ class ParsableContext(ConversationContext):
             return await tool_session.get_result(self)
         args = json.loads(last_msg.arguments)
         param = {
-            "code": args['code'],
+            "code": args["code"],
         }
         result = await tool_session.call_tool("python", param)
         result_str = result.content[0].text

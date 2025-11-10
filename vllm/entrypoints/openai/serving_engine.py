@@ -1334,7 +1334,9 @@ class OpenAIServing:
             # engine_prompt = EngineTokensPrompt(prompt_token_ids=prompt_token_ids)
             # request_prompt = prompt_token_ids
             # Update the sampling params.
-            sampling_params.max_tokens = self.max_model_len - len(engine_prompt)
+            sampling_params.max_tokens = self.max_model_len - len(
+                engine_prompt["prompt_token_ids"]
+            )
             # OPTIMIZATION
             priority = orig_priority - 1
 
