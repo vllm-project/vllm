@@ -129,10 +129,12 @@ class FlashMLASparseMetadataFP8(FlashMLASparseMetadataBF16):
     @dataclass
     class PrefillMetadata:
         # Sequence lengths (context + query) for prefill requests
+        # Shape: [num_prefill_reqs]
         seq_lens: torch.Tensor
 
         # Request ID for each token: -1 for decode tokens, request index
-        # (0, 1, 2, ...) for prefill tokens. Shape: [num_actual_tokens]
+        # (0, 1, 2, ...) for prefill tokens.
+        # Shape: [num_actual_tokens]
         request_ids: torch.Tensor
 
         # Workspace start offsets for all prefill requests
@@ -627,7 +629,10 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         self.padding = 128 if current_platform.is_device_capability(100) else 64
 
         vllm_config = get_current_vllm_config()
-        prefill_workspace_size = get_prefill_workspace_size(vllm_config)
+        assert vllm_config is not None and vllm_config.model_config is not None
+        prefill_workspace_size = get_prefill_workspace_size(
+            vllm_config.model_config.max_model_len
+        )
 
         self.prefill_workspace_shape = (prefill_workspace_size, head_size)
 
