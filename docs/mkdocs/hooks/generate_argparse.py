@@ -3,6 +3,7 @@
 import importlib
 import logging
 import sys
+import traceback
 from argparse import SUPPRESS, HelpFormatter
 from pathlib import Path
 from typing import Literal
@@ -16,7 +17,30 @@ ROOT_DIR = Path(__file__).parent.parent.parent.parent
 ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 
 sys.path.insert(0, str(ROOT_DIR))
+
+
+# Mock custom op code
+class MockCustomOp:
+    @staticmethod
+    def register(name):
+        def decorator(cls):
+            return cls
+
+        return decorator
+
+
+noop = lambda *a, **k: None
 sys.modules["vllm._C"] = MagicMock()
+sys.modules["vllm.model_executor.custom_op"] = MagicMock(CustomOp=MockCustomOp)
+sys.modules["vllm.utils.torch_utils"] = MagicMock(direct_register_custom_op=noop)
+
+# Mock any version checks by reading from compiled CI requirements
+with open(ROOT_DIR / "requirements/test.txt") as f:
+    VERSIONS = dict(line.strip().split("==") for line in f if "==" in line)
+importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
+
+# Make torch.nn.Parameter safe to inherit from
+sys.modules["torch.nn"] = MagicMock(Parameter=object)
 
 
 class PydanticMagicMock(MagicMock):
@@ -31,20 +55,17 @@ class PydanticMagicMock(MagicMock):
         return core_schema.any_schema()
 
 
-def auto_mock(module, attr, max_mocks=50):
+def auto_mock(module, attr, max_mocks=100):
     """Function that automatically mocks missing modules during imports."""
     logger.info("Importing %s from %s", attr, module)
     for _ in range(max_mocks):
         try:
             # First treat attr as an attr, then as a submodule
-            with patch("importlib.metadata.version", return_value="0.0.0"):
-                return getattr(
-                    importlib.import_module(module),
-                    attr,
-                    importlib.import_module(f"{module}.{attr}"),
-                )
-        except importlib.metadata.PackageNotFoundError as e:
-            raise e
+            return getattr(
+                importlib.import_module(module),
+                attr,
+                importlib.import_module(f"{module}.{attr}"),
+            )
         except ModuleNotFoundError as e:
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock(name=e.name)
@@ -139,10 +160,19 @@ def create_parser(add_cli_args, **kwargs) -> FlexibleArgumentParser:
     Returns:
         FlexibleArgumentParser: A parser with markdown formatting for the class.
     """
-    parser = FlexibleArgumentParser(add_json_tip=False)
-    parser.formatter_class = MarkdownFormatter
-    with patch("vllm.config.DeviceConfig.__post_init__"):
-        _parser = add_cli_args(parser, **kwargs)
+    try:
+        parser = FlexibleArgumentParser(add_json_tip=False)
+        parser.formatter_class = MarkdownFormatter
+        with patch("vllm.config.DeviceConfig.__post_init__"):
+            _parser = add_cli_args(parser, **kwargs)
+    except ModuleNotFoundError as e:
+        # Auto-mock runtime imports
+        if tb_list := traceback.extract_tb(e.__traceback__):
+            path = Path(tb_list[-1].filename).relative_to(ROOT_DIR)
+            auto_mock(module=".".join(path.parent.parts), attr=path.stem)
+            return create_parser(add_cli_args, **kwargs)
+        else:
+            raise e
     # add_cli_args might be in-place so return parser if _parser is None
     return _parser or parser
 
@@ -184,3 +214,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
         with open(doc_path, "w", encoding="utf-8") as f:
             f.write(super(type(parser), parser).format_help())
         logger.info("Argparse generated: %s", doc_path.relative_to(ROOT_DIR))
+
+
+if __name__ == "__main__":
+    on_startup("build", False)

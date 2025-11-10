@@ -6,18 +6,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
     vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
-
-
-def is_rocm_aiter_rmsnorm_enabled() -> bool:
-    return envs.VLLM_ROCM_USE_AITER_RMSNORM and envs.VLLM_ROCM_USE_AITER
 
 
 def rms_norm(
@@ -58,80 +53,34 @@ def fused_add_rms_norm(
     return x, residual
 
 
-def rocm_aiter_rms_norm_impl(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
+def poly_norm(
+    x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, variance_epsilon: float
 ) -> torch.Tensor:
-    import aiter as rocm_aiter
+    from vllm import _custom_ops as ops
 
-    if x.dim() > 2:
-        x_original_shape = x.shape
-        x = x.reshape(-1, x_original_shape[-1])
-        x = rocm_aiter.rms_norm(x, weight, variance_epsilon)
-        return x.reshape(x_original_shape)
-
-    return rocm_aiter.rms_norm(x, weight, variance_epsilon)
-
-
-def rocm_aiter_rmsnorm2d_fwd_with_add_impl(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    import aiter as rocm_aiter
-
-    residual_out = torch.empty_like(residual)
-    output = torch.empty_like(x)
-    rocm_aiter.rmsnorm2d_fwd_with_add(
-        output,  # output
-        x,  # input
-        residual,  # residual input
-        residual_out,  # residual output
+    out = torch.empty_like(x)
+    ops.poly_norm(
+        out,
+        x,
         weight,
+        bias,
         variance_epsilon,
     )
-    return output, residual_out
+    return out
 
 
-def rocm_aiter_rms_norm_fake(
-    x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
-) -> torch.Tensor:
-    return torch.empty_like(x)
-
-
-def rocm_aiter_rmsnorm2d_fwd_with_add_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x), torch.empty_like(residual)
-
-
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_rms_norm",
-        op_func=rocm_aiter_rms_norm_impl,
-        fake_impl=rocm_aiter_rms_norm_fake,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
-        op_func=rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-        fake_impl=rocm_aiter_rmsnorm2d_fwd_with_add_fake,
-    )
-
-
-def dispatch_rocm_rmsnorm_func(with_fused_add: bool, dtype: torch.dtype):
-    use_aiter = is_rocm_aiter_rmsnorm_enabled() and dtype in [
+def dispatch_rocm_rmsnorm_func(
+    with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
+):
+    use_aiter = use_aiter and dtype in [
         torch.float16,
         torch.bfloat16,
     ]
 
     if use_aiter and with_fused_add:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add
+        return rocm_aiter_ops.rms_norm2d_with_add
     if use_aiter:
-        return torch.ops.vllm.rocm_aiter_rms_norm
+        return rocm_aiter_ops.rms_norm
 
     # fall back to CUDA implementation
     if with_fused_add:
@@ -169,11 +118,14 @@ class RMSNorm(CustomOp):
             self.weight = nn.Parameter(self.weight)
 
         if current_platform.is_rocm():
+            aiter_rmsnorm_enabled = rocm_aiter_ops.is_rmsnorm_enabled()
             self.rocm_norm_func = dispatch_rocm_rmsnorm_func(
-                with_fused_add=False, dtype=weight_dtype
+                with_fused_add=False,
+                dtype=weight_dtype,
+                use_aiter=aiter_rmsnorm_enabled,
             )
             self.rocm_norm_func_with_add = dispatch_rocm_rmsnorm_func(
-                with_fused_add=True, dtype=weight_dtype
+                with_fused_add=True, dtype=weight_dtype, use_aiter=aiter_rmsnorm_enabled
             )
 
     @staticmethod
@@ -367,6 +319,109 @@ class GemmaRMSNorm(CustomOp):
             )
             self._is_compiled = True
         return self.forward_native(x, residual)
+
+
+@CustomOp.register("rms_norm_gated")
+class RMSNormGated(CustomOp):
+    """RMS Normalization with optional gating.
+
+    This is a native PyTorch implementation that supports:
+    - Standard RMS normalization
+    - Group RMS normalization
+    - Optional gating with SiLU activation
+    """
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        group_size: int | None = None,
+        norm_before_gate: bool = False,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        """Initialize RMSNormGated.
+
+        Args:
+            hidden_size: Size of the hidden dimension
+            eps: Epsilon for numerical stability
+            group_size: If not None, do GroupNorm with each group
+                        having group_size elements.
+                        group_size=None is equivalent to group_size=hidden_size
+                        (i.e. there's only 1 group).
+            norm_before_gate: If True and z is provided: out = norm(x) * silu(z)
+                              If False and z is provided: out = norm(x * silu(z))
+            device: Device to create parameters on
+            dtype: Data type for parameters
+        """
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.register_parameter("bias", None)
+        self.group_size = group_size
+        self.norm_before_gate = norm_before_gate
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        torch.nn.init.ones_(self.weight)
+
+    def forward_native(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """
+        Native PyTorch implementation of RMS normalization with gating.
+
+        Args:
+            x: Input tensor
+            z: Optional gating tensor
+
+        Returns:
+            Normalized (and optionally gated) tensor
+
+        If z is not None:
+            - norm_before_gate=True: out = norm(x) * silu(z)
+            - norm_before_gate=False: out = norm(x * silu(z))
+        """
+        # Apply gating before normalization if needed
+        if z is not None and not self.norm_before_gate:
+            x = x * F.silu(z)
+
+        # RMS Normalization
+        if self.group_size is None:
+            # Standard RMS norm across the last dimension
+            variance = x.pow(2).mean(dim=-1, keepdim=True)
+            x_normed = x * torch.rsqrt(variance + self.eps)
+            out = x_normed * self.weight
+        else:
+            # Group RMS norm
+            from einops import rearrange
+
+            x_group = rearrange(x, "... (g d) -> ... g d", d=self.group_size)
+            variance = x_group.pow(2).mean(dim=-1, keepdim=True)
+            x_normed = x_group * torch.rsqrt(variance + self.eps)
+            out = rearrange(x_normed, "... g d -> ... (g d)") * self.weight
+
+        # Apply gating after normalization if needed
+        if z is not None and self.norm_before_gate:
+            out = out * F.silu(z)
+
+        return out
+
+    def forward_cuda(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        from vllm.model_executor.layers.fla.ops.layernorm_guard import rmsnorm_fn
+
+        return rmsnorm_fn(
+            x,
+            self.weight,
+            self.bias,
+            z=z,
+            eps=self.eps,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+        )
 
 
 class LayerNorm(nn.Module):

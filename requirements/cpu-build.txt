@@ -1,7 +1,7 @@
 cmake>=3.26.1
 ninja
 packaging>=24.2
-setuptools>=77.0.3,<80.0.0
+setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.8.0+cpu; platform_machine == "x86_64"

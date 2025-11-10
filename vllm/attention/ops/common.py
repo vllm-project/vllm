@@ -53,6 +53,7 @@ def _correct_attn_cp_out_kernel(
     lse = tl.load(lses_ptr + lse_offsets)
     lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
     lse_max = tl.max(lse, axis=0)
+    lse_max = tl.where(lse_max == -float("inf"), 0, lse_max)
     lse -= lse_max
     lse_exp = tl.exp(lse)
     lse_acc = tl.sum(lse_exp, axis=0)

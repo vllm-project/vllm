@@ -136,7 +136,6 @@ run_tests_for_model() {
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
-    --disable-hybrid-kv-cache-manager \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
@@ -179,7 +178,6 @@ run_tests_for_model() {
     --port $PORT \
     --enforce-eager \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
-    --disable-hybrid-kv-cache-manager \
     --kv-transfer-config '$KV_CONFIG'"
   
   # DP-EP attention mode
