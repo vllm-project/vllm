@@ -86,7 +86,7 @@ class Mixer2RMSNormGated(CustomOp):
     def forward_native(
         self,
         x: torch.Tensor,
-        gate: torch.Tensor | None = None,
+        gate: torch.Tensor,
     ):
         # Three tensor-parallel cases:
         #   1. n_groups is 1
@@ -98,8 +98,7 @@ class Mixer2RMSNormGated(CustomOp):
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
-        if gate is not None:
-            x = x * nn.functional.silu(gate.to(torch.float32))
+        x = x * nn.functional.silu(gate.to(torch.float32))
         if not self.use_rms_norm:
             return x.to(input_dtype)
 
@@ -138,12 +137,10 @@ class Mixer2RMSNormGated(CustomOp):
     def forward_cuda(
         self,
         x: torch.Tensor,
-        gate: torch.Tensor | None = None,
+        gate: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
-            if gate is None:
-                return x.to(input_dtype)
             # Keep gate in float32 for numerical stability during silu
             return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
 
@@ -491,6 +488,16 @@ class MambaMixer2(MambaBase, CustomOp):
             projected_states = projected_states * mup_vector
 
         # 2. Prepare inputs for conv + SSM
+        gate, hidden_states_B_C, dt = torch.split(
+            projected_states,
+            [
+                self.intermediate_size // self.tp_size,
+                self.conv_dim // self.tp_size,
+                self.num_heads // self.tp_size,
+            ],
+            dim=-1,
+        )
+
         ssm_output = torch.empty(
             [
                 hidden_states.shape[0],
@@ -502,7 +509,8 @@ class MambaMixer2(MambaBase, CustomOp):
 
         # 3. conv + SSM
         torch.ops.vllm.mamba_mixer2(
-            projected_states,
+            hidden_states_B_C,
+            dt,
             ssm_output,
             self.prefix,
         )
@@ -511,7 +519,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
-        hidden_states = self.norm(ssm_output)
+        hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
         output, _ = self.out_proj(hidden_states)
@@ -520,7 +528,8 @@ class MambaMixer2(MambaBase, CustomOp):
 
     def forward_cuda(
         self,
-        projected_states: torch.Tensor,
+        hidden_states_B_C: torch.Tensor,
+        dt: torch.Tensor,
         output: torch.Tensor,
     ):
         forward_context = get_forward_context()
@@ -552,16 +561,6 @@ class MambaMixer2(MambaBase, CustomOp):
 
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
-        )
-
-        gate, hidden_states_B_C, dt = torch.split(
-            projected_states,
-            [
-                self.intermediate_size // self.tp_size,
-                self.conv_dim // self.tp_size,
-                self.num_heads // self.tp_size,
-            ],
-            dim=-1,
         )
 
         # - get hidden_states, B and C after depthwise convolution.
@@ -600,11 +599,6 @@ class MambaMixer2(MambaBase, CustomOp):
         )
         dt_d, dt_p = torch.split(
             dt[:num_actual_tokens],
-            [num_decodes, num_prefill_tokens],
-            dim=0,
-        )
-        gate_d, gate_p = torch.split(
-            gate[:num_actual_tokens],
             [num_decodes, num_prefill_tokens],
             dim=0,
         )
@@ -713,9 +707,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 C_p.view(num_prefill_tokens, self.n_groups // self.tp_size, -1),
                 chunk_size=chunk_size,
                 D=self.D,
-                z=gate_p.view(
-                    num_prefill_tokens, self.num_heads // self.tp_size, self.head_dim
-                ),
+                z=None,
                 dt_bias=self.dt_bias,
                 seq_idx=seq_idx_p,
                 cu_seqlens=query_start_loc_p,
@@ -855,7 +847,6 @@ class MambaMixer2(MambaBase, CustomOp):
             hidden_states_d = hidden_states_d.view(
                 -1, self.num_heads // self.tp_size, self.head_dim
             )
-            gate_d = gate_d.view(-1, self.num_heads // self.tp_size, self.head_dim)
 
             # - the hidden is reshaped into (bs, num_heads, head_dim)
             # - mamba_cache_params.ssm_state's slots will be selected
@@ -869,7 +860,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 B_d,
                 C_d,
                 D_d,
-                z=gate_d,
+                z=None,
                 dt_bias=dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
@@ -908,17 +899,19 @@ class MambaMixer2(MambaBase, CustomOp):
 
 
 def mamba_mixer2(
-    projected_states: torch.Tensor,
+    hidden_states_B_C: torch.Tensor,
+    dt: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(projected_states=projected_states, output=output)
+    self.forward_cuda(hidden_states_B_C=hidden_states_B_C, dt=dt, output=output)
 
 
 def mamba_mixer2_fake(
-    projected_states: torch.Tensor,
+    hidden_states_B_C: torch.Tensor,
+    dt: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
 ) -> None:
