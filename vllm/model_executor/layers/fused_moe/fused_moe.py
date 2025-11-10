@@ -819,8 +819,8 @@ def get_config_file_name(
 ) -> str:
     device_name = current_platform.get_device_name().replace(" ", "_")
     # Set device_name to H200 if a device from the H200 family is detected
-    if "H200" in device_name:
-        device_name = "H200"
+    if "H200" in device_name.split("_"):
+        device_name = "NVIDIA_H200"
     dtype_selector = "" if not dtype else f",dtype={dtype}"
     block_shape_selector = (
         "" if not block_shape or not all(block_shape) else f",block_shape={block_shape}"
@@ -1321,7 +1321,7 @@ def fused_grouped_topk(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    e_score_correction_bias: torch.Tensor,
+    e_score_correction_bias: torch.Tensor | None,
     num_expert_group: int = 0,
     topk_group: int = 0,
     scoring_func: str = "softmax",
@@ -1329,27 +1329,48 @@ def fused_grouped_topk(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
 
-    if scoring_func == "softmax":
+    # allow None bias by substituting a zero vector
+    bias = (
+        e_score_correction_bias.to(gating_output.dtype)
+        if e_score_correction_bias is not None
+        else torch.zeros(
+            gating_output.shape[-1],
+            device=gating_output.device,
+            dtype=gating_output.dtype,
+        )
+    )
+
+    if scoring_func == "sigmoid":
+        # Fully fused kernel path for sigmoid
+        topk_values, topk_indices = ops.grouped_topk(
+            gating_output,  # raw logits
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            bias,
+            1,  # scoring_func=1 for sigmoid
+        )
+    elif scoring_func == "softmax":
+        # Apply softmax in Python, then use fused kernel
+        # TODO: Add support for softmax in kernel
         scores = torch.softmax(gating_output, dim=-1)
-    elif scoring_func == "sigmoid":
-        scores = gating_output.sigmoid()
+        topk_values, topk_indices = ops.grouped_topk(
+            scores,  # pre-computed scores
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            bias,
+            0,  # scoring_func=0 (no activation, scores already computed)
+        )
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
 
-    if e_score_correction_bias is not None:
-        scores_with_bias = scores + e_score_correction_bias.unsqueeze(0)
-    else:
-        scores_with_bias = scores
-    topk_values, topk_indices = ops.grouped_topk(
-        scores,
-        scores_with_bias.to(scores.dtype),
-        num_expert_group,
-        topk_group,
-        topk,
-        renormalize,
-        routed_scaling_factor,
-    )
-    return topk_values.to(torch.float32), topk_indices.to(torch.int32)
+    # Fused kernel outputs float32 values and int32 indices directly
+    return topk_values, topk_indices
 
 
 def inplace_fused_experts(
