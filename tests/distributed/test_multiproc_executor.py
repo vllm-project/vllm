@@ -204,7 +204,7 @@ def test_multiproc_executor_worker_monitor():
 
 
 @multi_gpu_test(num_gpus=2)
-def test_multiproc_executor_get_message_queues():
+def test_multiproc_executor_get_response_message_queues():
     """Test message queue retrieval for different ranks."""
     vllm_config = create_vllm_config(
         tensor_parallel_size=2,
@@ -215,14 +215,14 @@ def test_multiproc_executor_get_message_queues():
 
     try:
         # Get all message queues
-        all_queues = executor.get_message_queues()
+        all_queues = executor.get_response_mqs()
         assert len(all_queues) == 2, "Should have 2 message queues for 2 workers"
 
         # Get message queue for specific rank
-        rank0_queue = executor.get_message_queues(unique_reply_rank=0)
+        rank0_queue = executor.get_response_mqs(unique_reply_rank=0)
         assert len(rank0_queue) == 1, "Should have 1 message queue for rank 0"
 
-        rank1_queue = executor.get_message_queues(unique_reply_rank=1)
+        rank1_queue = executor.get_response_mqs(unique_reply_rank=1)
         assert len(rank1_queue) == 1, "Should have 1 message queue for rank 1"
 
     finally:
@@ -340,6 +340,7 @@ def test_multiproc_executor_multi_node():
 
     def run_node(node_rank: int, result_queue: multiprocessing.Queue, port: int):
         """Run a single node's executor."""
+        executor = None
         try:
             # Set CUDA_VISIBLE_DEVICES for this node
             if node_rank == 0:
