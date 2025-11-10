@@ -2422,14 +2422,21 @@ class FusedMoE(CustomOp):
                 if self.shared_experts_stream is not None:
                     # For chunked, we start the shared experts stream here
                     # (Note that no concurrency with the router/gate)
+
+                    # Clone BEFORE switching streams to avoid race condition
+                    # Clone happens on current_stream, ensuring clean copy
+                    staged_hidden_states_clone = staged_hidden_states.clone()
+
                     self.shared_experts_stream.wait_stream(current_stream())
 
+                    # Record that the clone will be used by shared_experts_stream
+                    staged_hidden_states_clone.record_stream(self.shared_experts_stream)
+
                     with torch.cuda.stream(self.shared_experts_stream):
-                        # Note that staged_hidden_states clone() is necessary
-                        # here to avoid conflict with the main stream
-                        shared_output = self.shared_experts(
-                            staged_hidden_states.clone()
-                        )
+                        shared_output = self.shared_experts(staged_hidden_states_clone)
+
+                    # Record that shared_output will be used by current_stream
+                    shared_output.record_stream(current_stream())
                 else:
                     shared_output = self.shared_experts(staged_hidden_states)
 
@@ -2577,11 +2584,21 @@ class FusedMoE(CustomOp):
             assert self.shared_experts is not None
 
             if self.shared_experts_stream is not None:
+                # Clone BEFORE switching streams to avoid race condition
+                # Clone happens on current_stream, ensuring clean copy
+                hidden_states_clone = hidden_states.clone()
+
+                self.shared_experts_stream.wait_stream(current_stream())
+
+                # Record that the clone will be used by shared_experts_stream
+                hidden_states_clone.record_stream(self.shared_experts_stream)
+
                 # Run shared experts in parallel on a separate stream
                 with torch.cuda.stream(self.shared_experts_stream):
-                    # Note that hidden_states clone() is necessary here to avoid
-                    # conflict with the main stream
-                    shared_output = self.shared_experts(hidden_states.clone())
+                    shared_output = self.shared_experts(hidden_states_clone)
+
+                # Record that shared_output will be used by current_stream
+                shared_output.record_stream(current_stream())
             else:
                 shared_output = self.shared_experts(hidden_states)
         else:
