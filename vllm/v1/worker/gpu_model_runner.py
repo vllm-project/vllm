@@ -2590,9 +2590,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                     # Return early for 0-token case
                     if not has_kv_transfer_group():
+                        # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(
                         scheduler_output, self.vllm_config
+                    )
+                if self.cache_config.kv_sharing_fast_prefill:
+                    assert not self.input_batch.num_prompt_logprobs, (
+                        "--kv-sharing-fast-prefill produces incorrect "
+                        "logprobs for prompt tokens, tokens, please disable "
+                        "it when the requests need prompt logprobs"
                     )
 
                 # Normal execution path with tokens
@@ -2679,10 +2686,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len
-            ) and (
-                total_num_scheduled_tokens
-                == self.input_batch.num_reqs * max_num_scheduled_tokens
-            )
+            ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
             batch_descriptor = BatchDescriptor(
                 num_tokens=num_input_tokens,
                 uniform_decode=uniform_decode,
