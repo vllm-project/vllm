@@ -1193,9 +1193,9 @@ class OpenAIServing:
             preprocess_partial is not None,
         )
 
-        # HACK - depending on the plugin, validated_prompt may actually be
-        # a request still since it's cleaner to call async preprocessors
-        # from the async method
+        # NOTE - depending on the plugin, the validated input may actually
+        # be a request still since it's cleaner to call async preprocessors
+        # from the async method than the parsing.
         engine_prompts = await self.io_processor.pre_process_async(
             prompt=validated_req_or_prompt,
             request_id=request_id,

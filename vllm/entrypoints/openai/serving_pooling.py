@@ -32,6 +32,7 @@ from vllm.entrypoints.renderer import RenderConfig
 from vllm.entrypoints.utils import _validate_truncation_size
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.plugins.io_processors.interface import IOProcessorPluginType
 from vllm.tasks import PoolingTask, SupportedTask
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import (
@@ -113,8 +114,11 @@ class OpenAIServingPooling(OpenAIServing):
                 renderer=renderer,
             )
 
-            if self.io_processor is not None:
-                (_, _, engine_prompts) = await self._apply_input_processor_plugin(
+            if (
+                self.io_processor is not None
+                and self.io_processor.plugin_type != IOProcessorPluginType.OUTPUT_ONLY
+            ):
+                engine_prompts = await self._apply_input_processor_plugin(
                     request,
                     request_id,
                     lora_request,
@@ -122,8 +126,10 @@ class OpenAIServingPooling(OpenAIServing):
                     self.engine_client,
                     self.processor,
                 )
+                pooling_params = self.io_processor.validate_or_generate_params()
             else:
                 engine_prompts = await preprocess_partial(request)
+                pooling_params = request.to_pooling_params()
 
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
@@ -132,11 +138,6 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            if self.io_processor is not None:
-                pooling_params = self.io_processor.validate_or_generate_params()
-            else:
-                pooling_params = request.to_pooling_params()
-
             pooling_task: PoolingTask
             if "token_embed" in self.supported_tasks:
                 pooling_task = "token_embed"
@@ -186,7 +187,10 @@ class OpenAIServingPooling(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        if self.io_processor is not None:
+        if (
+            self.io_processor is not None
+            and self.io_processor.plugin_type != IOProcessorPluginType.INPUT_ONLY
+        ):
             return await self._apply_output_processor_plugin(
                 result_generator, request_id
             )
@@ -254,7 +258,7 @@ class OpenAIServingPooling(OpenAIServing):
             )
         else:
             raise ValueError(f"Unsupported request of type {type(request)}")
-        return None, None, engine_prompts
+        return engine_prompts
 
     def request_output_to_pooling_response(
         self,

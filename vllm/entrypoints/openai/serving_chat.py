@@ -64,6 +64,7 @@ from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.plugins.io_processors.interface import IOProcessorPluginType
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import (
@@ -228,7 +229,11 @@ class OpenAIServingChat(OpenAIServing):
                 tool_dicts=tool_dicts,
                 tool_parser=tool_parser,
             )
-            if self.io_processor is not None:
+
+            if (
+                self.io_processor is not None
+                and self.io_processor.plugin_type != IOProcessorPluginType.OUTPUT_ONLY
+            ):
                 (
                     conversation,
                     request_prompts,
@@ -349,12 +354,16 @@ class OpenAIServingChat(OpenAIServing):
         assert len(generators) == 1
         (result_generator,) = generators
 
-        # FIXME - maybe make IO processors optional for input or output
-        # if self.io_processor is not None:
-        #     if request.stream:
-        #         logger.warning("IO Processor Plugins do not support streaming")
-        #     return await self._apply_output_processor_plugin(
-        #       result_generator, request_id)
+        if (
+            self.io_processor is not None
+            and self.io_processor.plugin_type != IOProcessorPluginType.INPUT_ONLY
+        ):
+            if request.stream:
+                logger.warning("IO Processor Plugins do not support streaming")
+            return await self._apply_output_processor_plugin(
+                result_generator, request_id
+            )
+
         # Streaming response
         if request.stream:
             return self.chat_completion_stream_generator(
