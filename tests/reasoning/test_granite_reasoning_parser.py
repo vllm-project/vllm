@@ -12,37 +12,37 @@ START_RESPONSE = "Here is my response:"
 
 SIMPLE_REASONING = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}This is the rest",  # noqa: E501
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
 COMPLETE_REASONING = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
 }
 NO_REASONING = {
     "output": "This is content",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is content",
 }
 MULTIPLE_LINES = {
     "output": f"{START_REASONING}This\nThat{START_RESPONSE}This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
 }
 REASONING_WITH_THINK = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}This is the rest",  # noqa: E501
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
 COMPLETE_REASONING_WITH_THINK = {
     "output": f"{START_REASONING}This is a reasoning section{START_RESPONSE}",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
 }
 MULTIPLE_LINES_WITH_THINK = {
     "output": f"{START_REASONING}This\nThat{START_RESPONSE}This is the rest\nThat",
-    "reasoning_content": "This\nThat",
+    "reasoning": "This\nThat",
     "content": "This is the rest\nThat",
 }
 
@@ -141,7 +141,7 @@ def test_reasoning(
         parser, output_tokens, streaming=streaming
     )
 
-    assert reasoning == param_dict["reasoning_content"]
+    assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
 
 
@@ -155,7 +155,7 @@ STREAMING_1 = {
     "previous_text": None,
     "current_text": "Here",
     "delta_text": "Here",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
 }
 # When we fail, we should give what was previously being silenced first
@@ -163,7 +163,7 @@ STREAMING_2 = {
     "previous_text": "Here is my thought",
     "current_text": "Here is my thought failure",
     "delta_text": " failure",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "Here is my thought failure",
 }
 # But then after the first one, we should only add the delta text to content
@@ -171,7 +171,7 @@ STREAMING_3 = {
     "previous_text": "Here wrong",
     "current_text": " words",
     "delta_text": " Here wrong words",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": " words",
 }
 # But then after the first one, we should only add the delta text to content
@@ -179,7 +179,7 @@ STREAMING_4 = {
     "previous_text": "Here is my thought",
     "current_text": "Here is my thought process:",
     "delta_text": " process:",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
 }
 # Reasoning started successfully; parse reasoning content
@@ -187,7 +187,7 @@ STREAMING_5 = {
     "previous_text": "Here is my thought process:",
     "current_text": "Here is my thought process: foo",
     "delta_text": " foo",
-    "reasoning_content": " foo",
+    "reasoning": " foo",
     "content": None,
 }
 # Response special sequence has started, but not finished.
@@ -195,7 +195,7 @@ STREAMING_6 = {
     "previous_text": "Here is my thought process: foo",
     "current_text": "Here is my thought process: foo Here is",
     "delta_text": " Here is",
-    "reasoning_content": " ",
+    "reasoning": " ",
     "content": None,
 }
 # Response special sequence started, but was broken; the reasoning
@@ -204,7 +204,7 @@ STREAMING_7 = {
     "previous_text": "Here is my thought process: foo Here is",
     "current_text": "Here is my thought process: foo Here is Here",
     "delta_text": " Here",
-    "reasoning_content": "Here is ",
+    "reasoning": "Here is ",
     "content": None,
 }
 # Response special sequence is ongoing
@@ -212,7 +212,7 @@ STREAMING_8 = {
     "previous_text": "Here is my thought process: foo Here is my response:",
     "current_text": "Here is my thought process: foo Here is my response: bar",
     "delta_text": " bar",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": " bar",
 }
 # The delta text has everything; we should be able to correctly parse both
@@ -220,7 +220,7 @@ STREAMING_9 = {
     "previous_text": None,
     "current_text": "Here is my thought process: foo Here is my response: bar",
     "delta_text": "Here is my thought process: foo Here is my response: bar",
-    "reasoning_content": " foo ",
+    "reasoning": " foo ",
     "content": " bar",
 }
 ## The Response is ongoing, and the delta mixes reasoning content / content
@@ -228,7 +228,7 @@ STREAMING_10 = {
     "previous_text": "Here is my thought process: foo",
     "current_text": "Here is my thought process: foo bar Here is my response: baz",
     "delta_text": " bar Here is my response: baz",
-    "reasoning_content": " bar ",
+    "reasoning": " bar ",
     "content": " baz",
 }
 # The delta text starts a new substring that might be a response special seq
@@ -236,7 +236,7 @@ STREAMING_11 = {
     "previous_text": "Here is my thought process: This is a reasoning section ",
     "current_text": "Here is my thought process: This is a reasoning section Here",
     "delta_text": "Here",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
 }
 # The delta text is finishing the response special seq
@@ -244,14 +244,14 @@ STREAMING_12 = {
     "previous_text": "Here is my thought process: foo Here is my response",
     "current_text": "Here is my thought process: foo Here is my response:",
     "delta_text": ":",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": None,
 }
 STREAMING_13 = {
     "previous_text": "Here is my thought process: foo Here",
     "current_text": "Here is my thought process: foo Here was",
     "delta_text": " was",
-    "reasoning_content": "Here was",
+    "reasoning": "Here was",
     "content": None,
 }
 
@@ -326,7 +326,7 @@ def test_streaming_subcases(param_dict):
         tokenizer
     )
 
-    response = parser.extract_reasoning_content_streaming(
+    response = parser.extract_reasoning_streaming(
         previous_text=param_dict["previous_text"],
         current_text=param_dict["current_text"],
         delta_text=param_dict["delta_text"],
@@ -336,9 +336,9 @@ def test_streaming_subcases(param_dict):
     )
     # Streaming currently expects at least one of reasoning content / content,
     # so the response should return None in that case.
-    if param_dict["reasoning_content"] is None and param_dict["content"] is None:
+    if param_dict["reasoning"] is None and param_dict["content"] is None:
         assert response is None
     else:
         assert isinstance(response, DeltaMessage)
-        assert param_dict["reasoning_content"] == response.reasoning_content
+        assert param_dict["reasoning"] == response.reasoning
         assert param_dict["content"] == response.content
