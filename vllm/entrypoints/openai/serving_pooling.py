@@ -5,6 +5,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncGenerator
+from functools import partial
 from typing import Final, cast
 
 import jinja2
@@ -16,7 +17,6 @@ from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
-    IOProcessorRequest,
     IOProcessorResponse,
     PoolingBytesResponse,
     PoolingChatRequest,
@@ -88,7 +88,6 @@ class OpenAIServingPooling(OpenAIServing):
         request_id = f"pool-{self._base_request_id(raw_request)}"
         created_time = int(time.time())
 
-        is_io_processor_request = isinstance(request, IOProcessorRequest)
         try:
             lora_request = self._maybe_get_adapters(request)
 
@@ -108,52 +107,24 @@ class OpenAIServingPooling(OpenAIServing):
                 self.max_model_len, truncate_prompt_tokens
             )
 
-            if is_io_processor_request:
-                if self.io_processor is None:
-                    raise ValueError(
-                        "No IOProcessor plugin installed. Please refer "
-                        "to the documentation and to the "
-                        "'prithvi_geospatial_mae_io_processor' "
-                        "offline inference example for more details."
-                    )
+            preprocess_partial = partial(
+                self._preprocess_pooling,
+                tokenizer=tokenizer,
+                renderer=renderer,
+            )
 
-                validated_prompt = self.io_processor.parse_request(request)
-
-                engine_prompts = await self.io_processor.pre_process_async(
-                    prompt=validated_prompt, request_id=request_id
-                )
-
-            elif isinstance(request, PoolingChatRequest):
-                error_check_ret = self._validate_chat_template(
-                    request_chat_template=request.chat_template,
-                    chat_template_kwargs=request.chat_template_kwargs,
-                    trust_request_chat_template=self.trust_request_chat_template,
-                )
-                if error_check_ret is not None:
-                    return error_check_ret
-                (
-                    _,
-                    _,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
+            if self.io_processor is not None:
+                (_, _, engine_prompts) = await self._apply_input_processor_plugin(
                     request,
-                    tokenizer,
-                    request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.chat_template_content_format,
-                    # In pooling requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
-                    continue_final_message=False,
-                    add_special_tokens=request.add_special_tokens,
-                )
-            elif isinstance(request, PoolingCompletionRequest):
-                engine_prompts = await renderer.render_prompt(
-                    prompt_or_prompts=request.input,
-                    config=self._build_render_config(request),
+                    request_id,
+                    lora_request,
+                    preprocess_partial,
+                    self.engine_client,
+                    self.processor,
                 )
             else:
-                raise ValueError(f"Unsupported request of type {type(request)}")
+                engine_prompts = await preprocess_partial(request)
+
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -161,10 +132,7 @@ class OpenAIServingPooling(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
         try:
-            if is_io_processor_request:
-                assert self.io_processor is not None and isinstance(
-                    request, IOProcessorRequest
-                )
+            if self.io_processor is not None:
                 pooling_params = self.io_processor.validate_or_generate_params()
             else:
                 pooling_params = request.to_pooling_params()
@@ -218,13 +186,10 @@ class OpenAIServingPooling(OpenAIServing):
 
         result_generator = merge_async_iterators(*generators)
 
-        if is_io_processor_request:
-            assert self.io_processor is not None
-            output = await self.io_processor.post_process_async(
-                model_output=result_generator,
-                request_id=request_id,
+        if self.io_processor is not None:
+            return await self._apply_output_processor_plugin(
+                result_generator, request_id
             )
-            return self.io_processor.output_to_response(output)
 
         assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)
@@ -256,6 +221,40 @@ class OpenAIServingPooling(OpenAIServing):
             return self.create_error_response(str(e))
 
         return response
+
+    async def _preprocess_pooling(self, request, tokenizer, renderer):
+        if isinstance(request, PoolingChatRequest):
+            error_check_ret = self._validate_chat_template(
+                request_chat_template=request.chat_template,
+                chat_template_kwargs=request.chat_template_kwargs,
+                trust_request_chat_template=self.trust_request_chat_template,
+            )
+            if error_check_ret is not None:
+                return error_check_ret
+            (
+                _,
+                _,
+                engine_prompts,
+            ) = await self._preprocess_chat(
+                request,
+                tokenizer,
+                request.messages,
+                chat_template=request.chat_template or self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
+                # In pooling requests, we are not generating tokens,
+                # so there is no need to append extra tokens to the input
+                add_generation_prompt=False,
+                continue_final_message=False,
+                add_special_tokens=request.add_special_tokens,
+            )
+        elif isinstance(request, PoolingCompletionRequest):
+            engine_prompts = await renderer.render_prompt(
+                prompt_or_prompts=request.input,
+                config=self._build_render_config(request),
+            )
+        else:
+            raise ValueError(f"Unsupported request of type {type(request)}")
+        return None, None, engine_prompts
 
     def request_output_to_pooling_response(
         self,
