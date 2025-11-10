@@ -23,7 +23,6 @@ GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
-once=True
 
 class RejectionSampler(nn.Module):
     """
@@ -217,14 +216,6 @@ class RejectionSampler(nn.Module):
         Returns:
             A list of lists of token IDs.
         """
-        import os
-        import time
-        global once
-        if once:
-            print(f"pid={os.getpid()}")
-            once=False
-            # time.sleep(60)
-            
 
         output_token_ids_np = output_token_ids.cpu().numpy()
         # Create mask for valid tokens.
