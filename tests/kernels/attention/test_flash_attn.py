@@ -6,6 +6,10 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    pytest.skip("vllm_flash_attn not available on ROCm", allow_module_level=True)
+
 from vllm.vllm_flash_attn import (
     fa_version_unsupported_reason,
     flash_attn_varlen_func,

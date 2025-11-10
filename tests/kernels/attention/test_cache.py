@@ -643,6 +643,9 @@ def test_concat_and_cache_mla(
         torch.testing.assert_close(kv_cache, ref_kv_cache)
 
 
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="fp8_ds_mla cache dtype not supported on ROCm"
+)
 @pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
 @pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS_MLA)

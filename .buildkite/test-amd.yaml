@@ -507,7 +507,7 @@ steps:
 
 - label: Kernels Attention Test %N # 23min
   timeout_in_minutes: 35
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
   # grade: Blocking
   source_file_dependencies:
@@ -516,8 +516,7 @@ steps:
   - vllm/v1/attention
   - tests/kernels/attention
   commands:
-    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 2
+    - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore-glob='kernels/attention/test_flashinfer*.py'
 
 - label: Kernels Quantization Test %N # 64min
   timeout_in_minutes: 90
