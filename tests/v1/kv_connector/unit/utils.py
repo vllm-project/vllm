@@ -91,9 +91,6 @@ def create_vllm_config(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_model_len,
         enable_chunked_prefill=enable_chunked_prefill,
-        # Disable hybrid KV cache manager for testing
-        # Should be removed after we support hybrid KV cache manager-based testing.
-        disable_hybrid_kv_cache_manager=True,
     )
     model_config = ModelConfig(
         model=model,
@@ -254,7 +251,7 @@ def create_model_runner_output(
 
 
 class TestSharedStorageConnector(SharedStorageConnector):
-    def __init__(self, config: VllmConfig, role):
+    def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = SharedStorageConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
