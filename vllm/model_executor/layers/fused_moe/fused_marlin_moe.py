@@ -21,12 +21,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache, disable_inplace
-from vllm.model_executor.layers.quantization.utils.int8_utils import (
-    per_token_quant_int8,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
+    marlin_quant_input,
 )
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -114,13 +112,11 @@ def _fused_marlin_moe(
     a_scales1 = None
     gate_up_input = hidden_states
     if input_dtype == torch.int8:
-        gate_up_input, a_scales1 = per_token_quant_int8(hidden_states)
+        gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
         if input_global_scale1 is not None:
             a_scales1 = a_scales1 * input_global_scale1
     elif input_dtype == torch.float8_e4m3fn:
-        gate_up_input, a_scales1 = ops.scaled_fp8_quant(
-            hidden_states, use_per_token_if_dynamic=True
-        )
+        gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
 
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         gate_up_input,
@@ -164,12 +160,14 @@ def _fused_marlin_moe(
 
     a_scales2 = None
     if input_dtype == torch.int8:
-        intermediate_cache2, a_scales2 = per_token_quant_int8(intermediate_cache2)
+        intermediate_cache2, a_scales2 = marlin_quant_input(
+            intermediate_cache2, input_dtype
+        )
         if input_global_scale2 is not None:
             a_scales2 = a_scales2 * input_global_scale2
     elif input_dtype == torch.float8_e4m3fn:
-        intermediate_cache2, a_scales2 = ops.scaled_fp8_quant(
-            intermediate_cache2, use_per_token_if_dynamic=True
+        intermediate_cache2, a_scales2 = marlin_quant_input(
+            intermediate_cache2, input_dtype
         )
 
     output = ops.moe_wna16_marlin_gemm(

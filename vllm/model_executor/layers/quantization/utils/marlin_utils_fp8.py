@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
+    marlin_quant_input,
     should_use_atomic_add_reduce,
 )
 from vllm.platforms import current_platform
@@ -64,7 +65,7 @@ def apply_fp8_marlin_linear(
         if input_dtype != torch.float8_e4m3fn:
             raise RuntimeError("FP8 weight + INT8 activation is not supported.")
 
-        inputs, a_scales = ops.scaled_fp8_quant(inputs, use_per_token_if_dynamic=True)
+        inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
     output = ops.gptq_marlin_gemm(
         a=reshaped_x,

@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_workspace_new,
     marlin_permute_bias,
     marlin_permute_scales,
+    marlin_quant_input,
     should_use_atomic_add_reduce,
 )
 from vllm.platforms import current_platform
@@ -62,10 +63,12 @@ def mxfp4_marlin_process_scales(marlin_scales, input_dtype=None):
         marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
             marlin_scales.size(0), -1
         )
+
     marlin_scales = marlin_scales.to(torch.float8_e8m0fnu)
     if input_dtype == torch.float8_e4m3fn:
         marlin_scales = marlin_scales.view(torch.uint8)
         assert marlin_scales.max() <= 249
+        # exponent_bias (fp4->fp8) = 2 ** 3 - 2 ** 1 = 6
         marlin_scales = marlin_scales + 6
         marlin_scales = marlin_scales.view(torch.float8_e8m0fnu)
     return marlin_scales
@@ -115,7 +118,7 @@ def apply_fp4_marlin_linear(
         elif input_dtype != torch.float8_e4m3fn:
             raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
 
-        inputs, a_scales = ops.scaled_fp8_quant(inputs, use_per_token_if_dynamic=True)
+        inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
 
     output = torch.empty(out_shape, dtype=reshaped_x.dtype, device=reshaped_x.device)
 

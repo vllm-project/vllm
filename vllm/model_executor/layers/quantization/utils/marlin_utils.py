@@ -9,9 +9,11 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -468,6 +470,17 @@ def should_use_atomic_add_reduce(
     return True
 
 
+def marlin_quant_input(x: torch.Tensor, quant_dtype: torch.dtype):
+    x = x.reshape(-1, x.shape[-1])
+    if quant_dtype == torch.int8:
+        return per_token_quant_int8(x)
+    elif quant_dtype == torch.float8_e4m3fn:
+        quant_fp8 = QuantFP8(False, GroupShape.PER_TOKEN)
+        return quant_fp8(x)
+    else:
+        raise ValueError(f"unsupported quant_dtype {quant_dtype}")
+
+
 def apply_gptq_marlin_linear(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -501,15 +514,14 @@ def apply_gptq_marlin_linear(
         assert wtype == scalar_types.uint4b8, (
             "W8A8-INT8 is not supported by marlin kernel."
         )
-        reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
+        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
         assert wtype == scalar_types.uint4b8, (
             "INT8 weight + FP8 activation is not supported."
         )
-        reshaped_x, a_scales = ops.scaled_fp8_quant(
-            reshaped_x, use_per_token_if_dynamic=True
-        )
+
+        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
     output = ops.gptq_marlin_gemm(
         reshaped_x,
@@ -565,12 +577,10 @@ def apply_awq_marlin_linear(
 
     a_scales = None
     if input_dtype == torch.int8:
-        reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
+        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
-        reshaped_x, a_scales = ops.scaled_fp8_quant(
-            reshaped_x, use_per_token_if_dynamic=True
-        )
+        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
     output = ops.gptq_marlin_gemm(
         reshaped_x,
@@ -622,12 +632,10 @@ def apply_rtn_marlin_linear(
 
     a_scales = None
     if input_dtype == torch.int8:
-        reshaped_x, a_scales = per_token_quant_int8(reshaped_x)
+        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
         a_scales = a_scales * input_global_scale
     elif input_dtype == torch.float8_e4m3fn:
-        reshaped_x, a_scales = ops.scaled_fp8_quant(
-            reshaped_x, use_per_token_if_dynamic=True
-        )
+        reshaped_x, a_scales = marlin_quant_input(reshaped_x, input_dtype)
 
     output = ops.gptq_marlin_gemm(
         reshaped_x,
