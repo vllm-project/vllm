@@ -325,7 +325,7 @@ class W8A8BlockFp8LinearOp:
         if use_triton:
             gemm_w8a8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
-            gemm_w8a8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
+            gemm_w8a8_blockscale_op = rocm_aiter_ops.gemm_w8a8_blockscale
 
         if input_scale is not None:
             q_input = input_2d
@@ -346,7 +346,7 @@ class W8A8BlockFp8LinearOp:
             weight,
             input_scale,
             weight_scale,
-            input_2d.dtype,
+            output_dtype=input_2d.dtype,
         )
 
     def _run_triton(
