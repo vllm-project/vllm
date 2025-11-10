@@ -638,8 +638,8 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         if kv_cache_dtype == "fp8_ds_mla":
             # Reserve workspace during initialization
-            current_workspace_manager().get(
-                self.prefill_workspace_shape, torch.bfloat16
+            self.prefill_bf16_workspace = current_workspace_manager().get_simultaneous(
+                (self.prefill_workspace_shape, torch.bfloat16)
             )
 
     def _forward_bf16_kv(
@@ -820,13 +820,10 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                         attn_metadata.decode,
                     )
 
-                # Process prefill chunks
-                prefill_bf16_workspace = current_workspace_manager().get(
-                    self.prefill_workspace_shape, torch.bfloat16
-                )
-
                 for chunk in attn_metadata.prefill.chunks:
-                    chunk_workspace = prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
+                    chunk_workspace = self.prefill_bf16_workspace[
+                        : chunk.chunk_tot_seqlen
+                    ]
                     ops.cp_gather_and_upconvert_fp8_kv_cache(
                         kv_cache,
                         chunk_workspace,

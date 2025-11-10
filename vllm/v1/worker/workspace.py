@@ -73,20 +73,6 @@ class WorkspaceManager:
         """Check if workspace is locked."""
         return self._locked
 
-    def get(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
-        """Get a workspace tensor for the given shape and dtype.
-
-        Args:
-            shape: The shape of the workspace tensor.
-            dtype: The data type of the workspace tensor.
-
-        Returns:
-            A tensor view into the workspace buffer with the requested shape and dtype.
-        """
-        num_bytes = _compute_bytes(shape, dtype)
-        current_workspace = self._ensure_workspace_size(num_bytes)
-        return current_workspace[:num_bytes].view(dtype).reshape(shape)
-
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
