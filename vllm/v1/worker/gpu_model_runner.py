@@ -330,65 +330,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         
         # TKNP
         self.root_rank = is_root_rank()
-        # if is_tknp_initialized():
-        #     self.tknp_world_size = get_tknp_world_size()
-        #     self.req_to_tknp_rank: dict[str, int] = {}
-        #     self.next_tknp_rank_assignment = 0  # For round-robin block assignment
-        #     self.tknp_tokens_per_rank_cache = np.zeros(self.tknp_world_size, dtype=np.int32)
-        #     self.tknp_reqs_per_rank = np.zeros(self.tknp_world_size, dtype=np.int32)
-
-    # def _assign_token_parallel_ranks(
-    #     self,
-    #     scheduler_output: "SchedulerOutput",
-    # ) -> None:
-    #     """
-    #     Assign token parallel ranks to new requests using block-wise assignment.
-    #     Updates self.req_to_tknp_rank cache.
-        
-    #     Args:
-    #         scheduler_output: The scheduler output containing new requests.
-    #     """
-    #     if not is_tknp_initialized() or get_tknp_world_size() <= 1:
-    #         return
-        
-    #     world_size = get_tknp_world_size()
-    #     new_requests = scheduler_output.scheduled_new_reqs
-        
-    #     if not new_requests:
-    #         return
-        
-    #     # Group new requests into blocks for assignment
-    #     # This ensures consecutive requests go to the same rank for locality
-    #     block_size = max(1, len(new_requests) // world_size)
-        
-    #     for idx, req_data in enumerate(new_requests):
-    #         req_id = req_data.req_id
-            
-    #         # Skip if already assigned (shouldn't happen for new requests)
-    #         if req_id in self.req_to_tknp_rank:
-    #             continue
-            
-    #         # Block-wise assignment: assign block_size requests to each rank
-    #         assigned_rank = (idx // block_size) % world_size
-    #         self.req_to_tknp_rank[req_id] = assigned_rank
-    #         self.tknp_reqs_per_rank[assigned_rank] += 1
-    #         self.tknp_tokens_per_rank_cache[assigned_rank] += len(req_data.prompt_token_ids)
-
-    #         if self.root_rank:
-    #             logger.debug(f"[TKNP] Assigned request {req_id} to rank {assigned_rank}, new tokens {len(req_data.prompt_token_ids)}")
-
-    # def _cleanup_finished_request_ranks(
-    #     self,
-    #     scheduler_output: "SchedulerOutput",
-    # ) -> None:
-    #     """
-    #     Remove finished requests from the rank assignment cache.
-        
-    #     Args:
-    #         scheduler_output: The scheduler output containing finished request IDs.
-    #     """
-    #     for req_id in scheduler_output.finished_req_ids:
-    #         self.req_to_tknp_rank.pop(req_id, None)
 
     def _build_token_parallel_metadata(
         self,
@@ -487,6 +428,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             metadata_id = id(metadata)
 
             if metadata_id not in processed_metadata_ids:
+                
                 metadata.num_actual_tokens = num_actual_tokens
                 metadata.query_start_loc = new_query_start_locs
                 metadata.max_query_len = new_max_query_len
@@ -495,17 +437,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 metadata.seq_lens = local_seq_lens
                 
                 # slot mappings
-                new_slot_mapping = metadata.slot_mapping[tkn_start_idx:tkn_end_idx].contiguous()
+                new_slot_mapping = metadata.slot_mapping[tkn_start_idx:tkn_end_idx] #.contiguous()
                 metadata.slot_mapping = new_slot_mapping
                 
                 # block tables
-                new_block_table = metadata.block_table[req_start_idx:req_end_idx].contiguous()
+                new_block_table = metadata.block_table[req_start_idx:req_end_idx] #.contiguous()
                 metadata.block_table = new_block_table
                 
                 processed_metadata_ids.add(metadata_id)
                 
-            else:
-                logger.debug(f"[RANK {rank}] Layer {layer_name} shares metadata with previous layer, skipping slice")
+            # else:
+            #     logger.debug(f"[RANK {rank}] Layer {layer_name} shares metadata with previous layer, skipping slice")
         return attn_metadata, positions
 
     def _may_reorder_batch(self, scheduler_output: "SchedulerOutput") -> None:
@@ -1494,8 +1436,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
         
-        # if is_tknp_initialized() and get_tknp_world_size() > 1:
-        #     self._assign_token_parallel_ranks(scheduler_output)
+        # print(f"Scheduler output: {scheduler_output}")
         
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:

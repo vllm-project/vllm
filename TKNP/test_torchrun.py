@@ -61,7 +61,7 @@ def main():
     ]
 
     # Create sampling parameters, the same across all ranks
-    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=64)
 
     # Use `distributed_executor_backend="external_launcher"` so that
     # this llm engine/instance only creates one worker.

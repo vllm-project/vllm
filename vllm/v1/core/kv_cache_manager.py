@@ -192,6 +192,7 @@ class KVCacheManager:
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
+        tknp_skip_allocation: bool = False,
     ) -> Optional[KVCacheBlocks]:
         """Add slots for a request with new tokens to append.
 
@@ -210,6 +211,8 @@ class KVCacheManager:
             delay_cache_blocks: Whether to skip caching the blocks. This is
                 used by P/D when allocating blocks used in a KV transfer
                 which will complete in a future step.
+            tknp_skip_allocation: Whether to skip allocation for token parallelism.
+                This is used when the current rank is not assigned to the request.
 
         Blocks layout:
         ```
@@ -229,10 +232,9 @@ class KVCacheManager:
             A list of new allocated blocks.
         """
         
-        # Add this debug logging
-        # import traceback
-        # logger.debug(f"allocate_slots called for request {request.request_id} with {num_new_tokens} new tokens")
-        # logger.debug(f"Call stack:\n{''.join(traceback.format_stack())}")
+        if tknp_skip_allocation:
+            # logger.info(f"Skipping allocation for request {request.request_id} on rank {get_tknp_rank()}")
+            return self.create_empty_block_list()
         
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")

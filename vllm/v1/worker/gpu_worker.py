@@ -53,35 +53,35 @@ def _print_worker_rank_info(rank: int) -> None:
     )
     global_rank = torch.distributed.get_rank()
     
-    print(f"Worker Rank {global_rank} (PID: {os.getpid()}) - Parallel Groups:")
+    logger.info(f"Worker Rank {global_rank} (PID: {os.getpid()}) - Parallel Groups:")
     
     # Print tensor parallel group ranks
     try:
         tp_group = get_tp_group()
-        print(f"Rank {global_rank}: Tensor Parallel: {sorted(tp_group.ranks)}")
+        logger.info(f"Rank {global_rank}: Tensor Parallel: {sorted(tp_group.ranks)}")
     except (AssertionError, AttributeError):
-        print(f"Rank {global_rank}: Tensor Parallel: Not initialized")
-    
+        logger.info(f"Rank {global_rank}: Tensor Parallel: Not initialized")
+
     # Print pipeline parallel group ranks
     try:
         pp_group = get_pp_group()
-        print(f"Rank {global_rank}: Pipeline Parallel: {sorted(pp_group.ranks)}")
+        logger.info(f"Rank {global_rank}: Pipeline Parallel: {sorted(pp_group.ranks)}")
     except (AssertionError, AttributeError):
-        print(f"Rank {global_rank}: Pipeline Parallel: Not initialized")
-    
+        logger.info(f"Rank {global_rank}: Pipeline Parallel: Not initialized")
+
     # Print data parallel group ranks
     try:
         dp_group = get_dp_group()
-        print(f"Rank {global_rank}: Data Parallel: {sorted(dp_group.ranks)}")
+        logger.info(f"Rank {global_rank}: Data Parallel: {sorted(dp_group.ranks)}")
     except (AssertionError, AttributeError):
-        print(f"Rank {global_rank}: Data Parallel: Not initialized")
+        logger.info(f"Rank {global_rank}: Data Parallel: Not initialized")
 
     # Print token parallel group ranks
     try:
         tknp_group = get_tknp_group()
-        print(f"Rank {global_rank}: Token Parallel: {sorted(tknp_group.ranks)}")
+        logger.info(f"Rank {global_rank}: Token Parallel: {sorted(tknp_group.ranks)}")
     except (AssertionError, AttributeError):
-        print(f"Rank {global_rank}: Token Parallel: Not initialized")
+        logger.info(f"Rank {global_rank}: Token Parallel: Not initialized")
 
 
 class Worker(WorkerBase):
@@ -215,7 +215,6 @@ class Worker(WorkerBase):
                                             self.local_rank,
                                             current_platform.dist_backend)
         
-        print("GPUWorker init")
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
