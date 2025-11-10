@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""
+Tests for environment variable utility functions.
+
+This module tests generic utility functions for environment variable handling.
+For tests of specific environment variable functions with custom logic,
+see test_env_functions.py.
+"""
+
 import os
 from unittest.mock import patch
 
