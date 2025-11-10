@@ -1002,8 +1002,8 @@ class NixlConnectorWorker:
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """Assign copy (d2h, h2d) operations when host buffer is used."""
-        # Set a no-op if the host buffer is not cpu.
-        if self.kv_buffer_device != "cpu":
+        # Set a no-op if the host buffer is not cpu and self.device_type is 'cpu'.
+        if self.kv_buffer_device != "cpu" or self.device_type == "cpu":
             return
         if self.device_type != "cpu":
             assert self.use_host_buffer
