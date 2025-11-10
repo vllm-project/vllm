@@ -1446,7 +1446,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 audio_feature_lengths, dtype=torch.long
             )
 
-        if len(video_grid_thw):
+        if not len(second_per_grid_ts) and len(video_grid_thw):
             second_per_grids = torch.ones(len(video_grid_thw), dtype=torch.float32)
         else:
             second_per_grids = torch.tensor(second_per_grid_ts, dtype=torch.float32)
