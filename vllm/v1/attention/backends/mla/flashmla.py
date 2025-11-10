@@ -51,10 +51,6 @@ class FlashMLABackend(MLACommonBackend):
         return "FLASHMLA"
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashMLAMetadata"]:
-        return FlashMLAMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["FlashMLAMetadataBuilder"]:
         return FlashMLAMetadataBuilder
 

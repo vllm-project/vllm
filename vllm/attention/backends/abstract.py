@@ -61,15 +61,6 @@ class AttentionBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        raise NotImplementedError
-
-    @classmethod
-    def make_metadata(cls, *args, **kwargs) -> "AttentionMetadata":
-        return cls.get_metadata_cls()(*args, **kwargs)
-
-    @staticmethod
-    @abstractmethod
     def get_builder_cls():  # -> Type["AttentionMetadataBuilder"]:
         raise NotImplementedError
 

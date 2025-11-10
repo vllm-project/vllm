@@ -182,10 +182,6 @@ class FlashInferBackend(AttentionBackend):
         return FlashInferImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashInferMetadata"]:
-        return FlashInferMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
         return FlashInferMetadataBuilder
 

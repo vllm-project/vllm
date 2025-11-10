@@ -10,7 +10,6 @@ import torch
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     MultipleOf,
 )
@@ -461,10 +460,6 @@ class AiterFlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["AiterFlashAttentionImpl"]:
         return AiterFlashAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return AiterFlashAttentionMetadata
 
     @staticmethod
     def get_builder_cls() -> type["AiterFlashAttentionMetadataBuilder"]:
