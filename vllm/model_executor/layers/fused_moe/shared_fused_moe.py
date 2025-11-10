@@ -36,6 +36,7 @@ class SharedFusedMoE(FusedMoE):
         self.use_overlapped = (
             use_overlapped
             and not (
+                TODO(wentao): find the root cause and remove this condition
                 self.enable_eplb
                 or (self.use_flashinfer_cutlass_kernels and self.dp_size > 1)
             )
