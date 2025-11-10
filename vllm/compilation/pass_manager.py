@@ -20,6 +20,7 @@ if current_platform.is_cuda_alike():
 
 if current_platform.is_cuda():
     from .collective_fusion import AllReduceFusionPass, AsyncTPPass
+    from .triton_dist_fusion import TritonDistFusionPass
 
 from .fix_functionalization import FixFunctionalizationPass
 from .inductor_pass import CustomGraphPass, InductorPass, get_pass_context
@@ -93,6 +94,13 @@ class PostGradPassManager(CustomGraphPass):
         with set_current_vllm_config(config, check_compile=False):
             if self.pass_config.enable_noop:
                 self.passes += [NoOpEliminationPass(config)]
+
+            if self.pass_config.enable_triton_dist_fusion:
+                logger.info("PostGradPassManager: Adding TritonDistFusionPass")
+                self.passes += [TritonDistFusionPass(config)]
+            else:
+                logger.info("PostGradPassManager: TritonDistFusionPass NOT enabled (enable_triton_dist_fusion=%s)",
+                           self.pass_config.enable_triton_dist_fusion)
 
             if self.pass_config.enable_sequence_parallelism:
                 self.passes += [SequenceParallelismPass(config)]
