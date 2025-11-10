@@ -110,9 +110,7 @@ class MultiprocExecutor(Executor):
             f"divisible by distributed_node_size_within_dp "
             f"({self.parallel_config.distributed_node_size_within_dp}). "
         )
-        self.local_world_size = (
-            self.world_size // self.parallel_config.distributed_node_size_within_dp
-        )
+        self.local_world_size = self.parallel_config.local_world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
         pp_parallel_size = self.parallel_config.pipeline_parallel_size
         assert self.world_size == tensor_parallel_size * pp_parallel_size, (
