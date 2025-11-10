@@ -317,7 +317,7 @@ class EngineCore:
         if not (self.scheduler.has_requests() or needs_dp_sync):
             return {}, False
 
-        # Execute the model (may be with 0 tokens for DP sync)
+        # Execute the model (maybe with 0 tokens for DP sync)
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
