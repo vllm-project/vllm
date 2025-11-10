@@ -389,6 +389,7 @@ class EngineArgs:
     distributed_node_rank: int = ParallelConfig.distributed_node_rank
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
+    dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -518,7 +519,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     override_pooler_config: dict | PoolerConfig | None = (
@@ -557,7 +558,7 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool = SchedulerConfig.async_scheduling
+    async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
@@ -766,6 +767,10 @@ class EngineArgs:
             "--decode-context-parallel-size",
             "-dcp",
             **parallel_kwargs["decode_context_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--dcp-kv-cache-interleave-size",
+            **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
         parallel_group.add_argument(
             "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
@@ -1566,20 +1571,6 @@ class EngineArgs:
             else ParallelConfig.data_parallel_rpc_port
         )
 
-        if self.async_scheduling:
-            if self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not supported with pipeline-parallel-size > 1."
-                )
-
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling."
-                )
-
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
@@ -1623,19 +1614,10 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
-
-        if self.async_scheduling and (
-            parallel_config.distributed_executor_backend
-            not in ("mp", "uni", "external_launcher")
-        ):
-            raise ValueError(
-                "Currently, async scheduling only supports `mp`, `uni` or "
-                "`external_launcher` distributed executor backend, but you choose "
-                f"`{parallel_config.distributed_executor_backend}`."
-            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1688,6 +1670,20 @@ class EngineArgs:
             if self.enable_lora
             else None
         )
+
+        if (
+            lora_config is not None
+            and speculative_config is not None
+            and scheduler_config.max_num_batched_tokens
+            < (
+                scheduler_config.max_num_seqs
+                * (speculative_config.num_speculative_tokens + 1)
+            )
+        ):
+            raise ValueError(
+                "Consider increasing max_num_batched_tokens or "
+                "decreasing num_speculative_tokens"
+            )
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
