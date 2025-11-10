@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.gc_utils import reset_gc_heap
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
@@ -54,6 +55,9 @@ class UniProcExecutor(Executor):
         device_info = self.vllm_config.device_config.device.__str__().split(":")
         local_rank = int(device_info[1]) if len(device_info) > 1 else 0
         return distributed_init_method, 0, local_rank
+
+    def __del__(self) -> None:
+        reset_gc_heap()
 
     @cached_property
     def max_concurrent_batches(self) -> int:
