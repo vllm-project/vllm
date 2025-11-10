@@ -330,7 +330,7 @@ class W8A8BlockFp8LinearOp:
         if input_scale is not None:
             q_input = input_2d
         # MI350 case uses triton kernel
-        if use_triton:
+        elif use_triton:
             q_input, input_scale = per_token_group_quant_fp8(
                 input_2d,
                 self.act_quant_group_shape.col,
