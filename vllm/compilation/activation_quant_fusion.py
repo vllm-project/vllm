@@ -299,7 +299,6 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: torch.fx.Graph):
         self.matched_count = self.patterns.apply(graph)
-        print(self.matched_count)
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self):
