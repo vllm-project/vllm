@@ -144,29 +144,23 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        """
-        Current step in the sliding window.
-        """
-        """
-        NOTE: Keep in mind that all EP ranks need to have the same
-        `expert_rearrangement_step` value to ensure synchronization.
-        Otherwise, the rearrangement will hang at collective
-        communication calls.
-        """
         self.policy: EplbPolicy | None = None
         """
         Selected instance of the EPLB algorithm class
         """
+        self.expert_load_window_step: int = 0
         """
+        Current step in the sliding window.
+        
         Different from `expert_rearrangement_step`, 
         each EP rank may have its own `expert_load_window_step`.
         """
-        self.expert_load_window_step: int = 0
+        self.expert_load_window_size: int = 0
         """
         Size of the expert load sliding window.
         This is a constant and is taken from the config.
         """
-        self.expert_load_window_size: int = 0
+        self.expert_rearrangement_step: int = 0
         """
         Steps after last rearrangement.
         Will trigger a rearrangement if it exceeds the threshold.
@@ -176,12 +170,11 @@ class EplbState:
         Otherwise, the rearrangement will hang at collective
         communication calls.
         """
-        self.expert_rearrangement_step: int = 0
+        self.expert_rearrangement_step_interval: int = 0
         """
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
         """
-        self.expert_rearrangement_step_interval: int = 0
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
