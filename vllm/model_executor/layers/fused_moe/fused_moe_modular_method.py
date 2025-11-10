@@ -24,22 +24,11 @@ logger = init_logger(__name__)
 @CustomOp.register("modular_fused_moe")
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     def __init__(
-        self,
-        moe_layer: torch.nn.Module,
-        old_quant_method: FusedMoEMethodBase,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        shared_experts: torch.nn.Module | None,
+        self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEModularKernel
     ):
         super().__init__(old_quant_method.moe)
-        # Find better way to copy attributes?  Should we even copy attributes?
-        # self.__dict__.update(old_quant_method.__dict__)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        experts = old_quant_method.select_gemm_impl(prepare_finalize, moe_layer)
-        self.fused_experts = FusedMoEModularKernel(
-            prepare_finalize,
-            experts,
-            shared_experts,
-        )
+        self.fused_experts = experts
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
@@ -47,6 +36,22 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         )
         self.old_quant_method = old_quant_method
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
+
+    @staticmethod
+    def make(
+        moe_layer: torch.nn.Module,
+        old_quant_method: FusedMoEMethodBase,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        shared_experts: torch.nn.Module | None,
+    ) -> "FusedMoEModularMethod":
+        return FusedMoEModularMethod(
+            old_quant_method,
+            FusedMoEModularKernel(
+                prepare_finalize,
+                old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
+                shared_experts,
+            ),
+        )
 
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
