@@ -82,7 +82,7 @@ else:
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
-from vllm.model_executor.layers.fused_moe.modular_moe_method import (
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
