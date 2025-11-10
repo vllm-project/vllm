@@ -40,15 +40,17 @@ def _run_ar(
     orig_num_tokens_per_ubatch: int,
     padded_num_tokens_per_ubatch: int,
     parallel_config: ParallelConfig,
+    should_attempt_drafter: bool = False,
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
+    tensor = torch.zeros(5, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = 1 if should_dp_pad else 0
+    tensor[4][dp_rank] = 1 if should_attempt_drafter else 0
     dist.all_reduce(tensor, group=group)
     return tensor
 
@@ -94,7 +96,8 @@ def _synchronize_dp_ranks(
     should_attempt_ubatching: bool,
     should_attempt_dp_padding: bool,
     parallel_config: ParallelConfig,
-) -> tuple[bool, torch.Tensor | None]:
+    should_attempt_drafter: bool = False,
+) -> tuple[bool, torch.Tensor | None, bool]:
     """
     1. Decides if each DP rank is going to microbatch. Either all ranks
     run with microbatching or none of them do.
@@ -103,10 +106,14 @@ def _synchronize_dp_ranks(
     When running microbatched or if should_attempt_dp_padding is True, all
     ranks will be padded out so that the run with the same number of tokens
 
+    3. Determines if the speculative drafter should run. Only runs if all
+    ranks agree to run it.
+
     Returns: tuple[
         should_ubatch: Are all DP ranks going to microbatch
         num_tokens_after_padding: A tensor containing the total number of
         tokens per-microbatch for each DP rank including any DP padding.
+        should_run_drafter: Whether the drafter should run (all ranks agree)
     ]
 
     """
@@ -121,9 +128,11 @@ def _synchronize_dp_ranks(
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
         padded_num_tokens_per_ubatch=num_tokens_padded,
         parallel_config=parallel_config,
+        should_attempt_drafter=should_attempt_drafter,
     )
 
     should_dp_pad = bool(torch.any(tensor[3] == 1).item())
+    should_run_drafter = bool(torch.all(tensor[4] == 1).item())
 
     # Check conditions for microbatching
     should_ubatch = _post_process_ubatch(tensor)
@@ -144,7 +153,7 @@ def _synchronize_dp_ranks(
         should_dp_pad,
     )
 
-    return should_ubatch, num_tokens_after_padding
+    return should_ubatch, num_tokens_after_padding, should_run_drafter
 
 
 def coordinate_batch_across_dp(
@@ -155,7 +164,8 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     num_scheduled_tokens_per_request: np.ndarray | None = None,
-) -> tuple[UBatchSlices | None, torch.Tensor | None]:
+    should_attempt_drafter: bool = False,
+) -> tuple[UBatchSlices | None, torch.Tensor | None, bool]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
     should be split into microbatches.
@@ -171,6 +181,7 @@ def coordinate_batch_across_dp(
             only contains single token decodes
         num_scheduled_tokens_per_request: Only used if allow_microbatching is True. The
             number of tokens per request.
+        should_attempt_drafter: Whether this rank wants to run the speculative drafter
 
     Returns: tuple[
         ubatch_slices: if this is set then all DP ranks have agreed to
@@ -179,12 +190,13 @@ def coordinate_batch_across_dp(
         tokens per-microbatch for each DP rank including padding. Will be
         padded up to the max value across all DP ranks when allow_dp_padding
         is True.
+        should_run_drafter: Whether the drafter should run (all ranks must agree)
     ]
 
     """
     if parallel_config.data_parallel_size == 1:
         # Early exit.
-        return None, None
+        return None, None, should_attempt_drafter
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -200,17 +212,18 @@ def coordinate_batch_across_dp(
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
 
-    (should_ubatch, num_tokens_after_padding) = _synchronize_dp_ranks(
+    (should_ubatch, num_tokens_after_padding, should_run_drafter) = _synchronize_dp_ranks(
         num_tokens_unpadded,
         num_tokens_padded,
         should_attempt_ubatching,
         allow_dp_padding,
         parallel_config,
+        should_attempt_drafter,
     )
 
     # Don't microbatch unless every other DP worker is also microbatching
     if not should_ubatch:
-        return (None, num_tokens_after_padding)
+        return (None, num_tokens_after_padding, should_run_drafter)
 
     # This doesn't actually pad the ubatch slices. It just initializes the
     # split point to the padded value so that padding can be applied
@@ -224,4 +237,4 @@ def coordinate_batch_across_dp(
         num_scheduled_tokens_per_request, token_split_point
     )
 
-    return (ubatch_slices, num_tokens_after_padding)
+    return (ubatch_slices, num_tokens_after_padding, should_run_drafter)

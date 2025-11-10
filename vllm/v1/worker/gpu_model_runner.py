@@ -1042,7 +1042,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return encoder_seq_lens
 
     def _prepare_inputs(
-        self, scheduler_output: "SchedulerOutput"
+        self,
+        scheduler_output: "SchedulerOutput",
+        should_attempt_drafter: bool = False,
     ) -> tuple[
         PerLayerAttnMetadata,
         torch.Tensor,
@@ -1053,13 +1055,15 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         UBatchSlices | None,
         torch.Tensor | None,
         bool,
+        bool,
     ]:
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
             logits_indices, spec_decode_metadata,
             num_scheduled_tokens, spec_decode_common_attn_metadata,
-            max_num_scheduled_tokens, use_cascade_attn
+            max_num_scheduled_tokens, ubatch_slices, num_tokens_across_dp,
+            use_cascade_attn, should_run_drafter
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1187,7 +1191,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # decoder.
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+        ubatch_slices, num_tokens_across_dp, should_run_drafter = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.parallel_config,
             allow_microbatching=True,
@@ -1195,6 +1199,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens_padded=num_tokens_padded,
             uniform_decode=uniform_decode,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
+            should_attempt_drafter=should_attempt_drafter,
         )
 
         self.seq_lens.np[:num_reqs] = (
@@ -1432,6 +1437,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ubatch_slices,
             num_tokens_across_dp,
             use_cascade_attn,
+            should_run_drafter,
         )
 
     def _compute_cascade_attn_prefix_len(
@@ -2433,6 +2439,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                 has_tokens = bool(scheduler_output.total_num_scheduled_tokens)
 
+                # Compute should_attempt_drafter early, before calling _prepare_inputs
+                should_attempt_drafter = False
+                if has_tokens and self.speculative_config is not None:
+                    # Compute max_seq_len to determine if drafter can run
+                    num_reqs = self.input_batch.num_reqs
+                    req_ids = self.input_batch.req_ids
+                    num_scheduled_tokens_list = [
+                        scheduler_output.num_scheduled_tokens[i] for i in req_ids
+                    ]
+                    num_scheduled_tokens_np = np.array(
+                        num_scheduled_tokens_list, dtype=np.int32
+                    )
+                    seq_lens_np = (
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs]
+                        + num_scheduled_tokens_np
+                    )
+                    max_seq_len = seq_lens_np.max()
+
+                    # Determine if drafter fits within max model len
+                    effective_drafter_max_model_len = self.max_model_len
+                    if effective_drafter_max_model_len is None:
+                        effective_drafter_max_model_len = (
+                            self.model_config.max_model_len
+                        )
+                    if self.speculative_config.draft_model_config is not None and (
+                        self.speculative_config.draft_model_config.max_model_len
+                        is not None
+                    ):
+                        effective_drafter_max_model_len = (
+                            self.speculative_config.draft_model_config.max_model_len
+                        )
+                    should_attempt_drafter = bool(
+                        max_seq_len + self.speculative_config.num_speculative_tokens
+                        <= effective_drafter_max_model_len
+                    )
+
                 if has_tokens:
                     if self.cache_config.kv_sharing_fast_prefill:
                         assert not self.input_batch.num_prompt_logprobs, (
@@ -2452,7 +2494,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         ubatch_slices,
                         num_tokens_across_dp,
                         use_cascade_attn,
-                    ) = self._prepare_inputs(scheduler_output)
+                        should_run_drafter,
+                    ) = self._prepare_inputs(scheduler_output, should_attempt_drafter)
 
                     dp_rank = self.parallel_config.data_parallel_rank
                     if ubatch_slices:
@@ -2493,89 +2536,33 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                             batch_descriptor, use_cascade_attn
                         )
                     )
-                elif self.parallel_config.data_parallel_size > 1:
-                    # With spec decode + DP, participate in the coordinate call that
-                    # other ranks make in _prepare_inputs, even though this rank has
-                    # 0 tokens. We don't early return here, because we need to sync
-                    # should_run_drafter later.
-                    _, num_tokens_across_dp = coordinate_batch_across_dp(
-                        num_tokens_unpadded=0,
-                        parallel_config=self.parallel_config,
-                        allow_microbatching=False,
-                        allow_dp_padding=False,
-                    )
-                    spec_decode_common_attn_metadata = None
-                    # Set dummy values for 0-token case
-                    cudagraph_runtime_mode = CUDAGraphMode.NONE
-                    batch_descriptor = None
                 else:
-                    # Single DP rank with 0 tokens - return immediately
+                    # No tokens to process - handle early return
+                    # In DP mode, we need to participate in coordinate_batch_across_dp
+                    # to maintain synchronization across ranks
+                    if self.parallel_config.data_parallel_size > 1:
+                        _, _, should_run_drafter = coordinate_batch_across_dp(
+                            num_tokens_unpadded=0,
+                            parallel_config=self.parallel_config,
+                            allow_microbatching=False,
+                            allow_dp_padding=False,
+                            should_attempt_drafter=False,
+                        )
+
+                    # Return early for 0-token case
                     if not has_kv_transfer_group():
                         return EMPTY_MODEL_RUNNER_OUTPUT
                     return self.kv_connector_no_forward(
                         scheduler_output, self.vllm_config
                     )
 
-            if self.speculative_config is not None:
-                use_padded_batch_for_eagle = (
-                    self.speculative_config.use_eagle()
-                    and not self.speculative_config.disable_padded_drafter_batch
-                )
-                if has_tokens:
-                    # Compute whether this rank wants to run the drafter
-                    effective_drafter_max_model_len = self.max_model_len
-                    if effective_drafter_max_model_len is None:
-                        effective_drafter_max_model_len = (
-                            self.model_config.max_model_len
-                        )
-                    if self.speculative_config.draft_model_config is not None and (
-                        self.speculative_config.draft_model_config.max_model_len
-                        is not None
-                    ):
-                        effective_drafter_max_model_len = (
-                            self.speculative_config.draft_model_config.max_model_len
-                        )
-                    should_run_drafter = bool(
-                        spec_decode_common_attn_metadata
-                        and (
-                            spec_decode_common_attn_metadata.max_seq_len
-                            + self.speculative_config.num_speculative_tokens
-                            <= effective_drafter_max_model_len
-                        )
-                    )
-                else:
-                    # This rank has 0 tokens, so it cannot run the drafter
-                    should_run_drafter = False
-
-                # Sync across all DP ranks if DP > 1. Only run the drafter if all ranks
-                # agree to run it.
-                if self.parallel_config.data_parallel_size > 1:
-                    import torch.distributed as dist
-
-                    from vllm.distributed.parallel_state import get_dp_group
-
-                    device = get_dp_group().device
-                    group = get_dp_group().device_group
-                    if self.parallel_config.disable_nccl_for_dp_synchronization:
-                        device = "cpu"
-                        group = get_dp_group().cpu_group
-
-                    drafter_flag = torch.tensor(
-                        [1 if should_run_drafter else 0],
-                        device=device,
-                        dtype=torch.int32,
-                    )
-                    dist.all_reduce(drafter_flag, op=dist.ReduceOp.MIN, group=group)
-                    should_run_drafter = bool(drafter_flag.item())
-            else:
-                # No speculative decoding configured
-                should_run_drafter = False
-
-            # Having participated in the sync, the 0-token rank can now return
-            if not has_tokens:
-                if not has_kv_transfer_group():
-                    return EMPTY_MODEL_RUNNER_OUTPUT
-                return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
+            # should_run_drafter was already synchronized in coordinate_batch_across_dp
+            # during _prepare_inputs (for has_tokens) or above (for 0-token DP ranks)
+            use_padded_batch_for_eagle = (
+                self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+                and not self.speculative_config.disable_padded_drafter_batch
+            )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         if attn_metadata is not None:
@@ -3361,7 +3348,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+        ubatch_slices, num_tokens_across_dp, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=total_num_scheduled_tokens,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=allow_microbatching,
