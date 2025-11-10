@@ -110,22 +110,28 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # to select between the 2D and 3D kernels for decode.
         self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
         if self.decode_cudagraph_enabled:
-            # Select the CUDA Graph capture size closest to self.seq_threshold_3D
-            # as threshold. This ensures that each captured graph covers the
-            # correct execution path.
-            upd_seq_threshold_3D = min(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes,
-                key=lambda x: abs(x - self.seq_threshold_3D),
-            )
-
-            # If the updated threshold becomes significantly larger than the
-            # initial value, it is reset to zero. This enforces the use of the
-            # 2D kernel only and ensures that the size of the allocated
-            # intermediate structures remains bounded.
-            if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
-                self.seq_threshold_3D = upd_seq_threshold_3D
-            else:
+            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+            if not capture_sizes:
+                # If no CUDA Graph capture sizes are specified, the threshold
+                # is reset to zero, forcing the 2D kernel to be used.
                 self.seq_threshold_3D = 0
+            else:
+                # Select the CUDA Graph capture size closest to self.seq_threshold_3D
+                # as threshold. This ensures that each captured graph covers the
+                # correct execution path.
+                upd_seq_threshold_3D = min(
+                    capture_sizes,
+                    key=lambda x: abs(x - self.seq_threshold_3D),
+                )
+
+                # If the updated threshold becomes significantly larger than the
+                # initial value, it is reset to zero. This enforces the use of the
+                # 2D kernel only and ensures that the size of the allocated
+                # intermediate structures remains bounded.
+                if upd_seq_threshold_3D <= 4 * self.seq_threshold_3D:
+                    self.seq_threshold_3D = upd_seq_threshold_3D
+                else:
+                    self.seq_threshold_3D = 0
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         self.softmax_segm_output = torch.empty(
