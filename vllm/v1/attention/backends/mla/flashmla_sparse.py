@@ -636,8 +636,10 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
                 vllm_config.model_config.max_model_len
             )
             self.prefill_workspace_shape = (prefill_workspace_size, head_size)
-            self.prefill_bf16_workspace = current_workspace_manager().get_simultaneous(
-                (self.prefill_workspace_shape, torch.bfloat16)
+            (self.prefill_bf16_workspace,) = (
+                current_workspace_manager().get_simultaneous(
+                    (self.prefill_workspace_shape, torch.bfloat16)
+                )
             )
 
     def _forward_bf16_kv(
