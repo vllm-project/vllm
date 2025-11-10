@@ -29,7 +29,7 @@ from vllm.transformers_utils.config import maybe_register_config_serialize_by_va
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
-    unfreeze_gc_heap,
+    reset_gc_heap,
 )
 from vllm.utils.hashing import get_hash_fn_by_name
 from vllm.utils.network_utils import make_zmq_socket
@@ -204,7 +204,7 @@ class EngineCore:
         freeze_gc_heap()
 
     def __del__(self) -> None:
-        unfreeze_gc_heap()
+        reset_gc_heap()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig

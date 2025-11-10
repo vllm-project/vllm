@@ -89,29 +89,26 @@ class GCDebugger:
             )
 
 
+def reset_gc_heap() -> None:
+    """
+    Unfreeze and invokes GC collects for all generations to ensure objects
+    are cyclic-refrenence-free before gc.freeze.
+    """
+    gc.unfreeze()
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
+
+
 def freeze_gc_heap() -> None:
     """
     Freeze all objects tracked by the garbage collector. It should be invoked
     after server init / warmup, to reduce GC overhead from static objects
     during serving time.
     """
-    # Invoke GC collects for all generations to ensure objects are
-    # cyclic-refrenence-free before gc.freeze
-    gc.collect(0)
-    gc.collect(1)
-    gc.collect(2)
+    reset_gc_heap()
     # Freeze all GC tracked objects
     gc.freeze()
-
-
-def unfreeze_gc_heap() -> None:
-    """
-    Unfreezes GC heaps, which should be invoked in pair with freeze_gc_heap
-    to avoid freezed objects stay in memory when scope exits.
-    """
-    # Move objects in permanent generation back to the oldest generation
-    # in case the heap is already frozen.
-    gc.unfreeze()
 
 
 def maybe_attach_gc_debug_callback() -> None:
