@@ -62,14 +62,23 @@ from .utils import (
 
 class PersimmonMLP(nn.Module):
     def __init__(
-        self, config: PersimmonConfig, quant_config: QuantizationConfig | None = None
+        self,
+        config: PersimmonConfig,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.dense_h_to_4h = ColumnParallelLinear(
-            config.hidden_size, config.intermediate_size, quant_config=quant_config
+            config.hidden_size,
+            config.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.dense_4h_to_h = RowParallelLinear(
-            config.intermediate_size, config.hidden_size, quant_config=quant_config
+            config.intermediate_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
         self.act = get_act_fn(config.hidden_act)
 
@@ -110,12 +119,14 @@ class PersimmonAttention(nn.Module):
             self.total_num_heads,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.dense = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense",
         )
         self.is_qk_layernorm = config.qk_layernorm
 
@@ -192,7 +203,11 @@ class PersimmonDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
-        self.mlp = PersimmonMLP(config, quant_config=quant_config)
+        self.mlp = PersimmonMLP(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
         self.input_layernorm = nn.LayerNorm(
             config.hidden_size, eps=config.layer_norm_eps
         )

@@ -76,7 +76,7 @@ class ReasoningParser:
         """
 
     @abstractmethod
-    def extract_reasoning_content(
+    def extract_reasoning(
         self,
         model_output: str,
         request: ChatCompletionRequest | ResponsesRequest,
@@ -100,7 +100,7 @@ class ReasoningParser:
         """
 
     @abstractmethod
-    def extract_reasoning_content_streaming(
+    def extract_reasoning_streaming(
         self,
         previous_text: str,
         current_text: str,

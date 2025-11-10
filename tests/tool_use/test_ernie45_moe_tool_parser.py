@@ -337,7 +337,7 @@ def test_extract_tool_calls_streaming_incremental(
         if (
             delta_message.role is None
             and delta_message.content is None
-            and delta_message.reasoning_content is None
+            and delta_message.reasoning is None
             and len(delta_message.tool_calls) == 0
         ):
             continue

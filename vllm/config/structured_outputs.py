@@ -37,6 +37,9 @@ class StructuredOutputsConfig:
     reasoning_parser: str = ""
     """Select the reasoning parser depending on the model that you're using.
     This is used to parse the reasoning content into OpenAI API format."""
+    reasoning_parser_plugin: str = ""
+    """Path to a dynamically reasoning parser plugin that can be dynamically
+    loaded and registered."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
 
@@ -60,6 +63,22 @@ class StructuredOutputsConfig:
 
     @model_validator(mode="after")
     def _validate_structured_output_config(self) -> Self:
+        # Import here to avoid circular import
+        from vllm.reasoning.abs_reasoning_parsers import ReasoningParserManager
+
+        if self.reasoning_parser_plugin and len(self.reasoning_parser_plugin) > 3:
+            ReasoningParserManager.import_reasoning_parser(self.reasoning_parser_plugin)
+
+        valid_reasoning_parsers = ReasoningParserManager.list_registered()
+        if (
+            self.reasoning_parser != ""
+            and self.reasoning_parser not in valid_reasoning_parsers
+        ):
+            raise ValueError(
+                f"invalid reasoning parser: {self.reasoning_parser} "
+                f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+            )
+
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
             raise ValueError(
                 "disable_any_whitespace is only supported for "

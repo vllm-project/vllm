@@ -211,7 +211,7 @@ def get_rocm_tuning_space(use_fp16):
     num_warps_range = [1, 2, 4, 8]
     group_m_range = [1, 4, 8, 16, 32]
     num_stage_range = [2]
-    waves_per_eu_range = [0]
+    waves_per_eu_range = [0, 1, 2, 4]
     matrix_instr_nonkdim_range = [16, 32] if use_fp16 else []
     kpack_range = [1, 2] if use_fp16 else []
 
@@ -616,6 +616,11 @@ def main(args: argparse.Namespace):
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
         hidden_size = config.hidden_size
+    elif config.architectures[0] in ["Qwen3OmniMoeForConditionalGeneration"]:
+        E = config.thinker_config.text_config.num_experts
+        topk = config.thinker_config.text_config.num_experts_per_tok
+        intermediate_size = config.thinker_config.text_config.moe_intermediate_size
+        hidden_size = config.thinker_config.text_config.hidden_size
     else:
         # Support for llama4
         config = config.get_text_config()

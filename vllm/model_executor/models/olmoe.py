@@ -158,6 +158,7 @@ class OlmoeAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.tp_size = tp_size
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -168,6 +169,7 @@ class OlmoeAttention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(

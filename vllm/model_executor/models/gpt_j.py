@@ -78,12 +78,14 @@ class GPTJAttention(nn.Module):
             self.total_num_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.out_proj = RowParallelLinear(
             config.hidden_size,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
 
         tp_world_size = get_tensor_model_parallel_world_size()
@@ -130,6 +132,7 @@ class GPTJMLP(nn.Module):
         intermediate_size: int,
         config: GPTJConfig,
         quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.n_embd
@@ -137,11 +140,13 @@ class GPTJMLP(nn.Module):
             hidden_size,
             intermediate_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc_in",
         )
         self.fc_out = RowParallelLinear(
             intermediate_size,
             hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc_out",
         )
         self.act = get_act_fn(config.activation_function)
 
@@ -166,7 +171,7 @@ class GPTJBlock(nn.Module):
         self.attn = GPTJAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
-        self.mlp = GPTJMLP(inner_dim, config, quant_config)
+        self.mlp = GPTJMLP(inner_dim, config, quant_config, prefix=f"{prefix}.mlp")
 
     def forward(
         self,

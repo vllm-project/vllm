@@ -399,6 +399,7 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
         import intel_extension_for_pytorch as ipex
 
+        ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
             layer.w13_weight,
             layer.w2_weight,
@@ -407,6 +408,7 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             a1_scale_inv=layer.w13_input_scale,
             a2_scale_inv=layer.w2_input_scale,
             use_prepack=True,
+            experts_start_id=ep_rank_start,
         )
 
     def get_fused_moe_quant_config(

@@ -891,7 +891,6 @@ def test_kv_connector_basic():
     scheduler = create_scheduler(
         enable_prefix_caching=True,
         use_kv_connector=True,
-        disable_hybrid_kv_cache_manager=True,
     )
     NUM_TOTAL_BLOCKS = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
     BLOCK_SIZE = scheduler.cache_config.block_size
@@ -1017,7 +1016,6 @@ def test_external_prefix_cache_metrics():
     scheduler = create_scheduler(
         enable_prefix_caching=False,
         use_kv_connector=True,
-        disable_hybrid_kv_cache_manager=True,
     )
 
     # Mock connector to simulate a partial external cache hit
@@ -1082,7 +1080,6 @@ def test_kv_connector_unable_to_allocate():
         use_kv_connector=True,
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
-        disable_hybrid_kv_cache_manager=True,
     )
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
@@ -1166,7 +1163,6 @@ def test_kv_connector_handles_preemption():
         use_kv_connector=True,
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
-        disable_hybrid_kv_cache_manager=True,
     )
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
@@ -1383,7 +1379,6 @@ def create_scheduler_with_priority(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
-    disable_hybrid_kv_cache_manager: bool = False,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1408,7 +1403,6 @@ def create_scheduler_with_priority(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         policy="priority",  # Enable priority scheduling
-        disable_hybrid_kv_cache_manager=disable_hybrid_kv_cache_manager,
     )
     model_config = ModelConfig(
         model=model,
@@ -2015,7 +2009,6 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
         num_blocks=5,  # Can hold 64 tokens (first block is null)
         block_size=16,  # Standard block size
         use_kv_connector=True,
-        disable_hybrid_kv_cache_manager=True,
     )
 
     # Create a request and schedule it

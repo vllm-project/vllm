@@ -20,7 +20,6 @@ from torch.nn.attention.flex_attention import (
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     is_quantized_kv_cache,
 )
@@ -88,10 +87,6 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
         return FlexAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlexAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(

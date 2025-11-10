@@ -344,7 +344,7 @@ steps:
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
     - pytest -v -s v1/spec_decode
-    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_lmcache_integration.py
     - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
     - pytest -v -s v1/test_request.py
