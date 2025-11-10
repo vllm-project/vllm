@@ -704,8 +704,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         # decode:extend:prefill
         query = query[:num_actual_tokens]
-        key = key[:num_actual_tokens] if key is not None else key_cache[:num_actual_tokens]
-        value = value[:num_actual_tokens] if value is not None else value_cache[:num_actual_tokens]
+        if key is not None:
+            key = key[:num_actual_tokens]
+        if value is not None:
+            value = value[:num_actual_tokens]
+
 
         output_actual_tokens = output[:num_actual_tokens]
 
