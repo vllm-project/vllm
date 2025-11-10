@@ -963,9 +963,9 @@ class ChameleonForConditionalGeneration(
         self.model = ChameleonModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
-        self.unpadded_vocab_size = config.vocab_size
+
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -974,7 +974,7 @@ class ChameleonForConditionalGeneration(
 
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
+            config.vocab_size, config.vocab_size, logit_scale
         )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors

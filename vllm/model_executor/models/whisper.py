@@ -890,7 +890,7 @@ class WhisperForConditionalGeneration(
         self.dtype = vllm_config.model_config.dtype
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
-        self.unpadded_vocab_size = config.vocab_size
+
         self.proj_out = ParallelLMHead(
             config.vocab_size,
             config.d_model,
@@ -900,7 +900,7 @@ class WhisperForConditionalGeneration(
         self.proj_out = self.proj_out.tie_weights(self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
+            config.vocab_size, config.vocab_size, logit_scale
         )
 
     def forward(
