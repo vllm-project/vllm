@@ -608,17 +608,19 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        assert (
-            self.parallel_config.dcp_kv_cache_interleave_size
-            <= self.cache_config.block_size
-            and self.cache_config.block_size
-            % self.parallel_config.dcp_kv_cache_interleave_size
-            == 0
-        ), (
-            f"Block_size({self.cache_config.block_size}) should be "
-            "greater than or equal to and divisible by dcp_kv_cache_interleave_size "
-            f"({self.parallel_config.dcp_kv_cache_interleave_size})."
-        )
+        # If DCP, ensure the block size is right.
+        if self.parallel_config.decode_context_parallel_size > 1:
+            assert (
+                self.parallel_config.dcp_kv_cache_interleave_size
+                <= self.cache_config.block_size
+                and self.cache_config.block_size
+                % self.parallel_config.dcp_kv_cache_interleave_size
+                == 0
+            ), (
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by dcp_kv_cache_interleave_size "
+                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+            )
 
         assert (
             self.parallel_config.dcp_kv_cache_interleave_size == 1
