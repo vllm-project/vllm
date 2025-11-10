@@ -523,12 +523,12 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
         return base(raw_request).create_error_response(
             message="The model does not support Responses API"
         )
-    try:
-        generator = await handler.create_responses(request, raw_request)
-    except Exception as e:
-        raise HTTPException(
-            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
-        ) from e
+    # try:
+    generator = await handler.create_responses(request, raw_request)
+    # except Exception as e:
+    #     raise HTTPException(
+    #         status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
+    #     ) from e
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
