@@ -159,8 +159,9 @@ def test_triton_unified_attn(
         v_descale = torch.rand(scale_shape, dtype=torch.float32)
 
     num_par_softmax_segments = 16
+    head_size_padded = 1 << (head_size - 1).bit_length()  # next power of 2 value
     softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size),
+        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
     )
     softmax_segm_max = torch.empty(

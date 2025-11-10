@@ -352,7 +352,7 @@ def kernel_unified_attention_2d(
 @triton.jit
 def kernel_unified_attention_3d(
     segm_output_ptr,
-    # [num_tokens, num_query_heads, num_segments, head_size]
+    # [num_tokens, num_query_heads, num_segments, head_size_padded]
     segm_max_ptr,  # [num_tokens, num_query_heads, num_segments]
     segm_expsum_ptr,  # [num_tokens, num_query_heads, num_segments]
     query_ptr,  # [num_tokens, num_query_heads, head_size]
@@ -608,7 +608,7 @@ def kernel_unified_attention_3d(
 def reduce_segments(
     output_ptr,  # [num_tokens, num_query_heads, head_size]
     segm_output_ptr,
-    # [num_tokens, num_query_heads, max_num_segments, head_size]
+    # [num_tokens, num_query_heads, max_num_segments, head_size_padded]
     segm_max_ptr,  # [num_tokens, num_query_heads, max_num_segments]
     segm_expsum_ptr,  # [num_tokens, num_query_heads, max_num_segments]
     seq_lens_ptr,  # [num_seqs]

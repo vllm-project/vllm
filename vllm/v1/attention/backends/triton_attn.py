@@ -134,12 +134,13 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                     self.seq_threshold_3D = 0
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+        headdim_padded = 1 << (self.headdim - 1).bit_length()  # next power of 2 value
         self.softmax_segm_output = torch.empty(
             (
                 self.seq_threshold_3D,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
-                self.headdim,
+                headdim_padded,
             ),
             dtype=torch.float32,
             device=device,
