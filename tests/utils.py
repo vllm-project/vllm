@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Literal
 from unittest.mock import patch
 
+import anthropic
 import cloudpickle
 import httpx
 import openai
@@ -44,12 +45,10 @@ from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import (
-    FlexibleArgumentParser,
-    GB_bytes,
-    cuda_device_count_stateless,
-    get_open_port,
-)
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import GB_bytes
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -246,6 +245,23 @@ class RemoteOpenAIServer:
             api_key=self.DUMMY_API_KEY,
             max_retries=0,
             **kwargs,
+        )
+
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
         )
 
 
@@ -984,6 +1000,11 @@ def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]
 
             # `cloudpickle` allows pickling complex functions directly
             input_bytes = cloudpickle.dumps((f, output_filepath))
+
+            repo_root = str(VLLM_PATH.resolve())
+
+            env = dict(env or os.environ)
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
 
             cmd = [sys.executable, "-m", f"{module_name}"]
 

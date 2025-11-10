@@ -14,6 +14,7 @@ from vllm.attention.backends.registry import backend_name_to_enum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config.vllm import VllmConfig
 from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
@@ -31,10 +32,86 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    kv_cache_dtype_str_to_dtype,
+)
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+)
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+else:
+    on_gfx9 = lambda *args, **kwargs: False
+
 
 FP8_DTYPE = current_platform.fp8_dtype()
 logger = init_logger(__name__)
+
+
+def _init_kv_cache_quant(
+    layer: nn.Module,
+    quant_config: QuantizationConfig | None,
+    prefix: str,
+    kv_cache_dtype: str,
+    calculate_kv_scales: bool,
+) -> None:
+    """Initializes KV cache scaling factors and quantization method.
+
+    This helper function sets up the KV cache quantization attributes that are
+    shared between Attention and MLAAttention layers. It initializes scale
+    tensors for query, key, value, and probability, and configures the
+    quantization method if applicable.
+
+    Args:
+        layer: The attention layer instance to initialize.
+        quant_config: Optional quantization configuration.
+        prefix: Layer name prefix for quantization method lookup.
+        kv_cache_dtype: The KV cache data type string.
+        calculate_kv_scales: Whether to calculate KV scales dynamically.
+    """
+    # The default k/v_scale is set to 1.0. This is ignored
+    # when kv-cache is not fp8, and should be used with
+    # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
+    # expect the pre-quantized k/v_scale to be loaded along
+    # with the model weights.
+    layer.kv_cache_dtype = kv_cache_dtype
+    layer.calculate_kv_scales = calculate_kv_scales
+    layer._k_scale = torch.tensor(1.0, dtype=torch.float32)
+    layer._v_scale = torch.tensor(1.0, dtype=torch.float32)
+    layer._q_scale = torch.tensor(1.0, dtype=torch.float32)
+    layer._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+
+    # We also keep q/k/v_scale on host (cpu) memory for attention
+    # backends that require the scales to be on host instead of on device.
+    # e.g. Flashinfer
+    layer._q_scale_float = 1.0
+    layer._k_scale_float = 1.0
+    layer._v_scale_float = 1.0
+
+    # The output scale on host memory. This should be the input scale of
+    # the quant op after this attention layer.
+    layer._o_scale_float = None
+
+    quant_method = (
+        quant_config.get_quant_method(layer, prefix=prefix) if quant_config else None
+    )
+    if quant_method is not None and not isinstance(
+        quant_method, UnquantizedLinearMethod
+    ):
+        assert isinstance(quant_method, BaseKVCacheMethod)
+        # TODO (mgoin): kv cache dtype should be specified in the FP8
+        # checkpoint config and become the "auto" behavior
+        if kv_cache_dtype == "fp8_e5m2":
+            raise ValueError("fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
+        # If quantization is enabled, we make "k_scale" and "v_scale"
+        # parameters so that it can be loaded from the model checkpoint.
+        # The k/v_scale will then be converted back to native float32
+        # values after weight loading.
+        layer.quant_method = quant_method
+        layer.quant_method.create_weights(layer)
 
 
 class Attention(nn.Module, AttentionLayerBase):
@@ -80,6 +157,7 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             sliding_window = None
 
+        vllm_config = get_current_vllm_config()
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
@@ -88,62 +166,25 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
+        self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
+            kv_cache_dtype, vllm_config.model_config
+        )
         if num_kv_heads is None:
             num_kv_heads = num_heads
         assert num_heads % num_kv_heads == 0, (
             f"num_heads ({num_heads}) is not divisible by num_kv_heads ({num_kv_heads})"
         )
 
-        # The default k/v_scale is set to 1.0. This is ignored
-        # when kv-cache is not fp8, and should be used with
-        # kv-cache in fp8_e5m2. For kv-cache in fp8_e4m3, we
-        # expect the pre-quantized k/v_scale to be loaded along
-        # with the model weights.
-        self.kv_cache_dtype = kv_cache_dtype
-        self.calculate_kv_scales = calculate_kv_scales
-        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
-        # FlashAttn doesn't support quantizing the kv-cache only
-        # but requires q to be quantized as well.
-        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
-
-        # We also keep q/k/v_scale on host (cpu) memory for attention
-        # backends that require the scales to be on host instead of on device.
-        # e.g. Flashinfer
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-
-        # The output scale on host memory. This should be the input scale of
-        # the quant op after this attention layer.
-        self._o_scale_float: float | None = None
+        # Initialize KV cache quantization attributes
+        _init_kv_cache_quant(
+            self, quant_config, prefix, kv_cache_dtype, calculate_kv_scales
+        )
 
         self.num_heads = num_heads
         self.head_size = head_size
         self.num_kv_heads = num_kv_heads
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
-
-        quant_method = (
-            quant_config.get_quant_method(self, prefix=prefix) if quant_config else None
-        )
-        if quant_method is not None and not isinstance(
-            quant_method, UnquantizedLinearMethod
-        ):
-            assert isinstance(quant_method, BaseKVCacheMethod)
-            # TODO (mgoin): kv cache dtype should be specified in the FP8
-            # checkpoint config and become the "auto" behavior
-            if self.kv_cache_dtype == "fp8_e5m2":
-                raise ValueError(
-                    "fp8_e5m2 kv-cache is not supported with fp8 checkpoints."
-                )
-            # If quantization is enabled, we make "k_scale" and "v_scale"
-            # parameters so that it can be loaded from the model checkpoint.
-            # The k/v_scale will then be converted back to native float32
-            # values after weight loading.
-            self.quant_method = quant_method
-            self.quant_method.create_weights(self)
 
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
@@ -184,7 +225,7 @@ class Attention(nn.Module, AttentionLayerBase):
         self.use_direct_call = not current_platform.opaque_attention_op()
 
         self.use_output = self.attn_backend.accept_output_buffer
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = vllm_config.compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
@@ -204,9 +245,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # this variable will not be accessed if use_direct_call is True
         self.kv_cache = [
             torch.tensor([])
-            for _ in range(
-                get_current_vllm_config().parallel_config.pipeline_parallel_size
-            )
+            for _ in range(vllm_config.parallel_config.pipeline_parallel_size)
         ]
 
         # Initialize q/k/v range constants.
@@ -370,7 +409,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             block_size = 16
             calculate_kv_scales = False
-        self.kv_cache_dtype = kv_cache_dtype
+
+        # Initialize KV cache quantization attributes
+        _init_kv_cache_quant(
+            self, quant_config, prefix, kv_cache_dtype, calculate_kv_scales
+        )
 
         dtype = torch.get_default_dtype()
         self.attn_backend = get_attn_backend(
@@ -418,20 +461,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 get_current_vllm_config().parallel_config.pipeline_parallel_size
             )
         ]
-
-        # Align with Attention's scale attributes for MLA backends.
-
-        self.calculate_kv_scales = calculate_kv_scales
-        self._k_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._v_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._q_scale = torch.tensor(1.0, dtype=torch.float32)
-        self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
-
-        # Host-side mirrors used by some attention backends
-        self._q_scale_float = 1.0
-        self._k_scale_float = 1.0
-        self._v_scale_float = 1.0
-        self._o_scale_float: float | None = None
 
         self.use_sparse = use_sparse
 
@@ -531,6 +560,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        return MLAAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=1,
+            head_size=self.head_size,
+            dtype=kv_cache_dtype,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+        )
 
 
 def wait_for_kv_layer_from_connector(layer_name: str):
