@@ -433,7 +433,8 @@ class Scheduler(SchedulerInterface):
 
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
-            self.token_parallel_scheduler.assign_ranks(self.waiting)
+            if is_tknp_initialized():
+                self.token_parallel_scheduler.assign_ranks(self.waiting)
             while self.waiting and token_budget > 0:
                 
                 if len(self.running) == self.max_num_running_reqs:

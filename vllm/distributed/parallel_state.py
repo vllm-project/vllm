@@ -1297,6 +1297,11 @@ def destroy_model_parallel():
     if _EP:
         _EP.destroy()
     _EP = None
+    
+    global _TKNP
+    if _TKNP:
+        _TKNP.destroy()
+    _TKNP = None
 
 
 def destroy_distributed_environment():
