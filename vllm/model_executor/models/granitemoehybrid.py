@@ -652,50 +652,49 @@ class GraniteMoeHybridForCausalLM(
             conv_kernel=hf_config.mamba_d_conv,
         )
 
-    def maybe_update_quant_config(
-            self, quant_config: QuantizationConfig
-        ) -> QuantizationConfig:
-            """
-            Update quant config so that ignored module and target module names
-            match the vLLM model names.
-            Granite model specific: mamba -> mixer remapping.
-            """
-            remapping_rules = [
-                # Granite model: mamba -> mixer remapping
-                (
-                    r"model\.layers\.(\d+)\.mamba\.in_proj",
-                    r"model.layers.\1.mixer.in_proj",
-                ),
-                (
-                    r"model\.layers\.(\d+)\.mamba\.out_proj",
-                    r"model.layers.\1.mixer.out_proj",
-                ),
-            ]
-            # Update ignore list
-            if hasattr(quant_config, "ignore"):
-                updated_ignore = []
-                for name in quant_config.ignore:
-                    updated_name = name
-                    for pattern, repl in remapping_rules:
-                        if re.fullmatch(pattern, name):
-                            updated_name = re.sub(pattern, repl, name)
-                    updated_ignore.append(updated_name)
-                quant_config.ignore = updated_ignore
-            # Update target list
-            if hasattr(quant_config, "config_groups"):
-                config_groups = quant_config.config_groups
-                for group_name in config_groups:
-                    if "targets" in config_groups[group_name]:
-                        targets = []
-                        for name in config_groups[group_name]["targets"]:
-                            updated_name = name
-                            for pattern, repl in remapping_rules:
-                                if re.fullmatch(pattern, name):
-                                    updated_name = re.sub(pattern, repl, name)
-                            targets.append(updated_name)
-                    config_groups[group_name]["targets"] = targets
-                quant_config.config_groups = config_groups
-            return quant_config
+    def maybe_update_quant_config(self, quant_config: QuantizationConfig) -> QuantizationConfig:
+        """
+        Update quant config so that ignored module and target module names
+        match the vLLM model names.
+        Granite model specific: mamba -> mixer remapping.
+        """
+        remapping_rules = [
+            # Granite model: mamba -> mixer remapping
+            (
+                r"model\.layers\.(\d+)\.mamba\.in_proj",
+                r"model.layers.\1.mixer.in_proj",
+            ),
+            (
+                r"model\.layers\.(\d+)\.mamba\.out_proj",
+                r"model.layers.\1.mixer.out_proj",
+            ),
+        ]
+        # Update ignore list
+        if hasattr(quant_config, "ignore"):
+            updated_ignore = []
+            for name in quant_config.ignore:
+                updated_name = name
+                for pattern, repl in remapping_rules:
+                    if re.fullmatch(pattern, name):
+                        updated_name = re.sub(pattern, repl, name)
+                updated_ignore.append(updated_name)
+            quant_config.ignore = updated_ignore
+        # Update target list
+        if hasattr(quant_config, "config_groups"):
+            config_groups = quant_config.config_groups
+            for group_name in config_groups:
+                if "targets" in config_groups[group_name]:
+                    targets = []
+                    for name in config_groups[group_name]["targets"]:
+                        updated_name = name
+                        for pattern, repl in remapping_rules:
+                            if re.fullmatch(pattern, name):
+                                updated_name = re.sub(pattern, repl, name)
+                        targets.append(updated_name)
+                config_groups[group_name]["targets"] = targets
+            quant_config.config_groups = config_groups
+        return quant_config
+
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
