@@ -212,13 +212,15 @@ def coordinate_batch_across_dp(
     if num_tokens_padded is None:
         num_tokens_padded = num_tokens_unpadded
 
-    (should_ubatch, num_tokens_after_padding, should_run_drafter) = _synchronize_dp_ranks(
-        num_tokens_unpadded,
-        num_tokens_padded,
-        should_attempt_ubatching,
-        allow_dp_padding,
-        parallel_config,
-        should_attempt_drafter,
+    (should_ubatch, num_tokens_after_padding, should_run_drafter) = (
+        _synchronize_dp_ranks(
+            num_tokens_unpadded,
+            num_tokens_padded,
+            should_attempt_ubatching,
+            allow_dp_padding,
+            parallel_config,
+            should_attempt_drafter,
+        )
     )
 
     # Don't microbatch unless every other DP worker is also microbatching
