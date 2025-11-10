@@ -415,12 +415,12 @@ class LLM:
             validated_params = []
             for param in as_iter(params):
                 validated_params.append(
-                    self.io_processor.validate_or_generate_params(param)
+                    self.io_processor.validate_or_generate_params(params=param)
                 )
             params = validated_params
         else:
             assert not isinstance(params, Sequence)
-            params = self.io_processor.validate_or_generate_params(params)
+            params = self.io_processor.validate_or_generate_params(params=params)
         return params
 
     @deprecated("`set_tokenizer` is deprecated and will be removed in v0.13.")
