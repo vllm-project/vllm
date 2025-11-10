@@ -584,7 +584,7 @@ void persistent_masked_m_silu_mul_quant(
   TORCH_CHECK(y_q.dtype() == torch::kFloat8_e4m3fn ||
               y_q.dtype() == torch::kFloat8_e4m3fnuz);
   TORCH_CHECK(y_s.dtype() == torch::kFloat32);
-  TORCH_CHECK(input.size(-1) % GROUP_SIZE == 0);
+  TORCH_CHECK(input.size(-1) % (GROUP_SIZE * 2) == 0);
 
   using Idx_t = int64_t;
 
