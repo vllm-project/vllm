@@ -292,7 +292,6 @@ class OpenAIServingChat(OpenAIServing):
                         max_tokens, self.default_sampling_params
                     )
 
-                # TODO - align pooling behavior, since this was not previously passed
                 sampling_params = request.to_sampling_params(
                     max_tokens,
                     self.model_config.logits_processor_pattern,

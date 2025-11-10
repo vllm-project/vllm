@@ -114,6 +114,7 @@ class OpenAIServingPooling(OpenAIServing):
                 renderer=renderer,
             )
 
+            pooling_params = request.to_pooling_params()
             if (
                 self.io_processor is not None
                 and self.io_processor.plugin_type != IOProcessorPluginType.OUTPUT_ONLY
@@ -126,10 +127,12 @@ class OpenAIServingPooling(OpenAIServing):
                     self.engine_client,
                     self.processor,
                 )
-                pooling_params = self.io_processor.validate_or_generate_params()
+                pooling_params = self.io_processor.validate_or_generate_params(
+                    request,
+                    pooling_params,
+                )
             else:
                 engine_prompts = await preprocess_partial(request)
-                pooling_params = request.to_pooling_params()
 
         except (ValueError, TypeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
