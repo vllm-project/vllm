@@ -569,14 +569,16 @@ class EplbState:
             all_ranks_buffer_ready = self._all_ranks_buffer_ready()
 
         if self.is_async and self.ep_buffer_ready and all_ranks_buffer_ready:
-            self.move_to_workspace(
-                model=model, ep_group=ep_group, is_profile=is_profile
-            )
+            for eplb_model_state in self.model_states.values():
+                self.move_to_workspace(
+                    model=eplb_model_state.model, ep_group=ep_group, is_profile=is_profile
+                )
 
-            # Check if all layers have been processed
-            if self.layer_to_transfer >= model.num_moe_layers:
-                self.post_eplb(model, is_profile)
-                # Reset for next rearrangement cycle
+                # Check if all layers have been processed
+                if self.layer_to_transfer >= eplb_model_state.model.num_moe_layers:
+                    self.post_eplb(eplb_model_state.model, is_profile)
+            # Reset for next rearrangement cycle
+            if self.layer_to_transfer >= eplb_model_state.model.num_moe_layers:
                 self.rebalanced = False
                 self.layer_to_transfer = 0
                 self.pending_global_ready_check = False
