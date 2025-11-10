@@ -37,7 +37,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid, SupportsLoRA, SupportsPP
+from .interfaces import (
+    HasInnerState,
+    IsHybrid,
+    SupportsLoRA,
+    SupportsMambaPrefixCaching,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -53,6 +59,7 @@ class FalconH1MLP(nn.Module):
         config: FalconH1Config,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -60,12 +67,14 @@ class FalconH1MLP(nn.Module):
             output_sizes=[config.intermediate_size] * 2,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
         self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
             output_size=config.hidden_size,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.intermediate_size = config.intermediate_size
@@ -359,7 +368,7 @@ class FalconH1ParallelHybrid(nn.Module):
         self.attention_in_multiplier = config.attention_in_multiplier
         self.attn_out_multiplier = config.attention_out_multiplier
 
-        self.feed_forward = FalconH1MLP(config)
+        self.feed_forward = FalconH1MLP(config, prefix=f"{prefix}.feed_forward")
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.pre_ff_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -495,7 +504,14 @@ class FalconH1Model(nn.Module):
         return hidden_states
 
 
-class FalconH1ForCausalLM(nn.Module, HasInnerState, SupportsLoRA, SupportsPP, IsHybrid):
+class FalconH1ForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
+    SupportsMambaPrefixCaching,
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],

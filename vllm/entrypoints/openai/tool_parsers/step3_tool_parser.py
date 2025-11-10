@@ -19,7 +19,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -28,7 +27,6 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module(["step3"])
 class Step3ToolParser(ToolParser):
     """
     Tool parser for a model that uses a specific XML-like format for tool calls.
@@ -51,6 +49,7 @@ class Step3ToolParser(ToolParser):
         self.tool_block_finished = False
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             request.skip_special_tokens = False
         return request

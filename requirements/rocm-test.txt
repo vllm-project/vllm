@@ -4,7 +4,7 @@ tblib==3.1.0
 bm25s==0.2.13
 pystemmer==3.0.0
 
-# entrypoints test
+# Entrypoints test
 # librosa==0.10.2.post1 # required by audio tests in entrypoints/openai
 audioread==3.0.1
 cffi==1.17.1
@@ -17,11 +17,11 @@ soundfile==0.13.1
 soxr==0.5.0.post1
 librosa==0.10.2.post1
 
-# entrypoints test
+# Entrypoints test
 #vllm[video] # required by entrypoints/openai/test_video.py
 decord==0.6.0
 
-# entrypoints test
+# Entrypoints test
 #sentence-transformers # required by entrypoints/openai/test_score.py
 sentence-transformers==3.4.1
 
@@ -32,7 +32,10 @@ matplotlib==3.10.3
 blobfile==3.0.0
 
 # Required for openai schema test.
-schemathesis==3.39.15 
+schemathesis==3.39.15
 
-# required for mteb test
-mteb[bm25s]>=1.38.11, <2 
+# Required for mteb test
+mteb[bm25s]>=1.38.11, <2
+
+# Required for eval tests
+lm-eval[api] @ git+https://github.com/EleutherAI/lm-evaluation-harness.git@206b7722158f58c35b7ffcd53b035fdbdda5126d

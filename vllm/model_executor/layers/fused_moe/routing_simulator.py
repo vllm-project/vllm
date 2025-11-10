@@ -14,6 +14,10 @@ from typing import Any
 
 import torch
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class RoutingStrategy(ABC):
     """Base class for token-to-expert routing strategies."""
@@ -290,6 +294,12 @@ class RoutingSimulator:
                 f"Available strategies: "
                 f"{list(RoutingSimulator._routing_strategies.keys())}"
             )
+        logger.warning_once(
+            "Simulating MoE routing using a %s strategy. "
+            "This should only be used for performance testing. "
+            "Model outputs will not be valid.",
+            strategy_name,
+        )
 
         strategy = RoutingSimulator._routing_strategies[strategy_name]
         return strategy.route_tokens(

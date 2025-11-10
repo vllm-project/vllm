@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import (
@@ -12,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 _KV_CONNECTOR_AGENT: KVConnectorBaseType | None = None
 
@@ -48,7 +48,9 @@ def is_v1_kv_transfer_group(connector: KVConnectorBaseType | None = None) -> boo
     return isinstance(connector, KVConnectorBase_V1)
 
 
-def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
+def ensure_kv_transfer_initialized(
+    vllm_config: "VllmConfig", kv_cache_config: Optional["KVCacheConfig"] = None
+) -> None:
     """
     Initialize KV cache transfer parallel group.
     """
@@ -62,12 +64,11 @@ def ensure_kv_transfer_initialized(vllm_config: "VllmConfig") -> None:
         vllm_config.kv_transfer_config.is_kv_transfer_instance
         and _KV_CONNECTOR_AGENT is None
     ):
-        if envs.VLLM_USE_V1:
-            _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
-                config=vllm_config, role=KVConnectorRole.WORKER
-            )
-        else:
-            raise ValueError("V0 is no longer supported")
+        _KV_CONNECTOR_AGENT = KVConnectorFactory.create_connector(
+            config=vllm_config,
+            role=KVConnectorRole.WORKER,
+            kv_cache_config=kv_cache_config,
+        )
 
 
 def ensure_kv_transfer_shutdown() -> None:

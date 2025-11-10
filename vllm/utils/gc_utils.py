@@ -37,7 +37,7 @@ class GCDebugConfig:
             except Exception:
                 self.enabled = False
                 logger.error("Failed to parse VLLM_GC_DEBUG(%s)", envs.VLLM_GC_DEBUG)
-        logger.info("GC Debug Config. %s", str(self))
+        logger.debug("GC Debug Config. %s", str(self))
 
     def __repr__(self) -> str:
         return f"enabled:{self.enabled},top_objects:{self.top_objects}"

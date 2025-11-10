@@ -7,7 +7,7 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.protocol import FunctionCall, ToolCall
-from vllm.entrypoints.openai.tool_parsers import KimiK2ToolParser
+from vllm.entrypoints.openai.tool_parsers.kimi_k2_tool_parser import KimiK2ToolParser
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 pytestmark = pytest.mark.cpu_test
@@ -37,11 +37,11 @@ def assert_tool_calls(
         assert actual_tool_call.type == "function"
         assert actual_tool_call.function == expected_tool_call.function
 
-        # assert tool call id format
-        assert actual_tool_call.id.startswith("functions.")
+        # assert tool call id format: should contain function name and numeric index
+        # Format can be either "functions.func_name:0" or "func_name:0"
         assert actual_tool_call.id.split(":")[-1].isdigit()
         assert (
-            actual_tool_call.id.split(".")[1].split(":")[0]
+            actual_tool_call.id.split(":")[0].split(".")[-1]
             == expected_tool_call.function.name
         )
 

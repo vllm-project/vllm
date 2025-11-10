@@ -14,7 +14,6 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
@@ -26,7 +25,6 @@ else:
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("openai")
 class OpenAIToolParser(ToolParser):
     def __init__(self, tokenizer: "AnyTokenizer"):
         super().__init__(tokenizer)
