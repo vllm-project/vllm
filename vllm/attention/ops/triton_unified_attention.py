@@ -71,12 +71,12 @@ def select_3d_config(
         cu_count = current_platform.get_cu_count()
         if head_size < 128 or element_size == 1:
             cu_mult = 4
-            MIN_SEGMENTS = 4
+            MIN_SEGMENTS = 8
             attn_warps = 2
         else:
             cu_mult = 2
-            MIN_SEGMENTS = 8
-            attn_warps = 4         
+            MIN_SEGMENTS = 4
+            attn_warps = 2
         target_num_prgms = cu_count * cu_mult
         TILE_SIZE = 64
         reduce_num_warps = 2
