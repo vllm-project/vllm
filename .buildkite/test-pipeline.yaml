@@ -463,8 +463,8 @@ steps:
   - pytest -v -s compile/test_multimodal_compile.py
   - pytest -v -s compile/piecewise/
 
-- label: PyTorch Fullgraph Test # 22min
-  timeout_in_minutes: 35
+- label: PyTorch Fullgraph Test # 27min
+  timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental]
   torch_nightly: true
   source_file_dependencies:
