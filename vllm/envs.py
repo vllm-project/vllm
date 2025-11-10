@@ -254,6 +254,18 @@ def maybe_convert_bool(value: str | None) -> bool | None:
     return bool(int(value))
 
 
+def use_flashinfer_sampler() -> bool | None:
+    from vllm.platforms import current_platform
+
+    # Note: architectures lower than sm75 does not support FlashInfer sampler,
+    # so it will be automatically disabled even if explicitly set.
+    capability_tuple = current_platform.get_device_capability()
+    if capability_tuple is not None and capability_tuple < (7, 5):
+        return False
+
+    return maybe_convert_bool(os.environ.get("VLLM_USE_FLASHINFER_SAMPLER"))
+
+
 def disable_compile_cache() -> bool:
     return bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0")))
 
@@ -644,11 +656,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         ),
     ),
     # If set, vllm will use flashinfer sampler
-    "VLLM_USE_FLASHINFER_SAMPLER": lambda: bool(
-        int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"])
-    )
-    if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
-    else None,
+    "VLLM_USE_FLASHINFER_SAMPLER": lambda: use_flashinfer_sampler(),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
     # (CPU backend only) CPU key-value cache space.
