@@ -103,6 +103,7 @@ def triton_reshape_and_cache_flash(
     block_size = key_cache.shape[1]
     n = num_heads * head_size
 
+    print(f"key.shape={key.shape}, num_tokens = {num_tokens}, slot_mapping.shape={slot_mapping.shape}")
     key_stride = key.stride()[0]
     value_stride = value.stride()[0]
     block_stride = key_cache.stride()[0]
@@ -155,7 +156,7 @@ def triton_reshape_and_cache_flash(
 
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs
-    grid = lambda meta: (int(num_tokens), triton.cdiv(n, meta["TILE_SIZE"]))
+    grid = lambda meta: (min(int(num_tokens), slot_mapping.shape[0]), triton.cdiv(n, meta["TILE_SIZE"]))
 
     reshape_and_cache_kernel_flash[grid](
         key_ptr=key,
