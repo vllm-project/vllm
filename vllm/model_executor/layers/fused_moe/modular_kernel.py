@@ -149,6 +149,15 @@ class FusedMoEPrepareAndFinalize(ABC):
     described above.
     """
 
+    def post_init_setup(self, fused_experts: "FusedMoEPermuteExpertsUnpermute"):
+        """
+        Initialize FusedMoEPrepareAndFinalize settings that depend on
+        FusedMoEPermuteExpertsUnpermute experts object.
+        The FusedMoEPrepareAndFinalize implementations that have such
+        dependencies may choose to override this function.
+        """
+        return
+
     @abstractmethod
     def prepare(
         self,
@@ -344,20 +353,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         Indicates whether or not the output of finalize is reduced across all
         ranks.
-        """
-        raise NotImplementedError
-
-    def supports_packed_ue8m0_scales_dispatch(self) -> bool:
-        """
-        Return true if the implementation can dispatch activation scales in
-        packed ue8m0 format.
-        """
-        return False
-
-    def setup_packed_ue8m0_scales_dispatch(self) -> None:
-        """
-        Setup internal state of the implementation to dispatch activation scales
-        in packed ue8m0 format.
         """
         raise NotImplementedError
 
@@ -735,11 +730,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         Resolve any leftover setup dependencies between self.prepare_finalize
         and self.fused_experts here.
         """
-        if (
-            self.fused_experts.supports_packed_ue8m0_act_scales()
-            and self.prepare_finalize.supports_packed_ue8m0_scales_dispatch()
-        ):
-            self.prepare_finalize.setup_packed_ue8m0_scales_dispatch()
+        self.prepare_finalize.post_init_setup(self.fused_experts)
 
     def supports_expert_map(self) -> bool:
         """

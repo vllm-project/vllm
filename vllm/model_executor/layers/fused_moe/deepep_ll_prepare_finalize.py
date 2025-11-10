@@ -99,23 +99,24 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
         # We don't have enough information to determine if we should dispatch
         # activation scales in a packed ue8m0 format during object construction
-        # time. This setting is handled by setup_packed_ue8m0_scales_dispatch.
+        # time. This setting is handled by post_init_setup.
         self.use_ue8m0 = False
 
-    def supports_packed_ue8m0_scales_dispatch(self) -> bool:
-        return True
+    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+        if not fused_experts.supports_packed_ue8m0_act_scales():
+            # Early exit.
+            return
 
-    def setup_packed_ue8m0_scales_dispatch(self) -> None:
         if self.use_fp8_dispatch:
             logger.debug_once(
-                "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch"
+                "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch."
             )
             self.use_ue8m0 = True
         else:
             logger.warning_once(
-                "Ignoring request to dispatch activation scales in a packed "
-                "ue8m0 format as DeepEPLLPrepareAndFinalize is setup to"
-                "dispatch raw/unquantized activations.",
+                "DeepEPLLPrepareAndFinalize is setup to dispatch raw/unquantized "
+                f"activations despite ({fused_experts.__class__.__name__}) being able "
+                "to support quantized activations.",
                 scope="local",
             )
 

@@ -973,6 +973,7 @@ def deepgemm_post_process_fp8_weight_block(
 
     return wq, dg_ws
 
+
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
@@ -1194,7 +1195,6 @@ def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
         )
         layer.weight = torch.nn.Parameter(dg_weight, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(dg_weight_scale, requires_grad=False)
-
 
 
 def expert_weight_is_col_major(x: torch.Tensor) -> bool:
