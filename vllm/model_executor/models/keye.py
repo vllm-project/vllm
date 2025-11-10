@@ -40,6 +40,7 @@ from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -1627,16 +1628,17 @@ class KeyeForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw, video_grid_thw"},
+        )
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+
         if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
             video_grid_thw = video_grid_thw[0]
-        """Get mrope input positions and delta value (Keye series)."""
 
         def split_thw(grid_thw: torch.Tensor | list[int]) -> list[list[int]]:
             """
@@ -1662,6 +1664,7 @@ class KeyeForConditionalGeneration(
 
         video_grid_thw = split_thw(video_grid_thw)
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size

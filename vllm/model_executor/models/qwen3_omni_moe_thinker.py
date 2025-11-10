@@ -65,7 +65,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2_audio import Qwen2AudioProcessingInfo
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargsItems
+from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalKwargsItems
 from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
@@ -1413,14 +1413,23 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        config = hf_config.thinker_config
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {
+                "image_grid_thw, video_grid_thw",
+                "second_per_grid_ts",
+                "audio_feature_lengths",
+                "use_audio_in_video",
+            },
+        )
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
+        audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
+        use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
+
         if isinstance(image_grid_thw, list):
             image_grid_thw = torch.tensor(image_grid_thw)
         if isinstance(video_grid_thw, list):
@@ -1446,6 +1455,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         else:
             second_per_grids = torch.tensor(second_per_grid_ts, dtype=torch.float32)
 
+        config = self.config
         spatial_merge_size = config.vision_config.spatial_merge_size
         image_token_id = config.image_token_id
         video_token_id = config.video_token_id

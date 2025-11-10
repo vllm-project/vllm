@@ -15,7 +15,7 @@ from torch import nn
 from torch.nn import LayerNorm
 from torchvision import transforms
 from torchvision.transforms import InterpolationMode
-from transformers import BatchFeature, PretrainedConfig, PreTrainedTokenizer, TensorType
+from transformers import BatchFeature, PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
@@ -36,6 +36,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -622,15 +623,16 @@ class GLM4VForCausalLM(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value for GLM4V."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw, video_grid_thw"},
+        )
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_start_token_id = hf_config.video_start_token_id
         video_end_token_id = hf_config.video_end_token_id
