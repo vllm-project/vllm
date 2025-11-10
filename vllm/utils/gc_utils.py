@@ -97,10 +97,9 @@ def freeze_gc_heap() -> None:
     """
     # Ensure all static objects are pushed down to the oldest generation for
     # freeze
-    gc.collect()
-    # gc.collect(0)
-    # gc.collect(1)
-    # gc.collect(2)
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
     # Freeze all GC tracked objects
     gc.freeze()
 
