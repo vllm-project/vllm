@@ -1206,7 +1206,6 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
-
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.

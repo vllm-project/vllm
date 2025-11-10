@@ -2575,8 +2575,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                # Handle 0-token case early
-                if total_num_scheduled_tokens == 0:
+                if not total_num_scheduled_tokens:
                     # In DP mode, participate in coordinate_batch_across_dp
                     # to maintain synchronization across ranks
                     if self.parallel_config.data_parallel_size > 1:
@@ -2602,7 +2601,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         "it when the requests need prompt logprobs"
                     )
 
-                # Normal execution path with tokens
                 num_reqs = self.input_batch.num_reqs
                 req_ids = self.input_batch.req_ids
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
@@ -2620,7 +2618,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         "it when the requests need prompt logprobs"
                     )
 
-                # Prepare the decoder inputs.
                 (
                     logits_indices,
                     spec_decode_metadata,
@@ -2638,8 +2635,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Disable cascade attention when using microbatching (DBO)
                 if self.cascade_attn_enabled and ubatch_slices is None:
                     # Pre-compute cascade attention prefix lengths
-                    # NOTE: Must be AFTER _prepare_inputs uses self.input_batch
-                    # state
+                    # NOTE: Must be AFTER _prepare_inputs uses self.input_batch state
                     cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
                         num_scheduled_tokens_np,
                         scheduler_output.num_common_prefix_blocks,
