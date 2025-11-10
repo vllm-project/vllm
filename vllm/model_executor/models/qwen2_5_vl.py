@@ -46,6 +46,7 @@ from vllm.attention.backends.registry import _Backend
 from vllm.attention.layer import maybe_get_vit_flash_attn_backend
 from vllm.attention.ops.vit_attn_wrappers import (
     vit_flash_attn_wrapper,
+    vit_torch_sdpa_wrapper,
     vit_xformers_attn_wrapper,
 )
 from vllm.compilation.decorators import support_torch_compile
@@ -66,6 +67,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.vision import should_torch_compile_mm_vit
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.evs import (
     compute_mrope_for_media,
@@ -442,23 +444,12 @@ class Qwen2_5_VisionAttention(nn.Module):
                 q = q.contiguous()
                 k = k.contiguous()
                 v = v.contiguous()
-            outputs = []
-            for i in range(1, len(cu_seqlens)):
-                start_idx = cu_seqlens[i - 1]
-                end_idx = cu_seqlens[i]
-                q_i = q[:, start_idx:end_idx]
-                k_i = k[:, start_idx:end_idx]
-                v_i = v[:, start_idx:end_idx]
-                q_i, k_i, v_i = (
-                    einops.rearrange(x, "b s h d -> b h s d") for x in [q_i, k_i, v_i]
-                )
-                output_i = F.scaled_dot_product_attention(q_i, k_i, v_i, dropout_p=0.0)
-                output_i = einops.rearrange(output_i, "b h s d -> b s h d ")
-                outputs.append(output_i)
-            context_layer = torch.cat(outputs, dim=1)
-            context_layer = einops.rearrange(
-                context_layer, "b s h d -> s b (h d)"
-            ).contiguous()
+            context_layer = vit_torch_sdpa_wrapper(
+                q,
+                k,
+                v,
+                cu_seqlens,
+            )
         elif self.attn_backend == _Backend.XFORMERS:
             context_layer = vit_xformers_attn_wrapper(q, k, v, seqlens)
 
@@ -466,17 +457,16 @@ class Qwen2_5_VisionAttention(nn.Module):
         return output
 
 
-# (FIXME): Enable this after dynamic slicing is fixed
-# See https://github.com/vllm-project/vllm/pull/27760
-# @support_torch_compile(
-#     dynamic_arg_dims={
-#         "x": 0,
-#         "cu_seqlens": 0,
-#         "rotary_pos_emb": 0,
-#         "seqlens": 0,
-#     },
-#     mark_unbacked_dims={"seqlens": 0},
-# )
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb": 0,
+        "seqlens": 0,
+    },
+    mark_unbacked_dims={"seqlens": 0},
+    enable_if=should_torch_compile_mm_vit,
+)
 class Qwen2_5_VisionBlock(nn.Module):
     def __init__(
         self,
@@ -541,7 +531,8 @@ class Qwen2_5_VisionBlock(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
-    }
+    },
+    enable_if=should_torch_compile_mm_vit,
 )
 class Qwen2_5_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -572,7 +563,8 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
 @support_torch_compile(
     dynamic_arg_dims={
         "x": 0,
-    }
+    },
+    enable_if=should_torch_compile_mm_vit,
 )
 class Qwen2_5_VisionPatchMerger(nn.Module):
     def __init__(
@@ -1098,6 +1090,7 @@ class Qwen2_5_VLForConditionalGeneration(
     SupportsMRoPE,
 ):
     merge_by_field_config = True
+    multimodal_cpu_fields = {"image_grid_thw", "video_grid_thw"}
 
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -1372,13 +1365,8 @@ class Qwen2_5_VLForConditionalGeneration(
                     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each image item.
-        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
         merge_size = self.visual.spatial_merge_size
-        sizes = (
-            torch.tensor(grid_thw_list, dtype=torch.long).prod(-1)
-            // (merge_size * merge_size)
-        ).tolist()
-
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return image_embeds.split(sizes)
 
     def _postprocess_image_embeds_evs(
@@ -1438,12 +1426,7 @@ class Qwen2_5_VLForConditionalGeneration(
 
         # Split concatenated embeddings for each video item.
         merge_size = self.visual.spatial_merge_size
-        # Using prod on grid_thw_list instead of grid_thw.prod avoids CUDA sync
-        sizes = (
-            torch.tensor(grid_thw_list, dtype=torch.long).prod(-1)
-            // (merge_size * merge_size)
-        ).tolist()
-
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
     def _postprocess_video_embeds_evs(
