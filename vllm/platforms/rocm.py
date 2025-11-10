@@ -77,6 +77,7 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74b9": "AMD_Instinct_MI325X",  # MI325X VF
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
+    "0x744c": "AMD_Radeon_RX7900XTX",
 }
 
 # Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
@@ -252,16 +253,9 @@ class RocmPlatform(Platform):
                     f"does not support block size {block_size}."
                 )
             if selected_backend == _Backend.ROCM_AITER_MLA:
-                if block_size == 1:
-                    logger.info("Using AITER MLA backend.")
-                    return (
-                        "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
-                    )
-                raise ValueError(
-                    f" The selected backend, {selected_backend.name},"
-                    f"does not support block size {block_size}."
-                    "(currently only supports block size 1)"
-                )
+                logger.info("Using AITER MLA backend.")
+                return "vllm.v1.attention.backends.mla.rocm_aiter_mla.AiterMLABackend"  # noqa: E501
+
             raise ValueError(
                 f" The selected backend, {selected_backend.name},"
                 f"is not MLA type while requested for MLA backend."
