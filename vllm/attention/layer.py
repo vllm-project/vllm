@@ -745,10 +745,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
-        if self.use_direct_call:
-            if self.calculate_kv_scales:
-                self.calc_kv_scales(q, kv_c_normed, k_pe)
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
+        if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
@@ -772,11 +772,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
-            if self.calculate_kv_scales:
-                torch.ops.vllm.maybe_calc_kv_scales(
-                    q, kv_c_normed, k_pe, self.layer_name
-                )
-
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
