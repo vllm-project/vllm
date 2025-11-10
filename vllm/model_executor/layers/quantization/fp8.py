@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
@@ -1222,22 +1223,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
-            assert scoring_func == "sigmoid", (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}"
-            )
+
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
-                assert (
-                    renormalize and use_grouped_topk and custom_routing_function is None
-                )
                 e_score_correction_bias = (
                     e_score_correction_bias.to(x.dtype)
                     if e_score_correction_bias is not None
                     else None
                 )
+                routing_method_type = layer.routing_method_type
                 return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                    routing_logits=router_logits.to(torch.float32),
+                    routing_logits=router_logits.to(torch.float32)
+                    if routing_method_type == RoutingMethodType.DeepSeekV3
+                    else router_logits,
                     routing_bias=e_score_correction_bias,
                     x=x,
                     w13_weight=layer.w13_weight,
@@ -1252,6 +1251,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     expert_offset=layer.ep_rank * layer.local_num_experts,
                     local_num_experts=layer.local_num_experts,
                     block_shape=self.weight_block_size,
+                    routing_method_type=routing_method_type,
                     routed_scaling=routed_scaling_factor,
                 )
             else:
