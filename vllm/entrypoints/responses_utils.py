@@ -71,6 +71,7 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
     into:
         {"type": "function", "function": {...}}
     """
+    print(f"---------{tool}----------------------")
     return {
         "type": "function",
         "function": tool,
