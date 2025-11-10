@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -25,8 +24,11 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV3ForCausalLM,
 )
+from vllm.utils import init_logger
 
 from .utils import AutoWeightsLoader, maybe_prefix
+
+logger = init_logger(__name__)
 
 
 @support_torch_compile
@@ -216,6 +218,10 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
+        # Set MoE hyperparameters
+        self.num_moe_layers = self.config.num_hidden_layers
+        self.set_moe_parameters()
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
 
@@ -224,7 +230,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if inputs_embeds is not None:
             raise NotImplementedError(
@@ -235,7 +241,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

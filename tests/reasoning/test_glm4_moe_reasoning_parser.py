@@ -21,54 +21,54 @@ def glm45_tokenizer():
 
 WITH_THINK = {
     "output": "<think>This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 WITH_THINK_STREAM = {
     "output": "<think>This is a reasoning section</think>This is the rest",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": "This is the rest",
     "is_reasoning_end": True,
 }
 
 WITHOUT_THINK = {
     "output": "This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": False,
 }
 
 WITHOUT_THINK_STREAM = {
     "output": "This is the rest",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "This is the rest",
     "is_reasoning_end": False,
 }
 
 COMPLETE_REASONING = {
     "output": "<think>This is a reasoning section</think>",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": True,
 }
 MULTILINE_REASONING = {
     "output": "<think>This is a reasoning\nsection</think>This is the rest\nThat",
-    "reasoning_content": "This is a reasoning\nsection",
+    "reasoning": "This is a reasoning\nsection",
     "content": "This is the rest\nThat",
     "is_reasoning_end": True,
 }
 ONLY_OPEN_TAG = {
     "output": "<think>This is a reasoning section",
-    "reasoning_content": None,
+    "reasoning": None,
     "content": "<think>This is a reasoning section",
     "is_reasoning_end": False,
 }
 
 ONLY_OPEN_TAG_STREAM = {
     "output": "<think>This is a reasoning section",
-    "reasoning_content": "This is a reasoning section",
+    "reasoning": "This is a reasoning section",
     "content": None,
     "is_reasoning_end": False,
 }
@@ -184,7 +184,7 @@ def test_reasoning(
         parser, output_tokens, streaming=streaming
     )
 
-    assert reasoning == param_dict["reasoning_content"]
+    assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
 
     output_ids = glm45_tokenizer.convert_tokens_to_ids(output)

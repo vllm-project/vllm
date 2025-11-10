@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from fractions import Fraction
 from functools import cache, partial
-from typing import Any, Callable, Optional, Union
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -30,6 +31,13 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
+# TODO: move registration of custom op to aiter_ops.py
+# `from vllm._aiter_ops import rocm_aiter_ops`
+# use `rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()`
+# for envs checks which does not require @cache anymore.
+# triton kernel is torch compile compatible.
+# does not require direct registeration.
+# use `rocm_aiter_ops.triton_fp4_gemm_dynamic_qaunt`.
 @cache
 def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
     return (
@@ -44,7 +52,7 @@ try:
     from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
     from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
-    from vllm.utils import direct_register_custom_op
+    from vllm.utils.torch_utils import direct_register_custom_op
 
     if is_rocm_aiter_fp4_asm_gemm_enabled():
         from aiter import gemm_a4w4, per_1x32_f4_quant_hip
@@ -54,8 +62,8 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16,
-        x_scales: Optional[torch.Tensor] = None,
+        out_dtype: torch.dtype | None = torch.bfloat16,
+        x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         M = x.shape[0]
         if rocm_use_aiter_fp4_asm_gemm:
@@ -95,7 +103,7 @@ try:
         weight_scale: torch.Tensor,
         x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16,
+        out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> torch.Tensor:
         return torch.empty(
             (*x.shape[:-1], weight.shape[0]), dtype=out_dtype, device=x.device
@@ -129,7 +137,7 @@ class QuarkOCP_MX(QuarkScheme):
         )
 
         if self.weight_dtype == "mxfp4":
-            self.packed_factor: Union[int, Fraction] = 2
+            self.packed_factor: int | Fraction = 2
             self.dequant_func = dequant_mxfp4
         else:
             self.packed_factor = Fraction(numerator=8, denominator=6)
@@ -282,7 +290,7 @@ class QuarkOCP_MX(QuarkScheme):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.emulate:
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 
@@ -14,7 +13,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -110,10 +109,6 @@ class PallasAttentionBackend(AttentionBackend):
         return PallasAttentionBackendImpl
 
     @staticmethod
-    def get_metadata_cls() -> type["PallasMetadata"]:
-        return PallasMetadata
-
-    @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
         block_size: int,
@@ -201,12 +196,12 @@ class PallasAttentionBackendImpl(AttentionImpl):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: Optional[list[float]],
-        sliding_window: Optional[int],
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
+        logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[int] = None,
+        kv_sharing_target_layer_name: int | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -242,9 +237,9 @@ class PallasAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
-        output: Optional[torch.Tensor] = None,
-        output_scale: Optional[torch.Tensor] = None,
-        output_block_scale: Optional[torch.Tensor] = None,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Forward pass with Pallas attention.
 
@@ -342,7 +337,7 @@ def write_to_kv_cache(
     slot_mapping: torch.Tensor,
     num_slices_per_kv_cache_update_block: int,
     num_kv_update_slices: torch.Tensor,
-    kv_cache_quantized_dtype: Optional[torch.dtype] = None,
+    kv_cache_quantized_dtype: torch.dtype | None = None,
     k_scale: float = 1.0,
     v_scale: float = 1.0,
 ) -> None:

@@ -11,7 +11,7 @@ WARNING: This test runs in both single-node (4 GPUs) and multi-node
 import json
 import os
 from dataclasses import dataclass
-from typing import Literal, NamedTuple, Optional
+from typing import Literal, NamedTuple
 
 import pytest
 
@@ -30,13 +30,14 @@ class ParallelSetup(NamedTuple):
     tp_size: int
     pp_size: int
     dcp_size: int
+    dcp_kv_cache_interleave_size: int
     eager_mode: bool
     chunked_prefill: bool
 
 
 class CPTestOptions(NamedTuple):
     multi_node_only: bool
-    load_format: Optional[str] = None
+    load_format: str | None = None
 
 
 @dataclass
@@ -52,9 +53,10 @@ class CPTestSettings:
         tp_base: int = 4,
         pp_base: int = 1,
         dcp_base: int = 1,
+        dcp_kv_cache_interleave_size: int = 1,
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
-        load_format: Optional[str] = None,
+        load_format: str | None = None,
     ):
         parallel_setups = []
         for eager_mode_val in [False]:
@@ -66,6 +68,7 @@ class CPTestSettings:
                                 tp_size=tp_base,
                                 pp_size=pp_multiplier * pp_base,
                                 dcp_size=int(dcp_multiplier * tp_base),
+                                dcp_kv_cache_interleave_size=dcp_kv_cache_interleave_size,
                                 eager_mode=eager_mode_val,
                                 chunked_prefill=chunked_prefill_val,
                             )
@@ -108,6 +111,7 @@ def _compare_cp_with_tp(
         tp_size,
         pp_size,
         dcp_size,
+        dcp_kv_cache_interleave_size,
         eager_mode,
         chunked_prefill,
     ) = parallel_setup
@@ -180,6 +184,8 @@ def _compare_cp_with_tp(
         str(pp_size),
         "--decode-context-parallel-size",
         str(dcp_size),
+        "--dcp-kv-cache-interleave-size",
+        str(dcp_kv_cache_interleave_size),
         "--distributed-executor-backend",
         distributed_backend,
     ]
@@ -204,8 +210,12 @@ def _compare_cp_with_tp(
 
 
 CP_TEXT_GENERATION_MODELS = {
-    # [MLA attention only]
     "deepseek-ai/DeepSeek-V2-Lite-Chat": [
+        CPTestSettings.detailed(),
+        CPTestSettings.detailed(tp_base=2),
+        CPTestSettings.detailed(tp_base=2, dcp_kv_cache_interleave_size=64),
+    ],
+    "bigcode/gpt_bigcode-santacoder": [
         CPTestSettings.detailed(),
         CPTestSettings.detailed(tp_base=2),
     ],
@@ -215,6 +225,7 @@ CP_TEST_MODELS = [
     # TODO support other models
     # [LANGUAGE GENERATION]
     "deepseek-ai/DeepSeek-V2-Lite-Chat",
+    "bigcode/gpt_bigcode-santacoder",
 ]
 
 

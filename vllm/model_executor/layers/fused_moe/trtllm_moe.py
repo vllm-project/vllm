@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -12,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.utils import next_power_of_2
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -58,37 +56,13 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk: int,
         global_num_experts: int,
         local_num_experts: int,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # The workspaces for this implementation are managed by flashinfer.
         workspace1 = (0,)
         workspace2 = (0,)
         output = (M, K)
         return (workspace1, workspace2, output)
-
-    def _get_tile_tokens_dim(self, x: torch.Tensor, top_k: int, local_num_experts: int):
-        # Number of tokens in the input tensor.
-        num_tokens = x.shape[0]
-        # Factor to account for the imbalance of the experts.
-        # factor equals to the
-        # max_real_num_tokens_per_expert / perfect_num_tokens_per_expert
-        # 1.0 means perfect expert distribution.
-        # > 1.0 means some experts have more tokens than the perfect
-        # distribution.
-        # < 1.0 does not make sense.
-        imbalance_factor = 1.3
-        # Calculate the number of tokens per expert assuming perfect
-        # distribution.
-        num_tokens_per_expert = (num_tokens * top_k) // local_num_experts
-        # Apply the imbalance factor.
-        num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
-        # And pad the number to the next power of 2.
-        tile_tokens_dim = next_power_of_2(num_tokens_per_expert)
-        # Cap to 8-64 tokens per CTA tile as it's the range supported by the
-        #  kernel.
-        tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
-
-        return tile_tokens_dim
 
     def apply(
         self,
@@ -100,12 +74,12 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
-        expert_map: Optional[torch.Tensor],
-        a1q_scale: Optional[torch.Tensor],
-        a2_scale: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
+        a1q_scale: torch.Tensor | None,
+        a2_scale: torch.Tensor | None,
         workspace13: torch.Tensor,
         workspace2: torch.Tensor,
-        expert_tokens_meta: Optional[mk.ExpertTokensMetadata],
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
         topk = topk_ids.size(-1)
@@ -149,16 +123,21 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "local_expert_offset": local_expert_offset,
             "local_num_experts": local_num_experts,
             "routed_scaling_factor": None,
-            "tile_tokens_dim": self._get_tile_tokens_dim(
-                x_quant, topk, local_num_experts
-            ),
+            "tile_tokens_dim": None,
             "routing_method_type": 1,
             "do_finalize": True,
             "output": output,
-            "tune_max_num_tokens": self.max_capture_size,
+            "tune_max_num_tokens": max(self.max_capture_size, 1),
         }
 
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
-        trtllm_fp4_block_scale_routed_moe(**kwargs)
+        from vllm.utils.flashinfer import autotune
+
+        with autotune(False):
+            # Enable autotune when,
+            # https://github.com/flashinfer-ai/flashinfer/issues/2023 is
+            # resolved.
+            trtllm_fp4_block_scale_routed_moe(**kwargs)
+
         return output

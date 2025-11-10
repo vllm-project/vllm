@@ -4,8 +4,6 @@
 Run `pytest tests/entrypoints/openai/test_embedding_dimensions.py`.
 """
 
-from typing import Optional
-
 import openai
 import pytest
 
@@ -103,14 +101,14 @@ async def test_matryoshka(
         run_embedding_correctness_test(hf_model, prompts, vllm_outputs, dimensions)
 
     if model_info.is_matryoshka:
-        valid_dimensions: list[Optional[int]] = [None]
+        valid_dimensions: list[int | None] = [None]
         if model_info.matryoshka_dimensions is not None:
             valid_dimensions += model_info.matryoshka_dimensions[:2]
 
         for dimensions in valid_dimensions:
             await make_request_and_correctness_test(dimensions)
 
-        invalid_dimensions: list[Optional[int]] = [-1]
+        invalid_dimensions: list[int | None] = [-1]
         if model_info.matryoshka_dimensions is not None:
             assert 5 not in model_info.matryoshka_dimensions
             invalid_dimensions.append(5)

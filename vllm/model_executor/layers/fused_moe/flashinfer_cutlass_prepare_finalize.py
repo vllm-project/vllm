@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import torch
 
@@ -39,10 +38,10 @@ class FlashInferCutlassMoEPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def max_num_tokens_per_rank(self) -> Optional[int]:
+    def max_num_tokens_per_rank(self) -> int | None:
         return None
 
-    def topk_indices_dtype(self) -> Optional[torch.dtype]:
+    def topk_indices_dtype(self) -> torch.dtype | None:
         return None
 
     def num_dispatchers(self) -> int:
@@ -89,7 +88,7 @@ class FlashInferAllToAllMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFina
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
@@ -164,13 +163,15 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         num_experts: int,
-        expert_map: Optional[torch.Tensor],
+        expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
     ) -> mk.PrepareResultType:
         self._apply_router_weight_on_input(
             a1, topk_weights, topk_ids, apply_router_weight_on_input
         )
+        if not self.use_dp and quant_config.quant_dtype == "nvfp4":
+            return a1, None, None, topk_ids, topk_weights
 
         a1q, a1q_scale = moe_kernel_quantize_input(
             a1,
@@ -180,14 +181,15 @@ class FlashInferAllGatherMoEPrepareAndFinalize(FlashInferCutlassMoEPrepareAndFin
             quant_config.block_shape,
             is_fp4_scale_swizzled=not self.use_dp,
         )
+
         if self.use_dp:
             topk_weights, topk_ids, a1q, a1q_scale = get_dp_group().all_gatherv(
                 [topk_weights, topk_ids, a1q, a1q_scale],
                 dim=0,
                 sizes=get_local_sizes(),
             )
-            if quant_config.quant_dtype == "nvfp4":
-                a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
+        if quant_config.quant_dtype == "nvfp4":
+            a1q_scale = nvfp4_block_scale_interleave(a1q_scale)
 
         return a1q, a1q_scale, None, topk_ids, topk_weights
 
@@ -231,12 +233,13 @@ def flashinfer_alltoall_dispatch(
     max_num_token = (
         max(global_num_tokens_cpu) if global_num_tokens_cpu is not None else x.shape[0]
     )
+    orig_topk_weights_dtype = topk_weights.dtype
     alltoall_info, topk_ids, topk_weights, _ = (
         MnnvlMoe.mnnvl_moe_alltoallv_prepare_without_allgather(
             topk_ids,
             topk_weights,
             None,
-            all2all_manager.prepare_workspace,
+            all2all_manager.prepare_workspace_tensor,
             max_num_token,
             ep_rank,
             ep_size,
@@ -245,6 +248,7 @@ def flashinfer_alltoall_dispatch(
             top_k,
         )
     )
+    topk_weights = topk_weights.view(dtype=orig_topk_weights_dtype)
 
     x, x_sf = moe_kernel_quantize_input(
         x,

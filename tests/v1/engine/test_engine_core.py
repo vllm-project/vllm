@@ -12,10 +12,11 @@ from transformers import AutoTokenizer
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
-from vllm.v1.executor.abstract import Executor, UniProcExecutor
+from vllm.v1.executor.abstract import Executor
+from vllm.v1.executor.uniproc_executor import UniProcExecutor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
@@ -24,9 +25,11 @@ from ...utils import create_new_process_for_each_test, multi_gpu_test
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
-PROMPT = "Hello my name is Robert and I love quantization kernels"
+# test_engine_core_concurrent_batches assumes exactly 12 tokens per prompt.
+# Adjust prompt if changing model to maintain 12-token length.
+PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
@@ -63,7 +66,7 @@ def test_engine_core():
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 1
 
@@ -72,7 +75,7 @@ def test_engine_core():
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 1
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 2
 
@@ -82,12 +85,12 @@ def test_engine_core():
     assert len(engine_core.scheduler.waiting) == 2
     assert len(engine_core.scheduler.running) == 2
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 4
 
     # Loop through until they are all done.
-    while (outs := engine_core.step()[0].get(0)) and outs.outputs:
+    while (outs := engine_core.step_fn()[0].get(0)) and outs.outputs:
         pass
 
     assert len(engine_core.scheduler.waiting) == 0
@@ -104,7 +107,7 @@ def test_engine_core():
     assert engine_core.scheduler.has_unfinished_requests()
     assert not engine_core.scheduler.has_finished_requests()
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 1
     assert engine_core.scheduler.has_unfinished_requests()
@@ -116,7 +119,7 @@ def test_engine_core():
     assert not engine_core.scheduler.has_unfinished_requests()
     assert engine_core.scheduler.has_finished_requests()
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert not engine_core.scheduler.has_unfinished_requests()
     assert not engine_core.scheduler.has_finished_requests()
 
@@ -130,7 +133,7 @@ def test_engine_core():
     assert len(engine_core.scheduler.waiting) == 2
     assert len(engine_core.scheduler.running) == 0
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 2
 
@@ -138,7 +141,7 @@ def test_engine_core():
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 2
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 3
 
@@ -147,7 +150,7 @@ def test_engine_core():
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 2
 
-    _ = engine_core.step()
+    _ = engine_core.step_fn()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 2
 
@@ -162,12 +165,12 @@ def test_engine_core():
     req0.request_id = req1.request_id = "test"
     engine_core.add_request(*engine_core.preprocess_add_request(req0))
 
-    while (outs := engine_core.step()[0].get(0)) and outs.outputs:
-        pass
+    while engine_core.scheduler.has_requests():
+        engine_core.step_fn()
 
     engine_core.add_request(*engine_core.preprocess_add_request(req1))
-    while (outs := engine_core.step()[0].get(0)) and outs.outputs:
-        pass
+    while engine_core.scheduler.has_requests():
+        engine_core.step_fn()
 
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
@@ -205,8 +208,8 @@ def test_engine_core_advanced_sampling():
         assert len(engine_core.scheduler.waiting) == 1
         assert len(engine_core.scheduler.running) == 0
         # Loop through until they are all done.
-        while (outs := engine_core.step()[0].get(0)) and outs.outputs:
-            pass
+        while engine_core.scheduler.has_requests():
+            engine_core.step_fn()
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
 
@@ -245,7 +248,7 @@ def test_engine_core_concurrent_batches():
             self,
             scheduler_output,
             non_block=False,
-        ) -> Future[ModelRunnerOutput]:
+        ) -> Future[ModelRunnerOutput | None]:
             """Make execute_model non-blocking."""
 
             # DummyExecutor used only for testing async case.
@@ -253,6 +256,23 @@ def test_engine_core_concurrent_batches():
 
             def _execute():
                 output = self.collective_rpc("execute_model", args=(scheduler_output,))
+                # Make a copy because output[0] may be reused
+                # by the next batch.
+                return copy.deepcopy(output[0])
+
+            # Use the thread pool instead of creating a new thread
+            return self.thread_pool.submit(_execute)
+
+        def sample_tokens(
+            self, grammar_output, non_block=False
+        ) -> Future[ModelRunnerOutput]:
+            """Make sample_tokens non-blocking."""
+
+            # DummyExecutor used only for testing async case.
+            assert non_block
+
+            def _execute():
+                output = self.collective_rpc("sample_tokens", args=(grammar_output,))
                 # Make a copy because output[0] may be reused
                 # by the next batch.
                 return copy.deepcopy(output[0])
@@ -277,6 +297,8 @@ def test_engine_core_concurrent_batches():
         max_num_batched_tokens=10,
         # Reduce startup time.
         enforce_eager=True,
+        # Test concurrent batch behaviour independently of async scheduling.
+        async_scheduling=False,
     )
     vllm_config = engine_args.create_engine_config()
     with set_default_torch_num_threads(1):

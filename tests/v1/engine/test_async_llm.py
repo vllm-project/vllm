@@ -3,7 +3,6 @@
 
 import asyncio
 from contextlib import ExitStack
-from typing import Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -16,9 +15,14 @@ from vllm.inputs import PromptType
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
-from vllm.utils import set_default_torch_num_threads
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.loggers import LoggingStatLogger
+from vllm.v1.metrics.loggers import (
+    AggregatedLoggingStatLogger,
+    LoggingStatLogger,
+    PerEngineStatLoggerAdapter,
+    PrometheusStatLogger,
+)
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
@@ -53,8 +57,8 @@ async def generate(
     output_kind: RequestOutputKind,
     max_tokens: int,
     n: int = 1,
-    prompt_logprobs: Optional[int] = None,
-    cancel_after: Optional[int] = None,
+    prompt_logprobs: int | None = None,
+    cancel_after: int | None = None,
 ) -> tuple[int, str]:
     # Ensure generate doesn't complete too fast for cancellation test.
     await asyncio.sleep(0.2)
@@ -385,6 +389,12 @@ class MockLoggingStatLogger(LoggingStatLogger):
         self.log = MagicMock()
 
 
+class MockAggregatedStatLogger(AggregatedLoggingStatLogger):
+    def __init__(self, vllm_config: VllmConfig, engine_indexes: list[int]):
+        super().__init__(vllm_config, engine_indexes)
+        self.log = MagicMock()
+
+
 @pytest.mark.asyncio
 async def test_customize_loggers(monkeypatch):
     """Test that we can customize the loggers.
@@ -402,10 +412,42 @@ async def test_customize_loggers(monkeypatch):
 
         await engine.do_log_stats()
 
-        stat_loggers = engine.logger_manager.per_engine_logger_dict
-        assert len(stat_loggers) == 1
-        assert len(stat_loggers[0]) == 2  # LoggingStatLogger + MockLoggingStatLogger
-        stat_loggers[0][0].log.assert_called_once()
+        stat_loggers = engine.logger_manager.stat_loggers
+        assert (
+            len(stat_loggers) == 3
+        )  # MockLoggingStatLogger + LoggingStatLogger +  Promethus Logger
+        print(f"{stat_loggers=}")
+        stat_loggers[0].per_engine_stat_loggers[0].log.assert_called_once()
+        assert isinstance(stat_loggers[1], PerEngineStatLoggerAdapter)
+        assert isinstance(stat_loggers[1].per_engine_stat_loggers[0], LoggingStatLogger)
+        assert isinstance(stat_loggers[2], PrometheusStatLogger)
+
+
+@pytest.mark.asyncio
+async def test_customize_aggregated_loggers():
+    """Test that we can customize the aggregated loggers.
+    If a customized logger is provided at the init, it should
+    be added to the default loggers.
+    """
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(
+                TEXT_ENGINE_ARGS,
+                stat_loggers=[MockLoggingStatLogger, MockAggregatedStatLogger],
+            )
+        after.callback(engine.shutdown)
+
+        await engine.do_log_stats()
+
+        stat_loggers = engine.logger_manager.stat_loggers
+        assert len(stat_loggers) == 4
+        #  MockLoggingStatLogger + MockAggregatedStatLogger
+        # + LoggingStatLogger + PrometheusStatLogger
+        stat_loggers[0].per_engine_stat_loggers[0].log.assert_called_once()
+        stat_loggers[1].log.assert_called_once()
+        assert isinstance(stat_loggers[2], PerEngineStatLoggerAdapter)
+        assert isinstance(stat_loggers[2].per_engine_stat_loggers[0], LoggingStatLogger)
+        assert isinstance(stat_loggers[3], PrometheusStatLogger)
 
 
 @pytest.mark.asyncio(scope="module")
@@ -545,9 +587,9 @@ async def collect_outputs(
     prompt: PromptType,
     sampling_params: SamplingParams,
     outputs_list: list[RequestOutput],
-) -> Optional[RequestOutput]:
+) -> RequestOutput | None:
     """Helper to collect outputs and return the final one."""
-    final_output: Optional[RequestOutput] = None
+    final_output: RequestOutput | None = None
     async for output in engine.generate(
         request_id=request_id, prompt=prompt, sampling_params=sampling_params
     ):

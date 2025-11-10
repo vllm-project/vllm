@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import torch
 
@@ -20,7 +20,7 @@ class MPLinearLayerConfig:
     group_size: int
     zero_points: bool
     has_g_idx: bool
-    out_type: Optional[torch.dtype] = None
+    out_type: torch.dtype | None = None
 
 
 class MPLinearKernel(ABC):
@@ -31,7 +31,7 @@ class MPLinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, Optional[str]]:
+    def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         raise NotImplementedError
 
     def __init__(
@@ -39,8 +39,8 @@ class MPLinearKernel(ABC):
         c: MPLinearLayerConfig,
         w_q_param_name: str,
         w_s_param_name: str,
-        w_zp_param_name: Optional[str] = None,
-        w_gidx_param_name: Optional[str] = None,
+        w_zp_param_name: str | None = None,
+        w_gidx_param_name: str | None = None,
     ) -> None:
         assert self.can_implement(c)
         self.config = c
@@ -62,12 +62,12 @@ class MPLinearKernel(ABC):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         raise NotImplementedError
 
     def _transform_param(
-        self, layer: torch.nn.Module, name: Optional[str], fn: Callable
+        self, layer: torch.nn.Module, name: str | None, fn: Callable
     ) -> None:
         if name is not None and getattr(layer, name, None) is not None:
             old_param = getattr(layer, name)
@@ -83,8 +83,8 @@ class MPLinearKernel(ABC):
     ) -> tuple[
         torch.Tensor,  # w_q
         torch.Tensor,  # w_s
-        Optional[torch.Tensor],  # w_zp,
-        Optional[torch.Tensor],  # w_gidx
+        torch.Tensor | None,  # w_zp,
+        torch.Tensor | None,  # w_gidx
     ]:
         return (
             getattr(layer, self.w_q_name),

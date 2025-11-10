@@ -4,7 +4,6 @@
 # A modified implementation of the AIMv2 Transformer
 # inserted here also the image tokenizer used by Ovis2
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -165,7 +164,7 @@ class AIMv2Transformer(nn.Module):
         config: AIMv2Config,
         quant_config: QuantizationConfig,
         *,
-        require_post_norm: Optional[bool] = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -196,7 +195,7 @@ class AIMv2Model(torch.nn.Module):
         config: AIMv2Config,
         quant_config: QuantizationConfig,
         *,
-        require_post_norm: Optional[bool] = None,
+        require_post_norm: bool | None = None,
         prefix: str = "",
     ):
         super().__init__()

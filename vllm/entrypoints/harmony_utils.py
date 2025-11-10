@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from __future__ import annotations
-
 import datetime
 import json
 from collections.abc import Iterable, Sequence
-from typing import Literal, Union
+from typing import Literal
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -40,11 +38,14 @@ from openai_harmony import (
     ToolDescription,
     load_harmony_encoding,
 )
+from openai_harmony import Message as OpenAIHarmonyMessage
+from openai_harmony import Role as OpenAIHarmonyRole
 
 from vllm import envs
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionToolsParam,
     ResponseInputOutputItem,
+    ResponsesRequest,
 )
 from vllm.utils import random_uuid
 
@@ -60,15 +61,19 @@ _harmony_encoding = None
 # they are available and requested by the user.
 # Tool args are provided by MCP tool descriptions. Output
 # of the tools are stringified.
-BUILTIN_TOOLS = {
+MCP_BUILTIN_TOOLS: set[str] = {
     "web_search_preview",
     "code_interpreter",
     "container",
 }
 
 
-def has_custom_tools(tool_types: list[str]) -> bool:
-    return not set(tool_types).issubset(BUILTIN_TOOLS)
+def has_custom_tools(tool_types: set[str]) -> bool:
+    """
+    Checks if the given tool types are custom tools
+    (i.e. any tool other than MCP buildin tools)
+    """
+    return not tool_types.issubset(MCP_BUILTIN_TOOLS)
 
 
 def get_encoding():
@@ -122,7 +127,7 @@ def get_system_message(
     return sys_msg
 
 
-def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
+def create_tool_definition(tool: ChatCompletionToolsParam | Tool):
     if isinstance(tool, ChatCompletionToolsParam):
         return ToolDescription.new(
             name=tool.function.name,
@@ -138,13 +143,13 @@ def create_tool_definition(tool: Union[ChatCompletionToolsParam, Tool]):
 
 def get_developer_message(
     instructions: str | None = None,
-    tools: list[Union[Tool, ChatCompletionToolsParam]] | None = None,
+    tools: list[Tool | ChatCompletionToolsParam] | None = None,
 ) -> Message:
     dev_msg_content = DeveloperContent.new()
     if instructions is not None and not envs.VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS:
         dev_msg_content = dev_msg_content.with_instructions(instructions)
     if tools is not None:
-        function_tools: list[Union[Tool, ChatCompletionToolsParam]] = []
+        function_tools: list[Tool | ChatCompletionToolsParam] = []
         for tool in tools:
             if tool.type in (
                 "web_search_preview",
@@ -178,7 +183,7 @@ def get_user_message(content: str) -> Message:
 
 def parse_response_input(
     response_msg: ResponseInputOutputItem,
-    prev_responses: list[Union[ResponseOutputItem, ResponseReasoningItem]],
+    prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
 ) -> Message:
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
@@ -230,7 +235,7 @@ def parse_response_input(
     return msg
 
 
-def parse_chat_input(chat_msg) -> list[Message]:
+def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)
@@ -256,6 +261,15 @@ def parse_chat_input(chat_msg) -> list[Message]:
     if role == "tool":
         name = chat_msg.get("name", "")
         content = chat_msg.get("content", "") or ""
+        if isinstance(content, list):
+            # Handle array format for tool message content
+            # by concatenating all text parts.
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+
         msg = Message.from_author_and_content(
             Author.new(Role.TOOL, f"functions.{name}"), content
         ).with_channel("commentary")
@@ -270,6 +284,40 @@ def parse_chat_input(chat_msg) -> list[Message]:
         contents = [TextContent(text=c.get("text", "")) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return [msg]
+
+
+def construct_harmony_previous_input_messages(
+    request: ResponsesRequest,
+) -> list[OpenAIHarmonyMessage]:
+    messages: list[OpenAIHarmonyMessage] = []
+    if request.previous_input_messages:
+        for message in request.previous_input_messages:
+            # Handle both OpenAIHarmonyMessage objects and dictionary inputs
+            if isinstance(message, OpenAIHarmonyMessage):
+                message_role = message.author.role
+                # To match OpenAI, instructions, reasoning and tools are
+                # always taken from the most recent Responses API request
+                # not carried over from previous requests
+                if (
+                    message_role == OpenAIHarmonyRole.SYSTEM
+                    or message_role == OpenAIHarmonyRole.DEVELOPER
+                ):
+                    continue
+                messages.append(message)
+            else:
+                harmony_messages = parse_input_to_harmony_message(message)
+                for harmony_msg in harmony_messages:
+                    message_role = harmony_msg.author.role
+                    # To match OpenAI, instructions, reasoning and tools are
+                    # always taken from the most recent Responses API request
+                    # not carried over from previous requests
+                    if (
+                        message_role == OpenAIHarmonyRole.SYSTEM
+                        or message_role == OpenAIHarmonyRole.DEVELOPER
+                    ):
+                        continue
+                    messages.append(harmony_msg)
+    return messages
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
@@ -296,7 +344,24 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         if len(message.content) != 1:
             raise ValueError("Invalid number of contents in browser message")
         content = message.content[0]
-        browser_call = json.loads(content.text)
+        # We do not need to check the VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY
+        # env variable since if it is not set, we are certain the json is valid
+        # The use of Actions for web search will be removed entirely in
+        # the future, so this is only necessary temporarily
+        try:
+            browser_call = json.loads(content.text)
+        except json.JSONDecodeError:
+            # If the content is not valid JSON, then it was
+            # caught and retried by vLLM, which means we
+            # need to make note of that so the user is aware
+            json_retry_output_message = (
+                f"Invalid JSON args, caught and retried: {content.text}"
+            )
+            browser_call = {
+                "query": json_retry_output_message,
+                "url": json_retry_output_message,
+                "pattern": json_retry_output_message,
+            }
         # TODO: translate to url properly!
         if recipient == "browser.search":
             action = ActionSearch(
@@ -456,15 +521,15 @@ def parse_chat_output(
     is_tool_call = False  # TODO: update this when tool call is supported
     if len(output_msgs) == 0:
         # The generation has stopped during reasoning.
-        reasoning_content = parser.current_content
+        reasoning = parser.current_content
         final_content = None
     elif len(output_msgs) == 1:
         # The generation has stopped during final message.
-        reasoning_content = output_msgs[0].content[0].text
+        reasoning = output_msgs[0].content[0].text
         final_content = parser.current_content
     else:
         reasoning_msg = output_msgs[:-1]
         final_msg = output_msgs[-1]
-        reasoning_content = "\n".join([msg.content[0].text for msg in reasoning_msg])
+        reasoning = "\n".join([msg.content[0].text for msg in reasoning_msg])
         final_content = final_msg.content[0].text
-    return reasoning_content, final_content, is_tool_call
+    return reasoning, final_content, is_tool_call
