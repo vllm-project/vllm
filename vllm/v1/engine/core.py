@@ -310,22 +310,14 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-
         in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
 
-        # Check for any requests remaining in the scheduler - unfinished,
-        # or finished and not yet removed from the batch.
-        # IMPORTANT: In DP mode, we cannot early return when engines_running
-        # is True, because other ranks might still be processing requests.
-        # We need to stay synchronized by going through execute_model even
-        # with 0 tokens.
-        if not self.scheduler.has_requests():
-            # In DP mode with engines running, we should not early return.
-            # We need to participate in the DP synchronization even with 0 tokens.
-            if in_dp_mode and hasattr(self, "engines_running") and self.engines_running:
-                pass  # Continue to execute_model for synchronization
-            else:
-                return {}, False
+        # Early return if no work and not participating in DP synchronization
+        needs_dp_sync = in_dp_mode and getattr(self, "engines_running", False)
+        if not (self.scheduler.has_requests() or needs_dp_sync):
+            return {}, False
+
+        # Execute the model (may be with 0 tokens for DP sync)
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
@@ -338,11 +330,8 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        # In DP mode, even if this rank has 0 tokens, it participated in DP
-        # synchronization during execute_model, so it should be considered as
-        # "executed" to avoid calling execute_dummy_batch() in a tight loop.
+        # Mark as executed if we processed tokens OR participated in DP sync
         has_tokens = scheduler_output.total_num_scheduled_tokens > 0
-        in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
         executed = has_tokens or in_dp_mode
 
         return engine_core_outputs, executed

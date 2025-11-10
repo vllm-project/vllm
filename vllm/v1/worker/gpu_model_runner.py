@@ -2522,6 +2522,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             **model_kwargs,
         )
 
+    def _should_attempt_drafter(
+        self,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> bool:
+        """Determine if the speculative drafter should attempt to run.
+
+        Returns False if no speculative config or if sequences would exceed
+        the drafter's max model length.
+        """
+        if self.speculative_config is None:
+            return False
+
+        seq_lens_np = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            + num_scheduled_tokens_np
+        )
+        max_seq_len = seq_lens_np.max()
+
+        # Determine effective max model length for drafter
+        effective_drafter_max_model_len = self.max_model_len
+        if effective_drafter_max_model_len is None:
+            effective_drafter_max_model_len = self.model_config.max_model_len
+        if (
+            self.speculative_config.draft_model_config is not None
+            and self.speculative_config.draft_model_config.max_model_len is not None
+        ):
+            effective_drafter_max_model_len = (
+                self.speculative_config.draft_model_config.max_model_len
+            )
+
+        return bool(
+            max_seq_len + self.speculative_config.num_speculative_tokens
+            <= effective_drafter_max_model_len
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2539,135 +2575,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                if total_num_scheduled_tokens > 0:
-                    num_reqs = self.input_batch.num_reqs
-                    req_ids = self.input_batch.req_ids
-                    tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
-                    num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
-                    max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
-
-                    should_attempt_drafter = False
-                    if self.speculative_config is not None:
-                        seq_lens_np = (
-                            self.input_batch.num_computed_tokens_cpu[:num_reqs]
-                            + num_scheduled_tokens_np
-                        )
-                        max_seq_len = seq_lens_np.max()
-                        effective_drafter_max_model_len = self.max_model_len
-                        if effective_drafter_max_model_len is None:
-                            effective_drafter_max_model_len = (
-                                self.model_config.max_model_len
-                            )
-                        if self.speculative_config.draft_model_config is not None and (
-                            self.speculative_config.draft_model_config.max_model_len
-                            is not None
-                        ):
-                            effective_drafter_max_model_len = (
-                                self.speculative_config.draft_model_config.max_model_len
-                            )
-                        should_attempt_drafter = bool(
-                            max_seq_len + self.speculative_config.num_speculative_tokens
-                            <= effective_drafter_max_model_len
-                        )
-
-                    if self.cache_config.kv_sharing_fast_prefill:
-                        assert not self.input_batch.num_prompt_logprobs, (
-                            "--kv-sharing-fast-prefill produces incorrect "
-                            "logprobs for prompt tokens, tokens, please disable "
-                            "it when the requests need prompt logprobs"
-                        )
-
-                    # Prepare the decoder inputs.
-                    (
-                        logits_indices,
-                        spec_decode_metadata,
-                        ubatch_slices,
-                        num_tokens_across_dp,
-                        should_run_drafter,
-                    ) = self._prepare_inputs(
-                        scheduler_output,
-                        num_scheduled_tokens_np,
-                        max_num_scheduled_tokens,
-                        should_attempt_drafter,
-                    )
-
-                    cascade_attn_prefix_lens = None
-                    # Disable cascade attention when using microbatching (DBO)
-                    if self.cascade_attn_enabled and ubatch_slices is None:
-                        # Pre-compute cascade attention prefix lengths
-                        # NOTE: Must be AFTER _prepare_inputs uses self.input_batch
-                        # state
-                        cascade_attn_prefix_lens = (
-                            self._compute_cascade_attn_prefix_lens(
-                                num_scheduled_tokens_np,
-                                scheduler_output.num_common_prefix_blocks,
-                            )
-                        )
-
-                    # TODO(lucas): move cudagraph dispatching here:
-                    #   https://github.com/vllm-project/vllm/issues/23789
-
-                    use_spec_decode = (
-                        len(scheduler_output.scheduled_spec_decode_tokens) > 0
-                    )
-                    attn_metadata, spec_decode_common_attn_metadata = (
-                        self._build_attention_metadata(
-                            total_num_scheduled_tokens=total_num_scheduled_tokens,
-                            max_num_scheduled_tokens=max_num_scheduled_tokens,
-                            num_reqs=num_reqs,
-                            ubatch_slices=ubatch_slices,
-                            logits_indices=logits_indices,
-                            use_spec_decode=use_spec_decode,
-                            scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
-                            cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                        )
-                    )
-
-                    dp_rank = self.parallel_config.data_parallel_rank
-                    if ubatch_slices:
-                        assert num_tokens_across_dp is not None
-                        num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                        self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-                    elif num_tokens_across_dp is not None:
-                        num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                    else:
-                        num_input_tokens = self._get_num_input_tokens(
-                            total_num_scheduled_tokens
-                        )
-
-                    (
-                        input_ids,
-                        inputs_embeds,
-                        positions,
-                        intermediate_tensors,
-                        model_kwargs,
-                    ) = self._preprocess(
-                        scheduler_output, num_input_tokens, intermediate_tensors
-                    )
-
-                    uniform_decode = (
-                        max_num_scheduled_tokens == self.uniform_decode_query_len
-                    ) and (
-                        total_num_scheduled_tokens
-                        == self.input_batch.num_reqs * max_num_scheduled_tokens
-                    )
-                    batch_descriptor = BatchDescriptor(
-                        num_tokens=num_input_tokens,
-                        uniform_decode=uniform_decode,
-                        has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-                    )
-                    cudagraph_runtime_mode, batch_descriptor = (
-                        self.cudagraph_dispatcher.dispatch(
-                            batch_descriptor,
-                            use_cascade_attn=cascade_attn_prefix_lens is not None,
-                        )
-                    )
-                else:
-                    # No tokens to process - handle early return
-                    # In DP mode, we need to participate in coordinate_batch_across_dp
+                # Handle 0-token case early
+                if total_num_scheduled_tokens == 0:
+                    # In DP mode, participate in coordinate_batch_across_dp
                     # to maintain synchronization across ranks
                     if self.parallel_config.data_parallel_size > 1:
-                        _, _, should_run_drafter = coordinate_batch_across_dp(
+                        coordinate_batch_across_dp(
                             num_tokens_unpadded=0,
                             parallel_config=self.parallel_config,
                             allow_microbatching=False,
@@ -2681,6 +2594,106 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     return self.kv_connector_no_forward(
                         scheduler_output, self.vllm_config
                     )
+
+                # Normal execution path with tokens
+                num_reqs = self.input_batch.num_reqs
+                req_ids = self.input_batch.req_ids
+                tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+                num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
+                max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
+                should_attempt_drafter = self._should_attempt_drafter(
+                    num_reqs, num_scheduled_tokens_np
+                )
+
+                if self.cache_config.kv_sharing_fast_prefill:
+                    assert not self.input_batch.num_prompt_logprobs, (
+                        "--kv-sharing-fast-prefill produces incorrect "
+                        "logprobs for prompt tokens, tokens, please disable "
+                        "it when the requests need prompt logprobs"
+                    )
+
+                # Prepare the decoder inputs.
+                (
+                    logits_indices,
+                    spec_decode_metadata,
+                    ubatch_slices,
+                    num_tokens_across_dp,
+                    should_run_drafter,
+                ) = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                    max_num_scheduled_tokens,
+                    should_attempt_drafter,
+                )
+
+                cascade_attn_prefix_lens = None
+                # Disable cascade attention when using microbatching (DBO)
+                if self.cascade_attn_enabled and ubatch_slices is None:
+                    # Pre-compute cascade attention prefix lengths
+                    # NOTE: Must be AFTER _prepare_inputs uses self.input_batch
+                    # state
+                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        scheduler_output.num_common_prefix_blocks,
+                    )
+
+                # TODO(lucas): move cudagraph dispatching here:
+                #   https://github.com/vllm-project/vllm/issues/23789
+
+                use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                attn_metadata, spec_decode_common_attn_metadata = (
+                    self._build_attention_metadata(
+                        total_num_scheduled_tokens=total_num_scheduled_tokens,
+                        max_num_scheduled_tokens=max_num_scheduled_tokens,
+                        num_reqs=num_reqs,
+                        ubatch_slices=ubatch_slices,
+                        logits_indices=logits_indices,
+                        use_spec_decode=use_spec_decode,
+                        scheduled_encoder_inputs=scheduler_output.scheduled_encoder_inputs,
+                        cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                    )
+                )
+
+                dp_rank = self.parallel_config.data_parallel_rank
+                if ubatch_slices:
+                    assert num_tokens_across_dp is not None
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                    self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+                elif num_tokens_across_dp is not None:
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                else:
+                    num_input_tokens = self._get_num_input_tokens(
+                        total_num_scheduled_tokens
+                    )
+
+                (
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
+                )
+
+                uniform_decode = (
+                    max_num_scheduled_tokens == self.uniform_decode_query_len
+                ) and (
+                    total_num_scheduled_tokens
+                    == self.input_batch.num_reqs * max_num_scheduled_tokens
+                )
+                batch_descriptor = BatchDescriptor(
+                    num_tokens=num_input_tokens,
+                    uniform_decode=uniform_decode,
+                    has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                )
+                cudagraph_runtime_mode, batch_descriptor = (
+                    self.cudagraph_dispatcher.dispatch(
+                        batch_descriptor,
+                        use_cascade_attn=cascade_attn_prefix_lens is not None,
+                    )
+                )
 
             use_padded_batch_for_eagle = (
                 self.speculative_config is not None
