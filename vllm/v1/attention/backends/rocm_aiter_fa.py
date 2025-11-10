@@ -709,7 +709,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
         if value is not None:
             value = value[:num_actual_tokens]
 
-
         output_actual_tokens = output[:num_actual_tokens]
 
         num_decodes = attn_metadata.num_decodes
