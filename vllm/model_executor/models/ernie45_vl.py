@@ -1482,11 +1482,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
                 if modality_type == "image":
-                    t, h, w = (
-                        image_grid_thw[mm_data_idx][0],
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = image_grid_thw[mm_data_idx].tolist()
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
                         h // spatial_conv_size,
@@ -1517,11 +1513,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     mm_data_idx += 1
 
                 elif modality_type == "video":
-                    t, h, w = (
-                        video_grid_thw[mm_data_idx][0],
-                        video_grid_thw[mm_data_idx][1],
-                        video_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = video_grid_thw[mm_data_idx].tolist()
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t // temporal_conv_size,
                         h // spatial_conv_size,

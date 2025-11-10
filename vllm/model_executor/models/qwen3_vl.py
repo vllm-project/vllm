@@ -1457,20 +1457,12 @@ class Qwen3VLForConditionalGeneration(
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
-                t, h, w = (
-                    image_grid_thw[image_index][0],
-                    image_grid_thw[image_index][1],
-                    image_grid_thw[image_index][2],
-                )
+                t, h, w = image_grid_thw[image_index].tolist()
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = (
-                    video_grid_thw[video_index][0],
-                    video_grid_thw[video_index][1],
-                    video_grid_thw[video_index][2],
-                )
+                t, h, w = video_grid_thw[video_index].tolist()
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video

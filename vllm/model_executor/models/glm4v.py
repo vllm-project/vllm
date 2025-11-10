@@ -671,11 +671,7 @@ class GLM4VForCausalLM(
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
                 if modality_type == "image":
-                    t, h, w = (
-                        image_grid_thw[mm_data_idx][0],
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = image_grid_thw[mm_data_idx].tolist()
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
                         h // spatial_merge_size,
@@ -708,8 +704,7 @@ class GLM4VForCausalLM(
                 elif modality_type == "video":
                     t, h, w = (
                         video_frame_num,
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
+                        *image_grid_thw[mm_data_idx][1:].tolist(),
                     )
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
