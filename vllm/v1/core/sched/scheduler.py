@@ -197,9 +197,9 @@ class Scheduler(SchedulerInterface):
         Returns:
             Tuple of (token_demand, memory_capacity):
             - token_demand: Total tokens that could be scheduled from
-              running + waiting queues
+                running + waiting queues
             - memory_capacity: Max additional tokens that can fit in
-              available memory
+                available memory
         """
         # Calculate token demand from running and waiting requests
         token_demand = 0
