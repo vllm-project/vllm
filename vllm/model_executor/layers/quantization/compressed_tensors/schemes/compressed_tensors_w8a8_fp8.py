@@ -192,6 +192,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if self.strategy == QuantizationStrategy.BLOCK:
             maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
 
+        self.fp8_linear.process_weights_after_loading(layer)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,

@@ -8,6 +8,8 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
+    AiterCKPerTokenFp8ScaledMMLinearKernel,
     AiterScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
@@ -64,6 +66,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
+        AiterCKPerTokenFp8ScaledMMLinearKernel,
         ROCmScaledMMLinearKernel,
         PerTensorTorchScaledMMLinearKernel,
         RowWiseTorchScaledMMLinearKernel,
