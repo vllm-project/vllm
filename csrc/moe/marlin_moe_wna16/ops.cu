@@ -436,7 +436,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   TORCH_CHECK(major_capability * 10 + minor_capability >= 80,
               "marlin kernel only support Ampere or newer GPUs.");
   if (a_type == vllm::kFE4M3fn) {
-    TORCH_CHECK(major_capability * 10 + minor_capability >= 80,
+    TORCH_CHECK(major_capability * 10 + minor_capability >= 89,
                 "FP8 only support Ada Lovelace or newer GPUs.");
   }
   if (a_type == vllm::kFE4M3fn) {
