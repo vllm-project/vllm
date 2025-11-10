@@ -473,7 +473,6 @@ class MambaMixer2(MambaBase, CustomOp):
     def forward_native(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
         pass
@@ -481,21 +480,57 @@ class MambaMixer2(MambaBase, CustomOp):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        output: torch.Tensor,
         mup_vector: torch.Tensor | None = None,
     ):
-        torch.ops.vllm.mamba_mixer2(
-            hidden_states,
-            output,
-            self.prefix,
-            mup_vector,
+        # 1. Gated MLP's linear projection
+        projected_states, _ = self.in_proj(hidden_states)
+        if mup_vector is not None:
+            projected_states = projected_states * mup_vector
+
+        # 2. Prepare inputs for conv + SSM
+        gate, hidden_states_B_C, dt = torch.split(
+            projected_states,
+            [
+                self.intermediate_size // self.tp_size,
+                self.conv_dim // self.tp_size,
+                self.num_heads // self.tp_size,
+            ],
+            dim=-1,
         )
+
+        ssm_output = torch.empty(
+            [
+                hidden_states.shape[0],
+                (self.num_heads // self.tp_size) * self.head_dim,
+            ],
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        )
+
+        # 3. conv + SSM
+        torch.ops.vllm.mamba_mixer2(
+            hidden_states_B_C,
+            dt,
+            ssm_output,
+            self.prefix,
+        )
+
+        # 4. gated MLP
+        # GatedRMSNorm internally applying SiLU to the gate
+        # SiLU is applied internally before normalization, unlike standard
+        # norm usage
+        hidden_states = self.norm(ssm_output, gate)
+
+        # 5. Final linear projection
+        output, _ = self.out_proj(hidden_states)
+
+        return output
 
     def forward_cuda(
         self,
-        hidden_states: torch.Tensor,
+        hidden_states_B_C: torch.Tensor,
+        dt: torch.Tensor,
         output: torch.Tensor,
-        mup_vector: torch.Tensor | None = None,
     ):
         forward_context = get_forward_context()
         # attn_metadata contains metadata necessary for the mamba2 triton
@@ -524,22 +559,6 @@ class MambaMixer2(MambaBase, CustomOp):
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
-        # 1. Gated MLP's linear projection
-        projected_states, _ = self.in_proj(hidden_states)
-
-        if mup_vector is not None:
-            projected_states = projected_states * mup_vector
-
-        gate, hidden_states_B_C, dt = torch.split(
-            projected_states,
-            [
-                self.intermediate_size // self.tp_size,
-                self.conv_dim // self.tp_size,
-                self.num_heads // self.tp_size,
-            ],
-            dim=-1,
-        )
-
         conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
@@ -561,9 +580,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 hidden_states_B_C.transpose(0, 1).clone().transpose(0, 1)
             ).contiguous()
             hidden_states, _B, _C = split_hidden_states_B_C_fn(hidden_states_B_C)
-            hidden_states = self.norm(hidden_states, gate)
-            out, _ = self.out_proj(hidden_states)
-            return out
+            return hidden_states
 
         # NOTE: V0 put prefill before decode, v1 puts decode before prefill
         num_prefills = attn_metadata.num_prefills  # request count
@@ -622,18 +639,8 @@ class MambaMixer2(MambaBase, CustomOp):
             block_idx_first_scheduled_token_p = None
             num_computed_tokens_p = None
 
-        # Preallocate output tensor to avoid memcpy cost for merging prefill
-        # and decode outputs
-        preallocated_ssm_out = torch.empty(
-            [
-                num_prefill_tokens + num_decodes,
-                (self.num_heads // self.tp_size) * self.head_dim,
-            ],
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
-            preallocated_ssm_out,
+            output[:num_actual_tokens],
             [num_decodes, num_prefill_tokens],
             dim=0,
         )
@@ -861,15 +868,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
             )
 
-        # 4. gated MLP
-        # GatedRMSNorm internally applying SiLU to the gate
-        # SiLU is applied internally before normalization, unlike standard
-        # norm usage
-        hidden_states = self.norm(preallocated_ssm_out, gate[:num_actual_tokens])
-
-        # 5. Final linear projection
-        output[:num_actual_tokens], _ = self.out_proj(hidden_states)
-
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         assert self.model_config is not None
         assert self.cache_config is not None
@@ -901,21 +899,21 @@ class MambaMixer2(MambaBase, CustomOp):
 
 
 def mamba_mixer2(
-    hidden_states: torch.Tensor,
+    hidden_states_B_C: torch.Tensor,
+    dt: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    mup_vector: torch.Tensor | None = None,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output, mup_vector=mup_vector)
+    self.forward_cuda(hidden_states_B_C=hidden_states_B_C, dt=dt, output=output)
 
 
 def mamba_mixer2_fake(
-    hidden_states: torch.Tensor,
+    hidden_states_B_C: torch.Tensor,
+    dt: torch.Tensor,
     output: torch.Tensor,
     layer_name: str,
-    mup_vector: torch.Tensor | None = None,
 ) -> None:
     return
 
