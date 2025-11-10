@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
+    VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
@@ -223,7 +224,6 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLATTEN_LOGPROBS: bool = False
-    VLLM_MOE_USE_DEEP_GEMM: bool = True
 
 
 def get_default_cache_root():
