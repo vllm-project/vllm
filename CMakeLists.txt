@@ -49,8 +49,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.8.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.8.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.9.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.9.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -241,7 +241,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "Enabling cumem allocator extension.")
   # link against cuda driver library
   list(APPEND CUMEM_LIBS CUDA::cuda_driver)
-  define_gpu_extension_target(
+  define_extension_target(
     cumem_allocator
     DESTINATION vllm
     LANGUAGE CXX
@@ -858,7 +858,7 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 message(STATUS "Enabling C extension.")
-define_gpu_extension_target(
+define_extension_target(
   _C
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
@@ -973,7 +973,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 endif()
 
 message(STATUS "Enabling moe extension.")
-define_gpu_extension_target(
+define_extension_target(
   _moe_C
   DESTINATION vllm
   LANGUAGE ${VLLM_GPU_LANG}
@@ -994,7 +994,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
-  define_gpu_extension_target(
+  define_extension_target(
     _rocm_C
     DESTINATION vllm
     LANGUAGE ${VLLM_GPU_LANG}
