@@ -615,16 +615,13 @@ def main(args: argparse.Namespace):
         E = config.num_experts
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
-<<<<<<< Updated upstream
         hidden_size = config.hidden_size
-=======
-     elif config.architectures[0] in ["Qwen3OmniMoeForConditionalGeneration"]:
-         E = config.thinker_config.text_config.num_experts
-         topk = config.thinker_config.text_config.num_experts_per_tok
-         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
-         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-         hidden_size = config.thinker_config.text_config.hidden_size
->>>>>>> Stashed changes
+    elif config.architectures[0] in ["Qwen3OmniMoeForConditionalGeneration"]:
+        E = config.thinker_config.text_config.num_experts
+        topk = config.thinker_config.text_config.num_experts_per_tok
+        intermediate_size = config.thinker_config.text_config.moe_intermediate_size
+        shard_intermediate_size = 2 * intermediate_size // args.tp_size
+        hidden_size = config.thinker_config.text_config.hidden_size
     else:
         # Support for llama4
         config = config.get_text_config()
