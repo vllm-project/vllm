@@ -42,10 +42,6 @@ class FlashAttnMLABackend(MLACommonBackend):
         return "FLASH_ATTN_MLA"
 
     @staticmethod
-    def get_metadata_cls() -> type["FlashAttnMLAMetadata"]:
-        return FlashAttnMLAMetadata
-
-    @staticmethod
     def get_builder_cls() -> type["FlashAttnMLAMetadataBuilder"]:
         return FlashAttnMLAMetadataBuilder
 
@@ -97,13 +93,6 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
-            if self.max_cudagraph_size > 992:
-                # This condition derives from FA3's internal heuristic.
-                # TODO(woosuk): Support larger cudagraph sizes.
-                raise ValueError(
-                    "Capture size larger than 992 is not supported for full cuda graph."
-                )
-
             self.scheduler_metadata = torch.zeros(
                 vllm_config.scheduler_config.max_num_seqs + 1,
                 dtype=torch.int32,
