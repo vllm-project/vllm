@@ -20,7 +20,11 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionMetadata,
+    MultipleOf,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -82,7 +86,6 @@ from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
     supports_dynamo,
 )
-from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
