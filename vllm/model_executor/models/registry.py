@@ -495,17 +495,19 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
 class _MambaBackend(Enum):
     MAMBA1 = "vllm.v1.attention.backends.mamba1_attn.Mamba1AttentionBackend"
     MAMBA2 = "vllm.v1.attention.backends.mamba2_attn.Mamba2AttentionBackend"
-    LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
-    GDN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
     SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
+    LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
+    LINEAR_GDN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
+    # TODO(shen-shanshan): add KDA backend for kimi linear model
 
 
 MAMBA_BACKEND_MAP = {
     "mamba1": _MambaBackend.MAMBA1.value,  # noqa
     "mamba2": _MambaBackend.MAMBA2.value,  # noqa
-    "linear_attention": _MambaBackend.LINEAR.value,  # noqa
-    "gdn_attention": _MambaBackend.GDN.value,  # noqa
     "short_conv": _MambaBackend.SHORT_CONV.value,  # noqa
+    "linear_attention": _MambaBackend.LINEAR.value,  # noqa
+    "linear_attention_gdn": _MambaBackend.LINEAR_GDN.value,  # noqa
+    # TODO(shen-shanshan): add KDA backend for kimi linear model
 }
 
 
