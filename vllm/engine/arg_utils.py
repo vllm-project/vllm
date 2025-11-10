@@ -476,7 +476,7 @@ class EngineArgs:
     max_lora_rank: int = LoRAConfig.max_lora_rank
     default_mm_loras: dict[str, str] | None = LoRAConfig.default_mm_loras
     fully_sharded_loras: bool = LoRAConfig.fully_sharded_loras
-    block_diagonal_sharded_loras: bool = False
+    block_diagonal_sharded_loras: bool = LoRAConfig.block_diagonal_sharded_loras
     max_cpu_loras: int | None = LoRAConfig.max_cpu_loras
     lora_dtype: str | torch.dtype | None = LoRAConfig.lora_dtype
     lora_extra_vocab_size: int = LoRAConfig.lora_extra_vocab_size
