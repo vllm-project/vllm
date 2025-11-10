@@ -29,6 +29,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     split_decodes_and_prefills,
+    split_prefill_chunks,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -132,7 +133,7 @@ class FlashMLASparseMetadataFP8(FlashMLASparseMetadataBF16):
 
         # Request ID for each token: -1 for decode tokens, request index
         # (0, 1, 2, ...) for prefill tokens. Shape: [num_actual_tokens]
-        request_id: torch.Tensor
+        request_ids: torch.Tensor
 
         # Workspace start offsets for all prefill requests
         # Shape: [num_prefill_reqs], adjusted in-place per chunk to be
@@ -237,8 +238,9 @@ def triton_convert_req_index_to_global_index(
     BLOCK_SIZE: int = 64,
     NUM_TOPK_TOKENS: int = 2048,
     BLOCK_N: int = 128,  # tile width along columns
-    prefill_request_id: torch.Tensor | None = None,
-    workspace_starts: torch.Tensor | None = None,
+    HAS_PREFILL_WORKSPACE: bool = False,
+    prefill_workspace_request_ids: torch.Tensor | None = None,
+    prefill_workspace_starts: torch.Tensor | None = None,
 ):
     """
     out[token_id, indice_id] =
@@ -250,8 +252,14 @@ def triton_convert_req_index_to_global_index(
     For safety, we also output -1 if the derived block_id would be
         out-of-bounds.
 
-    When prefill_request_id and workspace_starts are provided, prefill tokens
-    are mapped to workspace offsets instead of global cache slots.
+    When HAS_PREFILL_WORKSPACE is True, prefill tokens are mapped to workspace offsets
+    instead of global cache slots. prefill_workspace_request_ids and
+    prefill_workspace_starts must be provided.
+
+    prefill_workspace_request_ids: int32 [num_tokens], -1 for decode else
+        prefill request index (maps to prefill_workspace_starts)
+    prefill_workspace_starts: int32 [num_prefills], 0-indexed workspace
+        starts for each prefill request
     """
     assert req_id.dtype == torch.int32
     assert block_table.dtype == torch.int32
@@ -261,15 +269,14 @@ def triton_convert_req_index_to_global_index(
         f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
     )
 
-    has_prefill = prefill_request_id is not None and workspace_starts is not None
-    if has_prefill:
-        assert prefill_request_id is not None
-        assert workspace_starts is not None
-        assert prefill_request_id.dtype == torch.int32
-        assert workspace_starts.dtype == torch.int32
+    if HAS_PREFILL_WORKSPACE:
+        assert prefill_workspace_request_ids is not None
+        assert prefill_workspace_starts is not None
+        assert prefill_workspace_request_ids.dtype == torch.int32
+        assert prefill_workspace_starts.dtype == torch.int32
 
     num_tokens = req_id.shape[0]
-    num_requests, max_num_blocks_per_req = block_table.shape
+    max_num_blocks_per_req = block_table.shape[1]
     tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
 
     # Ensure contiguous tensors on the same device
@@ -284,17 +291,11 @@ def triton_convert_req_index_to_global_index(
     out_stride0, out_stride1 = out.stride()
 
     # Prepare prefill pointers
-    if has_prefill:
-        assert prefill_request_id is not None  # for mypy
-        assert workspace_starts is not None  # for mypy
-        prefill_request_id_c = prefill_request_id.contiguous()
-        workspace_starts_c = workspace_starts.contiguous()
-        prefill_request_id_ptr = prefill_request_id_c
-        workspace_starts_ptr = workspace_starts_c
-    else:
-        # Dummy pointers (won't be accessed when HAS_PREFILL=False)
-        prefill_request_id_ptr = req_id_c
-        workspace_starts_ptr = req_id_c
+    if HAS_PREFILL_WORKSPACE:
+        assert prefill_workspace_request_ids is not None  # for mypy
+        assert prefill_workspace_starts is not None  # for mypy
+        assert prefill_workspace_request_ids.is_contiguous()
+        assert prefill_workspace_starts.is_contiguous()
 
     # Exact 2D grid: tokens × column tiles
     grid = (num_tokens, tiles_per_row)
@@ -304,13 +305,13 @@ def triton_convert_req_index_to_global_index(
         block_table_c,
         token_indices_c,
         out,
-        prefill_request_id_ptr,
-        workspace_starts_ptr,
+        prefill_workspace_request_ids,
+        prefill_workspace_starts,
         # shapes / constexprs
         max_num_blocks_per_req,
         BLOCK_SIZE,
         BLOCK_N,
-        has_prefill,
+        HAS_PREFILL_WORKSPACE,
         # strides
         bt_stride0,
         bt_stride1,
@@ -322,36 +323,7 @@ def triton_convert_req_index_to_global_index(
     return out
 
 
-def split_prefill_chunks(
-    seq_lens_cpu: torch.Tensor, workspace_size: int
-) -> list[tuple[int, int]]:
-    """
-    Split the prefill chunks into a list of tuples of (reqs_start, reqs_end)
-    such that the total sequence length of each chunk is less than the
-    maximum prefill buffer size.
-
-    Args:
-        seq_lens_cpu: The sequence lengths of the prefill requests.
-        max_prefill_buffer_size: The maximum prefill buffer size.
-
-    Returns:
-        A list of tuples of (reqs_start, reqs_end).
-    """
-    chunk_bounds = []
-    i, n = 0, len(seq_lens_cpu)
-    assert torch.all(seq_lens_cpu <= workspace_size).item()
-
-    while i < n:
-        start, total = i, 0
-        while i < n and (total + (cur := seq_lens_cpu[i].item())) <= workspace_size:
-            total += cur
-            i += 1
-        chunk_bounds.append((start, i))
-    return chunk_bounds
-
-
-def get_prefill_workspace_size(vllm_config: VllmConfig):
-    max_model_len = vllm_config.model_config.max_model_len
+def get_prefill_workspace_size(max_model_len: int):
     # NOTE(Lucas): 5 is a magic number for controlling the prefill buffer size.
     # May be tuned later.
     # Memory usage: 5 * max_model_len * 576 * 2 bytes
@@ -496,7 +468,9 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             )
 
             # Chunk prefill requests to fit within workspace size
-            max_prefill_buffer_size = get_prefill_workspace_size(self.vllm_config)
+            max_prefill_buffer_size = get_prefill_workspace_size(
+                self.vllm_config.model_config.max_model_len
+            )
             chunk_bounds = split_prefill_chunks(
                 prefill_seq_lens_cpu, max_prefill_buffer_size
             )
@@ -541,7 +515,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
 
             fp8_metadata.prefill = FlashMLASparseMetadataFP8.PrefillMetadata(
                 seq_lens=prefill_seq_lens,
-                request_id=prefill_request_id,
+                request_ids=prefill_request_id,
                 workspace_starts=prefill_workspace_starts,
                 chunks=prefill_chunks,
             )
@@ -765,14 +739,16 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
 
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
-        prefill_request_id = None
+        prefill_request_ids = None
         prefill_workspace_starts = None
+        has_prefill_workspace = False
         if (
             isinstance(attn_metadata, FlashMLASparseMetadataFP8)
             and attn_metadata.prefill is not None
         ):
-            prefill_request_id = attn_metadata.prefill.request_id
+            prefill_request_ids = attn_metadata.prefill.request_ids
             prefill_workspace_starts = attn_metadata.prefill.workspace_starts
+            has_prefill_workspace = True
 
         # Convert per-request indices to global slots (decode) or workspace
         # offsets (prefill).
@@ -786,8 +762,9 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
             topk_indices,
             BLOCK_SIZE=attn_metadata.block_size,
             NUM_TOPK_TOKENS=topk_indices.shape[1],
-            prefill_request_id=prefill_request_id,
-            workspace_starts=prefill_workspace_starts,
+            HAS_PREFILL_WORKSPACE=has_prefill_workspace,
+            prefill_workspace_request_ids=prefill_request_ids,
+            prefill_workspace_starts=prefill_workspace_starts,
         )
 
         q = torch.cat([ql_nope, q_pe], dim=-1)

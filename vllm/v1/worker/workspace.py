@@ -73,12 +73,6 @@ class WorkspaceManager:
         """Check if workspace is locked."""
         return self._locked
 
-    def current_allocated_size_bytes(self) -> int:
-        """Get the size of the current workspace in bytes."""
-        return self._workspace_size_bytes(
-            self._current_workspaces[dbo_current_ubatch_id()]
-        )
-
     def get(self, shape: tuple[int, ...], dtype: torch.dtype) -> torch.Tensor:
         """Get a workspace tensor for the given shape and dtype.
 
