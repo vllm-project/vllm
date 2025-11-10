@@ -27,8 +27,6 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
-[](){ #chunked-prefill }
-
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.

@@ -23,7 +23,7 @@ from vllm.distributed.parallel_state import (
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.platforms import current_platform
-from vllm.utils import update_environment_variables
+from vllm.utils.system_utils import update_environment_variables
 
 torch.manual_seed(42)
 random.seed(44)

@@ -80,8 +80,6 @@ You might also need to set `export NCCL_SOCKET_IFNAME=<your_network_interface>` 
 If vLLM crashes and the error trace captures it somewhere around `self.graph.replay()` in `vllm/worker/model_runner.py`, it is a CUDA error inside CUDAGraph.
 To identify the particular CUDA operation that causes the error, you can add `--enforce-eager` to the command line, or `enforce_eager=True` to the [LLM][vllm.LLM] class to disable the CUDAGraph optimization and isolate the exact CUDA operation that causes the error.
 
-[](){ #troubleshooting-incorrect-hardware-driver }
-
 ## Incorrect hardware/driver
 
 If GPU/CPU communication cannot be established, you can use the following Python script and follow the instructions below to confirm whether the GPU/CPU communication is working correctly.
@@ -177,8 +175,6 @@ If the test script hangs or crashes, usually it means the hardware/drivers are b
     - In the second node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py`.
 
     Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
-
-[](){ #troubleshooting-python-multiprocessing }
 
 ## Python multiprocessing
 
@@ -319,6 +315,10 @@ Traceback (most recent call last):
 ```
 
 This indicates vLLM failed to initialize the NCCL communicator, possibly due to a missing `IPC_LOCK` linux capability  or an unmounted `/dev/shm`. Refer to [Enabling GPUDirect RDMA](../serving/parallelism_scaling.md#enabling-gpudirect-rdma) for guidance on properly configuring the environment for GPUDirect RDMA.
+
+## CUDA error: the provided PTX was compiled with an unsupported toolchain
+
+If you see an error like `RuntimeError: CUDA error: the provided PTX was compiled with an unsupported toolchain.`, it means that the CUDA PTX in vLLM's wheels was compiled with a toolchain unsupported by your system. The released vLLM wheels have to be compiled with a specific version of CUDA toolkit, and the compiled code might fail to run on lower versions of CUDA drivers. Read [cuda compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/) for more details. The solution is to install `cuda-compat` package from your package manager. For example, on Ubuntu, you can run `sudo apt-get install cuda-compat-12-9`, and then add `export LD_LIBRARY_PATH=/usr/local/cuda-12.9/compat:$LD_LIBRARY_PATH` to your `.bashrc` file. When successfully installed, you should see that the output of `nvidia-smi` will show `CUDA Version: 12.9`. Note that we use CUDA 12.9 as an example here, you may want to install a higher version of cuda-compat package in case vLLM's default CUDA version goes higher.
 
 ## Known Issues
 

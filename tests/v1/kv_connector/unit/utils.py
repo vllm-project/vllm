@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.shared_storage_connector import (  # noqa
     SharedStorageConnector,
 )
-from vllm.utils import sha256
+from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -251,7 +251,7 @@ def create_model_runner_output(
 
 
 class TestSharedStorageConnector(SharedStorageConnector):
-    def __init__(self, config: VllmConfig, role):
+    def __init__(self, config: VllmConfig, role, kv_cache_config):
         self.name = config.kv_transfer_config.kv_connector_extra_config["name"]
         self._connector = SharedStorageConnector(config, role)
         self.call_record: dict[str, int] = defaultdict(int)
