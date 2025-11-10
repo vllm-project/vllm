@@ -937,7 +937,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
             {
-                "image_grid_thw, video_grid_thw",
+                "image_grid_thw",
+                "video_grid_thw",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",

@@ -1623,7 +1623,7 @@ class Glm4vForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         kwargs = MultiModalFeatureSpec.gather_kwargs(
             mm_features,
-            {"image_grid_thw, video_grid_thw"},
+            {"image_grid_thw", "video_grid_thw"},
         )
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
