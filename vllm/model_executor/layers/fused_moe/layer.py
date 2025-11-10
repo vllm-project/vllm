@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.nn.parameter import UninitializedParameter
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
@@ -41,8 +42,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 )
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
-    is_rocm_aiter_fusion_shared_expert_enabled,
-    is_rocm_aiter_moe_enabled,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
@@ -92,13 +91,11 @@ else:
         return topk_ids
 
     eplb_map_to_physical_and_record = _eplb_map_to_physical_and_record
+from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
+from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
+    rocm_aiter_grouped_topk,
+)
 
-if is_rocm_aiter_moe_enabled():
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-        rocm_aiter_grouped_topk as grouped_topk_aiter,
-    )
-else:
-    from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
@@ -463,7 +460,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         if self.rocm_aiter_moe_enabled:
             from .rocm_aiter_fused_moe import rocm_aiter_fused_experts
 
@@ -620,13 +618,9 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         # Padding the weight for better performance on ROCm
         layer.w13_weight.data = self._maybe_pad_weight(layer.w13_weight.data)
         layer.w2_weight.data = self._maybe_pad_weight(layer.w2_weight.data)
-        # Lazy import to avoid importing triton.
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            shuffle_weights,
-        )
 
         if self.rocm_aiter_moe_enabled:
-            shuffled_w13, shuffled_w2 = shuffle_weights(
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 
@@ -1002,6 +996,7 @@ def determine_expert_map(
     global_num_experts: int,
     expert_placement_strategy: ExpertPlacementStrategy = "linear",
     num_fused_shared_experts: int = 0,
+    return_expert_mask: bool = False,
 ) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
     Calculates how many experts should be assigned to each rank for EP and
@@ -1064,7 +1059,7 @@ def determine_expert_map(
         )
 
     expert_mask = None
-    if is_rocm_aiter_moe_enabled():
+    if return_expert_mask:
         expert_mask = torch.ones(
             (global_num_experts + num_fused_shared_experts + 1,), dtype=torch.int32
         )
@@ -1292,14 +1287,18 @@ class FusedMoE(CustomOp):
         self.logical_replica_count: torch.Tensor | None = None
 
         # ROCm aiter shared experts fusion
+        self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+        self.aiter_fmoe_shared_expert_enabled = (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        )
+
         self.num_fused_shared_experts = (
             n_shared_experts
-            if n_shared_experts is not None
-            and is_rocm_aiter_fusion_shared_expert_enabled()
+            if n_shared_experts is not None and self.aiter_fmoe_shared_expert_enabled
             else 0
         )
         if (
-            not is_rocm_aiter_fusion_shared_expert_enabled()
+            not self.aiter_fmoe_shared_expert_enabled
             and self.num_fused_shared_experts != 0
         ):
             raise ValueError(
@@ -1346,6 +1345,7 @@ class FusedMoE(CustomOp):
                 global_num_experts=self.global_num_experts,
                 expert_placement_strategy=expert_placement_strategy,
                 num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("expert_map", expert_map)
@@ -1570,13 +1570,16 @@ class FusedMoE(CustomOp):
                 ep_rank=self.ep_rank,
                 global_num_experts=self.global_num_experts,
                 num_fused_shared_experts=self.num_fused_shared_experts,
+                return_expert_mask=self.rocm_aiter_fmoe_enabled,
             )
             self.local_num_experts = local_num_experts
             self.register_buffer("expert_map", expert_map)
             self.register_buffer("expert_mask", expert_mask)
-            self._init_aiter_shared_experts_topK_buffer(
-                vllm_config=get_current_vllm_config(), dp_size=get_dp_group().world_size
-            )
+            if self.aiter_fmoe_shared_expert_enabled:
+                self._init_aiter_shared_experts_topK_buffer(
+                    vllm_config=get_current_vllm_config(),
+                    dp_size=get_dp_group().world_size,
+                )
 
     def _load_per_tensor_weight_scale(
         self,
@@ -1753,20 +1756,19 @@ class FusedMoE(CustomOp):
     def _init_aiter_shared_experts_topK_buffer(
         self, vllm_config: VllmConfig, dp_size: int
     ):
-        if is_rocm_aiter_fusion_shared_expert_enabled():
-            if self.num_fused_shared_experts > 0:
-                init_aiter_topK_meta_data(
-                    n_routed_experts=self.global_num_experts,
-                    n_shared_experts=self.num_fused_shared_experts,
-                    top_k=self.top_k,
-                    tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
-                    tp_size=self.ep_size if self.use_ep else self.tp_size,
-                    shared_experts_score=1.0,
-                    max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
-                    * dp_size,
-                    is_EP=self.use_ep,
-                )
-            self.local_num_experts += self.num_fused_shared_experts
+        if self.num_fused_shared_experts > 0:
+            init_aiter_topK_meta_data(
+                n_routed_experts=self.global_num_experts,
+                n_shared_experts=self.num_fused_shared_experts,
+                top_k=self.top_k,
+                tp_rank=self.ep_rank if self.use_ep else self.tp_rank,
+                tp_size=self.ep_size if self.use_ep else self.tp_size,
+                shared_experts_score=1.0,
+                max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens
+                * dp_size,
+                is_EP=self.use_ep,
+            )
+        self.local_num_experts += self.num_fused_shared_experts
 
     @overload
     def weight_loader(
@@ -2208,15 +2210,16 @@ class FusedMoE(CustomOp):
         elif use_grouped_topk:
             assert topk_group is not None
             assert num_expert_group is not None
-            if is_rocm_aiter_moe_enabled():
-                if not is_rocm_aiter_fusion_shared_expert_enabled():
+            if rocm_aiter_ops.is_fused_moe_enabled():
+                if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                     assert num_fused_shared_experts == 0
                 grouped_topk_impl = partial(
-                    grouped_topk_aiter,
+                    rocm_aiter_grouped_topk,
                     num_fused_shared_experts=num_fused_shared_experts,
                 )
             else:
                 grouped_topk_impl = grouped_topk
+
             topk_weights, topk_ids = grouped_topk_impl(
                 hidden_states=hidden_states,
                 gating_output=router_logits,
@@ -2448,7 +2451,7 @@ class FusedMoE(CustomOp):
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
                 expert_map=self.expert_map
-                if not is_rocm_aiter_moe_enabled()
+                if not self.rocm_aiter_fmoe_enabled
                 else self.expert_mask,
                 topk_group=self.topk_group,
                 num_expert_group=self.num_expert_group,
@@ -2612,7 +2615,7 @@ class FusedMoE(CustomOp):
                 use_grouped_topk=self.use_grouped_topk,
                 global_num_experts=self.global_num_experts,
                 expert_map=self.expert_map
-                if not is_rocm_aiter_moe_enabled()
+                if not self.rocm_aiter_fmoe_enabled
                 else self.expert_mask,
                 topk_group=self.topk_group,
                 num_expert_group=self.num_expert_group,

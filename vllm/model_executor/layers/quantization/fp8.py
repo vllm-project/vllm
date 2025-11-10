@@ -12,6 +12,7 @@ from torch.nn.parameter import Parameter
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -56,7 +57,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
-    check_aiter_fp8_linear_support,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
@@ -369,7 +369,7 @@ class Fp8LinearMethod(LinearMethodBase):
         if vllm_is_batch_invariant():
             self.use_marlin = False
 
-        self.use_aiter_and_is_supported = check_aiter_fp8_linear_support()
+        self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enaled()
         self.use_deep_gemm = is_deep_gemm_supported()
 
         self.weight_block_size = self.quant_config.weight_block_size
@@ -869,12 +869,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer: Module) -> None:
         # Lazy import to avoid importing triton too early.
-        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-            is_rocm_aiter_moe_enabled,
-            shuffle_weights,
-        )
 
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
         # TODO (rob): refactor block quant into separate class.
         if self.block_quant:
@@ -916,7 +912,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             )
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
-                shuffled_w13, shuffled_w2 = shuffle_weights(
+                shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight.data, layer.w2_weight.data
                 )
 
@@ -962,7 +958,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
-                shuffled_w13, shuffled_w2 = shuffle_weights(
+                shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight, layer.w2_weight
                 )
 
@@ -1042,7 +1038,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     start += shard_size
 
             if self.rocm_aiter_moe_enabled:
-                shuffled_w13, shuffled_w2 = shuffle_weights(
+                shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight, layer.w2_weight
                 )
 
