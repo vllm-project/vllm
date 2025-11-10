@@ -71,8 +71,9 @@ def run_test(
         vllm_runner_kwargs_["tokenizer_mode"] = model_info.tokenizer_mode
     if model_info.hf_overrides:
         vllm_runner_kwargs_["hf_overrides"] = model_info.hf_overrides
-    if model_info.skip_tokenizer_init:
-        vllm_runner_kwargs_["skip_tokenizer_init"] = model_info.skip_tokenizer_init
+    if model_info.require_embed_inputs:
+        for k in ("skip_tokenizer_init", "enable_prompt_embeds", "enable_mm_embeds"):
+            vllm_runner_kwargs_[k] = model_info.require_embed_inputs
 
     if vllm_runner_kwargs:
         vllm_runner_kwargs_.update(vllm_runner_kwargs)

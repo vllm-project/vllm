@@ -9,7 +9,6 @@ from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
@@ -137,11 +136,10 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         if not do_pan_and_scan:
             return 0
 
-        if envs.VLLM_USE_V1:
-            logger.warning_once(
-                "`do_pan_and_scan=True` has suboptimal results on V1 "
-                "because of the simplified attention pattern being used."
-            )
+        logger.warning_once(
+            "`do_pan_and_scan=True` has suboptimal results on V1 "
+            "because of the simplified attention pattern being used."
+        )
 
         # Based on Gemma3ImageProcessor.pan_and_scan
         if image_width >= image_height:

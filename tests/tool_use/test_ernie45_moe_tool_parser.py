@@ -13,7 +13,7 @@ from vllm.entrypoints.openai.protocol import (
     FunctionCall,
     ToolCall,
 )
-from vllm.entrypoints.openai.tool_parsers import Ernie45ToolParser
+from vllm.entrypoints.openai.tool_parsers.ernie45_tool_parser import Ernie45ToolParser
 from vllm.transformers_utils.detokenizer_utils import detokenize_incrementally
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
@@ -337,7 +337,7 @@ def test_extract_tool_calls_streaming_incremental(
         if (
             delta_message.role is None
             and delta_message.content is None
-            and delta_message.reasoning_content is None
+            and delta_message.reasoning is None
             and len(delta_message.tool_calls) == 0
         ):
             continue
