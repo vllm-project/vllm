@@ -5,10 +5,11 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
+#include "quantization/w8a8/fp8/common.cuh"
 #ifdef USE_ROCM
-  #include "quantization/fp8/amd/quant_utils.cuh"
+  #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
 #else
-  #include "quantization/fp8/nvidia/quant_utils.cuh"
+  #include "quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #endif
 
 #ifdef USE_ROCM
