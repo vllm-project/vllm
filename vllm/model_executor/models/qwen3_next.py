@@ -280,6 +280,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             else 0
         )
 
+        self.mamba_attn_backend = get_mamba_attn_backend(
+            self.mamba_type, self.linear_attn_type
+        )
+
         # QKV
         self.conv_dim = self.key_dim * 2 + self.value_dim
         self.conv1d = ColumnParallelLinear(
@@ -366,10 +370,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-        self.mamba_attn_backend = get_mamba_attn_backend(
-            self.mamba_type, self.linear_attn_type
-        )
 
     def fix_query_key_value_ordering(
         self,

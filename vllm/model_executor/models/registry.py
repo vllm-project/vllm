@@ -498,7 +498,6 @@ class _MambaBackend(Enum):
     SHORT_CONV = "vllm.v1.attention.backends.short_conv_attn.ShortConvAttentionBackend"
     LINEAR = "vllm.v1.attention.backends.linear_attn.LinearAttentionBackend"
     LINEAR_GDN = "vllm.v1.attention.backends.gdn_attn.GDNAttentionBackend"
-    # TODO(shen-shanshan): add KDA backend for kimi linear model
 
 
 MAMBA_BACKEND_MAP = {
@@ -507,7 +506,6 @@ MAMBA_BACKEND_MAP = {
     "short_conv": _MambaBackend.SHORT_CONV.value,  # noqa
     "linear_attention": _MambaBackend.LINEAR.value,  # noqa
     "linear_attention_gdn": _MambaBackend.LINEAR_GDN.value,  # noqa
-    # TODO(shen-shanshan): add KDA backend for kimi linear model
 }
 
 
