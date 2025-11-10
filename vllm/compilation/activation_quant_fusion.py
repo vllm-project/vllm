@@ -124,7 +124,7 @@ if check_aiter_fp8_linear_support():
         fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-    AITER_BLOCK_QUANT_OP = torch.ops.vllm.rocm_aiter_per1x128_quant.default
+    AITER_BLOCK_GEMM_OP = torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
     FUSED_SILU_MUL_QUANT_OP = (
         torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
     )
@@ -136,19 +136,40 @@ if check_aiter_fp8_linear_support():
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
+                gemm_weight: torch.Tensor,
+                gemm_weight_scale: torch.Tensor,
             ):
                 at1 = self.silu_and_mul_matcher.forward_custom(input)
-                at2 = AITER_BLOCK_QUANT_OP(x=at1)
-                return at2[0], at2[1]
+                at2 = AITER_BLOCK_GEMM_OP(
+                    input_2d=at1,
+                    weight=gemm_weight,
+                    input_scale=None,
+                    weight_scale=gemm_weight_scale,
+                    group_size=128,
+                    output_dtype=input.dtype,
+                )
+                return at2
 
             def replacement(
                 input: torch.Tensor,
+                gemm_weight: torch.Tensor,
+                gemm_weight_scale: torch.Tensor,
             ):
-                at = FUSED_SILU_MUL_QUANT_OP(x=input)
-                return at[0], at[1]
+                at1 = FUSED_SILU_MUL_QUANT_OP(x=input)
+                at2 = AITER_BLOCK_GEMM_OP(
+                    input_2d=at1[0],
+                    weight=gemm_weight,
+                    input_scale=at1[1],
+                    weight_scale=gemm_weight_scale,
+                    group_size=128,
+                    output_dtype=input.dtype,
+                )
+                return at2
 
             inputs = [
                 self.silu_and_mul_matcher.inputs()[0],
+                torch.empty(4, 32, dtype=FP8_DTYPE),  # gemm_weight
+                empty_fp32(1, 1),  # gemm_weight_scale
             ]
 
             register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)

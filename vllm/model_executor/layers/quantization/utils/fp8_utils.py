@@ -92,11 +92,17 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
         ]
 
     n, k = weight.shape
+    use_aiter_triton_gemm = (
+        not current_platform.is_fp8_fnuz() and is_aiter_triton_kernel_tuned(n, k)
+    )
+    if use_aiter_triton_gemm:
+        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    else:
+        from aiter import gemm_a8w8_blockscale, get_hip_quant
+
     if input_scale is not None:
         q_input = input_2d
-    elif not current_platform.is_fp8_fnuz() and is_aiter_triton_kernel_tuned(n, k):
-        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
-
+    elif use_aiter_triton_gemm:
         # MI350 case uses triton kernel
         q_input, input_scale = per_token_group_quant_fp8(
             input_2d,
@@ -107,7 +113,6 @@ def rocm_aiter_gemm_w8a8_blockscale_impl(
     else:
         # MI300 uses tuned AITER ASM/C++ kernel
         import aiter as rocm_aiter
-        from aiter import gemm_a8w8_blockscale, get_hip_quant
 
         aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
         q_input, input_scale = aiter_per1x128_quant(
