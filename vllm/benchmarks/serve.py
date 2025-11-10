@@ -19,7 +19,6 @@ On the client side, run:
 import argparse
 import asyncio
 import contextlib
-import gc
 import importlib.util
 import json
 import os
@@ -49,6 +48,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils.gc_utils import freeze_gc_heap
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -1414,8 +1414,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     percentile_metrics: str = args.percentile_metrics or default_percentile_metrics
 
     # Avoid GC processing "static" data - reduce pause times.
-    gc.collect()
-    gc.freeze()
+    freeze_gc_heap()
 
     benchmark_result = await benchmark(
         task_type=task_type,
