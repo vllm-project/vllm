@@ -221,9 +221,9 @@ def check_moe_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
 def get_marlin_input_dtype(prefix):
     if envs.VLLM_MARLIN_INPUT_DTYPE is None:
         return
-    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "INT8":
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "int8":
         return torch.int8
-    elif envs.VLLM_MARLIN_INPUT_DTYPE.upper() == "FP8":
+    elif envs.VLLM_MARLIN_INPUT_DTYPE.lower() == "fp8":
         if not current_platform.is_device_capability(
             89
         ) and not current_platform.is_device_capability(120):

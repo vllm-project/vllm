@@ -140,7 +140,7 @@ if TYPE_CHECKING:
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
-    VLLM_MARLIN_INPUT_DTYPE: str | None = None
+    VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_V1_USE_OUTLINES_CACHE: bool = False
     VLLM_TPU_BUCKET_PADDING_GAP: int = 0
@@ -1089,7 +1089,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_MXFP4_USE_MARLIN", None)
     ),
     # The activation dtype for marlin kernel
-    "VLLM_MARLIN_INPUT_DTYPE": lambda: os.environ.get("VLLM_MARLIN_INPUT_DTYPE", None),
+    "VLLM_MARLIN_INPUT_DTYPE": env_with_choices(
+        "VLLM_MARLIN_INPUT_DTYPE", None, ["int8", "fp8"]
+    ),
     # Whether to turn on the outlines cache for V1
     # This cache is unbounded and on disk, so it's not safe to use in
     # an environment with potentially malicious users.
