@@ -479,10 +479,8 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     text_config = config.get_text_config()
     if layer_types := getattr(text_config, "layer_types", None):
         return any(
-            [
-                interleaved_type.issubset(layer_types)
-                for interleaved_type in INTERLEAVED_LAYER_TYPES
-            ]
+            interleaved_type.issubset(layer_types)
+            for interleaved_type in INTERLEAVED_LAYER_TYPES
         )
     return False
 
