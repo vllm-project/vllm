@@ -2577,21 +2577,22 @@ class FusedMoE(CustomOp):
 
             if self.shared_experts_stream is not None:
                 # Clone BEFORE switching streams to avoid race condition
-                # Clone happens on current_stream, ensuring clean copy
+                # where routed_expert kernel may mutate hidden_states.
                 hidden_states_clone = hidden_states.clone()
 
                 self.shared_experts_stream.wait_stream(current_stream())
 
                 # Record that the clone will be used by shared_experts_stream
-                # to avoid gc issue from 
+                # to avoid gc issue from deallocation of hidden_states_clone
+                # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+                # NOTE: we dont need shared_output.record_stream(current_stream())
+                # because we synch the streams before using shared_output.
                 hidden_states_clone.record_stream(self.shared_experts_stream)
 
                 # Run shared experts in parallel on a separate stream
                 with torch.cuda.stream(self.shared_experts_stream):
                     shared_output = self.shared_experts(hidden_states_clone)
 
-                # Record that shared_output will be used by current_stream
-                shared_output.record_stream(current_stream())
             else:
                 shared_output = self.shared_experts(hidden_states)
         else:
