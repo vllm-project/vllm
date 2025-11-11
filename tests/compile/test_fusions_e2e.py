@@ -72,10 +72,10 @@ if current_platform.is_cuda():
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
             backend=AttentionBackendEnum.FLASHINFER,
             matches=Matches(
-                attention_fusion=48,
-                allreduce_fusion=96,
-                sequence_parallel=96,
-                async_tp=190,
+                attention_fusion=32,
+                allreduce_fusion=65,
+                sequence_parallel=65,
+                async_tp=128,
             ),
         ),
     ]
@@ -100,6 +100,8 @@ if current_platform.is_cuda():
             matches=Matches(
                 attention_fusion=0,
                 allreduce_fusion=97,
+                sequence_parallel=49,
+                async_tp=48,
             ),
         ),
     ]
