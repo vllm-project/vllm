@@ -173,7 +173,10 @@ class FlashInferBackend(AttentionBackend):
         # Note: Not sure for all platforms,
         # but on Blackwell, only support a page size of
         # 16, 32, 64
-        return [16, 32, 64]
+        # TODO: 16 is temporary removed because TRT-LLM kernel has a bug when using 16.
+        # See https://github.com/flashinfer-ai/flashinfer/issues/1993
+        # for more details.
+        return [32, 64]
 
     @classmethod
     def validate_head_size(cls, head_size: int) -> None:

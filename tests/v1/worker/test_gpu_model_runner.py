@@ -790,55 +790,56 @@ def test_hybrid_attention_mamba_tensor_shapes(monkeypatch):
         cache_dtype="auto",
     )
     parallel_config = ParallelConfig()
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        cache_config=cache_config,
-        scheduler_config=scheduler_config,
-        parallel_config=parallel_config,
-    )
-
-    layer_0 = "model.layers.0.self_attn.attn"
-    layer_1 = "model.layers.1.self_attn.attn"
-    layer_2 = "model.layers.2.mixer"
-    layer_3 = "model.layers.3.mixer"
-    layer_4 = "model.layers.4.mixer"
-    layer_5 = "model.layers.5.mixer"
-
-    with set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
-        hf_config = vllm_config.model_config.hf_config
-        fwd_context = {}
-        for key in [layer_0, layer_1]:
-            fwd_context[key] = Attention(
-                num_heads=model_config.get_num_attention_heads(parallel_config),
-                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
-                head_size=model_config.get_head_size(),
-                scale=1.0,
-                prefix=key,
-            )
-        for key in [layer_2, layer_3, layer_4, layer_5]:
-            fwd_context[key] = MambaMixer2(
-                hidden_size=hf_config.hidden_size,
-                ssm_state_size=hf_config.mamba_d_state,
-                conv_kernel_size=hf_config.mamba_d_conv,
-                intermediate_size=hf_config.mamba_expand * hf_config.hidden_size,
-                use_conv_bias=hf_config.mamba_conv_bias,
-                use_bias=hf_config.mamba_proj_bias,
-                n_groups=hf_config.mamba_n_groups,
-                num_heads=hf_config.mamba_n_heads,
-                head_dim=hf_config.mamba_d_head,
-                rms_norm_eps=hf_config.rms_norm_eps,
-                activation=hf_config.hidden_act,
-                cache_config=cache_config,
-                model_config=model_config,
-                prefix=key,
-            )
-        # suppress var not used error
-        assert fwd_context is not None
-    vllm_ctx = vllm_config.compilation_config.static_forward_context
-
     with monkeypatch.context() as m:
+        # Attention backend should be set before creating VllmConfig because 
+        # VllmConfig will determine the kv block size based on the attention backend
         m.setenv("VLLM_ATTENTION_BACKEND", "FLASHINFER")
+        vllm_config = VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            scheduler_config=scheduler_config,
+            parallel_config=parallel_config,
+        )
+
+        layer_0 = "model.layers.0.self_attn.attn"
+        layer_1 = "model.layers.1.self_attn.attn"
+        layer_2 = "model.layers.2.mixer"
+        layer_3 = "model.layers.3.mixer"
+        layer_4 = "model.layers.4.mixer"
+        layer_5 = "model.layers.5.mixer"
+
+        with set_current_vllm_config(vllm_config):
+            hf_config = vllm_config.model_config.hf_config
+            fwd_context = {}
+            for key in [layer_0, layer_1]:
+                fwd_context[key] = Attention(
+                    num_heads=model_config.get_num_attention_heads(parallel_config),
+                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    head_size=model_config.get_head_size(),
+                    scale=1.0,
+                    prefix=key,
+                )
+            for key in [layer_2, layer_3, layer_4, layer_5]:
+                fwd_context[key] = MambaMixer2(
+                    hidden_size=hf_config.hidden_size,
+                    ssm_state_size=hf_config.mamba_d_state,
+                    conv_kernel_size=hf_config.mamba_d_conv,
+                    intermediate_size=hf_config.mamba_expand * hf_config.hidden_size,
+                    use_conv_bias=hf_config.mamba_conv_bias,
+                    use_bias=hf_config.mamba_proj_bias,
+                    n_groups=hf_config.mamba_n_groups,
+                    num_heads=hf_config.mamba_n_heads,
+                    head_dim=hf_config.mamba_d_head,
+                    rms_norm_eps=hf_config.rms_norm_eps,
+                    activation=hf_config.hidden_act,
+                    cache_config=cache_config,
+                    model_config=model_config,
+                    prefix=key,
+                )
+            # suppress var not used error
+            assert fwd_context is not None
+        vllm_ctx = vllm_config.compilation_config.static_forward_context
+
 
         runner = GPUModelRunner(vllm_config, DEVICE)
         kv_cache_spec = runner.get_kv_cache_spec()

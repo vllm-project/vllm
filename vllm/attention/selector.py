@@ -5,7 +5,6 @@ import os
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from functools import cache
 
 import torch
 
@@ -145,7 +144,6 @@ def get_attn_backend(
     )
 
 
-@cache
 def _cached_get_attn_backend(
     head_size: int,
     dtype: torch.dtype,
@@ -236,4 +234,3 @@ def global_force_attn_backend_context_manager(
     finally:
         # Revert the original global backend override, if any
         global_force_attn_backend(original_value)
-        _cached_get_attn_backend.cache_clear()
