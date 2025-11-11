@@ -1625,8 +1625,8 @@ class Glm4vForConditionalGeneration(
             mm_features,
             {"image_grid_thw", "video_grid_thw"},
         )
-        image_grid_thw = kwargs.get("image_grid_thw", [])
-        video_grid_thw = kwargs.get("video_grid_thw", [])
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
         hf_config = self.config
         image_token_id = hf_config.image_token_id
@@ -1667,7 +1667,7 @@ class Glm4vForConditionalGeneration(
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
                 if modality_type == "image":
-                    t, h, w = image_grid_thw[mm_data_idx].tolist()
+                    t, h, w = image_grid_thw[mm_data_idx]
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
                         h // spatial_merge_size,
@@ -1700,7 +1700,7 @@ class Glm4vForConditionalGeneration(
                 elif modality_type == "video":
                     t, h, w = (
                         video_frame_num,
-                        *image_grid_thw[mm_data_idx][1:].tolist(),
+                        *image_grid_thw[mm_data_idx][1:],
                     )
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,

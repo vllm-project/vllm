@@ -1423,8 +1423,8 @@ class Qwen3VLForConditionalGeneration(
             mm_features,
             {"image_grid_thw", "video_grid_thw"},
         )
-        image_grid_thw = kwargs.get("image_grid_thw", [])
-        video_grid_thw = kwargs.get("video_grid_thw", [])
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
         video_grid_thw = [[1, h, w] for t, h, w in video_grid_thw for _ in range(t)]
 
@@ -1457,12 +1457,12 @@ class Qwen3VLForConditionalGeneration(
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
-                t, h, w = image_grid_thw[image_index].tolist()
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = video_grid_thw[video_index].tolist()
+                t, h, w = video_grid_thw[video_index]
                 video_index += 1
                 remain_videos -= 1
                 ed = ed_video

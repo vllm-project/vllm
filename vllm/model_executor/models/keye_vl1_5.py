@@ -604,8 +604,8 @@ class KeyeVL1_5ForConditionalGeneration(
             mm_features,
             {"image_grid_thw", "video_grid_thw"},
         )
-        image_grid_thw = kwargs.get("image_grid_thw", [])
-        video_grid_thw = kwargs.get("video_grid_thw", [])
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
         if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
             video_grid_thw = video_grid_thw[0]
@@ -664,12 +664,12 @@ class KeyeVL1_5ForConditionalGeneration(
                 ed_video = len(input_tokens) + 1
 
             if ed_image < ed_video:
-                t, h, w = image_grid_thw[image_index].tolist()
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = video_grid_thw[video_index].tolist()
+                t, h, w = video_grid_thw[video_index]
                 video_index += 1
                 remain_frames -= 1
                 ed = ed_video
