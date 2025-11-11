@@ -109,7 +109,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_ROCM_USE_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
+    VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
@@ -926,8 +927,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter rope.
     # By default is disabled.
-    "VLLM_ROCM_USE_TRITON_ROPE": lambda: (
-        os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
@@ -1116,6 +1117,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
+    # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
+    "VLLM_MOE_USE_DEEP_GEMM": lambda: bool(
+        int(os.getenv("VLLM_MOE_USE_DEEP_GEMM", "1"))
+    ),
     # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
     "VLLM_USE_DEEP_GEMM_E8M0": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))
@@ -1569,6 +1574,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
+        "VLLM_MOE_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",
@@ -1589,7 +1595,7 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_ROCM_USE_TRITON_ROPE",
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
         "VLLM_ROCM_USE_AITER_TRITON_GEMM",
