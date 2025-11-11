@@ -16,6 +16,23 @@ TEST_VIDEO_URL = (
     "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
 )
 
+GEMMA_CLASSIFIER_TEXT_OVERRIDES = {
+    # Mirror the gemma classification conversion used in
+    # tests/models/language/pooling/test_mm_classifier_conversion.py
+    "text_config": {
+        "architectures": ["Gemma3ForSequenceClassification"],
+        "classifier_from_token": ["A", "B", "C", "D", "E"],
+        "method": "no_post_processing",
+        "id2label": {
+            "A": "Chair",
+            "B": "Couch",
+            "C": "Table",
+            "D": "Bed",
+            "E": "Cupboard",
+        },
+    },
+}
+
 
 @pytest.fixture(scope="module")
 def server_vlm_classify():
@@ -37,7 +54,9 @@ def server_vlm_classify():
         json.dumps({"video": MAXIMUM_VIDEOS}),
     ]
 
-    with RemoteOpenAIServer(VLM_MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        VLM_MODEL_NAME, args, override_hf_configs=GEMMA_CLASSIFIER_TEXT_OVERRIDES
+    ) as remote_server:
         yield remote_server
 
 
