@@ -558,8 +558,8 @@ class FusedMoE(CustomOp):
             else:
                 self.routing_method_type = RoutingMethodType.TopK
 
-
-        # TODO(bnell): total hack
+        # TODO(bnell): total hack to get around deepep hybrid
+        # problem size restrictions.
         if envs.VLLM_ALL2ALL_BACKEND == "deepep_hybrid":
             max_num_tokens = envs.VLLM_FUSED_MOE_CHUNK_SIZE
         else:
@@ -1985,6 +1985,9 @@ class FusedMoE(CustomOp):
                     router_logits,
                     dim=0,
                 )
+
+            # TODO: might require padding here if deepep hybrid goes down
+            # this codepath.
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
