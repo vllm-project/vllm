@@ -5,11 +5,19 @@ from collections.abc import Callable
 import torch
 import torch.nn.functional as F
 
-from vllm.attention.backends.registry import _Backend
+import vllm.envs as envs
+from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.config import MultiModalConfig
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.vision import get_vit_attn_backend
 from vllm.platforms import current_platform
+
+if current_platform.is_rocm():
+    from vllm.platforms.rocm import on_gfx9
+else:
+    on_gfx9 = lambda *args, **kwargs: False
+
 
 logger = init_logger(__name__)
 USE_XFORMERS_OPS = None
@@ -56,27 +64,50 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _Backend, use_upstream_fa: bool
-) -> tuple[_Backend, Callable]:
-    if (
-        attn_backend != _Backend.FLASH_ATTN
-        and attn_backend != _Backend.ROCM_AITER_FA
-        and check_upstream_fa_availability(torch.get_default_dtype())
-    ):
-        attn_backend = _Backend.FLASH_ATTN
-        use_upstream_fa = True
+    attn_backend: AttentionBackendEnum,
+    use_upstream_fa: bool,
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> tuple[AttentionBackendEnum, Callable | None]:
+    if current_platform.is_rocm():
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
+            attn_backend = AttentionBackendEnum.ROCM_AITER_FA
 
-    if current_platform.is_rocm() and attn_backend == _Backend.FLASH_ATTN:
-        use_upstream_fa = True
+        elif (
+            check_upstream_fa_availability(torch.get_default_dtype())
+            and on_gfx9()
+            and attn_backend_override is None
+        ):
+            attn_backend = AttentionBackendEnum.FLASH_ATTN
+            use_upstream_fa = True
+        else:
+            return AttentionBackendEnum.TORCH_SDPA, None
 
-    if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
-        if attn_backend == _Backend.ROCM_AITER_FA:
+    elif current_platform.is_cuda():
+        if (
+            attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
+        ):
+            attn_backend = AttentionBackendEnum.FLASH_ATTN
+            use_upstream_fa = True
+    elif current_platform.is_xpu():
+        assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
+            "XPU platform only supports FLASH_ATTN as vision attention backend."
+        )
+        use_upstream_fa = False
+    else:
+        return AttentionBackendEnum.TORCH_SDPA, None
+
+    if attn_backend in {
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+    }:
+        if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
             else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
@@ -94,8 +125,9 @@ class MMEncoderAttention(CustomOp):
         scale: float,
         num_kv_heads: int | None = None,
         # This has no effect, it is only here to make it easier to swap
-        # between Attention and MMEncoderAttention
+        # between Attention and MultiHeadAttention
         prefix: str = "",
+        multimodal_config: MultiModalConfig | None = None,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -115,32 +147,46 @@ class MMEncoderAttention(CustomOp):
         dtype = torch.get_default_dtype()
 
         # Determine the attention backend
-        backend = get_vit_attn_backend(head_size=head_size, dtype=dtype)
+        attn_backend_override = None
+        if multimodal_config is not None:
+            attn_backend_override = multimodal_config.mm_encoder_attn_backend
+        backend = get_vit_attn_backend(
+            head_size=head_size,
+            dtype=dtype,
+            attn_backend_override=attn_backend_override,
+        )
 
         # Some auto-selected backends can be upgraded
         # to upstream flash attention if available.
         # If vllm native fa is selected, we use it directly.
         use_upstream_fa = False
 
-        self.attn_backend: _Backend = backend
+        self.attn_backend = backend
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
 
-        if self.attn_backend == _Backend.XFORMERS and not check_xformers_availability():
-            self.attn_backend = _Backend.TORCH_SDPA
+        if (
+            self.attn_backend == AttentionBackendEnum.XFORMERS
+            and not check_xformers_availability()
+        ):
+            self.attn_backend = AttentionBackendEnum.TORCH_SDPA
 
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
         # this condition is just to make sure that the
         # use_upstream_fa in the log is correct
-        if current_platform.is_rocm() and self.attn_backend == _Backend.FLASH_ATTN:
+        if (
+            current_platform.is_rocm()
+            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        ):
             use_upstream_fa = True
 
         logger.info_once(
@@ -258,6 +304,9 @@ class MMEncoderAttention(CustomOp):
         key: torch.Tensor,
         value: torch.Tensor,
     ):
+        assert self._flash_attn_varlen_func is not None, (
+            "Flash attention function is not set."
+        )
         bsz, q_len = query.size()[:2]
         kv_len = key.size(1)
 
@@ -308,9 +357,9 @@ class MMEncoderAttention(CustomOp):
     ):
         if self.is_flash_attn_backend:
             return self._forward_fa(query, key, value)
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             return self._forward_xformers(query, key, value)
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             return self._forward_sdpa(query, key, value)
         raise ValueError(
             f"Unsupported mm attention backend for CUDA: {self.attn_backend}"
@@ -330,7 +379,7 @@ class MMEncoderAttention(CustomOp):
         key: torch.Tensor,
         value: torch.Tensor,
     ):
-        assert self.attn_backend == _Backend.PALLAS, (
+        assert self.attn_backend == AttentionBackendEnum.PALLAS, (
             f"MMEncoderAttention on TPU only supports PALLAS backend, "
             f"but got {self.attn_backend}."
         )
