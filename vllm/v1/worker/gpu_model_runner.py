@@ -900,7 +900,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.use_async_scheduling:
                 req_state.prev_num_draft_len = num_spec_tokens
                 if num_spec_tokens and self._draft_token_ids is None:
-                    req_state.prev_num_draft_len = 0
                     scheduler_output.total_num_scheduled_spec_tokens -= num_spec_tokens
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
@@ -1148,7 +1147,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             ],
         )
 
-        # scatter the draft tokens after the sampled tokens are scattered.
+        # Scatter the draft tokens after the sampled tokens are scattered.
         if self._draft_token_ids is None or not spec_flattened_indices:
             return
 
@@ -2930,16 +2929,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             <= effective_drafter_max_model_len
         )
         if use_padded_batch_for_eagle:
+            sampled_token_ids = sampler_output.sampled_token_ids
             if input_fits_in_drafter:
                 # EAGLE speculative decoding can use the GPU sampled tokens
                 # as inputs, and does not need to wait for bookkeeping to finish.
-                propose_draft_token_ids(sampler_output.sampled_token_ids)
+                propose_draft_token_ids(sampled_token_ids)
             elif self.valid_sampled_token_count_event is not None:
-                # No draft tokens available, all requests are sampled
-                # normally but rejection sampling.
-                self.valid_sampled_token_count_cpu.fill_(1)
-                self.valid_sampled_token_count_event.record(
-                    self.valid_sampled_token_count_copy_stream
+                next_token_ids, valid_sampled_tokens_count = (
+                    self.drafter.prepare_next_token_ids_padded(
+                        spec_decode_common_attn_metadata,
+                        sampled_token_ids,
+                        self.requests,
+                        self.input_batch,
+                        self.discard_request_indices.gpu,
+                        self.num_discarded_requests,
+                    )
+                )
+                self._copy_valid_sampled_token_count(
+                    next_token_ids, valid_sampled_tokens_count
                 )
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
