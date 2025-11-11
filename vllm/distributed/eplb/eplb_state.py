@@ -275,7 +275,7 @@ class EplbState:
         Build the initial EPLB state.
         """
         self.validate_ep_configuration(model)
-        self.is_async = model_config.parallel_config.eplb_config.use_async
+        self.is_async = self.parallel_config.eplb_config.use_async
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
