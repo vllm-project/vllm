@@ -938,4 +938,5 @@ class rocm_aiter_ops:
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
 
 
-rocm_aiter_ops.register_ops_once()
+if IS_AITER_FOUND:
+    rocm_aiter_ops.register_ops_once()
