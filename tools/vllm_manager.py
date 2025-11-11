@@ -15,11 +15,12 @@ from datetime import datetime
 import asyncio
 import aiohttp
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, HttpUrl
 import json
 from collections import deque
+import time
 
 # GPU monitoring
 try:
@@ -107,7 +108,7 @@ app = FastAPI(
 
 # Pydantic models
 class StartVLLMRequest(BaseModel):
-    model_name: str
+    model_name: Optional[str] = None  # Optional - can start service without specifying
     gpu_memory_utilization: float = 0.9
     max_model_len: Optional[int] = 30000  # Default to 30k context window
     tensor_parallel_size: int = 1
@@ -446,7 +447,7 @@ async def root():
         }
 
         .container {
-            max-width: 800px;
+            max-width: 1200px;
             margin: 0 auto;
             background: white;
             border-radius: 20px;
@@ -696,6 +697,25 @@ async def root():
             50% { opacity: 0.5; }
         }
 
+        .log-line {
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            cursor: pointer;
+            padding: 2px 0;
+            transition: background-color 0.2s;
+        }
+
+        .log-line:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
+        .log-line.expanded {
+            white-space: pre-wrap;
+            word-break: break-all;
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+
         .loading {
             display: none;
             text-align: center;
@@ -816,6 +836,12 @@ async def root():
                 <button class="btn-stop" onclick="stopVLLM()">■ Stop vLLM</button>
                 <button class="btn-refresh" onclick="refreshStatus()">↻ Refresh</button>
             </div>
+            <div class="button-group" style="margin-top: 10px;">
+                <button class="btn-delete" onclick="clearPrefixCache()">🗑️ Clear KV Cache</button>
+            </div>
+            <div style="font-size: 0.85em; color: #666; margin-top: 10px;">
+                ℹ️ Clear KV Cache: Resets the prefix cache to free up GPU memory. Use this between test runs or when memory is high.
+            </div>
         </div>
 
         <div class="section">
@@ -837,6 +863,39 @@ async def root():
             <div class="button-group">
                 <button id="toggleAutoRestart" class="btn-start" onclick="toggleAutoRestart()">Enable Auto-Restart</button>
                 <button class="btn-refresh" onclick="resetCrashLoop()">Reset Crash Loop</button>
+            </div>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Live Monitoring</div>
+            <div id="deadlockAlert" class="notification error" style="display: none;">
+                <strong>⚠️ Potential Deadlock Detected!</strong>
+                <p>0 running requests with waiting requests for >30s</p>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 15px;">
+                <div style="background: #f3f4f6; padding: 15px; border-radius: 10px;">
+                    <div style="font-weight: 600; margin-bottom: 5px; font-size: 0.9em; color: #666;">KV Cache Usage</div>
+                    <div id="monitorKVCache" style="font-size: 1.4em; font-weight: bold; color: #667eea;">-</div>
+                </div>
+                <div style="background: #f3f4f6; padding: 15px; border-radius: 10px;">
+                    <div style="font-weight: 600; margin-bottom: 5px; font-size: 0.9em; color: #666;">Running Requests</div>
+                    <div id="monitorRunning" style="font-size: 1.4em; font-weight: bold; color: #10b981;">-</div>
+                </div>
+                <div style="background: #f3f4f6; padding: 15px; border-radius: 10px;">
+                    <div style="font-weight: 600; margin-bottom: 5px; font-size: 0.9em; color: #666;">Waiting Requests</div>
+                    <div id="monitorWaiting" style="font-size: 1.4em; font-weight: bold; color: #f59e0b;">-</div>
+                </div>
+                <div style="background: #f3f4f6; padding: 15px; border-radius: 10px;">
+                    <div style="font-weight: 600; margin-bottom: 5px; font-size: 0.9em; color: #666;">Prompt Throughput</div>
+                    <div id="monitorPromptThroughput" style="font-size: 1.4em; font-weight: bold; color: #8b5cf6;">-</div>
+                </div>
+                <div style="background: #f3f4f6; padding: 15px; border-radius: 10px;">
+                    <div style="font-weight: 600; margin-bottom: 5px; font-size: 0.9em; color: #666;">Gen Throughput</div>
+                    <div id="monitorGenThroughput" style="font-size: 1.4em; font-weight: bold; color: #3b82f6;">-</div>
+                </div>
+            </div>
+            <div style="font-size: 0.85em; color: #888; text-align: center;">
+                Last updated: <span id="monitorTimestamp">Never</span>
             </div>
         </div>
 
@@ -865,6 +924,17 @@ async def root():
                 <input type="text" id="modelUrl" placeholder="e.g., meta-llama/Llama-2-7b-hf or https://..." />
             </div>
             <button class="btn-download" onclick="downloadModel()">⬇ Download Model</button>
+        </div>
+
+        <div class="section">
+            <div class="section-title">Live Log Monitor</div>
+            <div style="background: #1e1e1e; border-radius: 10px; padding: 15px; height: 400px; overflow-y: auto; font-family: 'Courier New', monospace; font-size: 0.85em;" id="logContainer">
+                <div id="logContent" style="color: #d4d4d4;"></div>
+            </div>
+            <div style="display: flex; gap: 10px; margin-top: 10px;">
+                <button class="btn-refresh" onclick="clearLogs()">Clear Logs</button>
+                <button class="btn-refresh" onclick="toggleAutoScroll()" id="autoScrollBtn">Auto-scroll: ON</button>
+            </div>
         </div>
 
         <div id="loading" class="loading">
@@ -1016,34 +1086,35 @@ async def root():
         }
 
         async function startVLLM() {
+            // Model selection is now optional - service starts with configured model
             const modelName = document.getElementById('modelSelect').value;
-            if (!modelName) {
-                showNotification('Please select a model first', 'error');
-                return;
-            }
-
-            const contextWindow = document.getElementById('startContextWindow').value || 30000;
+            const contextWindow = document.getElementById('startContextWindow').value;
 
             showLoading(true);
-            showProgress(true, 'Starting vLLM...', 10);
+            showProgress(true, 'Starting vLLM service...', 10);
 
             try {
-                showProgress(true, 'Loading model weights...', 30);
+                showProgress(true, 'Starting vllm.service...', 30);
+
+                const requestBody = {};
+                if (modelName) {
+                    requestBody.model_name = modelName.replace('models--', '').replace('--', '/');
+                }
+                if (contextWindow) {
+                    requestBody.max_model_len = parseInt(contextWindow);
+                }
+
                 const response = await fetch('/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        model_name: modelName.replace('models--', '').replace('--', '/'),
-                        gpu_memory_utilization: 0.85,
-                        max_model_len: parseInt(contextWindow)
-                    })
+                    body: JSON.stringify(requestBody)
                 });
 
                 const data = await response.json();
 
                 if (response.ok) {
-                    showProgress(true, 'Model loaded successfully!', 100);
-                    showNotification('vLLM started successfully with model: ' + data.model, 'success');
+                    showProgress(true, 'Service started successfully!', 100);
+                    showNotification('vLLM service started: ' + data.message, 'success');
                     setTimeout(() => {
                         showProgress(false);
                         refreshStatus();
@@ -1236,11 +1307,209 @@ async def root():
             }
         }
 
+        async function clearPrefixCache() {
+            if (!confirm('Clear the KV prefix cache? This will free up GPU memory but may reduce cache hit rate temporarily.')) {
+                return;
+            }
+
+            showLoading(true);
+            try {
+                // Call vLLM's built-in reset_prefix_cache endpoint
+                const response = await fetch('http://localhost:8000/reset_prefix_cache', {
+                    method: 'POST'
+                });
+
+                if (response.ok) {
+                    showNotification('✅ KV prefix cache cleared successfully! GPU memory should be freed.', 'success');
+                    // Refresh monitoring stats to show updated cache usage
+                    setTimeout(updateMonitoringStats, 2000);
+                } else {
+                    const errorText = await response.text();
+                    showNotification('Failed to clear cache: ' + errorText, 'error');
+                }
+            } catch (error) {
+                showNotification('Error clearing cache: ' + error.message + '. Is vLLM running?', 'error');
+            } finally {
+                showLoading(false);
+            }
+        }
+
+        let deadlockStartTime = null;
+        let lastMonitoringUpdate = 0;
+        let logSocket = null;
+        let autoScroll = true;
+        let maxLogLines = 500;
+
+        function connectLogStream() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws/logs`;
+
+            try {
+                logSocket = new WebSocket(wsUrl);
+
+                logSocket.onopen = function() {
+                    console.log('Log stream connected');
+                };
+
+                logSocket.onmessage = function(event) {
+                    const logContent = document.getElementById('logContent');
+                    const logContainer = document.getElementById('logContainer');
+
+                    // Create new log line
+                    const logLine = document.createElement('div');
+                    logLine.className = 'log-line';
+                    logLine.textContent = event.data;
+                    logLine.title = 'Click to expand/collapse';
+
+                    // Add click handler to toggle expansion
+                    logLine.onclick = function() {
+                        this.classList.toggle('expanded');
+                    };
+
+                    // Color code based on log level
+                    if (event.data.includes('ERROR')) {
+                        logLine.style.color = '#f87171';
+                    } else if (event.data.includes('WARNING')) {
+                        logLine.style.color = '#fbbf24';
+                    } else if (event.data.includes('INFO')) {
+                        logLine.style.color = '#60a5fa';
+                    } else if (event.data.includes('GPU KV cache usage')) {
+                        logLine.style.color = '#a78bfa';
+                        logLine.style.fontWeight = 'bold';
+                    } else if (event.data.includes('Running:') && event.data.includes('Waiting:')) {
+                        logLine.style.color = '#34d399';
+                        logLine.style.fontWeight = 'bold';
+                    }
+
+                    logContent.appendChild(logLine);
+
+                    // Limit number of lines
+                    while (logContent.children.length > maxLogLines) {
+                        logContent.removeChild(logContent.firstChild);
+                    }
+
+                    // Auto-scroll if enabled
+                    if (autoScroll) {
+                        logContainer.scrollTop = logContainer.scrollHeight;
+                    }
+                };
+
+                logSocket.onerror = function(error) {
+                    console.error('WebSocket error:', error);
+                };
+
+                logSocket.onclose = function() {
+                    console.log('Log stream disconnected, reconnecting in 3s...');
+                    setTimeout(connectLogStream, 3000);
+                };
+            } catch (error) {
+                console.error('Failed to connect log stream:', error);
+                setTimeout(connectLogStream, 3000);
+            }
+        }
+
+        function clearLogs() {
+            document.getElementById('logContent').innerHTML = '';
+        }
+
+        function toggleAutoScroll() {
+            autoScroll = !autoScroll;
+            const btn = document.getElementById('autoScrollBtn');
+            btn.textContent = 'Auto-scroll: ' + (autoScroll ? 'ON' : 'OFF');
+            btn.className = autoScroll ? 'btn-refresh' : 'btn-stop';
+        }
+
+        async function updateMonitoringStats() {
+            try {
+                const response = await fetch('/monitoring/stats');
+                const data = await response.json();
+
+                if (data.error) {
+                    console.error('Monitoring error:', data.error);
+                    return;
+                }
+
+                // Update KV Cache
+                if (data.kv_cache_pct !== null && data.kv_cache_pct !== undefined) {
+                    const cacheEl = document.getElementById('monitorKVCache');
+                    cacheEl.textContent = data.kv_cache_pct.toFixed(1) + '%';
+                    // Color code based on usage
+                    if (data.kv_cache_pct > 90) {
+                        cacheEl.style.color = '#ef4444'; // Red
+                    } else if (data.kv_cache_pct > 70) {
+                        cacheEl.style.color = '#f59e0b'; // Orange
+                    } else {
+                        cacheEl.style.color = '#667eea'; // Purple
+                    }
+                } else {
+                    document.getElementById('monitorKVCache').textContent = '-';
+                }
+
+                // Update Running Requests
+                if (data.running !== null && data.running !== undefined) {
+                    document.getElementById('monitorRunning').textContent = data.running;
+                } else {
+                    document.getElementById('monitorRunning').textContent = '-';
+                }
+
+                // Update Waiting Requests
+                if (data.waiting !== null && data.waiting !== undefined) {
+                    const waitingEl = document.getElementById('monitorWaiting');
+                    waitingEl.textContent = data.waiting;
+
+                    // Deadlock detection: 0 running with waiting > 0 for 30+ seconds
+                    if (data.running === 0 && data.waiting > 0) {
+                        if (deadlockStartTime === null) {
+                            deadlockStartTime = Date.now();
+                        } else if (Date.now() - deadlockStartTime > 30000) {
+                            document.getElementById('deadlockAlert').style.display = 'block';
+                        }
+                    } else {
+                        deadlockStartTime = null;
+                        document.getElementById('deadlockAlert').style.display = 'none';
+                    }
+                } else {
+                    document.getElementById('monitorWaiting').textContent = '-';
+                }
+
+                // Update Throughput
+                if (data.prompt_throughput !== null && data.prompt_throughput !== undefined) {
+                    document.getElementById('monitorPromptThroughput').textContent =
+                        data.prompt_throughput.toFixed(1) + ' tok/s';
+                } else {
+                    document.getElementById('monitorPromptThroughput').textContent = '-';
+                }
+
+                if (data.gen_throughput !== null && data.gen_throughput !== undefined) {
+                    document.getElementById('monitorGenThroughput').textContent =
+                        data.gen_throughput.toFixed(1) + ' tok/s';
+                } else {
+                    document.getElementById('monitorGenThroughput').textContent = '-';
+                }
+
+                // Update timestamp
+                const now = new Date();
+                document.getElementById('monitorTimestamp').textContent =
+                    now.toLocaleTimeString();
+                lastMonitoringUpdate = Date.now();
+
+            } catch (error) {
+                console.error('Error updating monitoring stats:', error);
+            }
+        }
+
         // Auto-refresh status every 30 seconds
         setInterval(refreshStatus, 30000);
 
+        // Update monitoring stats every 5 seconds
+        setInterval(updateMonitoringStats, 5000);
+
         // Initial load
         refreshStatus();
+        updateMonitoringStats();
+
+        // Connect to log stream
+        connectLogStream();
     </script>
 </body>
 </html>
@@ -1298,30 +1567,29 @@ async def get_status():
 
 
 @app.post("/start")
-async def start_vllm(request: StartVLLMRequest):
-    """Start vLLM service with specified model"""
+async def start_vllm(request: StartVLLMRequest = StartVLLMRequest()):
+    """Start vLLM service (controls vllm.service directly)"""
     global current_model, context_window
 
     if is_vllm_running():
         raise HTTPException(
             status_code=400,
-            detail=f"vLLM service is already running with model: {current_model}"
+            detail=f"vLLM service is already running"
         )
 
-    # Update the service file with new parameters if needed
-    # For now, we'll just start the existing service
-    # In a production setup, you might want to dynamically update the service file
-    
     try:
         # Start the vLLM service
+        # Note: The service configuration is in /etc/systemd/system/vllm.service
+        # and the actual model/settings are in /home/richardbrown/vllm_cpu_offload_server.py
         success, output = run_systemctl_command("start")
-        
+
         if not success:
             raise HTTPException(status_code=500, detail=f"Failed to start vLLM service: {output}")
-        
-        # Update global state
-        current_model = request.model_name
-        context_window = request.max_model_len
+
+        # Update global state if model name was provided
+        if request.model_name:
+            current_model = request.model_name
+            context_window = request.max_model_len
 
         # Wait a moment to check if it started successfully
         await asyncio.sleep(3)
@@ -1331,14 +1599,14 @@ async def start_vllm(request: StartVLLMRequest):
 
         return {
             "status": "started",
-            "model": current_model,
+            "model": current_model or "configured in service file",
             "service": SERVICE_NAME,
             "port": VLLM_PORT,
             "message": "vLLM service started successfully"
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        current_model = None
-        context_window = None
         raise HTTPException(status_code=500, detail=f"Failed to start vLLM service: {str(e)}")
 
 
@@ -1347,16 +1615,16 @@ async def stop_vllm():
     """Stop the running vLLM service"""
     global current_model
 
-    if not is_vllm_running():
-        raise HTTPException(status_code=400, detail="vLLM service is not running")
+    # Don't raise error if already stopped - just ensure it's stopped
+    was_running = is_vllm_running()
 
     try:
         old_model = current_model
 
-        # Stop the vLLM service
+        # Stop the vLLM service (systemctl stop is idempotent)
         success, output = run_systemctl_command("stop")
-        
-        if not success:
+
+        if not success and was_running:
             raise HTTPException(status_code=500, detail=f"Failed to stop vLLM service: {output}")
 
         # Wait for service to stop
@@ -1372,8 +1640,11 @@ async def stop_vllm():
             "status": "stopped",
             "model": old_model,
             "service": SERVICE_NAME,
-            "message": "vLLM service has been stopped"
+            "was_running": was_running,
+            "message": "vLLM service has been stopped" if was_running else "vLLM service was already stopped"
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop vLLM service: {str(e)}")
 
@@ -1585,6 +1856,103 @@ async def reset_crash_loop():
 async def get_crash_loop_status():
     """Get crash loop status"""
     return crash_detector.get_status()
+
+
+@app.get("/monitoring/stats")
+async def get_monitoring_stats():
+    """Get real-time monitoring stats from vLLM logs"""
+    try:
+        # Parse the latest stats from vllm log
+        log_file = "/var/log/vllm.log"
+        stats = {
+            "kv_cache_pct": None,
+            "running": None,
+            "waiting": None,
+            "prompt_throughput": None,
+            "gen_throughput": None,
+            "timestamp": datetime.now().isoformat()
+        }
+
+        if not os.path.exists(log_file):
+            return stats
+
+        # Read last 100 lines of log file
+        with open(log_file, 'r') as f:
+            lines = f.readlines()[-100:]
+
+        import re
+        for line in reversed(lines):
+            # GPU KV cache usage: 45.2%
+            if "GPU KV cache usage:" in line and stats["kv_cache_pct"] is None:
+                match = re.search(r'GPU KV cache usage: ([\d.]+)%', line)
+                if match:
+                    stats["kv_cache_pct"] = float(match.group(1))
+
+            # Running: 3, Waiting: 2
+            if "Running:" in line and "Waiting:" in line and stats["running"] is None:
+                running_match = re.search(r'Running: (\d+)', line)
+                waiting_match = re.search(r'Waiting: (\d+)', line)
+                if running_match and waiting_match:
+                    stats["running"] = int(running_match.group(1))
+                    stats["waiting"] = int(waiting_match.group(1))
+
+            # Avg prompt throughput: 123.4 tokens/s
+            if "Avg prompt throughput:" in line and stats["prompt_throughput"] is None:
+                match = re.search(r'Avg prompt throughput: ([\d.]+) tokens/s', line)
+                if match:
+                    stats["prompt_throughput"] = float(match.group(1))
+
+            # Avg generation throughput: 456.7 tokens/s
+            if "Avg generation throughput:" in line and stats["gen_throughput"] is None:
+                match = re.search(r'Avg generation throughput: ([\d.]+) tokens/s', line)
+                if match:
+                    stats["gen_throughput"] = float(match.group(1))
+
+        return stats
+    except Exception as e:
+        return {
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        }
+
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """WebSocket endpoint for streaming vLLM logs"""
+    await websocket.accept()
+
+    log_file = "/var/log/vllm.log"
+
+    try:
+        # Send initial logs (last 50 lines)
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                lines = f.readlines()[-50:]
+                for line in lines:
+                    await websocket.send_text(line.rstrip())
+
+        # Follow the log file for new lines
+        if os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                # Seek to end
+                f.seek(0, 2)
+
+                while True:
+                    line = f.readline()
+                    if line:
+                        await websocket.send_text(line.rstrip())
+                    else:
+                        # No new line, wait a bit
+                        await asyncio.sleep(0.5)
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
 @app.on_event("startup")
