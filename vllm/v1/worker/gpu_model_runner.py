@@ -4371,7 +4371,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             """
             for backend in backends:
                 is_supported = False
-                for supported_size in backend.get_supported_kernel_block_size():
+                for supported_size in backend.supported_kernel_block_sizes:
                     if isinstance(supported_size, int):
                         if block_size == supported_size:
                             is_supported = True
@@ -4402,7 +4402,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         all_int_supported_sizes = set(
             supported_size
             for backend in backends
-            for supported_size in backend.get_supported_kernel_block_size()
+            for supported_size in backend.supported_kernel_block_sizes
             if isinstance(supported_size, int)
         )
 
