@@ -50,6 +50,12 @@ MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
 
+INTERLEAVED_LAYER_TYPES = [
+    {"full_attention", "sliding_attention"},
+    {"full_attention", "chunked_attention"},
+    {"full_attention", "linear_attention"},
+]
+
 
 def _get_hf_token() -> str | None:
     """
@@ -472,8 +478,10 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     """
     text_config = config.get_text_config()
     if layer_types := getattr(text_config, "layer_types", None):
-        interleaved_types = {"full_attention", "sliding_attention"}
-        return interleaved_types.issubset(layer_types)
+        return any([
+            interleaved_type.issubset(layer_types)
+            for interleaved_type in INTERLEAVED_LAYER_TYPES
+        ])
     return False
 
 
