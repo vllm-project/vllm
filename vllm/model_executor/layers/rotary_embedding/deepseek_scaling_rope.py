@@ -6,6 +6,12 @@ import math
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+try:
+    import flashinfer
+except:
+    flashinfer = None
+from vllm.logger import init_logger
 
 from .base import RotaryEmbeddingBase
 from .common import (
@@ -16,6 +22,7 @@ from .common import (
 )
 
 
+logger = init_logger(__name__)
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
         return 1.0
@@ -56,9 +63,14 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             / yarn_get_mscale(self.scaling_factor, float(mscale_all_dim))
             * attn_factor
         )
+        self.use_flashinfer = has_flashinfer
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype, has_flashinfer
         )
+        self.use_flashinferfused_fp8_rotary = self.use_flashinfer and self.dtype == current_platform.fp8_dtype() and self.rotary_dim < self.head_size
+        if self.use_flashinferfused_fp8_rotary:
+            logger.info("use_flashinferfused_fp8_rotary")
+            assert flashinfer is not None
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base ** (
@@ -120,7 +132,26 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
-
+            if self.use_flashinferfused_fp8_rotary:
+                q_out = torch.empty_like(query, dtype=self.dtype)
+                k_out = torch.empty_like(key, dtype=self.dtype)
+                flashinfer.rope.mla_rope_quantize_fp8(
+                    query_rot,
+                    key_rot,
+                    query_pass,
+                    key_pass,
+                    self.cos_sin_cache,
+                    positions,
+                    is_neox=self.is_neox_style,
+                    q_rope_out=q_out[..., :self.rotary_dim],
+                    k_rope_out=k_out[..., :self.rotary_dim],
+                    q_nope_out=q_out[..., self.rotary_dim:],
+                    k_nope_out=k_out[..., self.rotary_dim:],
+                    quant_scale_q=1.0,
+                    quant_scale_kv=1.0,
+                    enable_pdl=False,
+                )
+            return q_out, k_out
         cos_sin = self.cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]

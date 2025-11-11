@@ -1912,6 +1912,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
+        if fp8_attention:
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
         # write the latent and rope to kv cache
         if kv_cache.numel() > 0:
             ops.concat_and_cache_mla(
@@ -1923,8 +1925,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 scale=layer._k_scale,
             )
 
-        if fp8_attention:
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
@@ -1981,21 +1981,21 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 # Convert from (N, B, L) to (B, N, L)
                 decode_ql_nope = decode_ql_nope.transpose(0, 1)
 
-            if fp8_attention:
-                ql_nope_shape = decode_ql_nope.shape
-                decode_ql_nope, _ = ops.scaled_fp8_quant(
-                    decode_ql_nope.reshape(
-                        [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
-                    ),
-                    layer._q_scale,
-                )
-                decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
-                q_pe_shape = decode_q_pe.shape
-                decode_q_pe, _ = ops.scaled_fp8_quant(
-                    decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
-                    layer._q_scale,
-                )
-                decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+            # if fp8_attention:
+            #     ql_nope_shape = decode_ql_nope.shape
+            #     decode_ql_nope, _ = ops.scaled_fp8_quant(
+            #         decode_ql_nope.reshape(
+            #             [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+            #         ),
+            #         layer._q_scale,
+            #     )
+            #     decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+            #     q_pe_shape = decode_q_pe.shape
+            #     decode_q_pe, _ = ops.scaled_fp8_quant(
+            #         decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+            #         layer._q_scale,
+            #     )
+            #     decode_q_pe = decode_q_pe.reshape(q_pe_shape)
 
             decode_q = (decode_ql_nope, decode_q_pe)
             if self.dcp_world_size > 1:
