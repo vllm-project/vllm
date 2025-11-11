@@ -50,7 +50,7 @@ from typing import Annotated, Any, Literal
 
 import torch
 from torch import nn
-from transformers import BatchFeature
+from transformers import BatchFeature, DeepseekV2Config
 from transformers.activations import GELUActivation
 
 from vllm.config import VllmConfig
@@ -91,7 +91,6 @@ from vllm.multimodal.processing import (
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
-from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekV2Config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import PPMissingLayer, is_pp_missing_parameter, maybe_prefix
@@ -457,7 +456,11 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        if not config.use_mla:
+        use_mha = (
+            config.model_type == "deepseek"
+            or config.qk_nope_head_dim + config.qk_rope_head_dim == 0
+        )
+        if use_mha:
             stacked_params_mapping += [
                 (".qkv_proj", ".q_proj", "q"),
                 (".qkv_proj", ".k_proj", "k"),

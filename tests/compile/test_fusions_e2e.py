@@ -11,7 +11,7 @@ from typing import Any, NamedTuple
 import pytest
 import regex as re
 
-from tests.v1.attention.utils import _Backend
+from tests.v1.attention.utils import AttentionBackendEnum
 from vllm import LLM, SamplingParams
 from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
 from vllm.platforms import current_platform
@@ -31,7 +31,7 @@ class Matches(NamedTuple):
 class ModelBackendTestCase(NamedTuple):
     model_name: str
     model_kwargs: dict[str, Any]
-    backend: _Backend
+    backend: AttentionBackendEnum
     matches: Matches
 
 
@@ -45,7 +45,7 @@ if current_platform.is_cuda():
             # Use smaller model for L40s in CI
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.TRITON_ATTN,
+            backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=32,
                 allreduce_fusion=65,
@@ -56,7 +56,7 @@ if current_platform.is_cuda():
         ModelBackendTestCase(
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
-            backend=_Backend.FLASHINFER,
+            backend=AttentionBackendEnum.FLASHINFER,
             matches=Matches(
                 attention_fusion=48,
                 allreduce_fusion=96,
@@ -68,9 +68,9 @@ if current_platform.is_cuda():
 
     MODELS_FP4 = [
         ModelBackendTestCase(
-            model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP4",
+            model_name="nvidia/Llama-3.1-8B-Instruct-FP4",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
-            backend=_Backend.FLASHINFER,
+            backend=AttentionBackendEnum.FLASHINFER,
             matches=Matches(
                 attention_fusion=48,
                 allreduce_fusion=96,
@@ -85,12 +85,21 @@ if current_platform.is_cuda():
         ModelBackendTestCase(
             model_name="meta-llama/Llama-3.1-8B-Instruct",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.TRITON_ATTN,
+            backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=0,
                 allreduce_fusion=65,
                 sequence_parallel=65,
                 async_tp=128,
+            ),
+        ),
+        ModelBackendTestCase(
+            model_name="Qwen/Qwen3-30B-A3B",
+            model_kwargs=dict(max_model_len=1024),
+            backend=AttentionBackendEnum.TRITON_ATTN,
+            matches=Matches(
+                attention_fusion=0,
+                allreduce_fusion=97,
             ),
         ),
     ]
@@ -100,25 +109,24 @@ elif current_platform.is_rocm():
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.TRITON_ATTN,
+            backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(attention_fusion=32),
         ),
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.ROCM_ATTN,
+            backend=AttentionBackendEnum.ROCM_ATTN,
             matches=Matches(attention_fusion=32),
         ),
         ModelBackendTestCase(
             model_name="amd/Llama-3.1-8B-Instruct-FP8-KV",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.ROCM_AITER_UNIFIED_ATTN,
+            backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
             matches=Matches(attention_fusion=32),
         ),
     ]
 
-# TODO(luka) test both in nightly
-CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
+CUSTOM_OPS_FP8 = ["-quant_fp8", "+quant_fp8"]
 
 
 @pytest.mark.parametrize(
@@ -132,14 +140,14 @@ CUSTOM_OPS_FP8 = ["-quant_fp8"]  # , "+quant_fp8"]
 def test_attn_quant(
     model_name: str,
     model_kwargs: dict[str, Any],
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     matches: Matches,
     custom_ops: str,
     inductor_graph_partition: bool,
     caplog_mp_spawn,
     monkeypatch,
 ):
-    if backend == _Backend.FLASHINFER and (
+    if backend == AttentionBackendEnum.FLASHINFER and (
         not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
     ):
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
@@ -191,8 +199,7 @@ def test_attn_quant(
     assert int(log_matches[0]) == matches.attention_fusion
 
 
-# TODO(luka) test both in nightly
-CUSTOM_OPS_RMS_NORM = ["-rms_norm"]  # , "+rms_norm"]
+CUSTOM_OPS_RMS_NORM = ["-rms_norm", "+rms_norm"]
 
 
 def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
@@ -222,7 +229,7 @@ def custom_ops_product(*custom_ops_lists: list[str]) -> Iterable[str]:
 def test_tp2_attn_quant_allreduce_rmsnorm(
     model_name: str,
     model_kwargs: dict,
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     matches: Matches,
     custom_ops: str,
     inductor_graph_partition: bool,
@@ -310,7 +317,7 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
 def test_tp2_attn_quant_async_tp(
     model_name: str,
     model_kwargs: dict,
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     matches: Matches,
     custom_ops: str,
     inductor_graph_partition: bool,
