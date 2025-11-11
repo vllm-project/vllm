@@ -494,7 +494,9 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_triton_rotary_embed_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_ROTARY_EMBED
-    
+
+    @classmethod
+    @if_aiter_supported
     def is_triton_gemm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._TRITON_UNQUANT_GEMM
 
