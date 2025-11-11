@@ -7,12 +7,13 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
+
 import torch
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-import math
 
 logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -272,7 +273,7 @@ def kernel_unified_attention_2d(
     query_mask_0 = query_pos < cur_batch_query_len
     query_mask_1 = query_offset_1 < num_query_heads
 
-    if ALL_DECODE or BLOCK_M >= num_query_heads:
+    if ALL_DECODE or num_query_heads <= BLOCK_M:
         Q_cache_modifier: tl.constexpr = ".cg"
     else:
         Q_cache_modifier: tl.constexpr = ""
