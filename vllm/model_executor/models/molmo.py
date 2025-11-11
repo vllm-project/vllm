@@ -18,7 +18,7 @@ from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
 from vllm.attention import Attention
-from vllm.attention.layer import MultiHeadAttention
+from vllm.attention.layers.mm_encoder_attention import MMEncoderAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -223,7 +223,7 @@ class MultiHeadDotProductAttention(nn.Module):
         )
 
         self.scale = self.head_dim**-0.5
-        self.attn = MultiHeadAttention(
+        self.attn = MMEncoderAttention(
             self.num_heads, self.head_dim, self.scale, num_kv_heads=self.num_kv_heads
         )
 

@@ -94,7 +94,7 @@ class MMEncoderAttention(CustomOp):
         scale: float,
         num_kv_heads: int | None = None,
         # This has no effect, it is only here to make it easier to swap
-        # between Attention and MultiHeadAttention
+        # between Attention and MMEncoderAttention
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -312,6 +312,9 @@ class MMEncoderAttention(CustomOp):
             return self._forward_xformers(query, key, value)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             return self._forward_sdpa(query, key, value)
+        raise ValueError(
+            f"Unsupported mm attention backend for CUDA: {self.attn_backend}"
+        )
 
     def forward_cpu(
         self,
