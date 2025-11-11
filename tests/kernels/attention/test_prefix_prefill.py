@@ -47,22 +47,18 @@ def create_causal_attention_mask_for_sdpa(
     for query_len, seq_len in zip(query_lens, seq_lens):
         query_end = query_start + query_len
         key_end = key_start + seq_len
+        q_indices = torch.arange(query_len, device=device)
+        k_indices = torch.arange(seq_len, device=device)
+        q_pos_in_seq = seq_len - query_len + q_indices
 
-        for i in range(query_len):
-            # This query token is at position (seq_len - query_len + i)
-            # in the full sequence
-            query_pos_in_seq = seq_len - query_len + i
+        valid_mask = k_indices[None, :] <= q_pos_in_seq[:, None]
 
-            mask[query_start + i, key_start : key_start + query_pos_in_seq + 1] = 0.0
+        if sliding_window > 0:
+            valid_mask &= k_indices[None, :] >= (
+                q_pos_in_seq[:, None] - sliding_window + 1
+            )
 
-            # Apply sliding window if specified
-            if sliding_window > 0:
-                # Can only attend to positions within the sliding window
-                window_start = max(0, query_pos_in_seq - sliding_window + 1)
-                if window_start > 0:
-                    mask[query_start + i, key_start : key_start + window_start] = float(
-                        "-inf"
-                    )
+        mask[query_start:query_end, key_start:key_end][valid_mask] = 0.0
 
         query_start = query_end
         key_start = key_end
