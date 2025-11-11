@@ -826,7 +826,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                     None,
                     _PARTITION_SIZE_ROCM,
-                    self.sliding_window[0] + 1,
+                    sliding_window=self.sliding_window[0] + 1,
                 )
         else:
             raise NotImplementedError(
