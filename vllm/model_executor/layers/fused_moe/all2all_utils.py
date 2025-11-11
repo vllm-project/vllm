@@ -151,9 +151,7 @@ def maybe_make_prepare_finalize(
             hidden_dim_scale=hidden_dim_scale,
             in_dtype=in_dtype,
             out_dtype=in_dtype,
-            scale_dtype=torch.float32
-            if quant_config.quant_dtype is not None
-            else None,
+            scale_dtype=torch.float32 if quant_config.quant_dtype is not None else None,
             max_private_tokens=None,  # For tuning
         )
 
