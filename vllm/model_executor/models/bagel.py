@@ -12,8 +12,6 @@ from typing import Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig, SiglipVisionConfig
-from transformers.models.qwen2 import Qwen2Config
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -57,61 +55,6 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-# === Configuration === #
-
-
-class BagelConfig(PretrainedConfig):
-    """Configuration class for BAGEL model."""
-
-    model_type = "bagel"
-
-    def __init__(
-        self,
-        visual_gen: bool = True,
-        visual_und: bool = True,
-        llm_config: dict | Qwen2Config | None = None,
-        vit_config: dict | SiglipVisionConfig | None = None,
-        vae_config: dict | None = None,
-        latent_patch_size: int = 2,
-        max_latent_size: int = 32,
-        vit_max_num_patch_per_side: int = 70,
-        connector_act: str = "gelu_pytorch_tanh",
-        interpolate_pos: bool = False,
-        timestep_shift: float = 1.0,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.visual_gen = visual_gen
-        self.visual_und = visual_und
-
-        # Convert dict configs to proper config objects
-        if isinstance(llm_config, dict):
-            self.llm_config = Qwen2Config(**llm_config)
-        else:
-            self.llm_config = llm_config or Qwen2Config()
-
-        if isinstance(vit_config, dict):
-            self.vit_config = SiglipVisionConfig(**vit_config)
-        else:
-            self.vit_config = vit_config or SiglipVisionConfig()
-
-        self.vae_config = vae_config or {"z_channels": 16, "downsample": 8}
-        self.latent_patch_size = latent_patch_size
-        self.max_latent_size = max_latent_size
-        self.vit_max_num_patch_per_side = vit_max_num_patch_per_side
-        self.connector_act = connector_act
-        self.interpolate_pos = interpolate_pos
-        self.timestep_shift = timestep_shift
-
-    @property
-    def hidden_size(self) -> int:
-        """Return the hidden size of the language model."""
-        return self.llm_config.hidden_size
-
-
-# === Vision Inputs === #
-
-
 class BagelImagePixelInputs(TensorSchema):
     """
     Dimensions:
@@ -126,9 +69,6 @@ class BagelImagePixelInputs(TensorSchema):
 
 
 BagelImageInputs: TypeAlias = BagelImagePixelInputs
-
-
-# === Vision Encoder === #
 
 
 class BagelVisionMLP(nn.Module):
@@ -292,7 +232,7 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         # Use a simple placeholder for each image
-        return "<image>" * num_images
+        return "<|image_pad|>" * num_images
 
     def get_dummy_mm_data(
         self,
@@ -332,9 +272,7 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
 
         # Get the tokenizer to encode the placeholder
         tokenizer = self.info.get_tokenizer()
-        # Encode "<image>" to get its token IDs
-        # Use add_special_tokens=False to get just the token IDs for "<image>"
-        image_token_ids = tokenizer.encode("<image>", add_special_tokens=False)
+        image_token_id = tokenizer.get_vocab().get("<|image_pad|>")
 
         def get_replacement_bagel(item_idx: int):
             # For BAGEL, we need to calculate based on actual image size
@@ -348,7 +286,7 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=image_token_ids,
+                target=[image_token_id],
                 replacement=get_replacement_bagel,
             )
         ]
@@ -621,18 +559,9 @@ class BagelForConditionalGeneration(
                     tensor = tensor.reshape(
                         out_channels, patch_size, patch_size, in_channels
                     )
-                    tensor = tensor.permute(
-                        0, 3, 1, 2
-                    ).contiguous()  # [out, h, w, c] -> [out, c, h, w]
+                    tensor = tensor.permute(0, 3, 1, 2).contiguous()
 
             filtered_weights.append((name, tensor))
 
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
         return loader.load_weights(filtered_weights, mapper=self.hf_to_vllm_mapper)
-
-    @classmethod
-    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        """Get placeholder string for a given modality."""
-        if modality == "image":
-            return "<image>"
-        return None

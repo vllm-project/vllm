@@ -170,9 +170,6 @@ class Qwen2Attention(nn.Module):
         if self.qk_norm:
             self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        else:
-            self.q_norm = None
-            self.k_norm = None
 
         self.rotary_emb = get_rope(
             self.head_dim,
