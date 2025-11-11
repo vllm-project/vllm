@@ -330,11 +330,9 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
-        self.lora_config = lora_config
 
         self.model = model_type(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")

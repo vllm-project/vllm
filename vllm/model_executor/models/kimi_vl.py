@@ -60,7 +60,6 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
 )
 from vllm.model_executor.model_loader.weight_utils import (
@@ -347,13 +346,10 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=sub_vllm_config,
             prefix=maybe_prefix(prefix, "language_model"),
         )
-        self.unpadded_vocab_size = config.text_config.vocab_size
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.text_config.hidden_size,
-                org_num_embeddings=self.config.text_config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
         else:
@@ -362,9 +358,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             self.language_model.make_empty_intermediate_tensors
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
         self.media_placeholder: int = self.config.media_placeholder_token_id
 
     def _parse_and_validate_image_input(

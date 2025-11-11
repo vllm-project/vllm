@@ -547,18 +547,14 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.pad_token_id = (
             self.config.pad_token_id if self.config.pad_token_id is not None else -1
         )
-        self.unpadded_vocab_size = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            self.vocab_size,
             config.text_config.hidden_size,
-            org_num_embeddings=self.language_model.org_vocab_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, self.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(self.vocab_size, scale=logit_scale)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object

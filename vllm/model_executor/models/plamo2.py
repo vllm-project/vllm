@@ -46,7 +46,6 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -751,12 +750,10 @@ class Plamo2Model(torch.nn.Module):
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.org_vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
             prefix=f"{prefix}.embed_tokens",
         )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -827,20 +824,16 @@ class Plamo2ForCausalLM(torch.nn.Module, HasInnerState, SupportsPP, IsHybrid):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.vocab_size = self.config.vocab_size
-        self.unpadded_vocab_size = self.config.vocab_size
-        num_embeddings = ((self.vocab_size + 15) // 16) * 16
         self.lm_head = ParallelLMHead(
-            num_embeddings,
+            self.vocab_size,
             self.config.hidden_size,
-            org_num_embeddings=self.config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             prefix=f"{prefix}.lm_head",
         )
         if self.config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, self.config.vocab_size
+            config.vocab_size, self.config.vocab_size
         )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
