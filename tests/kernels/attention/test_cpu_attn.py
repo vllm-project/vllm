@@ -24,12 +24,8 @@ NUM_HEADS = [
     (9, 3),
 ]
 HEAD_SIZES = [96, 128]
-BLOCK_SIZES = [48, 96, 128]
 QTYPES = [torch.bfloat16, torch.half, torch.float32]
 SLIDING_WINDOWS = [None, 256]
-SOFT_CAPS = [None, 50]
-USE_ALIBI = [False, True]
-USE_SINK = [False, True]
 NUM_BLOCKS = [
     1024,
 ]
@@ -38,12 +34,6 @@ SEQ_LENS = [  # (q_len, kv_len)
     [(2345, 2345), (5, 5), (3, 16), (134, 5131)],  # prefill batch
     [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed batch
 ]
-
-ISA = (
-    ["amx", "vec", "vec16"]
-    if torch._C._cpu._is_amx_tile_supported()
-    else ["vec", "vec16"]
-)
 
 
 # rand number generation takes too much time, cache rand tensors
@@ -55,54 +45,6 @@ def tensor_cache(
     tensor = torch.randn(elem_num, dtype=dtype)
 
     return tensor
-
-
-def filter_tests(
-    seq_lens: list[tuple[int, int]],
-    num_heads: tuple[int, int],
-    head_size: int,
-    sliding_window: int | None,
-    dtype: torch.dtype,
-    block_size: int,
-    soft_cap: float | None,
-    num_blocks: int,
-    use_alibi: bool,
-    use_sink: bool,
-    isa: str,
-) -> None:
-    # unrealistic cases
-    if (
-        (use_alibi and use_sink)
-        or (use_alibi and soft_cap is not None)
-        or (use_sink and soft_cap is not None)
-    ):
-        pytest.skip()
-
-    # only test bs=16 with vec16 impl
-    if block_size == 48 and isa != "vec16":
-        pytest.skip()
-
-    # only test vec16 impl with bs=16
-    if block_size != 48 and isa == "vec16":
-        pytest.skip()
-
-    # only tests features with bf16 to save time
-    if dtype != torch.bfloat16 and (
-        sliding_window is not None or use_alibi or use_sink or soft_cap is not None
-    ):
-        pytest.skip()
-
-    # only tests features with limited settings to save time
-    if (
-        head_size != 96
-        or block_size != 96
-        or seq_lens != [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)]
-    ) and (use_alibi or use_sink or soft_cap is not None):
-        pytest.skip()
-
-    # AMX only supports BF16 for now
-    if dtype != torch.bfloat16 and isa == "amx":
-        pytest.skip()
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -218,19 +160,8 @@ def ref_paged_attn(
     return torch.cat(outputs, dim=0)
 
 
-@pytest.mark.parametrize("seq_lens", SEQ_LENS)
-@pytest.mark.parametrize("num_heads", NUM_HEADS)
-@pytest.mark.parametrize("head_size", HEAD_SIZES)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES)
-@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
-@pytest.mark.parametrize("dtype", QTYPES)
-@pytest.mark.parametrize("soft_cap", SOFT_CAPS)
-@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
-@pytest.mark.parametrize("use_alibi", USE_ALIBI)
-@pytest.mark.parametrize("use_sink", USE_SINK)
-@pytest.mark.parametrize("isa", ISA)
 @torch.inference_mode()
-def test_varlen_with_paged_kv(
+def varlen_with_paged_kv(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
@@ -243,20 +174,6 @@ def test_varlen_with_paged_kv(
     use_sink: bool,
     isa: str,
 ) -> None:
-    filter_tests(
-        seq_lens,
-        num_heads,
-        head_size,
-        sliding_window,
-        dtype,
-        block_size,
-        soft_cap,
-        num_blocks,
-        use_alibi,
-        use_sink,
-        isa,
-    )
-
     current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
@@ -412,4 +329,247 @@ def test_varlen_with_paged_kv(
     (
         torch.testing.assert_close(out_without_split, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(out_without_split - ref_output))}",
+    )
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", [96, 128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", QTYPES)
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["vec"])
+def test_varlen_with_paged_kv_normal_vec(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", [96, 128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["amx"])
+@pytest.mark.skipif(
+    not torch._C._cpu._is_amx_tile_supported(), reason="no AMX support."
+)
+def test_varlen_with_paged_kv_normal_amx(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("block_size", [48])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize("isa", ["vec16"])
+def test_varlen_with_paged_kv_normal_vec16(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [96])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [50])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize(
+    "isa", ["amx"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
+)
+def test_varlen_with_paged_kv_softcap(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [96])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [True])
+@pytest.mark.parametrize("use_sink", [False])
+@pytest.mark.parametrize(
+    "isa", ["amx"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
+)
+def test_varlen_with_paged_kv_alibi(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
+    )
+
+
+@pytest.mark.parametrize("seq_lens", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", [96])
+@pytest.mark.parametrize("block_size", [128])
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("soft_cap", [None])
+@pytest.mark.parametrize("num_blocks", NUM_BLOCKS)
+@pytest.mark.parametrize("use_alibi", [False])
+@pytest.mark.parametrize("use_sink", [True])
+@pytest.mark.parametrize(
+    "isa", ["amx"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
+)
+def test_varlen_with_paged_kv_sink(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    sliding_window: int | None,
+    dtype: torch.dtype,
+    block_size: int,
+    soft_cap: float | None,
+    num_blocks: int,
+    use_alibi: bool,
+    use_sink: bool,
+    isa: str,
+) -> None:
+    varlen_with_paged_kv(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=head_size,
+        sliding_window=sliding_window,
+        dtype=dtype,
+        block_size=block_size,
+        soft_cap=soft_cap,
+        num_blocks=num_blocks,
+        use_alibi=use_alibi,
+        use_sink=use_sink,
+        isa=isa,
     )

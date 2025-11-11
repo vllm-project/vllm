@@ -24,6 +24,7 @@ struct AttentionWorkItemGroup {
 
   int64_t total_kv_len;
   int32_t split_id;
+  int32_t local_split_id;
 
   AttentionWorkItemGroup(const int32_t req_id, const int32_t q_token_id_start,
                          const int32_t kv_split_pos_start,
@@ -34,7 +35,8 @@ struct AttentionWorkItemGroup {
         kv_split_pos_start(kv_split_pos_start),
         kv_split_pos_end(kv_split_pos_end),
         total_kv_len(0),
-        split_id(-1) {}
+        split_id(-1),
+        local_split_id(0) {}
 
   std::string to_string() const {
     std::stringstream ss;
@@ -45,6 +47,7 @@ struct AttentionWorkItemGroup {
     ss << "kv_split_pos_end: " << kv_split_pos_end << ",\n";
     ss << "total_kv_len: " << total_kv_len << ",\n";
     ss << "split_id: " << split_id << ",\n";
+    ss << "local_split_id: " << local_split_id << ",\n";
     ss << ']';
 
     return ss.str();
@@ -442,6 +445,7 @@ class AttentionScheduler {
       const int32_t q_start_pos = (casual ? (seq_len - q_token_num) : 0);
       const int32_t kv_start_pos = 0;
       const int32_t kv_end_pos = seq_len;
+      int32_t local_split_id = 0;
 
       AttentionWorkItemGroup curr_workitem(req_id, 0, 0, seq_len);
       for (int32_t token_id = 0; token_id < q_token_num;
@@ -476,6 +480,7 @@ class AttentionScheduler {
             if (curr_workitem.kv_split_pos_start != 0) {
               // got a partial kv spilt, need to create a single workitem
               curr_workitem.split_id = cum_split_num;
+              curr_workitem.local_split_id = local_split_id;
               workitems.emplace_back(curr_workitem);
               ++workitem_num_per_thread[curr_thread_id];
               ++reduce_workitems.back().split_num;
@@ -558,10 +563,12 @@ class AttentionScheduler {
           curr_workitem.q_token_num += q_tile_token_num;
           curr_workitem.total_kv_len += spilt_size;
           curr_workitem.split_id = cum_split_num;
+          curr_workitem.local_split_id = local_split_id;
           workitems.emplace_back(curr_workitem);
           ++workitem_num_per_thread[curr_thread_id];
           ++reduce_workitems.back().split_num;
           ++cum_split_num;
+          ++local_split_id;
 
           kv_token_pos_start += spilt_size;
           curr_kv_len -= spilt_size;
@@ -1002,10 +1009,10 @@ class AttentionMainLoop {
                    q_heads_per_kv, left_window_size, right_window_size);
 
         // if (debug_info){
-        //     print_logits("masked logits", logits_buffer, q_head_num,
-        //     kv_tile_token_num, kv_tile_token_num);
-        //     print_logits("old_max", max_buffer, 1, q_head_num, q_head_num);
-        //     print_logits("old_sum", sum_buffer, 1, q_head_num, q_head_num);
+        // print_logits("masked logits", logits_buffer, q_head_num,
+        // kv_tile_token_num, kv_tile_token_num);
+        // print_logits("old_max", max_buffer, 1, q_head_num, q_head_num);
+        // print_logits("old_sum", sum_buffer, 1, q_head_num, q_head_num);
         // }
 
         apply_softmax(logits_buffer, partial_q_buffer, max_buffer, sum_buffer,
@@ -1478,7 +1485,8 @@ class AttentionMainLoop {
                 (casual ? seq_len - (q_end - q_start) : 0);
             const int32_t block_num = (seq_len + block_size - 1) / block_size;
             // Only apply sink for the first KV split
-            bool use_sink = (s_aux != nullptr && curr_spilt_id <= 0);
+            bool use_sink = (s_aux != nullptr &&
+                             current_workitem_group->local_split_id == 0);
 
             for (int32_t q_token_offset = 0; q_token_offset < q_token_num;
                  q_token_offset += default_q_tile_token_num) {
@@ -1535,14 +1543,15 @@ class AttentionMainLoop {
                           : (kv_head_idx /
                              q_heads_per_kv);  // for GQA disabled case
 
-              //   std::printf("req_id: %d, q_token_start: %d, q_token_end: %d,
-              //   q_head_start: %d, q_head_end: %d, kv_head_idx: %d,
-              //   kv_pos_start: %d, kv_pos_end: %d\n",
-              //                current_group_idx, q_token_start_idx,
-              //                q_token_start_idx + actual_q_token_num,
-              //                q_head_start_idx, q_head_start_idx +
-              //                actual_q_heads_per_kv, curr_kv_head_idx,
-              //                kv_tile_start_pos, kv_tile_end_pos);
+              // std::printf("thread_id: %d, req_id: %d, q_token_start: %d,
+              // q_token_end: %d, q_head_start: %d, q_head_end: %d, kv_head_idx:
+              // %d, kv_pos_start: %d, kv_pos_end: %d\n",
+              //                 thread_id, current_group_idx,
+              //                 q_token_start_idx, q_token_start_idx +
+              //                 actual_q_token_num, q_head_start_idx,
+              //                 q_head_start_idx + actual_q_heads_per_kv,
+              //                 curr_kv_head_idx, kv_tile_start_pos,
+              //                 kv_tile_end_pos);
 
               // move buffers
               kv_cache_t* curr_k_cache =
@@ -1676,27 +1685,27 @@ class AttentionMainLoop {
                   float* curr_sum_buffer = sum_buffer + q_tile_head_offset;
 
                   bool debug_info = false;
-                  //     bool debug_info = (
-                  //       q_head_start_idx == 0 &&
-                  //       (q_token_start_idx + q_head_tile_token_offset) <=
-                  //       2303
-                  //       && (q_token_start_idx + q_head_tile_token_offset +
-                  //       q_tile_token_num) > 2303
-                  //     );
-                  //   if (debug_info) {
-                  //     std::printf("\tq_iter_idx: %d, q_token_start: %d,"
-                  //     "q_token_end: %d, q_token_num: %d, q_head_num: %d,"
-                  //     "q_pos_start: %d, q_pos_end: %d, kv_pos_start: %d,"
-                  //     "kv_pos_end: %d\n",
-                  //               q_iter_idx, q_token_start_idx +
-                  //               q_head_tile_token_offset,  q_token_start_idx
-                  //               + q_head_tile_token_offset +
-                  //               q_tile_token_num, q_tile_token_num,
-                  //               q_tile_head_num, q_tile_pos_left,
-                  //               q_tile_pos_right,
-                  //               aligned_actual_kv_tile_pos_left,
-                  //               aligned_actual_kv_tile_pos_right);
-                  //   }
+                  //   bool debug_info = (
+                  //     q_head_start_idx == 4 &&
+                  //     (q_token_start_idx + q_head_tile_token_offset) <=
+                  //     4
+                  //     && (q_token_start_idx + q_head_tile_token_offset +
+                  //     q_tile_token_num) > 4
+                  //   );
+                  // if (debug_info) {
+                  //   std::printf("\tq_iter_idx: %d, q_token_start: %d,"
+                  //   "q_token_end: %d, q_token_num: %d, q_head_num: %d,"
+                  //   "q_pos_start: %d, q_pos_end: %d, kv_pos_start: %d,"
+                  //   "kv_pos_end: %d\n",
+                  //             q_iter_idx, q_token_start_idx +
+                  //             q_head_tile_token_offset,  q_token_start_idx
+                  //             + q_head_tile_token_offset +
+                  //             q_tile_token_num, q_tile_token_num,
+                  //             q_tile_head_num, q_tile_pos_left,
+                  //             q_tile_pos_right,
+                  //             aligned_actual_kv_tile_pos_left,
+                  //             aligned_actual_kv_tile_pos_right);
+                  // }
 
                   attn_impl.template execute_attention<Attention>(
                       curr_q_heads_buffer, curr_k_cache, curr_v_cache,
