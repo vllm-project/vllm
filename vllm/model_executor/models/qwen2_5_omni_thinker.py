@@ -68,6 +68,7 @@ from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -923,21 +924,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value (Qwen2.5-Omni version).
-
-        Differences from MRotaryEmbedding:
-            1. Add audio support (and related `audio_feature_lengths`).
-            2. Add `use_audio_in_video` option to read audio from video inputs.
-                In this case, audio and vision position ids will be split into
-                chunks and interleaved.
-
+        """
         Example:
 
             (V_i are vision position ids, A_i are audio position ids)
@@ -945,11 +934,33 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             |V_1 ...    V_n|A_1 ...   A_n|V_n+1 ... V_2n|A_n+1 ... A_2n|...
             |vision chunk 1|audio chunk 1|vision chunk 2|audio chunk 2 |...
         """
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {
+                "image_grid_thw",
+                "video_grid_thw",
+                "second_per_grid_ts",
+                "audio_feature_lengths",
+                "use_audio_in_video",
+            },
+        )
+        image_grid_thw = kwargs.get("image_grid_thw", [])
+        video_grid_thw = kwargs.get("video_grid_thw", [])
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
+        audio_feature_lengths = kwargs.get("audio_feature_lengths", [])
+        use_audio_in_video = any(kwargs.get("use_audio_in_video", []))
+
+        image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
+            image_grid_thw
+        )
+        video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
+            video_grid_thw
+        )
 
         # TODO(fyabc): refactor and share more code with
         #  _vl_get_input_positions_tensor.
 
-        thinker_config = hf_config.thinker_config
+        thinker_config = self.config
         audio_token_id = thinker_config.audio_token_index
         image_token_id = thinker_config.image_token_index
         video_token_id = thinker_config.video_token_index
@@ -962,11 +973,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         tokens_per_second = getattr(
             thinker_config.vision_config, "tokens_per_second", 25
         )
-
-        if isinstance(image_grid_thw, list):
-            image_grid_thw = torch.tensor(image_grid_thw)
-        if isinstance(video_grid_thw, list):
-            video_grid_thw = torch.tensor(video_grid_thw)
 
         src_item = input_tokens
         audio_seqlens = audio_feature_lengths
