@@ -537,6 +537,18 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
+        # create per-tensor qparams populated by process_weights_after_loading
+        else:
+            scale = create_fp8_scale_parameter(
+                PerTensorScaleParameter,
+                output_partition_sizes,
+                input_size_per_partition,
+                None,
+                weight_loader,
+            )
+            set_weight_attrs(scale, {"scale_type": "weight_scale"})
+            layer.register_parameter("weight_scale", scale)
+
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
@@ -551,8 +563,8 @@ class Fp8LinearMethod(LinearMethodBase):
             weight, weight_scale = process_fp8_weight_block_strategy(
                 layer.weight, layer.weight_scale_inv
             )
-            # Delete the weight_scale_inv parameter to avoid confusion
-            # with the weight_scale parameter
+            # Rename weight_scale_inv parameter for consistency
+            layer.weight_scale = layer.weight_scale_inv
             del layer.weight_scale_inv
 
         # If checkpoint not serialized fp8, quantize the weights.
@@ -863,12 +875,10 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant
             else {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-        # If loading fp8 checkpoint, pass the weight loaders.
-        # If loading an fp16 checkpoint, do not (we will quantize in
-        #   process_weights_after_loading()
-        if self.quant_config.is_checkpoint_fp8_serialized:
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+
+        # add weight loaders to support loading (and reloading)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
