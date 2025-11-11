@@ -3,7 +3,7 @@
 """Attention layer with XFormersAttention."""
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import torch
 
@@ -41,10 +41,8 @@ logger = init_logger(__name__)
 
 class XFormersAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(16)]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -79,22 +77,6 @@ class XFormersAttentionBackend(AttentionBackend):
             248,
             256,
         ]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
 
     @staticmethod
     def get_name() -> str:
@@ -304,8 +286,6 @@ class XFormersAttentionImpl(AttentionImpl):
             # Setting logits_soft_cap to 0 means no soft cap.
             logits_soft_cap = 0
         self.logits_soft_cap = logits_soft_cap
-
-        XFormersAttentionBackend.validate_head_size(head_size)
 
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError(

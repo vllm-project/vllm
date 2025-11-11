@@ -10,7 +10,7 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -83,8 +83,8 @@ def get_vit_attn_backend(
     head_size: int,
     dtype: torch.dtype,
     *,
-    attn_backend_override: _Backend | None = None,
-) -> _Backend:
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> AttentionBackendEnum:
     """
     Get the available attention backend for Vision Transformer.
     """
@@ -94,7 +94,7 @@ def get_vit_attn_backend(
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
 
-    selected_backend: _Backend | None = get_env_variable_attn_backend()
+    selected_backend: AttentionBackendEnum | None = get_env_variable_attn_backend()
     if selected_backend is not None:
         return selected_backend
 

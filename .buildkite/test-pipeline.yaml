@@ -890,11 +890,16 @@ steps:
   - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_prepare_finalize.py
   - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
   - vllm/v1/attention/backends/flashinfer.py
+  - vllm/v1/attention/backends/mla/cutlass_mla.py
+  - vllm/v1/attention/backends/mla/flashinfer_mla.py
+  - vllm/platforms/cuda.py
+  - vllm/attention/selector.py
   commands:
     - nvidia-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
+    - pytest -v -s tests/kernels/attention/test_attention_selector.py
     - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py

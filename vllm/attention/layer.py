@@ -12,7 +12,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.config import CacheConfig, get_current_vllm_config
@@ -99,40 +99,44 @@ def check_upstream_fa_availability(dtype: torch.dtype):
 
 
 def maybe_get_vit_flash_attn_backend(
-    attn_backend: _Backend,
+    attn_backend: AttentionBackendEnum,
     use_upstream_fa: bool,
-    attn_backend_override: _Backend | None = None,
-) -> tuple[_Backend, Callable | None]:
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> tuple[AttentionBackendEnum, Callable | None]:
     if current_platform.is_rocm():
         if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
-            attn_backend = _Backend.ROCM_AITER_FA
+            attn_backend = AttentionBackendEnum.ROCM_AITER_FA
 
         elif (
             check_upstream_fa_availability(torch.get_default_dtype())
             and on_gfx9()
             and attn_backend_override is None
         ):
-            attn_backend = _Backend.FLASH_ATTN
+            attn_backend = AttentionBackendEnum.FLASH_ATTN
             use_upstream_fa = True
         else:
-            return _Backend.TORCH_SDPA, None
+            return AttentionBackendEnum.TORCH_SDPA, None
 
     elif current_platform.is_cuda():
-        if attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
+        if (
+            attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
         ):
-            attn_backend = _Backend.FLASH_ATTN
+            attn_backend = AttentionBackendEnum.FLASH_ATTN
             use_upstream_fa = True
     elif current_platform.is_xpu():
-        assert attn_backend == _Backend.FLASH_ATTN, (
+        assert attn_backend == AttentionBackendEnum.FLASH_ATTN, (
             "XPU platform only supports FLASH_ATTN as vision attention backend."
         )
         use_upstream_fa = False
     else:
-        return _Backend.TORCH_SDPA, None
+        return AttentionBackendEnum.TORCH_SDPA, None
 
-    if attn_backend in {_Backend.FLASH_ATTN, _Backend.ROCM_AITER_FA}:
-        if attn_backend == _Backend.ROCM_AITER_FA:
+    if attn_backend in {
+        AttentionBackendEnum.FLASH_ATTN,
+        AttentionBackendEnum.ROCM_AITER_FA,
+    }:
+        if attn_backend == AttentionBackendEnum.ROCM_AITER_FA:
             from aiter import flash_attn_varlen_func
         else:
             if use_upstream_fa:
@@ -309,7 +313,7 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_sharing_target_layer_name,
             **extra_impl_args,
         )
-        self.backend = backend_name_to_enum(self.attn_backend.get_name())
+        self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
         # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
@@ -530,13 +534,13 @@ class MultiHeadAttention(nn.Module):
             backend
             if backend
             in {
-                _Backend.TORCH_SDPA,
-                _Backend.XFORMERS,
-                _Backend.PALLAS,
-                _Backend.ROCM_AITER_FA,
-                _Backend.FLASH_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.XFORMERS,
+                AttentionBackendEnum.PALLAS,
+                AttentionBackendEnum.ROCM_AITER_FA,
+                AttentionBackendEnum.FLASH_ATTN,
             }
-            else _Backend.TORCH_SDPA
+            else AttentionBackendEnum.TORCH_SDPA
         )
 
         self.attn_backend, self._flash_attn_varlen_func = (
@@ -547,17 +551,23 @@ class MultiHeadAttention(nn.Module):
             )
         )
 
-        if self.attn_backend == _Backend.XFORMERS and not check_xformers_availability():
-            self.attn_backend = _Backend.TORCH_SDPA
+        if (
+            self.attn_backend == AttentionBackendEnum.XFORMERS
+            and not check_xformers_availability()
+        ):
+            self.attn_backend = AttentionBackendEnum.TORCH_SDPA
 
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
         # this condition is just to make sure that the
         # use_upstream_fa in the log is correct
-        if current_platform.is_rocm() and self.attn_backend == _Backend.FLASH_ATTN:
+        if (
+            current_platform.is_rocm()
+            and self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+        ):
             use_upstream_fa = True
 
         logger.info_once(
@@ -606,17 +616,17 @@ class MultiHeadAttention(nn.Module):
                 max_seqlen_k=kv_len,
                 softmax_scale=self.scale,
             )
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(
                 query, key, value, scale=self.scale
             )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             out = F.scaled_dot_product_attention(query, key, value, scale=self.scale)
             out = out.transpose(1, 2)
-        elif self.attn_backend == _Backend.PALLAS:
+        elif self.attn_backend == AttentionBackendEnum.PALLAS:
             query, key, value = (x.transpose(1, 2) for x in (query, key, value))
             from torch_xla.experimental.custom_kernel import flash_attention
 

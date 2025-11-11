@@ -15,16 +15,15 @@ from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.config import VllmConfig
     from vllm.config.cache import BlockSize
     from vllm.pooling_params import PoolingParams
 else:
     BlockSize = None
-    ModelConfig = None
     VllmConfig = None
     PoolingParams = None
-    _Backend = None
+    AttentionBackendEnum = None
 
 logger = init_logger(__name__)
 
@@ -54,7 +53,7 @@ class TpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
@@ -64,17 +63,17 @@ class TpuPlatform(Platform):
         has_sink,
         use_sparse,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on TPU.")
-        if selected_backend != _Backend.PALLAS:
+        if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
         if not use_v1:
             raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
-        return "vllm.v1.attention.backends.pallas.PallasAttentionBackend"
+        return AttentionBackendEnum.PALLAS.get_path()
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

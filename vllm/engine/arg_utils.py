@@ -34,7 +34,7 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
@@ -464,7 +464,7 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
-    mm_encoder_attn_backend: _Backend | str | None = (
+    mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
