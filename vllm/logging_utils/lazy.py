@@ -16,7 +16,5 @@ class lazy:
     def __str__(self) -> str:
         return str(self._factory())
 
-    def __repr__(self) -> str: 
+    def __repr__(self) -> str:
         return str(self)
-
-

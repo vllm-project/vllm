@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -357,7 +356,6 @@ class ModelConfig:
             "interleave_mm_strings",
             "skip_mm_profiling",
         }
-
 
         from vllm.config.utils import get_hash_factors, hash_factors
 

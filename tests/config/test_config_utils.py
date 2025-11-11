@@ -3,13 +3,13 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 import pytest
 
 from vllm.config.utils import get_hash_factors, hash_factors, normalize_value
 
 # Helpers
+
 
 def endswith_fqname(obj, suffix: str) -> bool:
     # normalize_value(type) returns fully-qualified name
@@ -30,7 +30,7 @@ def expected_path(p_str: str = ".") -> str:
 @dataclass
 class SimpleConfig:
     a: object
-    b: Optional[object] = None
+    b: object | None = None
 
 
 class DummyLogprobsMode(Enum):

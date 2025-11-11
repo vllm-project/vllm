@@ -182,6 +182,7 @@ def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
         processed_overrides[field_name] = value
     return replace(config, **processed_overrides)
 
+
 def normalize_value(x):
     """Return a stable, JSON-serializable canonical form for hashing.
     Order: primitives, special types (Enum, callable, torch.dtype, Path), then
