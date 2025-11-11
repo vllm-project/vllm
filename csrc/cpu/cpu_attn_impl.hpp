@@ -10,7 +10,7 @@
 #include "cpu_attn_macros.h"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC };
+enum class ISA { AMX, VEC, VEC16 };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};

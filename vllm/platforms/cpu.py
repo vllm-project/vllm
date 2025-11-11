@@ -188,10 +188,10 @@ class CpuPlatform(Platform):
             cache_config.block_size = 128
 
         if cache_config.block_size % 32 != 0:
-            block_size = cache_config.block_size
-            block_size = ((block_size + 31) // 32) * 32  # type: ignore
-            cache_config.block_size = block_size
-            logger.warning("CPU backend requires block_size is divisible by 32")
+            logger.warning(
+                "CPU backend prefers block_size is multiples of 32, "
+                "otherwise the performance is not optimized."
+            )
 
         scheduler_config = vllm_config.scheduler_config
         if (

@@ -125,7 +125,8 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.window_size = getattr(kv_cache_spec, "sliding_window", -1)
         if self.window_size is None:
             self.window_size = -1
-        self.isa = _get_attn_isa(self.dtype)
+        self.block_size = vllm_config.cache_config.block_size
+        self.isa = _get_attn_isa(self.dtype, self.block_size)
 
     def build(
         self,
@@ -474,11 +475,11 @@ def _make_sliding_window_bias(
     return attn_biases
 
 
-def _get_attn_isa(
-    dtype: torch.dtype,
-) -> str:
+def _get_attn_isa(dtype: torch.dtype, block_size: int) -> str:
     supports_amx = torch._C._cpu._is_amx_tile_supported()
-    if supports_amx and dtype in (torch.bfloat16,):
+    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
-    else:
+    elif block_size % 32 == 0:
         return "vec"
+    else:
+        return "vec16"

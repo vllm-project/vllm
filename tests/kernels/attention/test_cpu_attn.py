@@ -24,7 +24,7 @@ NUM_HEADS = [
     (9, 3),
 ]
 HEAD_SIZES = [96, 128]
-BLOCK_SIZES = [96, 128]
+BLOCK_SIZES = [48, 96, 128]
 QTYPES = [torch.bfloat16, torch.half, torch.float32]
 SLIDING_WINDOWS = [None, 256]
 SOFT_CAPS = [None, 50]
@@ -39,7 +39,11 @@ SEQ_LENS = [  # (q_len, kv_len)
     [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed batch
 ]
 
-ISA = ["amx", "vec"] if torch._C._cpu._is_amx_tile_supported() else ["vec"]
+ISA = (
+    ["amx", "vec", "vec16"]
+    if torch._C._cpu._is_amx_tile_supported()
+    else ["vec", "vec16"]
+)
 
 
 # rand number generation takes too much time, cache rand tensors
@@ -66,21 +70,27 @@ def filter_tests(
     use_sink: bool,
     isa: str,
 ) -> None:
-    skip = False
-
     # unrealistic cases
     if (
         (use_alibi and use_sink)
         or (use_alibi and soft_cap is not None)
         or (use_sink and soft_cap is not None)
     ):
-        skip = True
+        pytest.skip()
+
+    # only test bs=16 with vec16 impl
+    if block_size == 48 and isa != "vec16":
+        pytest.skip()
+
+    # only test vec16 impl with bs=16
+    if block_size != 48 and isa == "vec16":
+        pytest.skip()
 
     # only tests features with bf16 to save time
     if dtype != torch.bfloat16 and (
         sliding_window is not None or use_alibi or use_sink or soft_cap is not None
     ):
-        skip = True
+        pytest.skip()
 
     # only tests features with limited settings to save time
     if (
@@ -88,13 +98,10 @@ def filter_tests(
         or block_size != 96
         or seq_lens != [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)]
     ) and (use_alibi or use_sink or soft_cap is not None):
-        skip = True
+        pytest.skip()
 
     # AMX only supports BF16 for now
     if dtype != torch.bfloat16 and isa == "amx":
-        skip = True
-
-    if skip:
         pytest.skip()
 
 

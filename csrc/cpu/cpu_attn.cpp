@@ -1,4 +1,5 @@
 #include "cpu_attn_vec.hpp"
+#include "cpu_attn_vec16.hpp"
 
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu_attn_amx.hpp"
@@ -36,20 +37,26 @@
     }                                                           \
   }()
 
-#define CPU_ATTN_DISPATCH_IMPL(ISA_TYPE, ...)                               \
-  [&] {                                                                     \
-    switch (ISA_TYPE) {                                                     \
-      AMX_DISPATCH(__VA_ARGS__)                                             \
-      case cpu_attention::ISA::VEC: {                                       \
-        using attn_impl =                                                   \
-            cpu_attention::AttentionImpl<cpu_attention::ISA::VEC, scalar_t, \
-                                         head_dim>;                         \
-        return __VA_ARGS__();                                               \
-      }                                                                     \
-      default: {                                                            \
-        TORCH_CHECK(false, "Invalid CPU attention ISA type.");              \
-      }                                                                     \
-    }                                                                       \
+#define CPU_ATTN_DISPATCH_IMPL(ISA_TYPE, ...)                                 \
+  [&] {                                                                       \
+    switch (ISA_TYPE) {                                                       \
+      AMX_DISPATCH(__VA_ARGS__)                                               \
+      case cpu_attention::ISA::VEC: {                                         \
+        using attn_impl =                                                     \
+            cpu_attention::AttentionImpl<cpu_attention::ISA::VEC, scalar_t,   \
+                                         head_dim>;                           \
+        return __VA_ARGS__();                                                 \
+      }                                                                       \
+      case cpu_attention::ISA::VEC16: {                                       \
+        using attn_impl =                                                     \
+            cpu_attention::AttentionImpl<cpu_attention::ISA::VEC16, scalar_t, \
+                                         head_dim>;                           \
+        return __VA_ARGS__();                                                 \
+      }                                                                       \
+      default: {                                                              \
+        TORCH_CHECK(false, "Invalid CPU attention ISA type.");                \
+      }                                                                       \
+    }                                                                         \
   }()
 
 torch::Tensor get_scheduler_metadata(
@@ -64,6 +71,8 @@ torch::Tensor get_scheduler_metadata(
     isa = cpu_attention::ISA::AMX;
   } else if (isa_hint == "vec") {
     isa = cpu_attention::ISA::VEC;
+  } else if (isa_hint == "vec16") {
+    isa = cpu_attention::ISA::VEC16;
   } else {
     TORCH_CHECK(false, "Unsupported CPU attention ISA hint: " + isa_hint);
   }
@@ -147,6 +156,8 @@ void cpu_attn_reshape_and_cache(
       return cpu_attention::ISA::AMX;
     } else if (isa == "vec") {
       return cpu_attention::ISA::VEC;
+    } else if (isa == "vec16") {
+      return cpu_attention::ISA::VEC16;
     } else {
       TORCH_CHECK(false, "Invalid ISA type: " + isa);
     }
