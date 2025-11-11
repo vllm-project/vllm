@@ -44,6 +44,10 @@ def empty_i32(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.int32, device="cuda")
 
 
+def empty_i64(*args, **kwargs):
+    return torch.empty(*args, **kwargs, dtype=torch.int64, device="cuda")
+
+
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 

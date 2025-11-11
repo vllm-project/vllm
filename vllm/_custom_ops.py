@@ -329,6 +329,7 @@ def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    # If removed, also need to remove contiguous in MatcherRMSNorm
     input_contiguous = input.contiguous()
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
@@ -337,6 +338,34 @@ def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def fused_qk_norm_rope(
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    position_ids: torch.Tensor,
+) -> None:
+    torch.ops._C.fused_qk_norm_rope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        is_neox,
+        position_ids,
+    )
 
 
 def apply_repetition_penalties_torch(
