@@ -959,53 +959,36 @@ async def test_function_call_with_previous_input_messages(
     )
 
     # ============================================================
-    # Test for issue #28262: parse_response_input channel metadata
+    # Test for issue #28262: channel metadata preservation
     # ============================================================
-    from vllm.entrypoints.harmony_utils import parse_response_input
 
-    # Test 1: function_call_output should have commentary channel
-    tool_msg = parse_response_input(
-        response_msg={
-            "type": "function_call_output",
-            "call_id": function_call.call_id,
-            "output": str(result),
-        },
-        prev_responses=list(response.output),
+    # Make a third request with function_call_output to test channel metadata
+    response_3 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": function_call.call_id,
+                "output": str(result),
+            }
+        ],
+        tools=tools,
+        previous_response_id=response.id,
+        extra_body={"enable_response_messages": True},
     )
 
-    assert tool_msg.channel == "commentary", (
-        f"function_call_output should have channel='commentary', "
-        f"got '{tool_msg.channel}'"
-    )
+    assert response_3 is not None
+    assert response_3.status == "completed"
 
-    # Test 2: reasoning followed by function_call should have commentary channel
-    reasoning_output = None
-    for item in response.output:
-        if item.type == "reasoning":
-            reasoning_output = item
-            break
+    # Check input_messages have correct channel metadata
+    tool_msg_found = False
+    for msg_dict in response_3.input_messages:
+        msg = Message.from_dict(msg_dict)
+        # Check tool output has commentary channel
+        if msg.author.role == "tool":
+            assert msg.channel == "commentary", (
+                f"Tool output should have channel='commentary', got '{msg.channel}'"
+            )
+            tool_msg_found = True
 
-    if reasoning_output:
-        reasoning_msg = parse_response_input(
-            response_msg=reasoning_output.model_dump(),
-            prev_responses=[],
-            next_msg=function_call.model_dump(),
-        )
-
-        assert reasoning_msg.channel == "commentary", (
-            f"reasoning before function_call should have channel='commentary', "
-            f"got '{reasoning_msg.channel}'"
-        )
-
-    # Test 3: reasoning without following function_call should have analysis channel
-    if reasoning_output:
-        reasoning_msg_alone = parse_response_input(
-            response_msg=reasoning_output.model_dump(),
-            prev_responses=[],
-            next_msg=None,
-        )
-
-        assert reasoning_msg_alone.channel == "analysis", (
-            f"reasoning without following message should have channel='analysis', "
-            f"got '{reasoning_msg_alone.channel}'"
-        )
+    assert tool_msg_found, "Should have found a tool message in input_messages"

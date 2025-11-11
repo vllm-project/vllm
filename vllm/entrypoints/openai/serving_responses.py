@@ -1019,16 +1019,13 @@ class OpenAIServingResponses(OpenAIServing):
                 prev_outputs = copy(prev_response.output)
             else:
                 prev_outputs = []
-            for i, response_msg in enumerate(request.input):
-                # Pass next message to help determine channel for reasoning
-                next_msg = request.input[i + 1] if i + 1 < len(request.input) else None
-                messages.append(
-                    parse_response_input(response_msg, prev_outputs, next_msg)
-                )
+            for i in range(len(request.input)):
+                messages.append(parse_response_input(request.input, i, prev_outputs))
                 # User passes in a tool call request and its output. We need
                 # to add the tool call request to prev_outputs so that the
                 # parse_response_input can find the tool call request when
                 # parsing the tool call output.
+                response_msg = request.input[i]
                 if isinstance(response_msg, ResponseFunctionToolCall):
                     prev_outputs.append(response_msg)
         return messages

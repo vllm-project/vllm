@@ -182,12 +182,19 @@ def get_user_message(content: str) -> Message:
 
 
 def parse_response_input(
-    response_msg: ResponseInputOutputItem,
+    input_items: list[ResponseInputOutputItem],
+    current_index: int,
     prev_responses: list[ResponseOutputItem | ResponseReasoningItem],
-    next_msg: ResponseInputOutputItem | None = None,
 ) -> Message:
+    response_msg = input_items[current_index]
+    next_msg = (
+        input_items[current_index + 1] if current_index + 1 < len(input_items) else None
+    )
+
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
+    if next_msg is not None and not isinstance(next_msg, dict):
+        next_msg = next_msg.model_dump()
     if "type" not in response_msg or response_msg["type"] == "message":
         role = response_msg["role"]
         content = response_msg["content"]
@@ -223,6 +230,9 @@ def parse_response_input(
             response_msg["output"],
         )
         msg = msg.with_channel("commentary")
+        # Function outputs typically return plain text, not JSON
+        # But setting content_type for consistency with function tools
+        msg = msg.with_content_type("json")
     elif response_msg["type"] == "reasoning":
         content = response_msg["content"]
         assert len(content) == 1
@@ -231,12 +241,8 @@ def parse_response_input(
         # - If followed by function_call, use commentary channel
         # - Otherwise, use analysis channel (default)
         channel = "analysis"
-        if next_msg is not None:
-            next_msg_dict = (
-                next_msg if isinstance(next_msg, dict) else next_msg.model_dump()
-            )
-            if next_msg_dict.get("type") == "function_call":
-                channel = "commentary"
+        if next_msg is not None and next_msg.get("type") == "function_call":
+            channel = "commentary"
         msg = msg.with_channel(channel)
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
