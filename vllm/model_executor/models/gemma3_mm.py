@@ -596,7 +596,7 @@ class Gemma3ForConditionalGeneration(
     def _process_image_input(
         self,
         image_input: Gemma3ImageInputs,
-    ) -> list[torch.Tensor]:
+    ) -> torch.Tensor | list[torch.Tensor]:
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"]
         assert self.vision_tower is not None
