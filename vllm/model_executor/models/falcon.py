@@ -23,7 +23,7 @@
 import math
 from collections.abc import Iterable
 from itertools import islice
-from typing import Optional, Union
+from typing import TypeAlias
 
 import torch
 from torch import nn
@@ -65,7 +65,7 @@ from .utils import (
     maybe_prefix,
 )
 
-FalconConfig = Union[HF_FalconConfig, RWConfig]
+FalconConfig: TypeAlias = HF_FalconConfig | RWConfig
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -95,8 +95,8 @@ class FalconAttention(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -137,6 +137,7 @@ class FalconAttention(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.query_key_value",
         )
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
@@ -153,6 +154,7 @@ class FalconAttention(nn.Module):
             skip_bias_add=True,
             quant_config=quant_config,
             reduce_results=self.reduce_row_parallel_results,
+            prefix=f"{prefix}.dense",
         )
 
         self.use_rotary = config.rotary
@@ -226,7 +228,8 @@ class FalconMLP(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        quant_config: Optional[QuantizationConfig] = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -237,6 +240,7 @@ class FalconMLP(nn.Module):
             bias=config.bias,
             skip_bias_add=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_h_to_4h",
         )
         self.act = get_act_fn("gelu")
         self.reduce_row_parallel_results = not (
@@ -249,6 +253,7 @@ class FalconMLP(nn.Module):
             skip_bias_add=True,
             reduce_results=self.reduce_row_parallel_results,
             quant_config=quant_config,
+            prefix=f"{prefix}.dense_4h_to_h",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -265,8 +270,8 @@ class FalconDecoderLayer(nn.Module):
     def __init__(
         self,
         config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -275,7 +280,7 @@ class FalconDecoderLayer(nn.Module):
         self.self_attention = FalconAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.self_attention"
         )
-        self.mlp = FalconMLP(config, quant_config)
+        self.mlp = FalconMLP(config, quant_config, prefix=f"{prefix}.mlp")
         self.config = config
 
         if not hasattr(config, "num_ln_in_parallel_attn"):
@@ -401,9 +406,9 @@ class FalconModel(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -517,8 +522,8 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         self,
         input_ids: torch.LongTensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
         hidden_states = self.transformer(
             input_ids, positions, intermediate_tensors, inputs_embeds
@@ -528,7 +533,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 

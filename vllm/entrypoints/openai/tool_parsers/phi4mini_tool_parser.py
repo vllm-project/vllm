@@ -3,7 +3,7 @@
 
 import json
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any
 
 import regex as re
 from transformers import PreTrainedTokenizerBase
@@ -18,14 +18,12 @@ from vllm.entrypoints.openai.protocol import (
 )
 from vllm.entrypoints.openai.tool_parsers.abstract_tool_parser import (
     ToolParser,
-    ToolParserManager,
 )
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-@ToolParserManager.register_module("phi4_mini_json")
 class Phi4MiniJsonToolParser(ToolParser):
     """
     Tool call parser for phi-4-mini models intended for use with the
@@ -118,5 +116,5 @@ class Phi4MiniJsonToolParser(ToolParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
-    ) -> Optional[DeltaMessage]:
+    ) -> DeltaMessage | None:
         return None

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import Optional
 
 import torch
 
@@ -28,20 +27,25 @@ class FlashinferMoeBackend(Enum):
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
+    from flashinfer import next_positive_power_of_2
+
     # FlashInfer 0.2.10 has issues with larger tile sizes. Set to 8 for now.
     # TODO: Revert this to dynamic calculation once a new version of FlashInfer
     # with the necessary kernels is released.
     tile_tokens_dim = 8
 
-    # from flashinfer import next_positive_power_of_2
-
-    # # Guess tokens per expert assuming perfect expert distribution first.
-    # num_tokens_per_expert = (num_tokens * top_k) // num_experts
-    # # And pad the number to the next power of 2.
-    # tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
-    # # Cap to 8-64 tokens per CTA tile as it's the range supported by the
-    # # kernel.
-    # tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
+    # A factor considering tokens are not perfectly balanced among experts.
+    imbalance_factor = 1.3
+    # Calculate the number of tokens per expert
+    # assuming perfect distribution.
+    num_tokens_per_expert = (num_tokens * top_k) // num_experts
+    # Apply the imbalance factor.
+    num_tokens_per_expert = int(num_tokens_per_expert * imbalance_factor)
+    # And pad the number to the next power of 2.
+    tile_tokens_dim = next_positive_power_of_2(num_tokens_per_expert)
+    # Cap to 8-max_tile_tokens_dim tokens per CTA tile
+    # as it's the range supported by the kernel.
+    tile_tokens_dim = min(max(tile_tokens_dim, 8), 64)
 
     return tile_tokens_dim
 
@@ -101,10 +105,10 @@ def apply_flashinfer_per_tensor_scale_fp8(
     layer: torch.nn.Module,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
-    routing_bias: Optional[torch.Tensor],
+    routing_bias: torch.Tensor | None,
     top_k: int,
-    num_expert_group: Optional[int],
-    topk_group: Optional[int],
+    num_expert_group: int | None,
+    topk_group: int | None,
     global_num_experts: int,
     apply_router_weight_on_input: bool,
 ) -> torch.Tensor:
@@ -186,7 +190,7 @@ def register_moe_scaling_factors(layer: torch.nn.Module) -> None:
 
 
 def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
-    moe: Optional[FusedMoEConfig],
+    moe: FusedMoEConfig | None,
 ) -> mk.FusedMoEPrepareAndFinalize:
     """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
     use_dp = moe.moe_parallel_config.dp_size > 1 if moe is not None else False
@@ -194,9 +198,9 @@ def build_flashinfer_fp8_cutlass_moe_prepare_finalize(
 
 
 def select_cutlass_fp8_gemm_impl(
-    moe: Optional[FusedMoEConfig],
+    moe: FusedMoEConfig | None,
     quant_config: FusedMoEQuantConfig,
-    out_dtype: Optional[torch.dtype] = None,
+    out_dtype: torch.dtype | None = None,
 ) -> mk.FusedMoEPermuteExpertsUnpermute:
     """Return a GEMM *experts* implementation for fused-MoE layers"""
 
@@ -225,7 +229,7 @@ def flashinfer_cutlass_moe_fp8(
     inplace: bool = False,
     activation: str = "silu",
     global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
+    expert_map: torch.Tensor | None = None,
     apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
     quant_config = layer.quant_method.get_fused_moe_quant_config(layer)
@@ -264,3 +268,9 @@ def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
         f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
         f" expected one of {allowed_backends}"
     )
+
+
+def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
+    # TODO(shuw@nvidia): Update when new backends are added.
+    backends_supporting_global_sf = (FlashinferMoeBackend.CUTLASS,)
+    return backend in backends_supporting_global_sf

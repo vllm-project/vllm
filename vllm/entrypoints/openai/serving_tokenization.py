@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any, Final, Optional, Union
+from typing import Any, Final
 
 import jinja2
 from fastapi import Request
@@ -33,8 +33,8 @@ class OpenAIServingTokenization(OpenAIServing):
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
         trust_request_chat_template: bool = False,
         log_error_stack: bool = False,
@@ -54,7 +54,7 @@ class OpenAIServingTokenization(OpenAIServing):
         self,
         request: TokenizeRequest,
         raw_request: Request,
-    ) -> Union[TokenizeResponse, ErrorResponse]:
+    ) -> TokenizeResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -129,7 +129,7 @@ class OpenAIServingTokenization(OpenAIServing):
         self,
         request: DetokenizeRequest,
         raw_request: Request,
-    ) -> Union[DetokenizeResponse, ErrorResponse]:
+    ) -> DetokenizeResponse | ErrorResponse:
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -155,7 +155,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
     async def get_tokenizer_info(
         self,
-    ) -> Union[TokenizerInfoResponse, ErrorResponse]:
+    ) -> TokenizerInfoResponse | ErrorResponse:
         """Get comprehensive tokenizer information."""
         try:
             tokenizer = await self.engine_client.get_tokenizer()
@@ -171,7 +171,7 @@ class OpenAIServingTokenization(OpenAIServing):
 @dataclass
 class TokenizerInfo:
     tokenizer: AnyTokenizer
-    chat_template: Optional[str]
+    chat_template: str | None
 
     def to_dict(self) -> dict[str, Any]:
         """Return the tokenizer configuration."""

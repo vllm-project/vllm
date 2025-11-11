@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from typing import Optional
 
 import torch
 
 from vllm.platforms import current_platform
 
-from .base import RotaryEmbedding
+from .base import RotaryEmbeddingBase
 from .common import (
     rotate_gptj,
     rotate_neox,
@@ -23,7 +22,7 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     return 0.1 * mscale * math.log(scale) + 1.0
 
 
-class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
+class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     """RotaryEmbedding extended with YaRN method.
 
     Credits to Peng et al. github.com/jquesnelle/yarn
@@ -110,9 +109,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
         self._match_cos_sin_cache_dtype(query)
@@ -147,11 +146,20 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbedding):
             key = key_rot
         return query, key
 
+    def forward_hip(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_native(positions, query, key, offsets)
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
         query: torch.Tensor,
-        key: Optional[torch.Tensor] = None,
-        offsets: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         return self.forward_native(positions, query, key, offsets)

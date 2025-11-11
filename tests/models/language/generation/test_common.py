@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
 
 import pytest
 import torch
@@ -138,7 +137,7 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-        prompt_embeds: Optional[list[torch.Tensor]] = [] if use_prompt_embeds else None
+        prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None
 
         prompt_token_ids = []
         for prompt in example_prompts:

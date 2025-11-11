@@ -540,6 +540,11 @@ def get_gaudi_sw_version():
 
 
 def get_vllm_version() -> str:
+    # Allow overriding the version. This is useful to build platform-specific
+    # wheels (e.g. CPU, TPU) without modifying the source.
+    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
+        return env_version
+
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
 
@@ -704,10 +709,10 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "bench": ["pandas", "datasets"],
+        "bench": ["pandas", "matplotlib", "seaborn", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.14.0"],
+        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.0"],
         "audio": [
             "librosa",
             "soundfile",
