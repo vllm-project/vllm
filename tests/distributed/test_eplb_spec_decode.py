@@ -14,7 +14,6 @@ def get_model_args(
     spec_method: str,
     tp_size: int,
     model_max_len: int,
-    use_async: bool = False,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
@@ -38,23 +37,49 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
-    if use_async:
-        model_args["eplb_config"] = {"use_async": True}
     return model_args
 
 
-def _run_mtp_spec_decode_test(use_async: bool) -> None:
+@pytest.mark.parametrize(
+    "model_setup",
+    [
+        pytest.param(
+            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            marks=large_gpu_mark(min_gb=80),
+        ),
+        pytest.param(
+            (
+                "eagle",
+                "meta-llama/Llama-4-Scout-17B-16E-Instruct",
+                "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
+                4,
+                0.92,
+            ),
+            marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
+        ),
+    ],
+    ids=["qwen3_next_mtp", "llama4_eagle"],
+)
+def test_eplb_spec_decode(
+    monkeypatch: pytest.MonkeyPatch,
+    model_setup: tuple[str, str, str, int, float],
+):
+    """
+    Test the correctness of EPLB speculative decoding with GSM8K dataset.
+    Applicable to MoE models with mtp or eagle spec decode.
+    """
+    method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
+
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
     RTOL = 0.03
 
     model_args = get_model_args(
-        model_name="Qwen/Qwen3-Next-80B-A3B-Instruct",
-        spec_model_name=None,
-        spec_method="mtp",
-        tp_size=4,
+        model_name=model_name,
+        spec_model_name=spec_model_name,
+        spec_method=method,
+        tp_size=tp_size,
         model_max_len=4096,
-        use_async=use_async,
     )
 
     results = lm_eval.simple_evaluate(
@@ -65,22 +90,7 @@ def _run_mtp_spec_decode_test(use_async: bool) -> None:
         num_fewshot=8,
     )
     measured_value = results["results"][TASK][FILTER]
-    expected_gsm8k_value = 0.86
     assert (
         measured_value - RTOL < expected_gsm8k_value
         and measured_value + RTOL > expected_gsm8k_value
     ), f"Expected: {expected_gsm8k_value} |  Measured: {measured_value}"
-
-
-@large_gpu_mark(min_gb=80)
-def test_eplb_spec_decode_mtp_sync() -> None:
-    """Baseline EPLB + MTP run without async load balancing."""
-
-    _run_mtp_spec_decode_test(use_async=False)
-
-
-@large_gpu_mark(min_gb=80)
-def test_eplb_spec_decode_mtp_async() -> None:
-    """Same scenario as above but with async EPLB enabled."""
-
-    _run_mtp_spec_decode_test(use_async=True)
