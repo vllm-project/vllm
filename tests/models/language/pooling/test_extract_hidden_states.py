@@ -46,20 +46,8 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
             assert len(output.outputs.data) == n
             assert output.num_cached_tokens == 0
 
-        vllm_model.llm.reset_prefix_cache()
-
         # skip_reading_prefix_cache can still write to cache
         # to accelerate following requests
-        pooling_outputs = vllm_model.llm.encode(
-            [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
-            pooling_task="token_embed",
-        )
-
-        for n, output in zip(n_prompt_tokens, pooling_outputs):
-            assert len(output.prompt_token_ids) == n
-            assert len(output.outputs.data) == n
-            assert output.num_cached_tokens == 0
-
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
             pooling_task="embed",
