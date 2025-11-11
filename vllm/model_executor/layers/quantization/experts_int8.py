@@ -157,6 +157,7 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
+        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
@@ -178,7 +179,9 @@ class ExpertsInt8MoEMethod(FusedMoEMethodBase):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
-        )
+            num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_fused_moe_router=enable_fused_moe_router,
+            )
 
         return fused_experts(
             x,

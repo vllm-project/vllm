@@ -1156,6 +1156,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
+        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             assert expert_load_view is not None
@@ -1237,6 +1238,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
             num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_fused_moe_router=enable_fused_moe_router,
         )
 
         topk_weights, topk_ids, zero_expert_result = select_result

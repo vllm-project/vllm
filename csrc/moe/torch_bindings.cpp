@@ -48,6 +48,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "                     Tensor !adapter_enabled,"
       "                     Tensor !lora_ids) -> () ");
   m.impl("moe_lora_align_block_size", torch::kCUDA, &moe_lora_align_block_size);
+  m.def(
+      "moe_fused_gate(Tensor input, Tensor bias, int num_expert_group, int "
+      "topk_group, int topk, int "
+      "num_fused_shared_experts, float routed_scaling_factor, "
+      "bool apply_routed_scaling_factor_on_output) -> "
+      "(Tensor[])");
+  m.impl("moe_fused_gate", torch::kCUDA, &moe_fused_gate);
 
 #ifndef USE_ROCM
   m.def(

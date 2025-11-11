@@ -231,6 +231,9 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_FLAT_LOGPROBS: bool = False
+    VLLM_USE_CUDA_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_USE_FUSED_MOE_ROUTER: bool = False
 
 
 def get_default_cache_root():
@@ -1522,6 +1525,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    # Flag to enable FlatLogprobs whose GC overhead is significantly smaller than
+    # the original list[dict[int, Logprob]] approach.
+    # After enabled, PromptLogprobs and SampleLogprobs would populated as
+    # FlatLogprobs.
+    "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
+    # Enable the fusion of the shared experts of the model with other experts.
+    "VLLM_USE_CUDA_FUSION_SHARED_EXPERTS":
+    lambda: bool(int(os.getenv("VLLM_USE_CUDA_FUSION_SHARED_EXPERTS", "0"))),
+
+    # Use the fused grouped top-k MoE expert selection router
+    "VLLM_USE_FUSED_MOE_ROUTER":
+    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_ROUTER", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
