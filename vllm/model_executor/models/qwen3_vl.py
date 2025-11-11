@@ -491,8 +491,8 @@ class Qwen3_VisionTransformer(nn.Module):
             weights = weights.to(dtype=self.dtype)
 
             embeds = self.pos_embed(indices)
-            weighted_embeds = embeds * weights
-            combined = weighted_embeds.sum(dim=0)
+            embeds *= weights
+            combined = embeds.sum(dim=0)
 
             combined = combined.reshape(
                 h // m_size, m_size, w // m_size, m_size, hidden_dim
