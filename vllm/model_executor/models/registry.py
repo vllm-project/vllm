@@ -136,6 +136,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
+    "MotifForCausalLM": ("motif", "MotifForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
@@ -477,7 +478,6 @@ _VLLM_MODELS = {
 _SUBPROCESS_COMMAND = [sys.executable, "-m", "vllm.model_executor.models.registry"]
 
 _PREVIOUSLY_SUPPORTED_MODELS = {
-    "MotifForCausalLM": "0.10.2",
     "Phi3SmallForCausalLM": "0.9.2",
     "Phi4FlashForCausalLM": "0.10.2",
     # encoder-decoder models except whisper

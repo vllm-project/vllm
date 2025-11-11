@@ -345,6 +345,7 @@ class CudaPlatformBase(Platform):
         FLASH_ATTN_V1 = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"  # noqa: E501
         TREE_ATTN_V1 = "vllm.v1.attention.backends.tree_attn.TreeAttentionBackend"  # noqa: E501
         XFORMERS_V1 = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"  # noqa: E501
+        GROUPED_DIFF_ATTN_V1 = "vllm.v1.attention.backends.grouped_diff_attn.GroupedDifferentialAttentionBackend"  # noqa: E501
 
         use_fp8_kv_cache = kv_cache_dtype is not None and kv_cache_dtype.startswith(
             "fp8"
@@ -357,6 +358,9 @@ class CudaPlatformBase(Platform):
 
                 set_kv_cache_layout("HND")
             return FLASHINFER_V1
+        elif selected_backend == _Backend.GROUPED_DIFF_ATTN:
+            logger.info_once("Using GroupedDifferentialAttention backend on V1 engine.")
+            return GROUPED_DIFF_ATTN_V1
         elif selected_backend == _Backend.FLEX_ATTENTION:
             logger.info_once("Using FlexAttention backend.")
             return FLEX_ATTENTION_V1

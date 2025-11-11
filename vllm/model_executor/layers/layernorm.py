@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
@@ -319,6 +320,72 @@ class GemmaRMSNorm(CustomOp):
             )
             self._is_compiled = True
         return self.forward_native(x, residual)
+
+
+@CustomOp.register("poly_norm")
+class PolyNorm(CustomOp):
+    """Polynomial normalization.
+
+    Computes x -> w_0 * RMSNorm(x^3) + w_1 * RMSNorm(x^2) + w_2 * RMSNorm(x) + b
+    where w_n is the learned weight and b is the bias.
+    Refer to https://arxiv.org/html/2411.03884v1
+    """
+
+    def __init__(
+        self,
+        tp_size: float = 1,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.tp_size = tp_size
+        self.weight = torch.nn.Parameter(torch.ones(3) / 3)
+        self.bias = torch.nn.Parameter(torch.zeros(1))
+        self.variance_epsilon = eps
+
+    def _norm(self, x, mean):
+        return x / torch.sqrt(mean + self.variance_epsilon)
+
+    def forward_native(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward().
+
+        Refer to https://github.com/BryceZhuo/PolyCom?tab=readme-ov-file/README.md
+        """
+
+        orig_dtype = x.dtype
+        x_float = x.to(torch.float32)
+        x_2 = x_float.pow(2)
+        x_2_sum = x_2.sum(-1, keepdim=True)
+        x_3 = x_2 * x_float
+        x_4_sum = (x_2 * x_2).sum(-1, keepdim=True)
+        x_6_sum = (x_3 * x_3).sum(-1, keepdim=True)
+        H = x.shape[-1]
+        if self.tp_size > 1:
+            reducee = torch.cat([x_2_sum, x_4_sum, x_6_sum], dim=-1)
+            reducee = tensor_model_parallel_all_reduce(reducee)
+            x_2_sum, x_4_sum, x_6_sum = torch.split(reducee, 1, dim=-1)
+            H *= self.tp_size
+        x_2_mean = x_2_sum / H
+        x_4_mean = x_4_sum / H
+        x_6_mean = x_6_sum / H
+        output = (
+            self.weight[0] * self._norm(x_3, x_6_mean)
+            + self.weight[1] * self._norm(x_2, x_4_mean)
+            + self.weight[2] * self._norm(x_float, x_2_mean)
+            + self.bias
+        )
+        return output.to(orig_dtype)
+
+    def forward_cuda(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.tp_size > 1:
+            return self.forward_native(x)
+        else:
+            return poly_norm(x, self.weight, self.bias, self.variance_epsilon)
 
 
 @CustomOp.register("rms_norm_gated")
