@@ -6,7 +6,6 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 
 ## Files
 
-
 - `disagg_epd_proxy.py` - Proxy script that demonstrates the XeYpZd setup (X encode instances, Y prefill instances, Z decode instances). Currently stable for the 1e1p1d configuration.
 
 - `disagg_1e1p1d_example.sh` - Sets up the 1e1p1d configuration, runs the VisionArena benchmark, and processes a single request with a local image.
@@ -14,6 +13,7 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 - `disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
 ### Custom Configuration
+
 ```bash
 # Use specific GPUs
 GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash disagg_1e1p1d_example.sh
@@ -30,9 +30,7 @@ EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash disagg_1e1p1d_example.sh
 
 ## Encoder Instances
 
-
 Encoder engines should be launched with the following flags:
-
 
 - `--enforce-eager` **(required)** – The current EPD implementation is only compatible with encoder instances running in this mode.
 
@@ -40,16 +38,15 @@ Encoder engines should be launched with the following flags:
 
 - `--max-num-batched-tokens=<large value>` **(default: 2048)** – This flag controls the token scheduling budget per decoding step and is irrelevant to encoder-only instances. **Set it to a very high value (effectively unlimited) to bypass scheduler limitations.** The actual token budget is managed by the encoder cache manager.
 
-
 ## Local media inputs
 
 To support local image inputs (from your ```MEDIA_PATH``` directory), add the following flag to the encoder instance:
+
 ```bash
 --allowed-local-media-path $MEDIA_PATH
 ```
 
-The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url": "file://'"$MEDIA_PATH_FILENAME"'}``` as multimodal inputs. Each URI is passed unchanged from the `disagg_encoder_proxy` to the encoder instance so that the encoder can load the media locally. 
-
+The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url": "file://'"$MEDIA_PATH_FILENAME"'}``` as multimodal inputs. Each URI is passed unchanged from the `disagg_encoder_proxy` to the encoder instance so that the encoder can load the media locally.
 
 ## EC connector and KV transfer
 
@@ -77,7 +74,6 @@ The `ECSharedStorageConnector` is used to store the encoder cache on local disk 
 
 `$EC_SHARED_STORAGE_PATH` is the path where the EC connector temporarily stores the cache.
 
-
 If you enable prefill instance (`--prefill-servers-urls` not disabled), you will need --kv-transfer-config to facilitate the PD disaggregation. Currently, we use the `NixlConnector` for this purpose. Refer to `tests/v1/kv_connector/nixl_integration` for more example codes on PD disaggregation with Nixl.
 
 ```bash
@@ -96,7 +92,6 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 
 ## Proxy Instance Flags (`disagg_epd_proxy.py`)
 
-
 | Flag | Description |
 |------|-------------|
 | `--encode-servers-urls` | Comma-separated list of encoder endpoints. Every multimodal item extracted from the request is fanned out to one of these URLs in a round-robin fashion. |
@@ -106,7 +101,8 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 
 Example usage:
 For E + PD setup:
-```
+
+```bash
 $ python disagg_encoder_proxy.py \
       --encode-servers-urls "http://e1:8001,http://e2:8002" \
       --prefill-servers-urls "disable" \
@@ -114,7 +110,8 @@ $ python disagg_encoder_proxy.py \
 ```
 
 For E + P + D setup:
-```
+
+```bash
 $ python disagg_encoder_proxy.py \
       --encode-servers-urls "http://e1:8001,http://e2:8001" \
       --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
