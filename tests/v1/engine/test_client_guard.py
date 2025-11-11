@@ -183,7 +183,7 @@ def test_shutdown_guard():
 @pytest.mark.asyncio
 async def test_handle_fault_async():
     engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
-    engine_status_dict = create_test_thread_safe_dict({1: "Unhealthy"})
+    engine_status_dict = create_test_thread_safe_dict({0: "Unhealthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
     time.sleep(0.1)
@@ -208,7 +208,7 @@ async def test_handle_fault_async():
         nonlocal uuid
         while uuid is None:
             time.sleep(0.1)
-        execute_result = {"engine_index": 1, "success": True, "method_uuid": uuid}
+        execute_result = {"engine_index": 0, "success": True, "method_uuid": uuid}
         cmd_socket.send_multipart([b"", json.dumps(execute_result).encode("utf-8")])
 
     threading.Thread(target=receive_cmd, args=(cmd_socket,)).start()
@@ -217,6 +217,6 @@ async def test_handle_fault_async():
     result = await guard.handle_fault("retry", 3)
 
     assert result is True
-    assert engine_status_dict[1] == "Healthy"
+    assert engine_status_dict[0] == "Healthy"
 
     guard.shutdown_guard()

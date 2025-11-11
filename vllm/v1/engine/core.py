@@ -45,11 +45,9 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
-    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
-    FinishReason,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -179,13 +177,16 @@ class EngineCoreGuard(threading.Thread):  # changed
                 self.engine_running = False
             except queue.Empty:
                 pass
-
-            if self.client_cmd_socket.closed:
-                self.logger("Client socket closed", level="info")
+            try:
+                has_msg, _, cmd_str = recv_router_dealer_message(
+                    self.client_cmd_socket,
+                    use_poller=True,
+                    poll_timeout=poll_timeout_ms,
+                )
+            except zmq.ZMQError:
+                self.logger("Socket closed, terminating EngineCoreGuard", level="info")
                 break
-            has_msg, _, cmd_str = recv_router_dealer_message(
-                self.client_cmd_socket, use_poller=True, poll_timeout=poll_timeout_ms
-            )
+
             if has_msg:
                 self.logger("Received cmd: %s", cmd_str, level="info")
                 self._execute_cmd(cmd_str)
@@ -204,7 +205,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         identities = set()
         for tp_rank in range(self.tp_size):
             for pp_rank in range(self.pp_size):
-                identity = f"{tp_rank}_{pp_rank}".encode()
+                identity = f"{pp_rank}_{tp_rank}".encode()
                 identities.add(identity)
 
         method_uuid = broadcast_instruction(
@@ -286,10 +287,10 @@ class EngineCoreGuard(threading.Thread):  # changed
             success = True
             if not soft_pause:
                 # abort the communicators
-                self._stop_worker_execution(soft_pause=False, timeout=timeout)
+                success = self._stop_worker_execution(soft_pause=False, timeout=timeout)
         return success
 
-    def retry(self, timeout: int = 1):
+    def retry(self, new_stateless_dp_group_port: int, timeout: int = 1):
         """
         Handle the retry instruction from the ClientGuard.
         This instruction tells the EngineCore to continue its busy loop
@@ -297,7 +298,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         """
         start_time = time.monotonic()
 
-        success = self._execute_worker_method("restart_worker", timeout=timeout)
+        success = self._execute_worker_method("restore_worker", timeout=timeout)
         if not success:
             return success
 
@@ -305,7 +306,11 @@ class EngineCoreGuard(threading.Thread):  # changed
             # If the Gloo communication times out
             # the data parallel group (dp_group) needs to be reinitialized
             command = "reinit_dp_group_on_fault_tolerance"
-            self.cmd_q.put(serialize_method_call(command))
+            self.cmd_q.put(
+                serialize_method_call(
+                    command, new_stateless_dp_group_port=new_stateless_dp_group_port
+                )
+            )
         else:
             self.cmd_q.put(None)
 
@@ -1473,21 +1478,6 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
-    def engine_finish_requests(self):
-        assert isinstance(self.scheduler, V1Scheduler)
-        engine_finish_outputs = EngineCoreOutputs()
-        engine_finish_outputs.engine_index = self.engine_index
-        for request_id in list(self.scheduler.requests.keys()):
-            self.scheduler.finish_requests(request_id, RequestStatus.FINISHED_ABORTED)
-            engine_finish_outputs.outputs.append(
-                EngineCoreOutput(
-                    request_id=request_id,
-                    finish_reason=FinishReason.ABORT,
-                    new_token_ids=[],
-                )
-            )
-        self.output_queue.put((0, engine_finish_outputs))
-
     def shutdown(self):
         super().shutdown()
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
@@ -1549,7 +1539,6 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group(
             vllm_config.fault_tolerance_config.gloo_comm_timeout,
-            vllm_config.fault_tolerance_config.enable_fault_tolerance,
         )
 
     def shutdown(self):
@@ -1658,12 +1647,13 @@ class DPEngineCoreProc(EngineCoreProc):
 
         return ParallelConfig.has_unfinished_dp(self.dp_group, local_unfinished)
 
-    def reinit_dp_group_on_fault_tolerance(self):
+    def reinit_dp_group_on_fault_tolerance(self, new_stateless_dp_group_port: int):
         stateless_destroy_torch_distributed_process_group(self.dp_group)
         self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group(
             self.vllm_config.fault_tolerance_config.gloo_comm_timeout,
-            self.vllm_config.fault_tolerance_config.enable_fault_tolerance,
+            new_stateless_dp_group_port,
         )
+        self.step_counter = 0
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest

@@ -431,31 +431,35 @@ class ClientGuard:
         engine_core component. It is designed to run continuously to ensure no critical
         error information from the engine core is missed.
         """
-        while True:
-            _, sender_identity, message = recv_router_dealer_message(
-                self.fault_receiver_socket
-            )
-            if self.client_guard_dead:
-                self.logger("client guard dead, stop receiving fault")
-                break
-            assert message is not None, (
-                "message should not be None at fault tolerance scenario"
-            )
+        while not self.client_guard_dead:
+            try:
+                _, sender_identity, message = recv_router_dealer_message(
+                    self.fault_receiver_socket
+                )
+                assert message is not None, (
+                    "message should not be None at fault tolerance scenario"
+                )
 
-            fault_info = FaultInfo.from_json(message)
-            self.engine_exception_q.put_nowait(fault_info)
-            engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
-            self.engine_status_dict[int(fault_info.engine_id)] = engine_status
-            self.fault_pub_socket.send_string(
-                f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
-            )
-            # TODO Asynchronous issuance of pause commands and design of engine
-            #  core status
-            # Pause healthy engines on fault.
-            # Pause will be invoked again during fault-tolerance handling,
-            # so it's unnecessary to track whether all engines are currently
-            # paused.
-            self.fault_handler.submit_fault("pause", 5, soft_pause=False)
+                fault_info = FaultInfo.from_json(message)
+                self.engine_exception_q.put_nowait(fault_info)
+                engine_status = "Dead" if "dead" in fault_info.type else "Unhealthy"
+                self.engine_status_dict[int(fault_info.engine_id)] = engine_status
+                self.fault_pub_socket.send_string(
+                    f"vllm_fault|{json.dumps(self.engine_status_dict.to_dict())}"
+                )
+
+                # Pause healthy engines on fault.
+                # Pause will be invoked again during fault-tolerance handling,
+                # so it's unnecessary to track whether all engines are currently
+                # paused.
+                self.fault_handler.submit_fault("pause", 5, soft_pause=False)
+            except zmq.ZMQError:
+                # Socket was closed during polling, exit loop.
+                self.logger(
+                    "Fault receiver socket closed, stopping thread.", level="info"
+                )
+                break
+        self.logger("Fault receiver thread has stopped.")
 
     def shutdown_guard(self):
         self.client_guard_dead = True
