@@ -3371,7 +3371,7 @@ class GPUModelRunner(
                 rank_mapping,
             )
             if self.eplb_state.is_async:
-                self.eplb_state.start_async_loop(model=self.model)
+                self.eplb_state.start_async_loop(rank_mapping=rank_mapping)
 
         if (
             self.vllm_config.compilation_config.mode
