@@ -2,7 +2,10 @@
 
 vLLM offers support for reasoning models like [DeepSeek R1](https://huggingface.co/deepseek-ai/DeepSeek-R1), which are designed to generate outputs containing both reasoning steps and final conclusions.
 
-Reasoning models return an additional `reasoning_content` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
+Reasoning models return an additional `reasoning` field in their outputs, which contains the reasoning steps that led to the final conclusion. This field is not present in the outputs of other models.
+
+!!! warning
+    `reasoning` used to be called `reasoning_content`. For now, `reasoning_content` will continue to work. However, we encourage you to migrate to `reasoning` in case `reasoning_content` is removed in future.
 
 ## Supported Models
 
@@ -61,18 +64,18 @@ Next, make a request to the model that should return the reasoning content in th
     # extra_body={"chat_template_kwargs": {"enable_thinking": False}}
     response = client.chat.completions.create(model=model, messages=messages)
 
-    reasoning_content = response.choices[0].message.reasoning_content
+    reasoning = response.choices[0].message.reasoning
     content = response.choices[0].message.content
 
-    print("reasoning_content:", reasoning_content)
+    print("reasoning:", reasoning)
     print("content:", content)
     ```
 
-The `reasoning_content` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
+The `reasoning` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
 
 ## Streaming chat completions
 
-Streaming chat completions are also supported for reasoning models. The `reasoning_content` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
+Streaming chat completions are also supported for reasoning models. The `reasoning` field is available in the `delta` field in [chat completion response chunks](https://platform.openai.com/docs/api-reference/chat/streaming).
 
 ??? console "Json"
 
@@ -88,7 +91,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
                 "index": 0,
                 "delta": {
                     "role": "assistant",
-                    "reasoning_content": "is",
+                    "reasoning": "is",
                 },
                 "logprobs": null,
                 "finish_reason": null
@@ -97,7 +100,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
     }
     ```
 
-OpenAI Python client library does not officially support `reasoning_content` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning_content` attribute is present in the response. For example:
+OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning` attribute is present in the response. For example:
 
 ??? code
 
@@ -127,22 +130,22 @@ OpenAI Python client library does not officially support `reasoning_content` att
     )
 
     print("client: Start streaming chat completions...")
-    printed_reasoning_content = False
+    printed_reasoning = False
     printed_content = False
 
     for chunk in stream:
-        # Safely extract reasoning_content and content from delta,
+        # Safely extract reasoning and content from delta,
         # defaulting to None if attributes don't exist or are empty strings
-        reasoning_content = (
-            getattr(chunk.choices[0].delta, "reasoning_content", None) or None
+        reasoning = (
+            getattr(chunk.choices[0].delta, "reasoning", None) or None
         )
         content = getattr(chunk.choices[0].delta, "content", None) or None
 
-        if reasoning_content is not None:
-            if not printed_reasoning_content:
-                printed_reasoning_content = True
-                print("reasoning_content:", end="", flush=True)
-            print(reasoning_content, end="", flush=True)
+        if reasoning is not None:
+            if not printed_reasoning:
+                printed_reasoning = True
+                print("reasoning:", end="", flush=True)
+            print(reasoning, end="", flush=True)
         elif content is not None:
             if not printed_content:
                 printed_content = True
@@ -151,11 +154,11 @@ OpenAI Python client library does not officially support `reasoning_content` att
             print(content, end="", flush=True)
     ```
 
-Remember to check whether the `reasoning_content` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+Remember to check whether the `reasoning` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 
-The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning_content`.
+The reasoning content is also available when both tool calling and the reasoning parser are enabled. Additionally, tool calling only parses functions from the `content` field, not from the `reasoning`.
 
 ??? code
 
@@ -192,7 +195,7 @@ The reasoning content is also available when both tool calling and the reasoning
     print(response)
     tool_call = response.choices[0].message.tool_calls[0].function
 
-    print(f"reasoning_content: {response.choices[0].message.reasoning_content}")
+    print(f"reasoning: {response.choices[0].message.reasoning}")
     print(f"Function called: {tool_call.name}")
     print(f"Arguments: {tool_call.arguments}")
     ```
@@ -223,7 +226,7 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
         def __init__(self, tokenizer: AnyTokenizer):
             super().__init__(tokenizer)
 
-        def extract_reasoning_content_streaming(
+        def extract_reasoning_streaming(
             self,
             previous_text: str,
             current_text: str,
@@ -240,7 +243,7 @@ You can add a new `ReasoningParser` similar to [vllm/reasoning/deepseek_r1_reaso
             previously been parsed and extracted (see constructor)
             """
 
-        def extract_reasoning_content(
+        def extract_reasoning(
             self,
             model_output: str,
             request: ChatCompletionRequest | ResponsesRequest,

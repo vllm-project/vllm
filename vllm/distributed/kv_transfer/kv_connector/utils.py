@@ -4,8 +4,6 @@
 KV cache helper for store.
 """
 
-from collections.abc import Sequence
-from concurrent.futures import CancelledError, Future
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -218,28 +216,6 @@ class KVOutputAggregator:
         )
 
         return output
-
-    def async_aggregate(
-        self,
-        output_future: Future[Sequence[ModelRunnerOutput | None]],
-        output_rank: int = 0,
-    ) -> Future[ModelRunnerOutput | None]:
-        """Takes a future that resolves to a list of outputs and returns a future
-        which resolves to a single aggregated output."""
-        result_future: Future[ModelRunnerOutput | None] = Future()
-
-        def callback(fut):
-            if result_future.done():
-                return
-            try:
-                result_future.set_result(self.aggregate(fut.result(), output_rank))
-            except CancelledError:
-                result_future.cancel()
-            except Exception as e:
-                result_future.set_exception(e)
-
-        output_future.add_done_callback(callback)
-        return result_future
 
 
 def _make_src_and_dst_indices(

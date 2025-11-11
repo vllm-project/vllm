@@ -111,10 +111,51 @@ class PassConfig:
     """Whether to enable async TP."""
     enable_fi_allreduce_fusion: bool = False
     """Whether to enable flashinfer allreduce fusion."""
-    fi_allreduce_fusion_max_token_num: int = 16384
-    """Max number of tokens to used in flashinfer allreduce fusion."""
+    fi_allreduce_fusion_max_size_mb: float | None = None
+    """The threshold of the communicated tensor sizes under which
+    vllm should use flashinfer fused allreduce. Specified as a
+    float in MB.
+    Unspecified will fallback to default values 
+    which are compute capability and world size dependent.
+        FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
+            90: {
+                2: 64,  # 64MB
+                4: 2,  # 2MB
+                8: 1,  # 1MB
+            },
+            100: {
+                2: 64,  # 64MB
+                4: 32,  # 32MB
+                8: 1,  # 1MB
+            },
+        }, where key is the device capability"""
 
     # TODO(luka) better pass enabling system.
+
+    def flashinfer_max_size(self, world_size: int) -> int | None:
+        """
+        Returns the max communication size in bytes for flashinfer
+        allreduce fusion for the given world size. Returns None if world size
+        is not supported by configs as it's not supported by flashinfer.
+        """
+
+        MiB = 1024 * 1024
+        max_size_mb = self.fi_allreduce_fusion_max_size_mb
+        if max_size_mb is None:
+            max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
+
+        return int(max_size_mb * MiB) if max_size_mb is not None else None
+
+    @staticmethod
+    def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
+        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            return {}
+        return FI_ALLREDUCE_FUSION_MAX_SIZE_MB.get(
+            current_platform.get_device_capability().to_int(), {}
+        )
 
     def uuid(self):
         """
@@ -136,6 +177,11 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Attention + quant (fp8) fusion might not work"
                 )
+            if self.enable_fi_allreduce_fusion:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "Allreduce + rms norm + quant (fp8) fusion might not work"
+                )
 
 
 @config
@@ -150,6 +196,7 @@ class CompilationConfig:
         - [`backend`][vllm.config.CompilationConfig.backend]
         - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
+        - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
     - CudaGraph capture:
         - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
@@ -267,6 +314,9 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
+    compile_mm_encoder: bool = True
+    """Whether or not to compile the multimodal encoder.
+    Currently, this only works for `Qwen2_5_vl`."""
 
     # Inductor capture
     use_inductor: bool | None = None
@@ -462,7 +512,7 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention",
+        "vllm::gdn_attention_core",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
     ]
