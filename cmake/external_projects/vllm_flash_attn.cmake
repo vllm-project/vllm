@@ -37,7 +37,6 @@ if(VLLM_FLASH_ATTN_SRC_DIR)
 else()
   FetchContent_Declare(
           vllm-flash-attn
-          # Temporarily change to PR branch until FA-side PR is merged
           GIT_REPOSITORY https://github.com/MatthewBonanni/flash-attention.git
           GIT_TAG 220b280ab176f96f9687022c6af11f04a661e876
           GIT_PROGRESS TRUE
