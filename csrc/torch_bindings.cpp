@@ -186,14 +186,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "top_k_per_row_prefill(Tensor logits, Tensor rowStarts, Tensor rowEnds, "
       "Tensor! indices, int numRows, int stride0, "
-      "int stride1) -> ()");
+      "int stride1, int topK) -> ()");
   ops.impl("top_k_per_row_prefill", torch::kCUDA, &top_k_per_row_prefill);
 
   ops.def(
       "top_k_per_row_decode(Tensor logits, int next_n, "
-      "Tensor seq_lens, Tensor! indices, Tensor! aux_indices, Tensor! "
-      "aux_logits, "
-      "int numRows, int stride0, int stride1, int splitWorkThreshold) -> ()");
+      "Tensor seq_lens, Tensor! indices, "
+      "int numRows, int stride0, int stride1, int topK) -> ()");
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   // Layernorm-quant

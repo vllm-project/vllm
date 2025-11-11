@@ -100,13 +100,13 @@ void apply_repetition_penalties_(torch::Tensor& logits,
 void top_k_per_row_prefill(const torch::Tensor& logits,
                            const torch::Tensor& rowStarts,
                            const torch::Tensor& rowEnds, torch::Tensor& indices,
-                           int64_t numRows, int64_t stride0, int64_t stride1);
+                           int64_t numRows, int64_t stride0, int64_t stride1,
+                           int64_t topK);
 
 void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           const torch::Tensor& seqLens, torch::Tensor& indices,
-                          torch::Tensor& auxIndices, torch::Tensor& auxLogits,
                           int64_t numRows, int64_t stride0, int64_t stride1,
-                          int64_t splitWorkThreshold);
+                          int64_t topK);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,

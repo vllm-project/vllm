@@ -579,7 +579,6 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
             )
             num_rows = logits.shape[0]
-            assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
             topk_indices = topk_indices_buffer[
                 chunk.token_start : chunk.token_end, :topk_tokens
             ]
@@ -591,6 +590,7 @@ def sparse_attn_indexer(
                 num_rows,
                 logits.stride(0),
                 logits.stride(1),
+                topk_tokens,
             )
 
     if has_decode:
@@ -626,31 +626,17 @@ def sparse_attn_indexer(
             max_model_len=max_model_len,
         )
         num_rows = logits.shape[0]
-        assert topk_tokens == 2048, "top_k_per_row assumes size 2048"
         topk_indices = topk_indices_buffer[:num_decode_tokens, :topk_tokens]
-
-        splitWorkThreshold = 200 * 1000
-        aux_indices = torch.empty((0,), dtype=torch.int32, device=logits.device)
-        aux_logits = torch.empty((0,), dtype=torch.float32, device=logits.device)
-        if logits.shape[1] >= splitWorkThreshold:
-            aux_indices = torch.empty(
-                (num_rows, 10 * topk_tokens), dtype=torch.int32, device=logits.device
-            )
-            aux_logits = torch.empty(
-                (num_rows, 10 * topk_tokens), dtype=torch.float32, device=logits.device
-            )
 
         torch.ops._C.top_k_per_row_decode(
             logits,
             next_n,
             decode_metadata.seq_lens,
             topk_indices,
-            aux_indices,
-            aux_logits,
             num_rows,
             logits.stride(0),
             logits.stride(1),
-            splitWorkThreshold,
+            topk_tokens,
         )
         if decode_metadata.requires_padding:
             # if padded, we need to unpack

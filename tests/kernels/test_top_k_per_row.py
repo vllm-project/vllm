@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 
 # Test parameters
 NUM_ROWS = [1, 32, 2050]
-TOP_K_VALUES = [2048]
+TOP_K_VALUES = [2048, 3000]
 BATCH_SIZE = [1, 2, 2048]
 NEXT_N = [1, 8]
 DATA_GENERATION = ["random", "10LSBits"]
@@ -149,6 +149,7 @@ def test_top_k_per_row(
         num_rows,
         logits.stride(0),
         logits.stride(1),
+        top_k,
     )
 
     # Run reference implementation
@@ -191,17 +192,6 @@ def _run_top_k_per_row_decode_test(
 
     # Create output tensors
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
-    # Auxiliary tensors for long sequences (used when vocab_size >= 200,000)
-    splitWorkThreshold = 200 * 1000
-    aux_indices = torch.empty((0,), dtype=torch.int32, device=logits.device)
-    aux_logits = torch.empty((0,), dtype=torch.float32, device=logits.device)
-    if logits.shape[1] >= splitWorkThreshold:
-        aux_indices = torch.empty(
-            (num_rows, 10 * 2048), dtype=torch.int32, device=logits.device
-        )
-        aux_logits = torch.empty(
-            (num_rows, 10 * 2048), dtype=torch.float32, device=logits.device
-        )
 
     # Run CUDA implementation
     torch.ops._C.top_k_per_row_decode(
@@ -209,12 +199,10 @@ def _run_top_k_per_row_decode_test(
         next_n,
         seq_lens,
         indices,
-        aux_indices,
-        aux_logits,
         num_rows,
         logits.stride(0),
         logits.stride(1),
-        splitWorkThreshold,
+        top_k,
     )
 
     torch.cuda.synchronize()
