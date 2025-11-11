@@ -39,14 +39,20 @@ def test_mha_attn_platform(device: str):
 
     if device == "cpu":
         with (
-            patch("vllm.attention.layer.current_platform", CpuPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CpuPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
         with (
-            patch("vllm.attention.layer.current_platform", RocmPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                RocmPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
@@ -55,7 +61,10 @@ def test_mha_attn_platform(device: str):
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CudaPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
             attn = MMEncoderAttention(16, 64, scale=1)
@@ -65,10 +74,13 @@ def test_mha_attn_platform(device: str):
         # - with upstream FA not available
         # - should use xformers
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CudaPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
             patch(
-                "vllm.attention.layer.check_upstream_fa_availability",
+                "vllm.attention.layers.mm_encoder_attention.check_upstream_fa_availability",
                 return_value=False,
             ),
         ):
@@ -79,10 +91,14 @@ def test_mha_attn_platform(device: str):
         # - with upstream FA available
         # - should use upstream FA
         with (
-            patch("vllm.attention.layer.current_platform", CudaPlatform()),
+            patch(
+                "vllm.attention.layers.mm_encoder_attention.current_platform",
+                CudaPlatform(),
+            ),
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
             patch(
-                "vllm.attention.layer.check_upstream_fa_availability", return_value=True
+                "vllm.attention.layers.mm_encoder_attention.check_upstream_fa_availability",
+                return_value=True,
             ),
             patch.dict(
                 "sys.modules",
