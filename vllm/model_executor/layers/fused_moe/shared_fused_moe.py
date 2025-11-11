@@ -38,7 +38,7 @@ class SharedFusedMoE(FusedMoE):
             and not (
                 # TODO(wentao): find the root cause and remove this condition
                 self.enable_eplb
-                or (self.use_flashinfer_cutlass_kernels and self.dp_size > 1)
+                or (self.moe_config.use_flashinfer_cutlass_kernels and self.dp_size > 1)
             )
             and self._shared_experts is not None
         )
