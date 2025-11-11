@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
@@ -42,7 +43,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
@@ -94,11 +94,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.utils.deep_gemm import (
-    fp8_gemm_nt,
     get_col_major_tma_aligned_tensor,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
-    should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.flashinfer import has_flashinfer_moe
 from vllm.utils.import_utils import has_deep_gemm
@@ -160,7 +158,7 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
         return Fp8MoeBackend.MARLIN
 
     # deepGEMM on supported platforms with block-quantized weights
-    if envs.VLLM_USE_DEEP_GEMM and block_quant:
+    if envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM and block_quant:
         if not has_deep_gemm():
             logger.warning_once("DeepGEMM backend requested but not available.")
         elif is_deep_gemm_supported():
@@ -542,7 +540,7 @@ class Fp8LinearMethod(LinearMethodBase):
             return
 
         if self.block_quant:
-            maybe_post_process_fp8_weight_block(layer, self.cutlass_block_fp8_supported)
+            maybe_post_process_fp8_weight_block(layer)
 
     def apply(
         self,
@@ -553,83 +551,19 @@ class Fp8LinearMethod(LinearMethodBase):
         # if batch invariant mode is enabled, prefer DeepGEMM FP8 path
         # we will use BF16 dequant when DeepGEMM is not supported.
         if vllm_is_batch_invariant():
-            # Call is_deep_gemm_supported() ahead of time for torch.compile
-            # dynamo has trouble tracing through
-            if self.block_quant and should_use_deepgemm_for_fp8_linear(
-                torch.bfloat16, layer.weight, self.use_deep_gemm
-            ):
-                # use group quant consistent with block size across K
-                assert self.act_q_group_shape is not None
-                q_input, input_scale = QuantFP8(
-                    False,
-                    self.act_q_group_shape,
-                    column_major_scales=True,
-                )(x)
-
-                output_2d = torch.empty(
-                    (q_input.shape[0], layer.weight.shape[0]),
-                    dtype=torch.bfloat16,
-                    device=q_input.device,
-                )
-                fp8_gemm_nt(
-                    (q_input, input_scale),
-                    (layer.weight, layer.weight_scale),
-                    output_2d,
-                )
-                if bias is not None:
-                    output_2d = output_2d + bias
-                return output_2d
-
-            # Dequantize FP8 weights to BF16
-            weight_fp8 = layer.weight.to(torch.bfloat16)
-            weight_scale = layer.weight_scale.to(torch.bfloat16)
-
-            # Handle different quantization granularities
             if self.block_quant:
-                # Block-wise quantization:
-                # - Weight is NOT transposed, shape is [N, K] (output_size, input_size)
-                # - Scale has shape [num_blocks_k, num_blocks_n] (TRANSPOSED!)
                 assert self.weight_block_size is not None
-                block_n, block_k = self.weight_block_size  # Note: order is [N, K]
-
-                N, K = weight_fp8.shape
-
-                # determine expected number of blocks along N and K
-                num_blocks_n = (N + block_n - 1) // block_n
-                num_blocks_k = (K + block_k - 1) // block_k
-
-                # scale layout may be [num_blocks_n, num_blocks_k]
-                # or [num_blocks_k, num_blocks_n] depending on backend
-                if weight_scale.dim() != 2:
-                    raise RuntimeError(
-                        f"FP8 block scale must be 2D, got {tuple(weight_scale.shape)}"
-                    )
-
-                scale_rows, scale_cols = weight_scale.shape
-                if (scale_rows, scale_cols) == (num_blocks_k, num_blocks_n):
-                    if num_blocks_n == num_blocks_k:
-                        # ambiguous square case, warn and skip transpose
-                        logger.warning(
-                            "Batch-invariant FP8: square block-scale %dx%d; "
-                            "skipping transpose to avoid misorientation.",
-                            scale_rows,
-                            scale_cols,
-                        )
-                    else:
-                        # clear KN -> transpose to NK
-                        weight_scale = weight_scale.t()
-
-                # Expand scale to match weight dimensions
-                # scale_expanded should have shape [N, K]
-                scale_expanded = weight_scale.repeat_interleave(
-                    block_n, dim=0
-                ).repeat_interleave(block_k, dim=1)
-                # Trim to exact weight size (in case of padding)
-                scale_expanded = scale_expanded[:N, :K]
-                weight_bf16 = weight_fp8 * scale_expanded
+                return self.w8a8_block_fp8_linear.apply(
+                    input=x,
+                    weight=layer.weight,
+                    weight_scale=layer.weight_scale,
+                    input_scale=layer.input_scale,
+                    bias=bias,
+                )
             else:
-                # Per-tensor quantization: weight IS transposed to [K, N]
-                # scale should be scalar or [1] or per-output-channel [N]
+                # per-tensor/channel: dequant to BF16 and run GEMM
+                weight_fp8 = layer.weight.to(torch.bfloat16)
+                weight_scale = layer.weight_scale.to(torch.bfloat16)
                 if weight_scale.numel() == 1:
                     # Per-tensor: simple scalar multiplication
                     weight_bf16 = weight_fp8 * weight_scale
@@ -648,16 +582,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     else:
                         # Fallback
                         weight_bf16 = weight_fp8 * weight_scale
-
-            # For block quant, weight is [N, K], for per-tensor it's [K, N]
-            # F.linear expects weight to be [N, K], so:
-            if self.block_quant:
-                # Already in correct shape [N, K]
-                output = torch.nn.functional.linear(x, weight_bf16, bias)
-            else:
-                # Need to transpose back: [K, N] -> [N, K]
-                output = torch.nn.functional.linear(x, weight_bf16.t(), bias)
-            return output
+                return torch.nn.functional.linear(x, weight_bf16.t(), bias)
 
         if self.use_marlin:
             return apply_fp8_marlin_linear(
@@ -1222,22 +1147,20 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
-            assert scoring_func == "sigmoid", (
-                f"Expected 'sigmoid' scoring func but got {scoring_func}"
-            )
+
             if self.block_quant:
                 import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
 
-                assert (
-                    renormalize and use_grouped_topk and custom_routing_function is None
-                )
                 e_score_correction_bias = (
                     e_score_correction_bias.to(x.dtype)
                     if e_score_correction_bias is not None
                     else None
                 )
+                routing_method_type = layer.routing_method_type
                 return torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
-                    routing_logits=router_logits.to(torch.float32),
+                    routing_logits=router_logits.to(torch.float32)
+                    if routing_method_type == RoutingMethodType.DeepSeekV3
+                    else router_logits,
                     routing_bias=e_score_correction_bias,
                     x=x,
                     w13_weight=layer.w13_weight,
@@ -1252,6 +1175,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     expert_offset=layer.ep_rank * layer.local_num_experts,
                     local_num_experts=layer.local_num_experts,
                     block_shape=self.weight_block_size,
+                    routing_method_type=routing_method_type,
                     routed_scaling=routed_scaling_factor,
                 )
             else:

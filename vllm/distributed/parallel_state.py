@@ -1483,6 +1483,9 @@ def destroy_distributed_environment():
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    # Ensure all objects are not freezed before cleanup
+    gc.unfreeze()
+
     destroy_model_parallel()
     destroy_distributed_environment()
     if shutdown_ray:

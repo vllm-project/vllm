@@ -98,9 +98,6 @@ __all__ = [
 
 
 class CompressedTensorsMoEMethod(FusedMoEMethodBase):
-    def __init_(self, moe: FusedMoEConfig):
-        super().__init__(moe)
-
     @staticmethod
     def get_moe_method(
         quant_config: "CompressedTensorsConfig",  # type: ignore # noqa E501
@@ -966,10 +963,18 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
+                allow_deep_gemm=(
+                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
+                ),
             )
         else:
             logger.debug("TritonOrDeepGemmExperts(%s)", self.__class__.__name__)
-            return TritonOrDeepGemmExperts(self.moe_quant_config, allow_deep_gemm=True)
+            return TritonOrDeepGemmExperts(
+                self.moe_quant_config,
+                allow_deep_gemm=(
+                    envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM
+                ),
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
