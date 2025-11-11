@@ -27,7 +27,12 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx, has_rose
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_deep_gemm,
+    has_pplx,
+    has_pplx_garden,
+)
 
 from .mk_objects import (
     TestMoEQuantConfig,
@@ -203,9 +208,9 @@ class Config:
         info = prepare_finalize_info(self.prepare_finalize_type)
         return info.backend == "pplx"
 
-    def needs_rose(self):
+    def needs_pplx_garden(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend == "rose"
+        return info.backend == "pplx_garden"
 
     def needs_deep_ep(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
@@ -281,8 +286,8 @@ class Config:
             return False, "Needs DeepGEMM, but DeepGEMM not available."
         if self.needs_pplx() and not has_pplx():  # noqa: SIM103
             return False, "Needs PPLX, but PPLX not available."
-        if self.needs_rose() and not has_rose():  # noqa: SIM103
-            return False, "Needs Rose, but Rose not available."
+        if self.needs_pplx_garden() and not has_pplx_garden():  # noqa: SIM103
+            return False, "Needs PPLX Garden, but PPLX Garden not available."
 
         return True, None
 
