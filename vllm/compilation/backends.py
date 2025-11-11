@@ -17,11 +17,11 @@ from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
+from vllm.compilation.nanoflow import manager as nano_manager
 from vllm.compilation.partition_rules import (
     inductor_partition_rule_context,
     should_split,
 )
-from vllm.compilation.nanoflow import manager as nano_manager
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform

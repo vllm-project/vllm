@@ -433,20 +433,14 @@ class VllmConfig:
                     "nano batch split. Disabling nano batch split."
                 )
                 self.compilation_config.enable_nano_batch_split = False
-            else:
-                nano_batch_splitting_ops = [
-                    "vllm.all_reduce",
-                ]
-                if self.compilation_config.splitting_ops and set(
-                    self.compilation_config.splitting_ops
-                ) != set(nano_batch_splitting_ops):
-                    logger.info(
-                        "splitting_ops is not supported with "
-                        "nano batch split. Disabling nano batch split."
-                    )
-                    self.compilation_config.enable_nano_batch_split = False
-                else:
-                    self.compilation_config.splitting_ops = nano_batch_splitting_ops
+            elif (
+                self.compilation_config.splitting_ops
+                and "vllm.all_reduce" not in self.compilation_config.splitting_ops
+            ):
+                logger.info(
+                    "adding vllm.all_reduce to splitting_ops for nano batch split."
+                )
+                self.compilation_config.splitting_ops.append("vllm.all_reduce")
 
         # If the user does not explicitly set a compilation mode, then
         # we use the default mode. The default mode depends on other

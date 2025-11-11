@@ -1212,7 +1212,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # running prefills. This lets us set enforce_eager on the prefiller in
             # a P/D setup and still use CUDA graphs (enabled by this padding) on the
             # decoder.
-            allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            allow_dp_padding = (
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            )
 
             ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens_unpadded,
@@ -4195,6 +4197,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     else None,
                     num_metadata_builders=1
                     if not self.parallel_config.enable_dbo
+                    and not self.compilation_config.enable_nano_batch_split
                     else 2,
                 )
         # Calculate reorder batch threshold (if needed)

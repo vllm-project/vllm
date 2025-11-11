@@ -4,7 +4,7 @@
 import contextlib
 import copy
 import os
-from typing import Callable, Optional
+from collections.abc import Callable
 
 import torch
 import torch.fx.graph_module
@@ -26,7 +26,7 @@ class NanoSplitManager:
         self,
         graph_module: torch.fx.GraphModule,
         compilation_config: CompilationConfig,
-        local_cache_dir: Optional[str],
+        local_cache_dir: str | None,
     ) -> None:
         self.original_graph_module = graph_module
         self.original_graph = graph_module.graph
@@ -38,20 +38,18 @@ class NanoSplitManager:
         tag_graph(
             self.original_graph_module,
             {
-                "vllm.unified_attention": "attention",
-                "vllm.unified_attention_with_output": "attention",
                 "vllm.all_reduce": "all_reduce",
             },
         )
         self.graph_modules = {1: self.original_graph_module}
 
         # Runtime preparation
-        self.cached_config: Optional[NanoSplitConfig] = None
+        self.cached_config: NanoSplitConfig | None = None
         self.comm_stream: torch.cuda.Stream = torch.cuda.Stream()
         self.comp_stream: torch.cuda.Stream = torch.cuda.Stream()
-        self.hook: Optional[
-            Callable[[NanoOpInfo], contextlib.AbstractContextManager[None]]
-        ] = None
+        self.hook: (
+            Callable[[NanoOpInfo], contextlib.AbstractContextManager[None]] | None
+        ) = None
         self.get_bs_fn = "get_batch_size"
         self.split_fn = "split_input"
         self.wrapper_fn = "op_wrapper"
@@ -129,10 +127,10 @@ class NanoSplitManager:
                 return self.original_graph_module(*args, **kwargs)
 
             num_nano_batches = self.cached_config.num_nano_batches
-            comm_finished: list[Optional[torch.cuda.Event]] = [
+            comm_finished: list[torch.cuda.Event | None] = [
                 None for _ in range(num_nano_batches)
             ]
-            comp_finished: list[Optional[torch.cuda.Event]] = [
+            comp_finished: list[torch.cuda.Event | None] = [
                 None for _ in range(num_nano_batches)
             ]
 
@@ -233,7 +231,7 @@ _split_manager = None
 def get_callable(
     graph_module: torch.fx.GraphModule,
     compilation_config: CompilationConfig,
-    local_cache_dir: Optional[str] = None,
+    local_cache_dir: str | None = None,
 ) -> Callable:
     global _split_manager
     if _split_manager is None:
