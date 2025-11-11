@@ -983,11 +983,11 @@ async def test_function_call_with_previous_input_messages(
     # Check input_messages have correct channel metadata
     tool_msg_found = False
     for msg_dict in response_3.input_messages:
-        msg = Message.from_dict(msg_dict)
-        # Check tool output has commentary channel
-        if msg.author.role == "tool":
-            assert msg.channel == "commentary", (
-                f"Tool output should have channel='commentary', got '{msg.channel}'"
+        # msg_dict is serialized format with 'author' and 'channel' fields
+        if msg_dict.get("author", {}).get("role") == "tool":
+            assert msg_dict.get("channel") == "commentary", (
+                f"Tool output should have channel='commentary', "
+                f"got '{msg_dict.get('channel')}'"
             )
             tool_msg_found = True
 
