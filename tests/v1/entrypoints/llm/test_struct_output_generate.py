@@ -680,7 +680,7 @@ def test_structured_output_with_reasoning_matrices(
     if "Qwen3" in model_name:
         assert content is not None
 
-    assert reasoning_content is not None
+    assert reasoning is not None
 
     if content is not None:
         output_json = json.loads(content)
