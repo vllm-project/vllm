@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 from transformers import PretrainedConfig
 
 from vllm.transformers_utils.config import is_interleaved
