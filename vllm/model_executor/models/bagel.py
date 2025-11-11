@@ -424,8 +424,16 @@ class BagelForConditionalGeneration(
             # Also disable head as it's not in checkpoint
             vit_config = config.vit_config
             if vit_config.num_hidden_layers == 27:
+                logger.warning(
+                    "Overriding vit_config.num_hidden_layers from 27 to 26 "
+                    "to match the Bagel model checkpoint."
+                )
                 vit_config.num_hidden_layers = 26
             if not hasattr(vit_config, "vision_use_head"):
+                logger.warning(
+                    "Setting vit_config.vision_use_head to False as it is not "
+                    "present in the Bagel model checkpoint."
+                )
                 vit_config.vision_use_head = False
 
             self.vit_model = SiglipVisionModel(
@@ -607,8 +615,8 @@ class BagelForConditionalGeneration(
             if "patch_embedding.weight" in name and tensor.ndim == 2:
                 out_channels = tensor.shape[0]
                 in_features = tensor.shape[1]
-                patch_size = 14
-                in_channels = 3
+                patch_size = self.config.vit_config.patch_size
+                in_channels = self.config.vit_config.num_channels
                 if in_features == in_channels * patch_size * patch_size:
                     tensor = tensor.reshape(
                         out_channels, patch_size, patch_size, in_channels
