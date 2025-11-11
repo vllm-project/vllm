@@ -2006,6 +2006,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_q = get_dcp_group().all_gather(decode_q, dim=1)
 
             # call decode attn
+            print(f"{decode_ql_nope.shape=}, {decode_q_pe.shape=}, {kv_cache.dtype=}")
             attn_out, lse = self._forward_decode(
                 decode_q, kv_cache, attn_metadata, layer
             )
