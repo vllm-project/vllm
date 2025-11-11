@@ -2957,24 +2957,34 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         sampled_token_ids,
                         spec_decode_metadata.num_draft_tokens,
                     )
+                    target_token_ids = self.input_ids.gpu[token_indices]
+                    target_positions = self._get_positions(token_indices)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[token_indices] for h in aux_hidden_states], dim=-1
+                        )
+                    else:
+                        target_hidden_states = hidden_states[token_indices]
                 else:
-                    common_attn_metadata, token_indices, token_indices_to_sample = (
+                    common_attn_metadata, token_indices_to_sample = (
                         self.drafter.prepare_inputs_padded(
                             common_attn_metadata,
                             spec_decode_metadata,
                             valid_sampled_tokens_count,
                         )
                     )
-
-                target_token_ids = self.input_ids.gpu[token_indices]
-                target_positions = self._get_positions(token_indices)
-                if self.use_aux_hidden_state_outputs:
-                    assert aux_hidden_states is not None
-                    target_hidden_states = torch.cat(
-                        [h[token_indices] for h in aux_hidden_states], dim=-1
-                    )
-                else:
-                    target_hidden_states = hidden_states[token_indices]
+                    total_num_tokens = common_attn_metadata.num_actual_tokens
+                    # When padding the batch, token_indices is just a range
+                    target_token_ids = self.input_ids.gpu[:total_num_tokens]
+                    target_positions = self._get_positions(total_num_tokens)
+                    if self.use_aux_hidden_state_outputs:
+                        assert aux_hidden_states is not None
+                        target_hidden_states = torch.cat(
+                            [h[:total_num_tokens] for h in aux_hidden_states], dim=-1
+                        )
+                    else:
+                        target_hidden_states = hidden_states[:total_num_tokens]
 
             if self.supports_mm_inputs:
                 mm_embed_inputs = self._gather_mm_embeddings(

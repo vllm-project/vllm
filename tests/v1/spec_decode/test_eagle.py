@@ -71,7 +71,7 @@ def _create_proposer(
 
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
 
-
+@pytest.mark.repeat(5)
 def test_prepare_next_token_ids():
     """
     Test for prepare_next_token_ids_cpu and prepare_next_token_ids_padded.
@@ -143,16 +143,19 @@ def test_prepare_next_token_ids():
         [2, 5, 0, 0], dtype=torch.int32, device=device
     )
 
-    next_token_ids_from_padded, valid_sampled_tokens_count = (
-        proposer.prepare_next_token_ids_padded(
-            common_attn_metadata,
-            sampled_token_ids_tensor,
-            mock_requests,
-            mock_input_batch,
-            discarded_req_indices,
-            num_discarded_reqs,
+
+    torch.cuda._sleep(1_000_000_000)
+    with torch.cuda.nvtx.range("prepare_next_token_ids_padded"):
+        next_token_ids_from_padded, valid_sampled_tokens_count = (
+            proposer.prepare_next_token_ids_padded(
+                common_attn_metadata,
+                sampled_token_ids_tensor,
+                mock_requests,
+                mock_input_batch,
+                discarded_req_indices,
+                num_discarded_reqs,
+            )
         )
-    )
 
     assert torch.equal(next_token_ids_from_padded, expected_next_token_ids_tensor)
     assert torch.equal(valid_sampled_tokens_count, expected_valid_sampled_tokens_count)
@@ -247,7 +250,7 @@ def test_prepare_inputs():
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
 
-
+@pytest.mark.repeat(3)
 def test_prepare_inputs_padded():
     """
     Input scenario is 3 requests with num_speculative_tokens == 2 and:
@@ -305,11 +308,13 @@ def test_prepare_inputs_padded():
 
     proposer = _create_proposer("eagle", num_speculative_tokens)
 
-    output_metadata, token_indices, token_indices_to_sample = (
-        proposer.prepare_inputs_padded(
-            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+    torch.cuda._sleep(1_000_000_000)
+    with torch.cuda.nvtx.range("prepare_inputs_padded"):
+        output_metadata, token_indices, token_indices_to_sample = (
+            proposer.prepare_inputs_padded(
+                common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
+            )
         )
-    )
 
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
