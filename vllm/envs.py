@@ -232,6 +232,8 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool = False
+    VLLM_USE_CUDA_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_USE_FUSED_MOE_ROUTER: bool = False
 
 
 def get_default_cache_root():
@@ -1525,6 +1527,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
+    ),
+    # Enable the fusion of the shared experts of the model with other experts.
+    "VLLM_USE_CUDA_FUSION_SHARED_EXPERTS": lambda: bool(
+        int(os.getenv("VLLM_USE_CUDA_FUSION_SHARED_EXPERTS", "0"))
+    ),
+    # Use the fused grouped top-k MoE expert selection router
+    "VLLM_USE_FUSED_MOE_ROUTER": lambda: bool(
+        int(os.getenv("VLLM_USE_FUSED_MOE_ROUTER", "0"))
     ),
 }
 
