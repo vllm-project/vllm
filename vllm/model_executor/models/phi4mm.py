@@ -21,7 +21,6 @@ from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
 )
 from vllm.model_executor.models.llama import LlamaModel
@@ -1023,12 +1022,10 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
         multimodal_config = vllm_config.model_config.multimodal_config
         assert multimodal_config, "multimodal_config is required"
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
-        self.lora_config = lora_config
 
         # Tensor/Pipeline parallel not supported for now.
         assert get_pp_group().world_size == 1, "pipeline parallel is not supported"
@@ -1055,23 +1052,16 @@ class Phi4MMForCausalLM(nn.Module, SupportsLoRA, SupportsMultiModal):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         if config.tie_word_embeddings:
             self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def _parse_and_validate_audio_input(
         self, **kwargs: object

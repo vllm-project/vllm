@@ -581,10 +581,8 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         config = vllm_config.model_config.hf_config.get_text_config()
         vllm_config.model_config.hf_config = config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
         self.quant_config = quant_config
         self.max_position_embeddings = config.max_position_embeddings
         self.model = BailingMoeModel(
