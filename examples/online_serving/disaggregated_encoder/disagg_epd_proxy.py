@@ -227,7 +227,10 @@ async def process_prefill_stage(
 async def on_startup() -> None:
     global encode_session, prefill_session, decode_session
     timeout = aiohttp.ClientTimeout(total=100_000)
-    connector = aiohttp.TCPConnector(limit=0, force_close=False)
+    keepalive_timeout = int(os.getenv("CLIENT_HTTP_TIMEOUT_KEEP_ALIVE", 0))
+    connector = aiohttp.TCPConnector(
+        limit=0, force_close=False, keepalive_timeout=keepalive_timeout
+    )
     encode_session = aiohttp.ClientSession(timeout=timeout, connector=connector)
     if app.state.p_urls:
         # only setup if prefill instance(s) exist

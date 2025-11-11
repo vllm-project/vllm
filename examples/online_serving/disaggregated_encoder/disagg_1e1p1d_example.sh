@@ -28,6 +28,18 @@ export UCX_TLS=all
 export UCX_NET_DEVICES=all
 
 ###############################################################################
+# Check env
+###############################################################################
+export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-70}"
+export CLIENT_HTTP_TIMEOUT_KEEP_ALIVE="${CLIENT_HTTP_TIMEOUT_KEEP_ALIVE:-60}"
+
+if (( $CLIENT_HTTP_TIMEOUT_KEEP_ALIVE >= $VLLM_HTTP_TIMEOUT_KEEP_ALIVE )); then
+    echo "Error: Client keep alive timeout ($CLIENT_HTTP_TIMEOUT_KEEP_ALIVE) should be" \
+    " < server keep alive timeout ($VLLM_HTTP_TIMEOUT_KEEP_ALIVE)."
+    exit 1
+fi
+
+###############################################################################
 # Helpers
 ###############################################################################
 START_TIME=$(date +"%Y%m%d_%H%M%S")
