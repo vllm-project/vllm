@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright 2025 Bytedance Ltd. and/or its affiliates.
 """Inference-only BAGEL model compatible with HuggingFace weights.
 
@@ -7,16 +8,13 @@ For vLLM, we focus on the image understanding (vision-to-text) capabilities.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
 from typing import Any, Literal, TypeAlias
 
 import torch
 import torch.nn as nn
-from PIL import Image
 from transformers import PretrainedConfig, SiglipVisionConfig
 from transformers.models.qwen2 import Qwen2Config
 
-from vllm.attention.backends.registry import _Backend
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
@@ -26,15 +24,13 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    ImageItem,
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -42,8 +38,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.tensor_schema import TensorSchema
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -51,13 +46,13 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
 )
-from .siglip import SiglipVisionModel
 
 logger = init_logger(__name__)
 
@@ -181,9 +176,7 @@ class PositionEmbedding(nn.Module):
         self.hidden_size = hidden_size
 
         # Create learnable 2D position embeddings (frozen sin-cos)
-        pos_embed = self._get_2d_sincos_pos_embed(
-            hidden_size, max_num_patch_per_side
-        )
+        pos_embed = self._get_2d_sincos_pos_embed(hidden_size, max_num_patch_per_side)
         self.register_buffer(
             "pos_embed",
             torch.from_numpy(pos_embed).float(),
@@ -247,6 +240,8 @@ class PositionEmbedding(nn.Module):
         Returns:
             Position embeddings of shape (N, hidden_size)
         """
+        # Ensure position_ids are on the same device as pos_embed
+        position_ids = position_ids.to(self.pos_embed.device)
         return self.pos_embed[position_ids]
 
 
@@ -256,8 +251,10 @@ class PositionEmbedding(nn.Module):
 class BagelProcessingInfo(BaseProcessingInfo):
     """Processing information for BAGEL model."""
 
-    def get_hf_config(self) -> BagelConfig:
-        return self.ctx.get_hf_config(BagelConfig)
+    def get_hf_config(self):
+        # Don't pass BagelConfig type to avoid type mismatch when trust_remote_code=True
+        # The model loads its own BagelConfig from transformers_modules
+        return self.ctx.get_hf_config()
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -332,8 +329,12 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
     ) -> Sequence[PromptReplacement]:
         """Replace image placeholders with the correct number of tokens."""
         hf_config = self.info.get_hf_config()
-        vit_config = hf_config.vit_config
-        patch_size = vit_config.patch_size
+
+        # Get the tokenizer to encode the placeholder
+        tokenizer = self.info.get_tokenizer()
+        # Encode "<image>" to get its token IDs
+        # Use add_special_tokens=False to get just the token IDs for "<image>"
+        image_token_ids = tokenizer.encode("<image>", add_special_tokens=False)
 
         def get_replacement_bagel(item_idx: int):
             # For BAGEL, we need to calculate based on actual image size
@@ -347,7 +348,7 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
         return [
             PromptReplacement(
                 modality="image",
-                target=["<image>"],
+                target=image_token_ids,
                 replacement=get_replacement_bagel,
             )
         ]
@@ -397,8 +398,9 @@ class BagelForConditionalGeneration(
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
-        # Ensure we have a BagelConfig
-        if not isinstance(config, BagelConfig):
+        # Ensure we have a BagelConfig (check by name to handle trust_remote_code)
+        # When trust_remote_code=True, the config comes from transformers_modules
+        if type(config).__name__ != "BagelConfig":
             raise ValueError(
                 f"Expected BagelConfig, got {type(config).__name__}. "
                 "Make sure the model config is properly loaded."
@@ -408,16 +410,26 @@ class BagelForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         # Initialize language model (Qwen2)
+        # Pass the llm_config from BagelConfig to initialize Qwen2 properly
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
+            hf_config=config.llm_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Qwen2ForCausalLM"],
         )
 
         # Initialize vision model (SigLIP) if visual understanding is enabled
         if config.visual_und:
+            # Fix vit_config: checkpoint has 26 layers (0-25) but config says 27
+            # Also disable head as it's not in checkpoint
+            vit_config = config.vit_config
+            if vit_config.num_hidden_layers == 27:
+                vit_config.num_hidden_layers = 26
+            if not hasattr(vit_config, "vision_use_head"):
+                vit_config.vision_use_head = False
+
             self.vit_model = SiglipVisionModel(
-                config=config.vit_config,
+                config=vit_config,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "vit_model"),
             )
@@ -468,12 +480,19 @@ class BagelForConditionalGeneration(
         """Process image inputs through vision encoder and connector."""
         pixel_values = image_input["pixel_values"]
 
+        # Handle potential extra batch dimension
+        # Expected shape: (batch_size * num_images, 3, H, W)
+        # But might receive: (batch_size, num_images, 3, H, W)
+        if pixel_values.ndim == 5:
+            # Flatten batch and num_images dimensions
+            batch_size, num_images, channels, height, width = pixel_values.shape
+            pixel_values = pixel_values.reshape(
+                batch_size * num_images, channels, height, width
+            )
+
         # Get vision features from SigLIP
         # pixel_values shape: (batch_size * num_images, 3, H, W)
         vision_features = self.vit_model(pixel_values)
-
-        # vision_features shape: (batch_size * num_images, num_patches, hidden_size)
-        # where num_patches = (H / patch_size) * (W / patch_size)
 
         # Pass through connector
         vision_embeds = self.connector(vision_features)
@@ -498,6 +517,8 @@ class BagelForConditionalGeneration(
         # Add position embeddings
         pos_embeds = self.vit_pos_embed(position_ids)
         pos_embeds = pos_embeds.reshape(batch_size, num_patches, hidden_size)
+        # Ensure pos_embeds are on the same device as vision_embeds
+        pos_embeds = pos_embeds.to(vision_embeds.device)
         vision_embeds = vision_embeds + pos_embeds
 
         # Split by image
@@ -550,11 +571,56 @@ class BagelForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from checkpoint."""
         skip_prefixes = []
+        # Skip vit_pos_embed.pos_embed as it's handled by PositionEmbedding module
+        skip_prefixes.append("vit_pos_embed.pos_embed")
+
+        # If visual understanding is disabled, skip vision-related weights
         if self.vit_model is None:
-            skip_prefixes.extend(["vit_model.", "connector.", "vit_pos_embed."])
+            skip_prefixes.extend(["vit_model.", "connector.", "vit_pos_embed"])
+
+        # Skip generation-related weights since we only support text2text and image2text
+        # Filter out all image generation components:
+        # - 'moe_gen': MoE generation weights
+        # - 'latent_pos_embed': Latent position embeddings for VAE
+        # - 'llm2vae', 'vae2llm': LLM-VAE projections
+        # - 'time_embedder': Timestep embeddings for diffusion
+        # - VAE encoder/decoder: Use specific prefixes to avoid matching vision encoder
+        generation_keywords = [
+            "moe_gen",
+            "latent_pos_embed",
+            "llm2vae",
+            "vae2llm",
+            "time_embedder",
+        ]
+        vae_prefixes = [
+            "decoder.",
+            "encoder.",
+        ]  # VAE encoder/decoder, not vision encoder
+        filtered_weights = []
+        for name, tensor in weights:
+            # Skip generation-related keywords
+            if any(skip in name for skip in generation_keywords):
+                continue
+            if any(name.startswith(prefix) for prefix in vae_prefixes):
+                continue
+
+            if "patch_embedding.weight" in name and tensor.ndim == 2:
+                out_channels = tensor.shape[0]
+                in_features = tensor.shape[1]
+                patch_size = 14
+                in_channels = 3
+                if in_features == in_channels * patch_size * patch_size:
+                    tensor = tensor.reshape(
+                        out_channels, patch_size, patch_size, in_channels
+                    )
+                    tensor = tensor.permute(
+                        0, 3, 1, 2
+                    ).contiguous()  # [out, h, w, c] -> [out, c, h, w]
+
+            filtered_weights.append((name, tensor))
 
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return loader.load_weights(filtered_weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
