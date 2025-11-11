@@ -41,6 +41,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    FusedMoENaivePrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
@@ -231,6 +234,9 @@ class FusedMoEMethodBase(QuantizeMethodBase):
                 use_fp8_dispatch=use_fp8_dispatch,
             )
 
+        if prepare_finalize is None:
+            prepare_finalize = FusedMoENaivePrepareAndFinalize()
+
         return prepare_finalize
 
     def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
@@ -410,6 +416,9 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                     f"{self.old_quant_method.__class__.__name__}."
                 )
 
+        prepare_finalize = self.fused_experts.prepare_finalize
+        x, router_logits = prepare_finalize.preprocess_inputs(x, router_logits, layer)
+
         topk_weights, topk_ids, zero_expert_result = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -450,9 +459,15 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )
+            result = prepare_finalize.postprocess_tensor(result, layer)
             return result, zero_expert_result
         else:
-            return result
+            if isinstance(result, tuple):
+                return (
+                    result[0],
+                    prepare_finalize.postprocess_tensor(result[1], layer),
+                )
+            return prepare_finalize.postprocess_tensor(result, layer)
 
 
 @CustomOp.register("unquantized_fused_moe")
@@ -2583,10 +2598,6 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
-
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
         if has_separate_shared_experts:
@@ -2622,11 +2633,6 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
-            if do_naive_dispatch_combine:
-                hidden_states, router_logits = get_ep_group().dispatch(
-                    hidden_states, router_logits, self.is_sequence_parallel
-                )
-
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -2669,21 +2675,16 @@ class FusedMoE(CustomOp):
                 assert isinstance(final_hidden_states, tuple)
                 final_hidden_states, zero_expert_result = final_hidden_states
 
-            def combine_output(states: torch.Tensor) -> torch.Tensor:
-                if do_naive_dispatch_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
-                return states
-
             if self.shared_experts is not None:
                 return (
                     final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
+                    final_hidden_states[1],
                 )
             elif self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, torch.Tensor)
-                return (combine_output(final_hidden_states), zero_expert_result)
+                return (final_hidden_states, zero_expert_result)
             else:
-                return combine_output(final_hidden_states)
+                return final_hidden_states
 
     @classmethod
     def make_expert_params_mapping(
