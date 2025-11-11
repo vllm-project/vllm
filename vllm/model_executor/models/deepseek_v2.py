@@ -990,6 +990,11 @@ class DeepseekV2MLAAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
             is_neox_style=False,
+            dtype=(
+                current_platform.fp8_dtype()
+                if vllm_config.cache_config.cache_dtype == "fp8"
+                else None
+            )
         )
         if rope_scaling:
             mscale_all_dim = rope_scaling.get("mscale_all_dim", False)

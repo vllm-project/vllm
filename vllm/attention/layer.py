@@ -657,6 +657,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         use_sparse: bool = False,
         indexer: object | None = None,
+        fuse_rope_fp8: bool = False,
         **extra_impl_args,
     ):
         super().__init__()
@@ -714,6 +715,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
             indexer=indexer,
+            fuse_rope_fp8=fuse_rope_fp8,
             **extra_impl_args,
         )
 
