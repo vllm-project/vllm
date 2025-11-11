@@ -289,6 +289,48 @@ class VllmConfig:
 
         return replace(self, model_config=model_config)
 
+    def _post_init_kv_transfer_config(self) -> None:
+        """Update KVTransferConfig based on top-level configs in VllmConfig.
+
+        Right now, this function reads the offloading settings from
+        CacheConfig and configures the KVTransferConfig accordingly.
+        """
+        if (kv_offloading_backend := self.cache_config.kv_offloading_backend) is None:
+            return
+
+        # If no KVTransferConfig is provided, create a default one.
+        if self.kv_transfer_config is None:
+            self.kv_transfer_config = KVTransferConfig()
+
+        if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:
+            raise ValueError(
+                "You must set kv_offloading_size when kv_offloading_backend is set."
+            )
+        num_kv_ranks = (
+            self.parallel_config.tensor_parallel_size
+            * self.parallel_config.pipeline_parallel_size
+        )
+
+        if kv_offloading_backend == "native":
+            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            kv_bytes_per_rank = kv_offloading_size * (1 << 30) / num_kv_ranks
+
+            # NOTE(ApostaC): the actual calculation for num_cpu_blocks should be
+            # done after the model's KV cache is initialized
+            self.kv_transfer_config.kv_connector_extra_config.update(
+                {"kv_bytes_per_rank": kv_bytes_per_rank, "num_cpu_blocks": 0}
+            )
+        elif kv_offloading_backend == "lmcache":
+            self.kv_transfer_config.kv_connector = "LMCacheConnectorV1"
+            kv_gb_per_rank = kv_offloading_size / num_kv_ranks
+            self.kv_transfer_config.kv_connector_extra_config = {
+                "lmcache.local_cpu": True,
+                "lmcache.max_local_cpu_size": kv_gb_per_rank,
+            }
+
+        # This is the same for all backends
+        self.kv_transfer_config.kv_role = "kv_both"
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -310,6 +352,53 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+
+        executor_backend = self.parallel_config.distributed_executor_backend
+        executor_supports_async_sched = executor_backend in (
+            "mp",
+            "uni",
+            "external_launcher",
+        )
+
+        if self.scheduler_config.async_scheduling:
+            # Async scheduling explicitly enabled, hard fail any incompatibilities.
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "Async scheduling is not yet compatible with "
+                    "pipeline_parallel_size > 1."
+                )
+            if self.speculative_config is not None:
+                raise ValueError(
+                    "Async scheduling is not yet compatible with speculative decoding."
+                )
+            if not executor_supports_async_sched:
+                raise ValueError(
+                    "Currently, async scheduling only supports `mp`, `uni`, or "
+                    "`external_launcher` distributed executor backend, but you chose "
+                    f"`{executor_backend}`."
+                )
+        elif self.scheduler_config.async_scheduling is None:
+            # Enable async scheduling unless there is an incompatible option.
+            # NOTE: we won't reach here until async scheduling is enabled by default.
+            if (
+                self.parallel_config.pipeline_parallel_size > 1
+                or self.speculative_config is not None
+            ):
+                logger.warning(
+                    "Async scheduling is not yet supported with speculative decoding "
+                    " or pipeline_parallel_size > 1 and will be disabled."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif not executor_supports_async_sched:
+                logger.warning(
+                    "Async scheduling will be disabled because it is not supported "
+                    "with the `%s` distributed executor backend (only `mp`, `uni`, and "
+                    "`external_launcher` are supported).",
+                    executor_backend,
+                )
+                self.scheduler_config.async_scheduling = False
+            else:
+                self.scheduler_config.async_scheduling = True
 
         from vllm.platforms import current_platform
 
@@ -425,7 +514,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.use_eagle()
             ):
-                raise NotImplementedError(
+                raise ValueError(
                     "Fast prefill optimization for KV sharing is not "
                     "compatible with EAGLE as EAGLE requires correct logits "
                     "for all tokens while fast prefill gives incorrect logits "
@@ -449,7 +538,7 @@ class VllmConfig:
                     )
                 if not getattr(self.model_config.hf_config, "is_causal", True):
                     disable_chunked_prefill_reasons.append(
-                        "Only models using causal attention supports chunked "
+                        "Only models using causal attention support chunked "
                         "prefill and prefix caching; disabling both."
                     )
             elif self.model_config.is_encoder_decoder:
@@ -518,6 +607,25 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # If DCP, ensure the block size is right.
+        if self.parallel_config.decode_context_parallel_size > 1:
+            assert (
+                self.parallel_config.dcp_kv_cache_interleave_size
+                <= self.cache_config.block_size
+                and self.cache_config.block_size
+                % self.parallel_config.dcp_kv_cache_interleave_size
+                == 0
+            ), (
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by dcp_kv_cache_interleave_size "
+                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+            )
+
+        assert (
+            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            or self.speculative_config is None
+        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -645,6 +753,9 @@ class VllmConfig:
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
+
+        # Handle the KV connector configs
+        self._post_init_kv_transfer_config()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
