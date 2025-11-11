@@ -185,15 +185,10 @@ class PositionEmbedding(nn.Module):
         return self.pos_embed[position_ids]
 
 
-# === Multimodal Processing === #
-
-
 class BagelProcessingInfo(BaseProcessingInfo):
     """Processing information for BAGEL model."""
 
     def get_hf_config(self):
-        # Don't pass BagelConfig type to avoid type mismatch when trust_remote_code=True
-        # The model loads its own BagelConfig from transformers_modules
         return self.ctx.get_hf_config()
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -270,18 +265,19 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
         """Replace image placeholders with the correct number of tokens."""
         hf_config = self.info.get_hf_config()
 
-        # Get the tokenizer to encode the placeholder
+        # Get the tokenizer to look up the image token ID
         tokenizer = self.info.get_tokenizer()
         image_token_id = tokenizer.get_vocab().get("<|image_pad|>")
+        if image_token_id is None:
+            raise ValueError(
+                "Image token '<|image_pad|>' not found in tokenizer vocabulary"
+            )
 
         def get_replacement_bagel(item_idx: int):
-            # For BAGEL, we need to calculate based on actual image size
-            # Default to max patches
+            # For BAGEL, calculate number of tokens based on max patch size
             num_tokens = hf_config.vit_max_num_patch_per_side**2
-
-            # BAGEL uses a special image token
-            # Token ID 151655 is <|image_pad|>
-            return [151655] * num_tokens
+            # Use the image token ID from tokenizer
+            return [image_token_id] * num_tokens
 
         return [
             PromptReplacement(
@@ -299,9 +295,6 @@ class BagelMultiModalProcessor(BaseMultiModalProcessor[BagelProcessingInfo]):
         return {
             "pixel_values": MultiModalFieldConfig.batched("image"),
         }
-
-
-# === Main Model === #
 
 
 @MULTIMODAL_REGISTRY.register_processor(
