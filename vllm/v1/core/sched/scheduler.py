@@ -432,10 +432,7 @@ class Scheduler(SchedulerInterface):
                             continue
                         # Keep track of number of tokens to load from remote
                         # for the request st we can compute actual throughput
-                        request.num_external_computed_tokens = (
-                            num_external_computed_tokens
-                        )
-
+                        request.num_external_computed_tokens = ext_tokens
                         num_external_computed_tokens = ext_tokens
 
                     # Total computed tokens (local + external).
