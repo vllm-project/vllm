@@ -147,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
+    VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
@@ -222,7 +223,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_FLATTEN_LOGPROBS: bool = False
+    VLLM_FLAT_LOGPROBS: bool = False
 
 
 def get_default_cache_root():
@@ -1116,6 +1117,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
+    # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
+    "VLLM_MOE_USE_DEEP_GEMM": lambda: bool(
+        int(os.getenv("VLLM_MOE_USE_DEEP_GEMM", "1"))
+    ),
     # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
     "VLLM_USE_DEEP_GEMM_E8M0": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))
@@ -1476,11 +1481,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable FlattenLogprobs whose GC overhead is significantly smaller than
+    # Flag to enable FlatLogprobs whose GC overhead is significantly smaller than
     # the original list[dict[int, Logprob]] approach.
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
-    # FlattenLogprobs.
-    "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
+    # FlatLogprobs.
+    "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
 }
 
 # --8<-- [end:env-vars-definition]
@@ -1569,6 +1574,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
+        "VLLM_MOE_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",
