@@ -7,6 +7,7 @@ import hashlib
 import pickle
 from collections.abc import Callable
 from typing import Any
+from _hashlib import UnsupportedDigestmodError
 
 import cbor2
 
@@ -76,5 +77,5 @@ def safe_hash(data: bytes, usedforsecurity: bool = False):
     """
     try:
         return hashlib.md5(data, usedforsecurity=usedforsecurity)
-    except Exception:
+    except (UnsupportedDigestmodError, ValueError):
         return hashlib.sha256(data)
