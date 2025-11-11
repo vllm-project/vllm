@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from abc import abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
@@ -27,17 +26,13 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
     RoutingMethodType,
-    biased_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEActivationFormat,
-    FusedMoEModularKernel,
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
 )
@@ -50,35 +45,17 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
-    QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     is_flashinfer_supporting_global_sf,
 )
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.platforms.interface import CpuArchEnum
-from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_pplx
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
-    from .fused_batched_moe import BatchedTritonExperts
-    from .fused_moe import TritonExperts, eplb_map_to_physical_and_record, fused_experts
-
-    if has_pplx():
-        from .pplx_prepare_finalize import (
-            PplxPrepareAndFinalize,
-            pplx_hidden_dim_scale_bytes,
-        )
-    if has_deep_ep():
-        from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
-        from .deepep_ll_prepare_finalize import (
-            DEEPEP_QUANT_BLOCK_SHAPE,
-            DeepEPLLPrepareAndFinalize,
-        )
+    from .fused_moe import eplb_map_to_physical_and_record, fused_experts
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = object  # type: ignore
@@ -104,6 +81,16 @@ if current_platform.is_tpu():
     from .moe_pallas import fused_moe as fused_moe_pallas
 else:
     fused_moe_pallas = None  # type: ignore
+
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+    FusedMoEModularMethod,
+)
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
 
 logger = init_logger(__name__)
 
@@ -1140,16 +1127,13 @@ def maybe_roundup_hidden_size(
         Rounded up hidden_size if rounding up is required based on the configs.
         Original hidden size otherwise.
     """
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_roundup_layer_hidden_size,
+    )
 
-    if moe_parallel_config.use_deepep_ht_kernels:
-        hidden_size = DeepEPHTPrepareAndFinalize.maybe_roundup_layer_hidden_size(
-            hidden_size, act_dtype
-        )
-
-    if moe_parallel_config.use_deepep_ll_kernels:
-        hidden_size = DeepEPLLPrepareAndFinalize.maybe_roundup_layer_hidden_size(
-            hidden_size
-        )
+    hidden_size = maybe_roundup_layer_hidden_size(
+        hidden_size, act_dtype, moe_parallel_config
+    )
 
     # we are padding globally so EP buffer allocation works
     if quant_config and quant_config.get_name() == "mxfp4":
@@ -1445,7 +1429,6 @@ class FusedMoE(CustomOp):
             is_lora_enabled=vllm_config.lora_config is not None,
         )
 
-        self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.quant_config = quant_config
 
         def _get_quant_method() -> FusedMoEMethodBase:
@@ -1523,9 +1506,15 @@ class FusedMoE(CustomOp):
     # This is called after all weight loading and post-processing, so it
     # should be safe to swap out the quant_method.
     def maybe_init_modular_kernel(self) -> None:
-        mk = self.quant_method.maybe_init_modular_kernel(self)
-        if mk is not None:
-            self.quant_method = FusedMoEModularMethod(self.quant_method, mk)
+        self.ensure_moe_quant_config_init()
+        prepare_finalize = self.quant_method.maybe_make_prepare_finalize()
+        if prepare_finalize is not None:
+            logger.debug(
+                "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
+            )
+            self.quant_method = FusedMoEModularMethod.make(
+                self, self.quant_method, prepare_finalize, self.shared_experts
+            )
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -2157,12 +2146,16 @@ class FusedMoE(CustomOp):
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
+            # Note: the moe_quant_config can't be constructed until after
+            # weight loading post processing.
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
 
-        if self.moe_quant_config is None:
-            self.moe_quant_config = self.quant_method.moe_quant_config
+    @property
+    def moe_quant_config(self) -> FusedMoEQuantConfig | None:
+        self.ensure_moe_quant_config_init()
+        return self.quant_method.moe_quant_config
 
     def ensure_dp_chunking_init(self):
         if not self.use_dp_chunking or self.batched_hidden_states is not None:
