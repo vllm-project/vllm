@@ -951,7 +951,7 @@ class Scheduler(SchedulerInterface):
             )
             if scheduled_spec_token_ids:
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_accepted = max(0, len(generated_token_ids) - 1)
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
