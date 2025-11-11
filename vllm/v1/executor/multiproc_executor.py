@@ -31,11 +31,11 @@ from vllm.distributed import destroy_distributed_environment, destroy_model_para
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_dp_group,
     get_ep_group,
     get_pp_group,
     get_tp_group,
-    get_dcp_group,
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger

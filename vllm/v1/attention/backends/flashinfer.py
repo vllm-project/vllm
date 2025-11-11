@@ -26,8 +26,8 @@ from vllm.attention.backends.abstract import (
 from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.parallel_state import get_dcp_group
 from vllm.config.cache import CacheDType
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -51,8 +51,8 @@ from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
     KVCacheLayoutType,
+    get_dcp_local_seq_lens,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -163,9 +163,11 @@ def trtllm_prefill_attn_kvfp8_dequant(
     )
     return mock_kv_cache, mock_block_table
 
+
 @dataclass
 class BatchDCPPrefillPlanConfig:
     """Parameters for BatchDCPPrefillWrapper.plan() method."""
+
     qo_indptr_cpu: torch.Tensor
     paged_kv_indptr_cpu: torch.Tensor
     paged_kv_indices: torch.Tensor
@@ -203,7 +205,7 @@ class BatchDCPPrefillWrapper:
             cfg.qo_indptr_cpu,
             cfg.paged_kv_indptr_cpu,
             cfg.paged_kv_indices,
-            cfg.paged_kv_last_page_len_cpu[cfg.prefill_start:],
+            cfg.paged_kv_last_page_len_cpu[cfg.prefill_start :],
             cfg.num_qo_heads * cfg.dcp_world_size,
             cfg.num_kv_heads,
             cfg.head_dim,
@@ -230,15 +232,15 @@ class BatchDCPPrefillWrapper:
             logits_soft_cap=cfg.logits_soft_cap,
             q_data_type=cfg.q_data_type,
         )
-  
+
     def run(
-            self,
-            layer: torch.nn.Module,
-            prefill_query: torch.Tensor,
-            kv_cache_permute: torch.Tensor,
-            key: torch.Tensor,
-            value: torch.Tensor,
-        ):
+        self,
+        layer: torch.nn.Module,
+        prefill_query: torch.Tensor,
+        kv_cache_permute: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+    ):
         prefill_query_across_dcp = get_dcp_group().all_gather(
             prefill_query.contiguous(), dim=1
         )
@@ -271,6 +273,7 @@ class BatchDCPPrefillWrapper:
             lse_query,
         )
         return output
+
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -379,9 +382,7 @@ class FlashInferMetadata:
     use_cascade: bool
 
     prefill_wrapper: (
-        BatchPrefillWithPagedKVCacheWrapper
-        | BatchDCPPrefillWrapper
-        | None
+        BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
     ) = None
     decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None = None
@@ -409,13 +410,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.model_config = vllm_config.model_config
         self._workspace_buffer = None
         self._prefill_wrapper: (
-            BatchPrefillWithPagedKVCacheWrapper
-            | dict[
-                str,
-                BatchPrefillWithPagedKVCacheWrapper
-                | BatchPrefillWithRaggedKVCacheWrapper,
-            ]
-            | None
+            BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
         self._decode_wrapper = None  # Wrapper for decode (general shape)
 
@@ -563,13 +558,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(
         self,
-    ) -> (
-        BatchPrefillWithPagedKVCacheWrapper
-        | dict[
-            str,
-            BatchPrefillWithPagedKVCacheWrapper | BatchPrefillWithRaggedKVCacheWrapper,
-        ]
-    ):
+    ) -> BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper:
         if self._prefill_wrapper is None:
             if self.dcp_world_size > 1:
                 self._prefill_wrapper = BatchDCPPrefillWrapper(
@@ -855,7 +844,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
                 if not attn_metadata.prefill_use_trtllm:
                     if self.dcp_world_size > 1:
-                        assert isinstance(attn_metadata.prefill_wrapper, BatchDCPPrefillWrapper)
+                        assert isinstance(
+                            attn_metadata.prefill_wrapper, BatchDCPPrefillWrapper
+                        )
                         plan_cfgs = BatchDCPPrefillPlanConfig(
                             qo_indptr_cpu=qo_indptr_cpu,
                             paged_kv_indptr_cpu=paged_kv_indptr_cpu,
@@ -877,6 +868,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         )
                         attn_metadata.prefill_wrapper.plan(plan_cfgs)
                     else:
+                        assert isinstance(
+                            attn_metadata.prefill_wrapper,
+                            BatchPrefillWithPagedKVCacheWrapper,
+                        )
                         attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu,
                             paged_kv_indptr_cpu,
@@ -1196,11 +1191,15 @@ class FlashInferImpl(AttentionImpl):
                 if self.dcp_world_size > 1:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
                     assert prefill_wrapper._context._window_left == self.window_left
-                    assert prefill_wrapper._context._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._context._logits_soft_cap == (
+                        self.logits_soft_cap or 0.0
+                    )
                     assert prefill_wrapper._context._sm_scale == self.scale
                     assert not prefill_wrapper._context.causal
                     assert prefill_wrapper._new_tokens._window_left == self.window_left
-                    assert prefill_wrapper._new_tokens._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._new_tokens._logits_soft_cap == (
+                        self.logits_soft_cap or 0.0
+                    )
                     assert prefill_wrapper._new_tokens._sm_scale == self.scale
                     assert prefill_wrapper._new_tokens.causal
 
@@ -1212,8 +1211,13 @@ class FlashInferImpl(AttentionImpl):
                         value[num_decode_tokens:],
                     )
                 else:
+                    assert isinstance(
+                        prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
+                    )
                     assert prefill_wrapper._window_left == self.window_left
-                    assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._logits_soft_cap == (
+                        self.logits_soft_cap or 0.0
+                    )
                     assert prefill_wrapper._sm_scale == self.scale
                     assert prefill_wrapper._causal
                     prefill_wrapper.run(
