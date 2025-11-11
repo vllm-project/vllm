@@ -6,9 +6,8 @@ from typing import ClassVar
 
 import torch
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import AttentionLayer
-from vllm.attention.ops.rocm_aiter_mla import aiter_mla_decode_fwd
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.common import (
@@ -22,10 +21,6 @@ from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 
-def is_aiter_mla_enabled() -> bool:
-    return envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MLA
-
-
 class AiterMLABackend(MLACommonBackend):
     @staticmethod
     def get_name() -> str:
@@ -34,10 +29,6 @@ class AiterMLABackend(MLACommonBackend):
     @staticmethod
     def get_impl_cls() -> type["AiterMLAImpl"]:
         return AiterMLAImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AiterMLAMetadata"]:
-        return AiterMLAMetadata
 
     @staticmethod
     def get_builder_cls() -> type["AiterMLAMetadataBuilder"]:
@@ -288,7 +279,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         # max_seqlen_qo must be 1 except for MTP
         # TODO: Find the best value for MTP
         max_seqlen_qo = 1
-        aiter_mla_decode_fwd(
+        rocm_aiter_ops.mla_decode_fwd(
             q,
             kv_buffer,
             o,
