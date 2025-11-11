@@ -572,8 +572,6 @@ class Gemma3ForConditionalGeneration(
         pixel_values = kwargs.pop("pixel_values", None)
         num_patches = kwargs.pop("num_patches", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        if pixel_values is None:
-            return None
 
         if pixel_values is not None:
             image_size = self.config.vision_config.image_size
