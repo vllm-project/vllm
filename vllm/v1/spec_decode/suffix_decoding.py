@@ -43,7 +43,7 @@ class SuffixDecodingProposer:
         """
         draft_token_ids: list[np.ndarray] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
-            if not sampled_ids:
+            if sampled_ids.shape[0] == 0:
                 # Skip speculative decoding for partial prefills.
                 draft_token_ids.append(np.array([]))
                 continue
