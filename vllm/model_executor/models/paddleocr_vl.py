@@ -61,6 +61,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargs,
 )
@@ -1184,15 +1185,17 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float],
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
@@ -1229,20 +1232,12 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
-                t, h, w = (
-                    image_grid_thw[image_index][0],
-                    image_grid_thw[image_index][1],
-                    image_grid_thw[image_index][2],
-                )
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = (
-                    video_grid_thw[video_index][0],
-                    video_grid_thw[video_index][1],
-                    video_grid_thw[video_index][2],
-                )
+                t, h, w = video_grid_thw[video_index]
                 video_second_per_grid_t = 1.0
                 if second_per_grid_ts:
                     video_second_per_grid_t = second_per_grid_ts[video_index]
