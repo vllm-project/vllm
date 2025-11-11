@@ -2596,7 +2596,6 @@ class FusedMoE(CustomOp):
                 # Clone BEFORE switching streams to avoid race condition
                 # where routed_expert kernel may mutate hidden_states.
                 hidden_states_clone = hidden_states.clone()
-
                 self.shared_experts_stream.wait_stream(current_stream())
 
                 # Record that the clone will be used by shared_experts_stream
