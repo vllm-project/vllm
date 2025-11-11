@@ -682,6 +682,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if cudagraph_size_before_dp is None:
                 cudagraph_size_before_dp = -1
 
+        assert cudagraph_size_before_dp is not None
         num_tokens_across_dp, cudagraph_size_across_dp = get_batch_metadata_across_dp(
             total_num_scheduled_tokens,
             cudagraph_size_before_dp,
