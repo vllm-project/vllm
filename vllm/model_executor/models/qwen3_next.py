@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -173,6 +174,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            routing_method_type=RoutingMethodType.Renormalize,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -585,7 +587,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_decodes
+                    : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
             )
