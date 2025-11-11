@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
 
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
@@ -58,6 +58,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -1433,15 +1434,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor,
-        video_grid_thw: list[list[int]] | torch.Tensor,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get mrope input positions and delta value for Ernie VL."""
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
 
+        hf_config = self.config
         image_token_id = hf_config.im_patch_id
         video_start_token_id = hf_config.video_start_token_id
         video_end_token_id = hf_config.video_end_token_id
@@ -1449,10 +1451,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         temporal_conv_size = hf_config.temporal_conv_size
         llm_pos_ids_list: list = []
 
-        if not (image_grid_thw is None and video_grid_thw is None):
-            if isinstance(image_grid_thw, torch.Tensor):
-                image_grid_thw = image_grid_thw.tolist()
-
+        if image_grid_thw or video_grid_thw:
             input_token_type: list[str] = []
             video_check_flg = False
             for token in input_tokens:
@@ -1484,11 +1483,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                 )
                 if modality_type == "image":
-                    t, h, w = (
-                        image_grid_thw[mm_data_idx][0],
-                        image_grid_thw[mm_data_idx][1],
-                        image_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = image_grid_thw[mm_data_idx]
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t,
                         h // spatial_conv_size,
@@ -1519,11 +1514,7 @@ class Ernie4_5_VLMoeForConditionalGeneration(
                     mm_data_idx += 1
 
                 elif modality_type == "video":
-                    t, h, w = (
-                        video_grid_thw[mm_data_idx][0],
-                        video_grid_thw[mm_data_idx][1],
-                        video_grid_thw[mm_data_idx][2],
-                    )
+                    t, h, w = video_grid_thw[mm_data_idx]
                     llm_grid_t, llm_grid_h, llm_grid_w = (
                         t // temporal_conv_size,
                         h // spatial_conv_size,
