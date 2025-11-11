@@ -5,7 +5,7 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import AttentionMetadata, AttentionType
+from vllm.attention.backends.abstract import AttentionType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -15,7 +15,6 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
     RocmAttentionBackend,
     RocmAttentionImpl,
-    RocmAttentionMetadata,
     RocmAttentionMetadataBuilder,
 )
 
@@ -32,10 +31,6 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["RocmAiterUnifiedAttentionImpl"]:
         return RocmAiterUnifiedAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return RocmAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(

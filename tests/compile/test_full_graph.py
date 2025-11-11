@@ -183,8 +183,14 @@ def test_custom_compile_config(
     "compilation_mode",
     [CompilationMode.NONE, CompilationMode.VLLM_COMPILE],
 )
-def test_fp8_kv_scale_compile(compilation_mode: int):
-    model = "Qwen/Qwen2-0.5B"
+@pytest.mark.parametrize(
+    "model",
+    [
+        "Qwen/Qwen2-0.5B",  # Standard attention model
+        "deepseek-ai/DeepSeek-V2-Lite",  # MLA (Multi-head Latent Attention) model
+    ],
+)
+def test_fp8_kv_scale_compile(compilation_mode: int, model: str):
     model_kwargs = {
         "quantization": "fp8",
         "kv_cache_dtype": "fp8_e4m3",
