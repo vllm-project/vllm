@@ -43,6 +43,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
     _swizzle_mxfp4,
+    get_padding_alignment,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
@@ -282,10 +283,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             hidden_size = round_up(hidden_size, 128)
         elif current_platform.is_rocm():
+            pad_align = get_padding_alignment()
             intermediate_size_per_partition_after_pad = round_up(
-                intermediate_size_per_partition, 256
+                intermediate_size_per_partition, pad_align
             )
-            hidden_size = round_up(hidden_size, 256)
+            hidden_size = round_up(hidden_size, pad_align)
         else:
             intermediate_size_per_partition_after_pad = round_up(
                 intermediate_size_per_partition, 64
@@ -739,15 +741,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
             )
 
-            self.w13_weight_triton_tensor = w13_weight
-            self.w2_weight_triton_tensor = w2_weight
-
-            # need to delete the original weights to save memory on single GPU
-            del layer.w13_weight
-            del layer.w2_weight
-            layer.w13_weight = None
-            layer.w2_weight = None
-            torch.cuda.empty_cache()
+            self.w13_weight = w13_weight
+            self.w2_weight = w2_weight
+            layer.w13_weight = w13_weight
+            layer.w2_weight = w2_weight
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
@@ -822,18 +819,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     "EP batched experts format"
                 )
         else:
-            layer.w13_weight = (
-                self.w13_weight_triton_tensor
-                if layer.w13_weight is None
-                else layer.w13_weight
-            )
-            layer.w2_weight = (
-                self.w2_weight_triton_tensor
-                if layer.w2_weight is None
-                else layer.w2_weight
-            )
-            assert all([w is not None for w in [layer.w13_weight, layer.w2_weight]])
-
             assert self.moe_quant_config is not None
             if (
                 self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
@@ -1068,8 +1053,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             return triton_kernel_moe_forward(
                 hidden_states=x,
-                w1=self.w13_weight_triton_tensor,
-                w2=self.w2_weight_triton_tensor,
+                w1=self.w13_weight,
+                w2=self.w2_weight,
                 gating_output=router_logits,
                 topk=top_k,
                 renormalize=renormalize,
@@ -1111,6 +1096,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
 
         layer.w13_weight.data = layer.w13_weight.data.view(torch.int32)
         layer.w2_weight.data = layer.w2_weight.data.view(torch.int32)
+        ep_rank_start = self.moe_config.ep_rank * self.moe_config.num_local_experts
         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
             layer.w13_weight,
             layer.w2_weight,
@@ -1119,6 +1105,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
             w13_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
             is_mxfp4=True,
+            experts_start_id=ep_rank_start,
         )
 
     def apply(
