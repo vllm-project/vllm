@@ -32,6 +32,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    kv_cache_scale_loader,
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.utils import sequence_parallel_chunk
@@ -528,19 +529,15 @@ class GptOssModel(nn.Module):
             if is_pp_missing_parameter(name, self):
                 continue
 
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                if weight.numel() != 1:
-                    raise ValueError(
-                        f"KV cache scale '{scale_name}' is expected to be a scalar, "
-                        f"but got a tensor of shape {weight.shape}."
-                    )
-                # Ensure weight is a scalar tensor before passing to loader.
-                weight_loader(param, weight.flatten()[0])
-                loaded_params.add(scale_name)
+            load_kv_cache_scale_completed, loaded_params = kv_cache_scale_loader(
+                self.quant_config,
+                name,
+                params_dict,
+                weight,
+                default_weight_loader,
+                loaded_params,
+            )
+            if load_kv_cache_scale_completed:
                 continue
 
             if "scale" in name:
