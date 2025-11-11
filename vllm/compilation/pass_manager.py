@@ -129,6 +129,8 @@ class PostGradPassManager(CustomGraphPass):
         state["passes"].append(self.fix_functionalization.uuid())
         compile_range = get_pass_context().compile_range
         if compile_range is not None:
+            # Include the compile range in the uuid to ensure that inductor
+            # recompiles the graph for the new dynamic compile range.
             state["compile_range"] = str(compile_range)
 
         return InductorPass.hash_dict(state)

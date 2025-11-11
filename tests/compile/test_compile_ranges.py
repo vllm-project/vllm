@@ -4,6 +4,7 @@ import torch
 from torch import fx as fx
 from torch import nn
 
+# This import automatically registers `torch.ops.silly.attention`
 import tests.compile.silly_attention  # noqa
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
@@ -82,14 +83,16 @@ def test_compile_ranges():
             mode=CompilationMode.VLLM_COMPILE,
             compile_ranges_split_points=[8, 32],
             inductor_compile_config={
-                "post_grad_custom_post_pass": post_grad_pass_manager
+                "post_grad_custom_post_pass": post_grad_pass_manager,
+                # Disable inductor cache to get the number of passes correctly
+                "force_disable_caches": True,
             },
         ),
     )
 
     with set_current_vllm_config(vllm_config):
         model = TestModel(vllm_config=vllm_config, prefix="").eval().cuda()
-        batch_sizes = [1, 16, 48]
+        batch_sizes = [1, 4, 16, 24, 48, 64]
         # A has support_torch_compile
         with compilation_counter.expect(
             num_graphs_seen=1,

@@ -163,7 +163,7 @@ class PiecewiseBackend:
             range_found = True
         else:
             for range in self.compile_ranges:
-                if range.contains(runtime_shape):
+                if runtime_shape in range:
                     range_entry = self.range_entries[range]
                     range_found = True
                     break

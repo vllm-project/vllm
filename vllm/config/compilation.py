@@ -140,11 +140,14 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+        if world_size not in FI_SUPPORTED_WORLD_SIZES:
+            return None
         max_size_mb = self.fi_allreduce_fusion_max_size_mb
         if max_size_mb is None:
             max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
-        max_size_bytes = int(max_size_mb * MiB) if max_size_mb is not None else None
-        return max_size_bytes
+
+        return int(max_size_mb * MiB) if max_size_mb is not None else None
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:

@@ -419,8 +419,8 @@ class Worker(WorkerBase):
         all_sizes = set(self.vllm_config.compilation_config.cudagraph_capture_sizes)
         all_sizes.update(warmup_sizes)
         for compile_range in compile_ranges:
-            if not any(compile_range.contains(x) for x in all_sizes):
-                warmup_sizes.append(compile_range.start)
+            if not any(x in compile_range for x in all_sizes):
+                warmup_sizes.append(compile_range.end - 1)
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):

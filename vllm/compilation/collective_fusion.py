@@ -1100,12 +1100,12 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         if max_size is None:
             # Flashinfer doesn't support current world size
             logger.warning(
-                "Flashinfer allreduce fusion is not supported for world size %s",
+                "Flashinfer allreduce fusion is not supported for world size %s"
+                " or max size is not provided",
                 self.tp_size,
             )
             return
         element_size = 4 if use_fp32_lamport else 2
-        self.max_token_num = max_size // (self.hidden_dim * element_size)
         self.max_token_num = max_size // (self.hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
         # than max_num_batched_tokens anyways

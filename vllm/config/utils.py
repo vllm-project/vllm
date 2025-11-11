@@ -191,7 +191,7 @@ class Range:
     def is_single_size(self) -> bool:
         return self.start == self.end
 
-    def contains(self, size: int) -> bool:
+    def __contains__(self, size: int) -> bool:
         # Inclusive of start, exclusive of end
         if self.is_single_size():
             return size == self.start
