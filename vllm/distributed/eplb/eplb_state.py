@@ -275,7 +275,7 @@ class EplbState:
         Build the initial EPLB state.
         """
         self.validate_ep_configuration(model)
-        is_async = model_config.parallel_config.eplb_config.use_async
+        self.is_async = model_config.parallel_config.eplb_config.use_async
 
         physical_to_logical_map_list = (
             EplbState.build_initial_global_physical_to_logical_map(
@@ -448,11 +448,10 @@ class EplbState:
             is_unchanged=[],
             is_received_locally=[],
             experts_recv_loc={},
-            is_async_enabled=is_async,
+            is_async_enabled=self.is_async,
             cuda_device_index=self.cuda_device_index,
         )
         self.model_states[model_config.compute_hash()] = model_state
-        self.is_async = self.is_async or is_async
 
     def step(
         self,
@@ -719,7 +718,6 @@ class EplbState:
                 f"{num_gpus=}, {num_nodes=}"
             )
 
-        async_pending = False
         for eplb_model_state, global_expert_load_window in zip(
             self.model_states.values(), global_expert_load_windows
         ):
@@ -779,53 +777,22 @@ class EplbState:
                         new_logical_to_physical_map
                     )
                     eplb_model_state.logical_replica_count.copy_(new_logical_replica_count)
+                if is_main_rank:
+                    assert time_start is not None
+                    torch.cuda.synchronize()
+                    time_end = time.perf_counter()
+                    logger.info(
+                        "Rearranged experts%sin %.2f seconds.",
+                        " (profile) " if is_profile else " ",
+                        time_end - time_start,
+                    )    
             else:
-                device = eplb_model_state.physical_to_logical_map.device
-                new_physical = new_physical_to_logical_map.to(device)
-                max_slots = eplb_model_state.logical_to_physical_map.shape[-1]
-                assert (
-                    new_logical_to_physical_map.shape[-1] <= max_slots
-                ), "Exceeded logical-to-physical map capacity."
-                padded_logical = torch.nn.functional.pad(
-                    new_logical_to_physical_map,
-                    (
-                        0,
-                        max(
-                            0,
-                            max_slots - new_logical_to_physical_map.shape[-1],
-                        ),
-                    ),
-                    value=-1,
-                ).to(eplb_model_state.logical_to_physical_map.device)
-                new_replica = new_logical_replica_count.to(
-                    eplb_model_state.logical_replica_count.device
-                )
-
-                eplb_model_state.new_physical_to_logical_map = new_physical
-                eplb_model_state.new_logical_to_physical_map = padded_logical
-                eplb_model_state.new_logical_replica_count = new_replica
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
-                eplb_model_state.ep_buffer_ready = 0
-                eplb_model_state.buffer_ready_event = None
-                eplb_model_state.is_unchanged = []
-                eplb_model_state.is_received_locally = []
-                eplb_model_state.experts_recv_loc = {}
-                async_pending = True
-
-        if is_main_rank:
-            assert time_start is not None
-            torch.cuda.synchronize()
-            time_end = time.perf_counter()
-            logger.info(
-                "Rearranged experts%sin %.2f seconds.",
-                " (profile) " if is_profile else " ",
-                time_end - time_start,
-            )
 
         # Signal async thread to start transferring layers
-        if async_pending and (not is_profile):
+        if self.is_async and (not is_profile):
             self.rearrange_event.set()
         return None
 
