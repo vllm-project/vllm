@@ -3,6 +3,7 @@
 
 import argparse
 import os
+import readline  # noqa: F401 # fix unicode encode eror for multi-byte characters
 import signal
 import sys
 from typing import TYPE_CHECKING
