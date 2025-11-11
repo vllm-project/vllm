@@ -7,7 +7,6 @@ import torch
 
 from vllm.attention.backends.abstract import (
     AttentionBackend,
-    AttentionMetadata,
     MultipleOf,
 )
 from vllm.config import VllmConfig
@@ -24,9 +23,7 @@ logger = init_logger(__name__)
 
 
 class DeepseekV32IndexerBackend(AttentionBackend):
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return DeepseekV32IndexerMetadata
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [64]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -50,10 +47,6 @@ class DeepseekV32IndexerBackend(AttentionBackend):
     @staticmethod
     def get_kv_cache_stride_order() -> tuple[int, ...]:
         return (0, 1, 2)
-
-    @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        return [64]
 
 
 @dataclass

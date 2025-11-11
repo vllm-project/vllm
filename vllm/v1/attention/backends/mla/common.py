@@ -198,10 +198,10 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
-    AttentionMetadata,
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
@@ -271,28 +271,15 @@ except ImportError:
     flashinfer_available = False
 
 
-def is_rocm_aiter_fp8bmm_enabled() -> bool:
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER_FP8BMM
-        and envs.VLLM_ROCM_USE_AITER
-    )
-
-
-if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
-    )
-
-    def dynamic_per_batched_tensor_quant(
-        x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
-    ):
-        DTYPE_MAX = torch.finfo(dtype).max
-        min_val, max_val = x.aminmax()
-        amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
-        scale = DTYPE_MAX / amax
-        x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
-        return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
+def dynamic_per_batched_tensor_quant(
+    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+):
+    DTYPE_MAX = torch.finfo(dtype).max
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+    scale = DTYPE_MAX / amax
+    x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
 logger = init_logger(__name__)
@@ -306,10 +293,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return MLACommonMetadata
 
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
@@ -326,24 +309,12 @@ class MLACommonBackend(AttentionBackend):
         return (num_blocks, block_size, head_size)
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         return [576]
 
     @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    def is_mla(cls) -> bool:
+        return True
 
 
 @dataclass
@@ -442,8 +413,10 @@ class MLACommonMetadata(Generic[D]):
     ) = None
 
     def __post_init__(self):
-        if self.head_dim is not None:
-            MLACommonBackend.validate_head_size(self.head_dim)
+        if self.head_dim is not None and not MLACommonBackend.supports_head_size(
+            self.head_dim
+        ):
+            raise ValueError(f"Head dimension {self.head_dim} is not supported by MLA.")
 
 
 M = TypeVar("M", bound=MLACommonMetadata)
@@ -1114,6 +1087,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.kv_b_proj = kv_b_proj
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1163,7 +1137,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
@@ -1192,7 +1166,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dtype=torch.bfloat16,
                     device=self.W_K.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
                 )
 
@@ -1201,7 +1175,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dtype=torch.bfloat16,
                     device=self.W_V.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
@@ -1213,10 +1187,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_aiter_triton_fp8_bmm_enabled:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            x = aiter_triton_fp8_bmm(
+            x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
             )
             # Convert from (B, N, V) to (B, N * V)
@@ -1576,7 +1549,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
@@ -1605,7 +1578,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dtype=torch.bfloat16,
                     device=self.W_K.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
                 )
 
@@ -1614,7 +1587,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dtype=torch.bfloat16,
                     device=self.W_V.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
@@ -1973,7 +1946,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
-            # Pads the head_dim if necessary (for the underlying kernel)
             if self.q_pad_num_heads is not None:
                 B, N, L = decode_q_pe.shape
                 decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
@@ -1981,9 +1953,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_pe_padded.copy_(decode_q_pe)
                 decode_q_pe = decode_pe_padded
 
-            if is_rocm_aiter_fp8bmm_enabled():
+            if self.is_aiter_triton_fp8_bmm_enabled:
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                decode_ql_nope = aiter_triton_fp8_bmm(
+                decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                     decode_q_nope,
                     self.W_K,
                     self.W_K_scale,
