@@ -191,7 +191,7 @@ def kernel_unified_attention_2d(
     seq_lens_ptr,  # [num_seqs]
     alibi_slopes_ptr,  # [num_query_heads]
     qq_bias_ptr,  # [num_query_tokens, num_query_tokens]
-    scale: tl.constexpr,  # float32
+    scale,  # float32
     k_scale,  # float32
     v_scale,  # float32
     out_scale,  # float32
@@ -564,7 +564,7 @@ def kernel_unified_attention_3d(
 
     # needed to use exp2 (exp2 -> exp conversion)
     RCP_LN2 = 1.4426950408889634
-    qk_scale: tl.constexpr = scale * RCP_LN2
+    qk_scale = scale * RCP_LN2
 
     seq_idx = find_seq_idx(
         query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
