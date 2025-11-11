@@ -190,14 +190,25 @@ class Mxfp4Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            raise NotImplementedError("Mxfp4 linear layer is not implemented")
+            # TODO: Add support for MXFP4 Linear Method.
+            # MXFP4 LinearMethod is available in AMD-Quark, refer to that implementation
+            # if you are interested in enabling MXFP4 here.
+            logger.warning_once(
+                "MXFP4 linear layer is not implemented - falling back to "
+                "UnquantizedLinearMethod."
+            )
+            return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
             if current_platform.is_xpu():
                 return IpexMxfp4MoEMethod(layer.moe_config)
             else:
                 return Mxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
-            raise NotImplementedError("Mxfp4 attention layer is not implemented")
+            # TODO: Add support for MXFP4 Attention.
+            logger.warning_once(
+                "MXFP4 attention layer is not implemented. "
+                "Skipping quantization for this layer."
+            )
         return None
 
 
