@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Sequence
 from typing import Any
 
 import torch
@@ -158,7 +159,7 @@ def build_attn_metadata(
     query_start_loc: CpuGpuBuffer,
     seq_lens: CpuGpuBuffer,
     num_computed_tokens_cpu: torch.Tensor,
-    block_tables: tuple[torch.Tensor, ...],
+    block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
 ) -> dict[str, Any]:
