@@ -1142,11 +1142,10 @@ class Scheduler(SchedulerInterface):
         self,
         draft_token_ids: DraftTokenIds,
     ) -> None:
-        for req_id, spec_token_ids_np in zip(
+        for req_id, spec_token_ids in zip(
             draft_token_ids.req_ids,
             draft_token_ids.draft_token_ids,
         ):
-            spec_token_ids = spec_token_ids_np.tolist()
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
                 # The request may have been finished. Skip.

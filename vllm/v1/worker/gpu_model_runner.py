@@ -530,7 +530,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.runner_only_attn_layers: set[str] = set()
 
         # Cached outputs.
-        self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
+        self._draft_token_ids: list[np.ndarray] | torch.Tensor | None = None
         self.transfer_event = torch.cuda.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -2877,7 +2877,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if isinstance(self._draft_token_ids, torch.Tensor):
             draft_token_ids = self._draft_token_ids.tolist()
         else:
-            draft_token_ids = self._draft_token_ids
+            draft_token_ids = [row.tolist() for row in self._draft_token_ids]
         self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
