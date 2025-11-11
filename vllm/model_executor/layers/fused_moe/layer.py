@@ -2589,6 +2589,9 @@ class FusedMoE(CustomOp):
                 # Run shared experts in parallel on a separate stream
                 with torch.cuda.stream(self.shared_experts_stream):
                     shared_output = self.shared_experts(hidden_states_clone)
+
+                # Record that shared_output will be used by current_stream
+                shared_output.record_stream(current_stream())
             else:
                 shared_output = self.shared_experts(hidden_states)
         else:
