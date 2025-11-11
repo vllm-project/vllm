@@ -3,7 +3,6 @@
 
 import ast
 import dataclasses
-import hashlib
 import os
 import pprint
 import time
@@ -24,6 +23,7 @@ from vllm.compilation.partition_rules import (
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
@@ -588,7 +588,7 @@ class VllmBackend:
             factors.append(compiler_hash)
 
             # combine all factors to generate the cache dir
-            hash_key = hashlib.md5(
+            hash_key = safe_hash(
                 str(factors).encode(), usedforsecurity=False
             ).hexdigest()[:10]
 

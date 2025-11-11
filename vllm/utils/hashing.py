@@ -61,3 +61,20 @@ def get_hash_fn_by_name(hash_fn_name: str) -> Callable[[Any], bytes]:
         return sha256_cbor
 
     raise ValueError(f"Unsupported hash function: {hash_fn_name}")
+
+
+def safe_hash(data: bytes, usedforsecurity: bool = False):
+    """Hash for configs, defaulting to md5 but falling back to sha256
+    in FIPS constrained environments.
+
+    Args:
+        data: bytes
+        usedforsecurity: Whether the hash is used for security purposes
+
+    Returns:
+        Hash object
+    """
+    try:
+        return hashlib.md5(data, usedforsecurity=usedforsecurity)
+    except Exception:
+        return hashlib.sha256(data)
