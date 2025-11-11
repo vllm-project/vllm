@@ -35,7 +35,7 @@ class SuffixDecodingProposer:
         self,
         input_batch: InputBatch,
         sampled_token_ids: list[np.ndarray],
-    ) -> list[np.ndarray]:
+    ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,
@@ -45,20 +45,20 @@ class SuffixDecodingProposer:
         for i, sampled_ids in enumerate(sampled_token_ids):
             if sampled_ids.shape[0] == 0:
                 # Skip speculative decoding for partial prefills.
-                draft_token_ids.append(np.array([]))
+                draft_token_ids.append([])
                 continue
 
             # Skip requests that require sampling parameters that are not
             # supported with speculative decoding.
             req_id = input_batch.req_ids[i]
             if req_id in input_batch.spec_decode_unsupported_reqs:
-                draft_token_ids.append(np.array([]))
+                draft_token_ids.append([])
                 continue
 
             num_tokens = input_batch.num_tokens_no_spec[i]
             if num_tokens >= self.max_model_len:
                 # Skip requests that have already reached the max model length.
-                draft_token_ids.append(np.array([]))
+                draft_token_ids.append([])
                 continue
 
             index = input_batch.req_id_to_index[req_id]
@@ -88,7 +88,7 @@ class SuffixDecodingProposer:
                 min_token_prob=self.min_token_prob,
             )
 
-            draft_token_ids.append(np.array(draft.token_ids))
+            draft_token_ids.append(draft.token_ids)
 
         # Stop requests that were not seen in the input batch.
         for req_id in (
