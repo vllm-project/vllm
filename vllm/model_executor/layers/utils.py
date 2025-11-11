@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
@@ -104,25 +105,24 @@ def default_unquantized_gemm(
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
-    if (
-        envs.VLLM_ROCM_USE_AITER == 0
-        or envs.VLLM_ROCM_USE_AITER_TRITON_GEMM == 0
-        # MI300's - fp8nuz=True
-        or current_platform.is_fp8_fnuz()
-        or dtype not in [torch.float16, torch.bfloat16]
-    ):
-        return False
-
     # use hipblaslt for the larger GEMMs
     if n > 2048 and m > 512:
         return False
-    return (
+
+    dtype_matches = dtype in [torch.float16, torch.bfloat16]
+    shape_matches = (
         (m == 5120 and k == 2880)
         or (m == 2880 and k == 4096)
         or (m == 128 and k == 2880)
         or (m == 640 and k == 2880)
         or (m == 2880 and k == 512)
     )
+    platform_envs_matches = (rocm_aiter_ops.is_triton_gemm_enabled() 
+                             and not current_platform.is_fp8_fnuz())
+
+    return (platform_envs_matches and
+        shape_matches and
+         dtype_matches)
 
 
 def rocm_unquantized_gemm_impl(
