@@ -14,38 +14,32 @@ from ...utils import RemoteOpenAIServer
 @pytest.fixture(scope="session")
 def base64_encoded_image(local_asset_server) -> dict[str, str]:
     return {
-        image_asset:
-        encode_image_base64(local_asset_server.get_image_asset(image_asset))
+        image_asset: encode_image_base64(
+            local_asset_server.get_image_asset(image_asset)
+        )
         for image_asset in TEST_IMAGE_ASSETS
     }
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(not current_platform.is_tpu(),
-                    reason="This test needs a TPU")
+@pytest.mark.skipif(not current_platform.is_tpu(), reason="This test needs a TPU")
 @pytest.mark.parametrize("model_name", ["llava-hf/llava-1.5-7b-hf"])
-async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
-                                                                        str]):
-
+async def test_basic_vision(model_name: str, base64_encoded_image: dict[str, str]):
     pytest.skip("Skip this test until it's fixed.")
 
     def whats_in_this_image_msg(b64):
-        return [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "text",
-                    "text": "What's in this image?"
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/jpeg;base64,{b64}"
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
                     },
-                },
-            ],
-        }]
+                ],
+            }
+        ]
 
     server_args = [
         "--max-model-len",
@@ -62,19 +56,20 @@ async def test_basic_vision(model_name: str, base64_encoded_image: dict[str,
     ]
 
     # Server will pre-compile on first startup (takes a long time).
-    with RemoteOpenAIServer(model_name, server_args,
-                            max_wait_seconds=600) as remote_server:
+    with RemoteOpenAIServer(
+        model_name, server_args, max_wait_seconds=600
+    ) as remote_server:
         client: openai.AsyncOpenAI = remote_server.get_async_client()
 
         # Other requests now should be much faster
         for image_url in TEST_IMAGE_ASSETS:
             image_base64 = base64_encoded_image[image_url]
-            chat_completion_from_base64 = await client.chat.completions\
-                .create(
+            chat_completion_from_base64 = await client.chat.completions.create(
                 model=model_name,
                 messages=whats_in_this_image_msg(image_base64),
                 max_completion_tokens=24,
-                temperature=0.0)
+                temperature=0.0,
+            )
             result = chat_completion_from_base64
             assert result
             choice = result.choices[0]

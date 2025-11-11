@@ -11,9 +11,7 @@ MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 @pytest.fixture(scope="module")
 def server():
-    args = [
-        "--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"
-    ]
+    args = ["--max-model-len", "1024", "--enforce-eager", "--load-format", "dummy"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -46,6 +44,7 @@ def test_bench_serve(server):
 
     assert result.returncode == 0, f"Benchmark failed: {result.stderr}"
 
+
 @pytest.mark.benchmark
 def test_bench_serve_chat(server):
     command = [
@@ -68,7 +67,7 @@ def test_bench_serve_chat(server):
         "5",
         "--endpoint",
         "/v1/chat/completions",
-        "--endpoint-type",
+        "--backend",
         "openai-chat",
     ]
     result = subprocess.run(command, capture_output=True, text=True)

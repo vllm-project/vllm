@@ -7,21 +7,24 @@ import torch
 from vllm.scalar_type import scalar_types
 
 
-@pytest.mark.parametrize("type_tuple", (
-    (-8, 7, scalar_types.int4),
-    (0, 15, scalar_types.uint4),
-    (-8, 7, scalar_types.uint4b8),
-    (-128, 127, scalar_types.uint8b128),
-    (-6., 6., scalar_types.float4_e2m1f),
-    (-28., 28., scalar_types.float6_e3m2f),
-    (torch.int8, scalar_types.int8),
-    (torch.uint8, scalar_types.uint8),
-    (torch.float8_e5m2, scalar_types.float8_e5m2),
-    (torch.float8_e4m3fn, scalar_types.float8_e4m3fn),
-    (torch.bfloat16, scalar_types.float16_e8m7),
-    (torch.float16, scalar_types.float16_e5m10),
-),
-                         ids=lambda x: str(x))
+@pytest.mark.parametrize(
+    "type_tuple",
+    (
+        (-8, 7, scalar_types.int4),
+        (0, 15, scalar_types.uint4),
+        (-8, 7, scalar_types.uint4b8),
+        (-128, 127, scalar_types.uint8b128),
+        (-6.0, 6.0, scalar_types.float4_e2m1f),
+        (-28.0, 28.0, scalar_types.float6_e3m2f),
+        (torch.int8, scalar_types.int8),
+        (torch.uint8, scalar_types.uint8),
+        (torch.float8_e5m2, scalar_types.float8_e5m2),
+        (torch.float8_e4m3fn, scalar_types.float8_e4m3fn),
+        (torch.bfloat16, scalar_types.float16_e8m7),
+        (torch.float16, scalar_types.float16_e5m10),
+    ),
+    ids=lambda x: str(x),
+)
 def test_scalar_type_min_max(type_tuple):
     print(type_tuple)
     if len(type_tuple) == 3:

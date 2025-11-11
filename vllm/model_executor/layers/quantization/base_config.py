@@ -3,7 +3,7 @@
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -19,8 +19,9 @@ class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
     @abstractmethod
-    def create_weights(self, layer: torch.nn.Module, *weight_args,
-                       **extra_weight_attrs):
+    def create_weights(
+        self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
+    ):
         """Create weights for a layer.
 
         The weights will be set as attributes of the layer."""
@@ -34,8 +35,7 @@ class QuantizeMethodBase(ABC):
         raise NotImplementedError
 
     # Not required functions
-    def embedding(self, layer: torch.nn.Module, *args,
-                  **kwargs) -> torch.Tensor:
+    def embedding(self, layer: torch.nn.Module, *args, **kwargs) -> torch.Tensor:
         """Gather embeddings in the layer based on indices in the input tensor.
 
         Expects create_weights to have been called before on the layer."""
@@ -49,19 +49,16 @@ class QuantizeMethodBase(ABC):
         return
 
 
-def method_has_implemented_embedding(
-        method_class: type[QuantizeMethodBase]) -> bool:
+def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
     """
     Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
     has been changed from the base implementation.
     """
-    base_embedding = inspect.getattr_static(QuantizeMethodBase, "embedding",
-                                            None)
+    base_embedding = inspect.getattr_static(QuantizeMethodBase, "embedding", None)
     class_embedding = inspect.getattr_static(method_class, "embedding", None)
 
-    return (class_embedding is not None
-            and class_embedding is not base_embedding)
+    return class_embedding is not None and class_embedding is not base_embedding
 
 
 class QuantizationConfig(ABC):
@@ -107,12 +104,13 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def override_quantization_method(
-            cls, hf_quant_cfg, user_quant) -> Optional[QuantizationMethods]:
+        cls, hf_quant_cfg, user_quant
+    ) -> QuantizationMethods | None:
         """
-           Detects if this quantization method can support a given checkpoint
-           format by overriding the user specified quantization method -- 
-           this method should only be overwritten by subclasses in exceptional 
-           circumstances
+        Detects if this quantization method can support a given checkpoint
+        format by overriding the user specified quantization method --
+        this method should only be overwritten by subclasses in exceptional
+        circumstances
         """
         return None
 
@@ -122,12 +120,12 @@ class QuantizationConfig(ABC):
         for key in keys:
             if key in config:
                 return config[key]
-        raise ValueError(f"Cannot find any of {keys} in the model's "
-                         "quantization config.")
+        raise ValueError(
+            f"Cannot find any of {keys} in the model's quantization config."
+        )
 
     @staticmethod
-    def get_from_keys_or(config: dict[str, Any], keys: list[str],
-                         default: Any) -> Any:
+    def get_from_keys_or(config: dict[str, Any], keys: list[str], default: Any) -> Any:
         """Get an optional value from the model's quantization config."""
         try:
             return QuantizationConfig.get_from_keys(config, keys)
@@ -135,10 +133,11 @@ class QuantizationConfig(ABC):
             return default
 
     @abstractmethod
-    def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional[QuantizeMethodBase]:
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> QuantizeMethodBase | None:
         """Get the quantize method to use for the quantized layer.
-        
+
         Args:
             layer: The layer for the quant method.
             prefix: The full name of the layer in the state dict
@@ -148,11 +147,12 @@ class QuantizationConfig(ABC):
         """
         raise NotImplementedError
 
-    def get_cache_scale(self, name: str) -> Optional[str]:
+    def get_cache_scale(self, name: str) -> str | None:
         return None
 
     def apply_vllm_mapper(  # noqa: B027
-            self, hf_to_vllm_mapper: "WeightsMapper"):
+        self, hf_to_vllm_mapper: "WeightsMapper"
+    ):
         """
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
@@ -161,4 +161,10 @@ class QuantizationConfig(ABC):
             structure of the qconfig) to vllm model structure
         """
         # TODO (@kylesayrs): add implementations for all subclasses
+        pass
+
+    def maybe_update_config(self, model_name: str):  # noqa: B027
+        """
+        Interface to update values after config initialization.
+        """
         pass
