@@ -2000,7 +2000,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_q, kv_cache, attn_metadata, layer
             )
 
-            # recorect dcp attn_out with lse.
+            # correct dcp attn_out with lse.
             if self.dcp_world_size > 1:
                 attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
 
