@@ -61,9 +61,9 @@ class LogprobsTensors(NamedTuple):
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
         return LogprobsLists(
-            self.logprob_token_ids.to("cpu").numpy(),
-            self.logprobs.to("cpu").numpy(),
-            self.selected_token_ranks.to("cpu").numpy(),
+            self.logprob_token_ids.cpu().numpy(),
+            self.logprobs.cpu().numpy(),
+            self.selected_token_ranks.cpu().numpy(),
             cu_num_generated_tokens,
         )
 
