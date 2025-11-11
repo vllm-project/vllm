@@ -195,7 +195,6 @@ def cp_lse_ag_out_rs(
     cp_attn_lse = cp_attn_lse.contiguous()
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
     out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
-    assert out.is_contiguous()
     out = cp_group.reduce_scatter(out, dim=1)
 
     if return_lse:

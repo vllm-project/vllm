@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Literal, NamedTuple
 
 import pytest
+import torch
 
 from vllm.config.model import RunnerOption
 from vllm.logger import init_logger
@@ -254,6 +255,17 @@ def test_cp_generation(
     test_options: CPTestOptions,
     num_gpus_available,
 ):
+    if (
+        model_id == "deepseek-ai/DeepSeek-V2-Lite-Chat"
+        and torch.cuda.get_device_capability() < (9, 0)
+    ):
+        pytest.skip(reason="MLA+DCP requires compute capability of 9.0 or higher")
+    if (
+        model_id == "bigcode/gpt_bigcode-santacoder"
+        and torch.cuda.get_device_capability() != (9, 0)
+    ):
+        pytest.skip(reason="GQA+DCP currently requires compute capability of 9.0")
+
     _compare_cp_with_tp(
         model_id,
         parallel_setup,
