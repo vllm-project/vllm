@@ -156,7 +156,7 @@ def triton_reshape_and_cache_flash(
     # TODO(ngl): maybe replace with static launch grid to avoid overhead if
     #   using cudagraphs
     grid = lambda meta: (
-        min(int(num_tokens), slot_mapping.shape[0]),
+        slot_mapping.shape[0],
         triton.cdiv(n, meta["TILE_SIZE"]),
     )
 
