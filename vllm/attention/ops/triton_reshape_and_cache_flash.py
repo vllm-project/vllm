@@ -97,7 +97,6 @@ def triton_reshape_and_cache_flash(
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
 ):
-    num_tokens = key.shape[0]
     num_heads = key.shape[1]
     head_size = key.shape[2]
     block_size = key_cache.shape[1]
