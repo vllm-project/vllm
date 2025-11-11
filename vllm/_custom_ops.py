@@ -329,6 +329,7 @@ def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    # If removed, also need to remove contiguous in MatcherRMSNorm
     input_contiguous = input.contiguous()
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
@@ -337,6 +338,34 @@ def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def fused_qk_norm_rope(
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    position_ids: torch.Tensor,
+) -> None:
+    torch.ops._C.fused_qk_norm_rope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        is_neox,
+        position_ids,
+    )
 
 
 def apply_repetition_penalties_torch(
@@ -1898,25 +1927,40 @@ def topk_softmax(
 
 def grouped_topk(
     scores: torch.Tensor,
-    scores_with_bias: torch.Tensor,
     num_expert_group: int,
     topk_group: int,
     topk: int,
     renormalize: bool,
     routed_scaling_factor: float,
+    bias: torch.Tensor,
+    scoring_func: int = 0,
 ):
+    """
+    Perform grouped top-k routing for mixture of experts.
+
+    Args:
+        scores: Raw inputs (logits if scoring_func=1, scores if scoring_func=0)
+        num_expert_group: Number of expert groups
+        topk_group: Number of groups to select
+        topk: Number of experts to select per token
+        renormalize: Whether to renormalize the output weights
+        routed_scaling_factor: Scaling factor for routing weights
+        bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
+        scoring_func: 0=none (no activation), 1=sigmoid
+    """
     if not current_platform.is_cuda():
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA platforms"
         )
     return torch.ops._moe_C.grouped_topk(
         scores,
-        scores_with_bias,
         num_expert_group,
         topk_group,
         topk,
         renormalize,
         routed_scaling_factor,
+        bias,
+        scoring_func,
     )
 
 

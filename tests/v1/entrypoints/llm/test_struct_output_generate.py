@@ -674,8 +674,8 @@ def test_structured_output_with_reasoning_matrices(
     assert output is not None and isinstance(output, RequestOutput)
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    reasoning_content, content = run_reasoning_extraction(reasoner, [generated_text])
-    print(f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}")
+    reasoning, content = run_reasoning_extraction(reasoner, [generated_text])
+    print(f"Prompt: {prompt!r}\nReasoning: {reasoning!r}\nContent: {content!r}")
 
     if "Qwen3" in model_name:
         assert content is not None
