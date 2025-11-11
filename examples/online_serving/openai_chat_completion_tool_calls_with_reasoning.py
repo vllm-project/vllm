@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 An example demonstrates how to use tool calling with reasoning models 
-like QwQ-32B. The reasoning_content will not be parsed by the tool 
+like QwQ-32B. The reasoning will not be parsed by the tool 
 calling process; only the final output will be parsed.
 
 To run this example, you need to start the vLLM server with both 
@@ -78,7 +78,7 @@ messages = [
 
 
 def extract_reasoning_and_calls(chunks: list):
-    reasoning_content = ""
+    reasoning = ""
     tool_call_idx = -1
     arguments = []
     function_names = []
@@ -97,9 +97,9 @@ def extract_reasoning_and_calls(chunks: list):
                 if tool_call.function.arguments:
                     arguments[tool_call_idx] += tool_call.function.arguments
         else:
-            if hasattr(chunk.choices[0].delta, "reasoning_content"):
-                reasoning_content += chunk.choices[0].delta.reasoning_content
-    return reasoning_content, arguments, function_names
+            if hasattr(chunk.choices[0].delta, "reasoning"):
+                reasoning += chunk.choices[0].delta.reasoning
+    return reasoning, arguments, function_names
 
 
 def main():
@@ -115,7 +115,7 @@ def main():
     tool_calls = client.chat.completions.create(
         messages=messages, model=model, tools=tools
     )
-    print(f"reasoning_content: {tool_calls.choices[0].message.reasoning_content}")
+    print(f"reasoning: {tool_calls.choices[0].message.reasoning}")
     print(f"function name: {tool_calls.choices[0].message.tool_calls[0].function.name}")
     print(
         f"function arguments: "
@@ -129,9 +129,9 @@ def main():
 
     chunks = list(tool_calls_stream)
 
-    reasoning_content, arguments, function_names = extract_reasoning_and_calls(chunks)
+    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
 
-    print(f"reasoning_content: {reasoning_content}")
+    print(f"reasoning: {reasoning}")
     print(f"function name: {function_names[0]}")
     print(f"function arguments: {arguments[0]}")
 
@@ -144,7 +144,7 @@ def main():
     )
 
     tool_call = tool_calls.choices[0].message.tool_calls[0].function
-    print(f"reasoning_content: {tool_calls.choices[0].message.reasoning_content}")
+    print(f"reasoning: {tool_calls.choices[0].message.reasoning}")
     print(f"function name: {tool_call.name}")
     print(f"function arguments: {tool_call.arguments}")
     print("----------Stream Generate With Named Function Calling--------------")
@@ -159,8 +159,8 @@ def main():
 
     chunks = list(tool_calls_stream)
 
-    reasoning_content, arguments, function_names = extract_reasoning_and_calls(chunks)
-    print(f"reasoning_content: {reasoning_content}")
+    reasoning, arguments, function_names = extract_reasoning_and_calls(chunks)
+    print(f"reasoning: {reasoning}")
     print(f"function name: {function_names[0]}")
     print(f"function arguments: {arguments[0]}")
     print("\n\n")

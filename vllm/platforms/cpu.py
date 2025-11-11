@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -22,10 +23,10 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
-    _Backend = None
+    AttentionBackendEnum = None
     VllmConfig = None
 
 
@@ -126,7 +127,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
@@ -136,9 +137,9 @@ class CpuPlatform(Platform):
         has_sink: bool,
         use_sparse: bool,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
-        if selected_backend and selected_backend != _Backend.TORCH_SDPA:
+        if selected_backend and selected_backend != AttentionBackendEnum.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
@@ -147,11 +148,10 @@ class CpuPlatform(Platform):
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
-        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+        return AttentionBackendEnum.TORCH_SDPA.get_path()
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import vllm.envs as envs
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
@@ -289,17 +289,22 @@ class CpuPlatform(Platform):
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Note: to avoid the error 'nthreads cannot be larger than environment
-        #  variable "NUMEXPR_MAX_THREADS" (64)'.
+        # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
-        # Set default threads num for OpenMP parallel
-        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
+            # Set default threads num for OpenMP parallel
+            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        else:
+            # In this case, setting the OpenMP configuration via
+            # OMP_NUM_THREADS is up to the user.
+            logger.info("Disabling binding processes to CPU cores...")
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
         # Disable multi-stream for shared experts as no Stream on CPU
-        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "0"
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
 
         # Intel OpenMP setting
         ld_preload_str = os.getenv("LD_PRELOAD", "")
