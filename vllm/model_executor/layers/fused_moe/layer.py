@@ -1253,8 +1253,7 @@ class FusedMoE(CustomOp):
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
             # Note: the moe_quant_config can't be constructed until after
-            # weight loading post processing. Attempt to assert that here.
-            assert self.w13_weight is not None
+            # weight loading post processing.
             self.quant_method.moe_quant_config = (
                 self.quant_method.get_fused_moe_quant_config(self)
             )
