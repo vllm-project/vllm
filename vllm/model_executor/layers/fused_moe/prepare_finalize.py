@@ -4,13 +4,13 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.distributed import get_ep_group
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-from vllm.distributed import get_ep_group
 
 
 class MoEPrepareAndFinalizeNoEP(mk.FusedMoEPrepareAndFinalize):
@@ -83,41 +83,24 @@ class FusedMoENaivePrepareAndFinalize(MoEPrepareAndFinalizeNoEP):
     Prepare/finalize that mirrors the legacy naive dispatch+combine path.
     """
 
-    def __init__(self) -> None:
-        super().__init__()
-        self._is_sequence_parallel: bool = False
-
     def preprocess_inputs(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         layer: torch.nn.Module,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        self._is_sequence_parallel = getattr(layer, "is_sequence_parallel", False)
+        is_sequence_parallel = getattr(layer, "is_sequence_parallel", False)
         return get_ep_group().dispatch(
-            hidden_states, router_logits, self._is_sequence_parallel
+            hidden_states, router_logits, is_sequence_parallel
         )
 
-    def finalize(
+    def postprocess_tensor(
         self,
         output: torch.Tensor,
-        fused_expert_output: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-        weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
-        super().finalize(
-            output,
-            fused_expert_output,
-            topk_weights,
-            topk_ids,
-            apply_router_weight_on_input,
-            weight_and_reduce_impl,
-        )
-
+        layer: torch.nn.Module,
+    ) -> torch.Tensor:
         if output.numel() == 0:
-            return
+            return output
 
-        combined = get_ep_group().combine(output, self._is_sequence_parallel)
-        output.copy_(combined)
+        is_sequence_parallel = getattr(layer, "is_sequence_parallel", False)
+        return get_ep_group().combine(output, is_sequence_parallel)
