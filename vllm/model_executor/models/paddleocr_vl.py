@@ -227,8 +227,14 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         merge_size = hf_config.vision_config.spatial_merge_size
         patch_size = hf_config.vision_config.patch_size
         factor = merge_size * patch_size
-        image_size = self.get_image_processor().max_pixels // (factor**2)
-        return ImageSize(height=image_size, width=image_size)
+        max_num_tokens = self.get_image_processor().max_pixels // (factor**2)
+        # Find factors of max_num_tokens close to its square root
+        # to create a dummy image with a reasonable aspect ratio.
+        h_patches = int(math.sqrt(max_num_tokens))
+        while max_num_tokens % h_patches != 0:
+            h_patches -= 1
+        w_patches = max_num_tokens // h_patches
+        return ImageSize(height=h_patches * factor, width=w_patches * factor)
 
 
 class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessingInfo]):
