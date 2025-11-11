@@ -35,7 +35,7 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
 
         # test enable_prefix_caching plus all pooling
         # we need to skip reading cache at this request by
-        # request.skip_reading_cache
+        # request.skip_reading_prefix_cache
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],
             pooling_task="token_embed",
@@ -54,7 +54,7 @@ def test_embed_models(hf_runner, vllm_runner, model: str):
         enable_chunked_prefill=False,
         enable_prefix_caching=True,
     ) as vllm_model:
-        # skip_reading_cache can still write to cache
+        # skip_reading_prefix_cache can still write to cache
         # to accelerate following requests
         pooling_outputs = vllm_model.llm.encode(
             [TokensPrompt(prompt_token_ids=t) for t in token_prompts],

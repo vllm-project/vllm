@@ -252,7 +252,7 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
-    skip_reading_cache: bool = None
+    skip_reading_prefix_cache: bool = None
 
     @staticmethod
     def from_optional(
@@ -414,11 +414,11 @@ class SamplingParams(
             self.structured_outputs = self.guided_decoding
             self.guided_decoding = None
 
-        if self.skip_reading_cache is None:
+        if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
             # the output of prompt logprobs may less than n_prompt_tokens,
             # we need to skip reading cache at this request.
-            self.skip_reading_cache = self.prompt_logprobs is not None
+            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
