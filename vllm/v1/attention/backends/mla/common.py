@@ -196,8 +196,8 @@ from typing import ClassVar, Generic, TypeVar
 import torch
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
@@ -453,12 +453,6 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
     )
 
 
-# Currently 394MB, this can be tuned based on GEMM sizes used.
-# Chosen to be the same as sglang:
-#  https://github.com/sgl-project/sglang/blob/766392c6bda2558b61ce6d1c1bfd8081a549e1f1/python/sglang/global_config.py#L37
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 394 * 1024 * 1024
-
-
 class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -590,7 +584,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if self._use_fi_prefill:
             self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
+                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=device,
             )
 
             self._fi_prefill_main: BatchPrefillWithRaggedKVCacheWrapper | None = None
@@ -602,7 +598,9 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         if self._use_trtllm_ragged_prefill:
             self._workspace_buffer = torch.empty(
-                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
+                envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
+                dtype=torch.uint8,
+                device=device,
             )
 
         if self._use_cudnn_prefill:
