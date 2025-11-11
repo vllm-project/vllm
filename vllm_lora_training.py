@@ -18,7 +18,8 @@ from vllm.lora.request import LoRARequest
 # Configuration - MATCHES PEFT exactly
 BASE_MODEL_PATH = "/home/girfan/models/Llama-3.2-1B-Instruct"
 DTYPE = "bfloat16"
-LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_qkv_zero_init_lora"
+# LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_qkv_zero_init_lora"
+LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_random_lora"
 LORA_DROPOUT = 0.05
 LORA_RANK = 8
 LORA_ALPHA = 16

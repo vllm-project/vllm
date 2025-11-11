@@ -238,9 +238,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
                 slice_size = self.output_slices[slice_idx]
 
-                print(f"Updating output indices: {token_indices}")
-                print(f"Updating output offset: {output_offset} to {output_offset + slice_size}")
-                print(f"Updating slice size: {slice_size}")
+                # print(f"Updating output indices: {token_indices}")
+                # print(f"Updating output offset: {output_offset} to {output_offset + slice_size}")
+                # print(f"Updating slice size: {slice_size}")
 
                 output[token_indices, output_offset:output_offset + slice_size] += lora_output_scaled
                 output_offset += slice_size

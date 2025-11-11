@@ -253,53 +253,79 @@ class LlamaAttention(nn.Module):
         global IS_TRAINING
         global IS_LOGGED
 
-        if IS_TRAINING:
-            print("IS_TRAINING is True")
+        # if IS_TRAINING:
+        #     print("IS_TRAINING is True")
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # save q, k, v to a csv file
-        if IS_TRAINING and not IS_LOGGED:
-            print(f"q: {q.shape} {self.q_size}")
-            print(f"k: {k.shape} {self.kv_size}")
-            print(f"v: {v.shape} {self.kv_size}")
+        # # save q, k, v to a csv file
+        # if IS_TRAINING and not IS_LOGGED:
+        #     print(f"q: {q.shape} {self.q_size}")
+        #     print(f"k: {k.shape} {self.kv_size}")
+        #     print(f"v: {v.shape} {self.kv_size}")
 
-            import pandas as pd
-            df = pd.DataFrame({
-                "q": q.flatten().tolist(),
-            })
-            df.to_csv(f"vllm_q_before.csv", index=False)
+        #     import pandas as pd
+        #     df = pd.DataFrame({
+        #         "q": q.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_q_before.csv", index=False)
 
-        # Debug: Extract cos/sin to compare with PEFT
-        if IS_TRAINING and not IS_LOGGED:
-            positions_flat = positions.flatten()
-            num_tokens = positions_flat.shape[0]
-            cos_sin = self.rotary_emb.cos_sin_cache.index_select(0, positions_flat)
-            cos_vllm, sin_vllm = cos_sin.chunk(2, dim=-1)
-            print(f"vLLM cos shape: {cos_vllm.shape}, first few values: {cos_vllm[0, :5]}")
-            print(f"vLLM sin shape: {sin_vllm.shape}, first few values: {sin_vllm[0, :5]}")
-            print(f"vLLM positions: {positions_flat[:10]}")
-        
+        # # Debug: Extract cos/sin to compare with PEFT
+        # if IS_TRAINING and not IS_LOGGED:
+        #     positions_flat = positions.flatten()
+        #     num_tokens = positions_flat.shape[0]
+        #     cos_sin = self.rotary_emb.cos_sin_cache.index_select(0, positions_flat)
+        #     cos_vllm, sin_vllm = cos_sin.chunk(2, dim=-1)
+        #     print(f"vLLM cos shape: {cos_vllm.shape}, first few values: {cos_vllm[0, :5]}")
+        #     print(f"vLLM sin shape: {sin_vllm.shape}, first few values: {sin_vllm[0, :5]}")
+        #     print(f"vLLM positions: {positions_flat[:10]}")
+
         q, k = self.rotary_emb(positions, q, k)
 
         # cos, sin = positions
         # q, k = apply_rotary_pos_emb(q, k, cos, sin)
 
-        if IS_TRAINING and not IS_LOGGED:
-            # save q, k to a csv file
-            print(f"vLLM q shape after RoPE: {q.shape}")
-            print(f"vLLM q first few values: {q[0, :5]}")
-            import pandas as pd
-            df = pd.DataFrame({
-                "q": q.flatten().tolist(),
-            })
-            df.to_csv(f"vllm_q_after.csv", index=False)
-            IS_LOGGED = True
-            ss
+        # if IS_TRAINING and not IS_LOGGED:
+        #     # save q, k to a csv file
+        #     print(f"vLLM q shape after RoPE: {q.shape}")
+        #     print(f"vLLM q first few values: {q[0, :5]}")
+        #     import pandas as pd
+        #     df = pd.DataFrame({
+        #         "q": q.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_q_after.csv", index=False)
+        #     df = pd.DataFrame({
+        #         "k": k.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_k_after.csv", index=False)
 
         attn_output = self.attn(q, k, v)
+
+        # if IS_TRAINING and not IS_LOGGED:
+        #     print(f"vLLM attn_output shape: {attn_output.shape}")
+
+        #     # save attn_output to a csv file
+        #     import pandas as pd
+        #     df = pd.DataFrame({
+        #         "attn_output": attn_output.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_attn_output.csv", index=False)
+        #     IS_LOGGED = True
+        #     ss
+
         output, _ = self.o_proj(attn_output)
+
+        if IS_TRAINING and not IS_LOGGED:
+            print(f"vLLM output shape: {output.shape}")
+        #     import pandas as pd
+        #     print(f"vLLM output shape: {output.shape}")
+        #     df = pd.DataFrame({
+        #         "output": output.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_o_proj_output.csv", index=False)
+        #     IS_LOGGED = True
+
         return output
 
     def _init_rotary_emb(self, config: LlamaConfig,
@@ -331,6 +357,7 @@ class LlamaDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.layer_idx = int(prefix.split(".")[-1])
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -483,12 +510,22 @@ class LlamaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        global IS_TRAINING
+
         aux_hidden_states = []
         for idx, layer in enumerate(
                 islice(self.layers, self.start_layer, self.end_layer)):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
+            # print(f"vLLM hidden_states shape: {hidden_states.shape}")
+            # if IS_TRAINING:
+            #     # save hidden_states to a csv file
+            #     import pandas as pd
+            #     df = pd.DataFrame({
+            #         "hidden_states": hidden_states.flatten().tolist(),
+            #     })
+            #     df.to_csv(f"vllm_hidden_states_{idx}.csv", index=False)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -500,6 +537,16 @@ class LlamaModel(nn.Module):
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
+
+        # if IS_TRAINING:
+        #     # save hidden_states to a csv file
+        #     import pandas as pd
+        #     df = pd.DataFrame({
+        #         "hidden_states": hidden_states.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_model_output.csv", index=False)
+        #     ss
+
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str,
@@ -684,21 +731,31 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         global IS_TRAINING
 
-        # save input_ids to a csv file
-        # check if all input_ids are zero
-        if not torch.all(input_ids == 0):
-            import pandas as pd
-            # print(f"input_ids shape: {input_ids.shape}")
-            # df = pd.DataFrame({
-            #     "input_ids": input_ids.flatten().tolist(),
-            # })
-            # df.to_csv(f"vllm_input_ids.csv", index=False)
-            # load input_ids from transformers_input_ids.csv
-            df = pd.read_csv(f"transformers_input_ids.csv")
-            input_ids = torch.tensor(df["input_ids"].tolist(), device='cuda')
-            assert self.girfan_temp == False, "Girfan temp is already True"
-            self.girfan_temp = True
-            IS_TRAINING = True
+        # # save input_ids to a csv file
+        # # check if all input_ids are zero
+        # if not torch.all(input_ids == 0):
+        #     # import pandas as pd
+        #     # # print(f"input_ids shape: {input_ids.shape}")
+        #     # # df = pd.DataFrame({
+        #     # #     "input_ids": input_ids.flatten().tolist(),
+        #     # # })
+        #     # # df.to_csv(f"vllm_input_ids.csv", index=False)
+        #     # # load input_ids from transformers_input_ids.csv
+        #     # df = pd.read_csv(f"transformers_input_ids.csv")
+        #     # input_ids = torch.tensor(df["input_ids"].tolist(), device='cuda')
+        #     assert self.girfan_temp == False, "Girfan temp is already True"
+        #     self.girfan_temp = True
+        #     IS_TRAINING = True
+
+        # if IS_TRAINING:
+        #     # save input_ids to a csv file
+        #     print(f"vLLM input_ids shape: {input_ids.shape}")
+        #     import pandas as pd
+        #     df = pd.DataFrame({
+        #         "input_ids": input_ids.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_input_ids.csv", index=False)
+        #     ss
 
         model_output = self.model(input_ids, positions, intermediate_tensors,
                                   inputs_embeds, is_lora_training=is_lora_training)

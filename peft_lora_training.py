@@ -127,6 +127,12 @@ tokenized_dataset = dataset.map(tokenize_function, batched=True, batch_size=len(
 train_dataset = tokenized_dataset.select(range(len(train_data)))
 eval_dataset = tokenized_dataset.select(range(len(train_data), len(train_data) + len(eval_data)))
 
+# print the first 4 tokenized dataset
+print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
+print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
+print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
+print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
+
 # Data collator
 from transformers import default_data_collator
 data_collator = default_data_collator

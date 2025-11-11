@@ -456,6 +456,12 @@ class LLM:
         dataset = Dataset.from_list(data_list)
         tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
 
+        # print the first 4 tokenized dataset
+        print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
+        print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
+        print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
+        print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
+
         # Split the tokenized dataset into train and eval
         tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
         if eval_dataset is not None:

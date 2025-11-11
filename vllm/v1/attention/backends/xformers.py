@@ -34,6 +34,9 @@ from vllm import _custom_ops as ops
 logger = init_logger(__name__)
 
 
+ATTN_MASK = None
+
+
 class XFormersAttentionBackend(AttentionBackend):
 
     accept_output_buffer: bool = True
@@ -453,7 +456,7 @@ class XFormersAttentionImpl(AttentionImpl):
         # Reshape the output tensor.
         return output
 
-    def forward_training_(
+    def forward_training(
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
@@ -530,40 +533,13 @@ class XFormersAttentionImpl(AttentionImpl):
             scale=self.scale,
         )
 
-        print(q.shape, k.shape, v.shape)
-
-        # Remove batch dimension for comparison: [1, num_tokens, num_heads, head_dim] -> [num_tokens, num_heads, head_dim]
-        q_flat = q.squeeze(0)
-        k_flat = k.squeeze(0)
-        v_flat = v.squeeze(0)
-        
-        print(f"Flattened shapes: q={q_flat.shape}, k={k_flat.shape}, v={v_flat.shape}")
-
-        # save q, k, v to a csv file
-        import pandas as pd
-        df = pd.DataFrame({
-            "q": q_flat.flatten().tolist(),
-            "k": k_flat.flatten().tolist(),
-            "v": v_flat.flatten().tolist(),
-        })
-        df.to_csv(f"xformers_q_k_v.csv", index=False)
-        print("Saved vLLM QKV to xformers_q_k_v.csv")
-
-        # save attn_output to a csv file
-        import pandas as pd
-        df = pd.DataFrame({
-            "attn_output": attn_output.flatten().tolist(),
-        })
-        df.to_csv(f"xformers_attn_output.csv", index=False)
-        ss
-
         # Reshape output from [1, num_tokens, num_heads, head_size]
         # back to [num_tokens, num_heads, head_size]
         output[:] = attn_output.squeeze(0)
 
         return output
 
-    def forward_training(
+    def forward_training_sdpa(
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
@@ -589,6 +565,8 @@ class XFormersAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        global ATTN_MASK
+
         num_tokens = query.shape[0]
 
         # Reshape tensors for SDPA BNHD format: [batch, num_heads, seqlen, head_size]
@@ -614,7 +592,7 @@ class XFormersAttentionImpl(AttentionImpl):
             k = key.unsqueeze(0).transpose(1, 2)
             v = value.unsqueeze(0).transpose(1, 2)
 
-        print(q.shape, k.shape, v.shape)
+        # print(q.shape, k.shape, v.shape)
 
         # Flatten tensors to match Transformers format for comparison
         # SDPA: [batch, num_heads, seq_len, head_dim] -> [batch*seq_len, num_heads, head_dim]
@@ -630,12 +608,12 @@ class XFormersAttentionImpl(AttentionImpl):
         key_flat = key_reordered.reshape(-1, num_heads, head_dim)
         value_flat = value_reordered.reshape(-1, num_heads, head_dim)
         
-        print(f"Flattened shapes: q={query_flat.shape}, k={key_flat.shape}, v={value_flat.shape}")
+        # print(f"Flattened shapes: q={query_flat.shape}, k={key_flat.shape}, v={value_flat.shape}")
 
         # Create attention mask for causal attention
         # For training with batched sequences, we need a block diagonal causal mask
-        attention_mask = None
-        is_causal = True
+        # attention_mask = None
+        is_causal = False
         
         if hasattr(attn_metadata, 'query_start_loc') and hasattr(attn_metadata, 'seq_lens'):
             query_start_loc = attn_metadata.query_start_loc
@@ -652,33 +630,57 @@ class XFormersAttentionImpl(AttentionImpl):
                 # For now, we'll just use is_causal=True (which works for single sample)
                 pass
 
+        dropout = 0.0
+        scaling = self.scale
+
+        if ATTN_MASK is None:
+            
+            # Load attention_mask from PEFT: shape [4, 1, 512, 512], dtype bool
+            # Convert to vLLM format: [1, 1, 2048, 2048] (block diagonal)
+            import pandas as pd
+            df = pd.read_csv("transformers_attn_mask.csv")
+            batch_vllm, num_heads, seq_len_vllm, head_dim = q.shape  # [1, 32, 2048, 64]
+            
+            # PEFT has [4, 1, 512, 512], we need [1, 1, 2048, 2048]
+            peft_batch = 4
+            peft_seq_len = 512
+            peft_mask = torch.tensor(df["attn_mask"].values, dtype=torch.bool, device=q.device).reshape(peft_batch, 1, peft_seq_len, peft_seq_len)
+            
+            # Create block diagonal mask: [1, 1, 2048, 2048]
+            ATTN_MASK = torch.zeros(1, 1, seq_len_vllm, seq_len_vllm, dtype=torch.bool, device=q.device)
+            for i in range(peft_batch):
+                start_idx = i * peft_seq_len
+                end_idx = (i + 1) * peft_seq_len
+                ATTN_MASK[0, 0, start_idx:end_idx, start_idx:end_idx] = peft_mask[i, 0]
+            
+            print(f"vLLM loaded ATTN_MASK shape: {ATTN_MASK.shape}, dtype: {ATTN_MASK.dtype}")
+
         # Use PyTorch's scaled_dot_product_attention (same as Transformers)
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=attention_mask,
-            dropout_p=0.0,
-            scale=self.scale,
+            attn_mask=ATTN_MASK,
+            dropout_p=dropout,
+            scale=scaling,
             is_causal=is_causal,
         )
 
-        # # Save flattened tensors to CSV
+        # print(dropout, scaling, is_causal)
+
         # import pandas as pd
         # df = pd.DataFrame({
         #     "q": query_flat.flatten().tolist(),
+        # })
+        # df.to_csv(f"vllm_sdpa_q.csv", index=False)
+        # df = pd.DataFrame({
         #     "k": key_flat.flatten().tolist(),
+        # })
+        # df.to_csv(f"vllm_sdpa_k.csv", index=False)
+        # df = pd.DataFrame({
         #     "v": value_flat.flatten().tolist(),
         # })
-        # df.to_csv(f"vllm_sdpa_query_key_value.csv", index=False)
-
-        # # save attn_output to a csv file
-        # attn_output_flat = attn_output.transpose(1, 2).reshape(-1, num_heads, head_dim)
-        # df = pd.DataFrame({
-        #     "attn_output": attn_output_flat.flatten().tolist(),
-        # })
-        # df.to_csv(f"vllm_sdpa_attn_output.csv", index=False)
-        # ss
+        # df.to_csv(f"vllm_sdpa_v.csv", index=False)
 
         # Reshape output from [1, num_heads, num_tokens, head_size]
         # to [num_tokens, num_heads, head_size]

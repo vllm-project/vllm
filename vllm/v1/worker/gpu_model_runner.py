@@ -2454,12 +2454,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
                 # save model_output to a csv file
-                import pandas as pd
-                df = pd.DataFrame({
-                    "model_output": model_output.flatten().tolist(),
-                })
-                df.to_csv(f"vllm_model_output.csv", index=False)
-                ss
+                # import pandas as pd
+                # print(f"vLLM model_output shape: {model_output.shape}")
+                # print(f"vLLM model_output first few values: {model_output[0, :5]}")
+                # df = pd.DataFrame({
+                #     "model_output": model_output.flatten().tolist(),
+                # })
+                # df.to_csv(f"vllm_model_output.csv", index=False)
 
                 # For training, model_output should be hidden states
                 hidden_states = model_output
