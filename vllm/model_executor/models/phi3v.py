@@ -591,7 +591,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "model.embed_tokens"),
         )

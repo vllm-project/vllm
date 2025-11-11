@@ -554,7 +554,6 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         config.intermediate_size = (
@@ -562,7 +561,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if hasattr(config, "ffn_hidden_size")
             else config.intermediate_size
         )
-        self.lora_config = lora_config
+
         self.quant_config = quant_config
 
         self.model = FlashModel(
