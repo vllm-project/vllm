@@ -627,7 +627,7 @@ nvidia-nvjitlink-cu12==12.9.86
     #   nvidia-cusolver-cu12
     #   nvidia-cusparse-cu12
     #   torch
-nvidia-nvshmem-cu12==3.3.20
+nvidia-nvshmem-cu12==3.4.5
     # via torch
 nvidia-nvtx-cu12==12.9.79
     # via torch
@@ -1157,7 +1157,7 @@ tomli==2.2.1
     # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.9.1+cu129
+torch==2.10.0+cu129
     # via
     #   -r requirements/test.in
     #   accelerate
@@ -1186,7 +1186,7 @@ torch==2.9.1+cu129
     #   torchvision
     #   vector-quantize-pytorch
     #   vocos
-torchaudio==2.9.1+cu129
+torchaudio==2.10.0+cu129
     # via
     #   -r requirements/test.in
     #   encodec
@@ -1199,7 +1199,7 @@ torchmetrics==1.7.4
     #   pytorch-lightning
     #   terratorch
     #   torchgeo
-torchvision==0.24.1+cu129
+torchvision==0.25.0+cu129
     # via
     #   -r requirements/test.in
     #   lightly
@@ -1241,7 +1241,7 @@ transformers==4.57.5
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements/test.in
-triton==3.5.1
+triton==3.6.0
     # via torch
 tritonclient==2.64.0
     # via -r requirements/test.in

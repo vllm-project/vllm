@@ -28,7 +28,7 @@ FROM ubuntu:22.04 AS base-common
 WORKDIR /workspace
 
 ARG PYTHON_VERSION=3.12
-ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/test/cpu"
 
 # Install minimal dependencies and uv
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \

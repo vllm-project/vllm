@@ -271,7 +271,10 @@ def use_aot_compile() -> bool:
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
+        # Disabling AOT_COMPILE for CPU
+        # See: https://github.com/vllm-project/vllm/issues/32033
+        and not current_platform.is_cpu()
         else "0"
     )
 

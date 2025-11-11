@@ -91,7 +91,7 @@ def use_vllm_config(vllm_config: VllmConfig):
 
 
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+    not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10"
 )
 def test_no_dynamo_cache_entry(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
@@ -117,7 +117,7 @@ def test_no_dynamo_cache_entry(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+    not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10"
 )
 def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as tmpdirname, monkeypatch.context() as m:
@@ -133,7 +133,7 @@ def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+    not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10"
 )
 def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
@@ -163,7 +163,7 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+    not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10"
 )
 def test_cache_load_returns_tuple_consistency(monkeypatch: pytest.MonkeyPatch):
     """
@@ -334,7 +334,7 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
+    not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10"
 )
 def test_partition_wrapper_applied_on_aot_load(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path, mocker
