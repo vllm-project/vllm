@@ -760,17 +760,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         is_last_rank = get_pp_group().is_last_rank
         req_data = scheduler_output.scheduled_cached_reqs
 
-        # wait until valid_sampled_tokens_count is copied to cpu,
+        # Wait until valid_sampled_tokens_count is copied to cpu,
         # then use it to update actual num_computed_tokens of each request.
-        valid_sampled_token_count = []
-        if (
-            self.valid_sampled_token_count_event is not None
-            and self.input_batch.prev_sampled_token_ids is not None
-        ):
-            self.valid_sampled_token_count_event.synchronize()
-            valid_sampled_token_count = self.valid_sampled_token_count_cpu[
-                : self.input_batch.prev_sampled_token_ids.shape[0]
-            ].tolist()
+        valid_sampled_token_count = self._get_valid_sampled_token_count()
 
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
@@ -3034,7 +3026,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return
 
         default_stream = torch.cuda.current_stream()
-        # initialize a new stream to overlap the copy operation with
+        # Initialize a new stream to overlap the copy operation with
         # prepare_input of draft model.
         with torch.cuda.stream(self.valid_sampled_token_count_copy_stream):
             self.valid_sampled_token_count_copy_stream.wait_stream(default_stream)  # type: ignore
@@ -3044,6 +3036,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.valid_sampled_token_count_event.record()
 
         self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
+
+    def _get_valid_sampled_token_count(self) -> list[int]:
+        # Wait until valid_sampled_tokens_count is copied to cpu,
+        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
+        if (
+            self.valid_sampled_token_count_event is None
+            or prev_sampled_token_ids is None
+        ):
+            return []
+
+        counts_cpu = self.valid_sampled_token_count_cpu
+        self.valid_sampled_token_count_event.synchronize()
+        return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
 
     def propose_draft_token_ids(
         self,
