@@ -443,4 +443,6 @@ class KimiDeltaAttention(nn.Module, MambaBase):
                 cu_seqlens=non_spec_query_start_loc[: attn_metadata.num_decodes + 1],
                 ssm_state_indices=non_spec_state_indices_tensor,
             )
-        core_attn_out[0][:num_actual_tokens] = core_attn_out_non_spec
+        core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
+            0, :num_actual_tokens
+        ]
