@@ -867,7 +867,7 @@ steps:
   optional: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py -k 'Gemma3 ModernBert Qwen2_5_VL Qwen2_5vl Qwen2VL TransformersMultiModalEmbeddingModel TransformersMultiModalForSequenceClassification Ultravox Phi4Multimodal LlavaNextVideo MiniCPMO Lfm2Moe PaliGemma Whisper RobertaForSequenceClassification Ovis2_5 Fuyu DeepseekOCR KimiVL'
+    - pytest -v -s tests/models/test_initialization.py -k 'not (Gemma3 or ModernBert or Qwen2_5_VL or Qwen2_5vl or Qwen2VL or TransformersMultiModalEmbeddingModel or TransformersMultiModalForSequenceClassification or Ultravox or Phi4Multimodal or LlavaNextVideo or MiniCPMO or Lfm2Moe or PaliGemma or Whisper or RobertaForSequenceClassification or Ovis2_5 or Fuyu or DeepseekOCR KimiVL)'
     - pytest -v -s tests/models/test_transformers.py
     - pytest -v -s tests/models/multimodal/processing/
     - pytest -v -s tests/models/multimodal/test_mapping.py
