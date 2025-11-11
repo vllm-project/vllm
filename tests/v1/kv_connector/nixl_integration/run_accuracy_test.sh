@@ -19,6 +19,18 @@ done
 
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
 
+CONNECTOR=${CONNECTOR-"NIXL"}
+
+if [[ ${CONNECTOR} == "NIXL" ]]; then
+  KV_CONFIG='{"kv_connector":"NixlConnector"'
+elif [[ ${CONNECTOR} == "MOONCAKE" ]]; then
+  KV_CONFIG='{"kv_connector":"MooncakeConnector"'
+else
+  echo "error: unrecognized connector ${CONNECTOR}"
+fi
+
+KV_CONFIG+=',"kv_role":"kv_both"'
+
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
   KV_CONFIG_HETERO_LAYOUT=',"enable_permute_local_kv":"True"'
@@ -28,9 +40,10 @@ fi
 
 # Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG+=${KV_CONFIG_HETERO_LAYOUT}'}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
+  KV_CONFIG+=',"kv_buffer_device":"'${KV_BUFFER_DEVICE}'"'
+  KV_CONFIG+=${KV_CONFIG_HETERO_LAYOUT}'}'
 fi
 
 # Models to run
@@ -42,6 +55,8 @@ else
       "Qwen/Qwen3-0.6B"
   )
 fi
+
+echo KV_CONFIG=${KV_CONFIG}
 
 # Number of prefill and decode instances to create
 NUM_PREFILL_INSTANCES=${NUM_PREFILL_INSTANCES:-1} # Default to 1
@@ -132,7 +147,7 @@ run_tests_for_model() {
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT='HND' \
     UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_P2PXFER_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
@@ -173,7 +188,7 @@ run_tests_for_model() {
     BASE_CMD="CUDA_VISIBLE_DEVICES=$GPU_ID \
     VLLM_KV_CACHE_LAYOUT=$DECODER_KV_LAYOUT \
     UCX_NET_DEVICES=all \
-    VLLM_NIXL_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
+    VLLM_P2PXFER_SIDE_CHANNEL_PORT=$SIDE_CHANNEL_PORT \
     vllm serve $model_name \
     --port $PORT \
     --enforce-eager \
