@@ -37,7 +37,7 @@ def if_aiter_supported(func: Callable) -> Callable:
 
             if on_gfx9():
                 return func(*args, **kwargs)
-    
+
         return None
 
     return wrapper

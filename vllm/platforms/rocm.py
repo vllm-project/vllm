@@ -350,8 +350,8 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
-        from vllm.config.compilation import CUDAGraphMode
         from vllm._aiter_ops import rocm_aiter_ops
+        from vllm.config.compilation import CUDAGraphMode
 
         cache_config = vllm_config.cache_config
         compilation_config = vllm_config.compilation_config

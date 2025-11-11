@@ -7,8 +7,8 @@ from collections.abc import Callable
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
