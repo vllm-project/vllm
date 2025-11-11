@@ -74,7 +74,12 @@ class LogprobsProcessor:
 
         token_ids_lst, logprobs_lst, ranks_lst, _ = logprobs_lists
 
-        for rank, logprobs, token_ids in zip(ranks_lst, logprobs_lst, token_ids_lst):
+        for rank_np, logprobs_np, token_ids_np in zip(
+            ranks_lst, logprobs_lst, token_ids_lst
+        ):
+            rank = rank_np.tolist()
+            logprobs = logprobs_np.tolist()
+            token_ids = token_ids_np.tolist()
             # Detokenize (non-incrementally).
             decoded_tokens = (
                 NONES
