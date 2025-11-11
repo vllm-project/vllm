@@ -14,6 +14,7 @@ def get_model_args(
     spec_method: str,
     tp_size: int,
     model_max_len: int,
+    use_async: bool = False,
 ) -> dict:
     speculative_config = {
         "method": spec_method,
@@ -37,6 +38,8 @@ def get_model_args(
         "enable_eplb": True,
         "max_model_len": model_max_len,
     }
+    if use_async:
+        model_args["eplb_config"] = {"use_async": True}
     return model_args
 
 
@@ -44,7 +47,7 @@ def get_model_args(
     "model_setup",
     [
         pytest.param(
-            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86),
+            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86, False),
             marks=large_gpu_mark(min_gb=80),
         ),
         pytest.param(
@@ -54,21 +57,28 @@ def get_model_args(
                 "morgendave/EAGLE-Llama-4-Scout-17B-16E-Instruct",
                 4,
                 0.92,
+                False,
             ),
             marks=pytest.mark.skip(reason="Skipping due to CI OOM issues"),
         ),
+        pytest.param(
+            ("mtp", "Qwen/Qwen3-Next-80B-A3B-Instruct", None, 4, 0.86, True),
+            marks=large_gpu_mark(min_gb=80),
+        ),
     ],
-    ids=["qwen3_next_mtp", "llama4_eagle"],
+    ids=["qwen3_next_mtp", "llama4_eagle", "qwen3_next_mtp_async"],
 )
 def test_eplb_spec_decode(
     monkeypatch: pytest.MonkeyPatch,
-    model_setup: tuple[str, str, str, int, float],
+    model_setup: tuple[str, str, str, int, float, bool],
 ):
     """
     Test the correctness of EPLB speculative decoding with GSM8K dataset.
     Applicable to MoE models with mtp or eagle spec decode.
     """
-    method, model_name, spec_model_name, tp_size, expected_gsm8k_value = model_setup
+    method, model_name, spec_model_name, tp_size, expected_gsm8k_value, use_async = (
+        model_setup
+    )
 
     TASK = "gsm8k"
     FILTER = "exact_match,strict-match"
@@ -80,6 +90,7 @@ def test_eplb_spec_decode(
         spec_method=method,
         tp_size=tp_size,
         model_max_len=4096,
+        use_async=use_async,
     )
 
     results = lm_eval.simple_evaluate(
