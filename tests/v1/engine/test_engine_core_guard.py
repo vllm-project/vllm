@@ -38,6 +38,7 @@ def create_engine_core_guard(
         guard_identity=GUARD_IDENTITY,
         tp_size=1,
         pp_size=1,
+        dp_size=1,
     )
 
 
@@ -101,6 +102,8 @@ def test_run_handle_instruction(instruction):
     param = {"timeout": 3}
     if instruction == "pause":
         param["soft_pause"] = True
+    elif instruction == "retry":
+        param["new_stateless_dp_group_port"] = 23456
     serial_instruction = serialize_method_call(instruction, **param)
     client_socket.send_multipart(
         [GUARD_IDENTITY, b"", serial_instruction.encode("utf-8")]

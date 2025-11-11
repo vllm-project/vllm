@@ -27,6 +27,7 @@ from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils.collection_utils import ThreadSafeDict
 from vllm.utils.network_utils import (
+    get_open_port,
     get_open_zmq_ipc_path,
     make_zmq_socket,
     recv_router_dealer_message,
@@ -36,7 +37,7 @@ from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
-from vllm.v1.serial_utils import serialize_method_call
+from vllm.v1.serial_utils import run_method, serialize_method_call
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
 if TYPE_CHECKING:
@@ -1417,40 +1418,44 @@ class FaultHandler:
                 if fut:
                     fut.set_exception(e)
 
-    async def _handle_fault_internal(
-        self, instruction: str, timeout: int, **kwargs
-    ) -> bool:
-        if instruction == "retry" and "Dead" in self.engine_status_dict.values():
+    def retry(self, **kwargs):
+        if "Dead" in self.engine_status_dict.values():
             self.logger(
                 "engine_core dead unexpectedly, retry is impossible,"
                 "shutdown will be performed",
                 level="info",
             )
+            return False, set(), kwargs
+
+        target_engines = set(self.engine_identity_to_index.keys())
+        kwargs["new_stateless_dp_group_port"] = get_open_port()
+        return True, target_engines, kwargs
+
+    def pause(self, **kwargs):
+        self.logger(
+            "Pause operation is best-effort only. Due to the complexity of "
+            "collective communications (e.g., timing dependencies and "
+            "synchronization barriers), pausing may not always succeed. If "
+            "the process remains unresponsive or collective operations "
+            "cannot be interrupted, consider shutting down and restarting "
+            "the instance.",
+            level="warning",
+        )
+
+        alive_engines = {
+            identity
+            for identity, index in self.engine_identity_to_index.items()
+            if self.engine_status_dict.get(index) != "Dead"
+        }
+        return True, alive_engines, kwargs
+
+    async def _handle_fault_internal(
+        self, instruction: str, timeout: int, **kwargs
+    ) -> bool:
+        success, target_engines, kwargs = run_method(self, instruction, (), kwargs)
+
+        if not success:
             return False
-
-        if instruction == "pause":
-            logger.warning(
-                "Pause operation is best-effort only. Due to the complexity of "
-                "collective communications (e.g., timing dependencies and "
-                "synchronization barriers), pausing may not always succeed. If "
-                "the process remains unresponsive or collective operations "
-                "cannot be interrupted, consider shutting down and restarting "
-                "the instance."
-            )
-
-            dead_engine_indices = {
-                index
-                for index, status in self.engine_status_dict.items()
-                if status == "Dead"
-            }
-
-            target_engines = {
-                identity
-                for identity, index in self.engine_identity_to_index.items()
-                if index not in dead_engine_indices
-            }
-        else:
-            target_engines = set(self.engine_identity_to_index.keys())
 
         if timeout is not None:
             kwargs["timeout"] = timeout

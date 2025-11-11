@@ -131,7 +131,7 @@ class WorkerGuard:
         self.init_distributed_env_callback = init_distributed_env_callback
         self.clear_input_batch_callback = clear_input_batch_callback
         self.device = device
-        identity = f"{self.tp_rank}_{self.pp_rank}".encode()
+        identity = f"{self.pp_rank}_{self.tp_rank}".encode()
         worker_cmd_addr = vllm_config.fault_tolerance_config.engine_core_cmd_addr
         self.cmd_socket = make_zmq_socket(
             ctx=self.zmq_ctx,
@@ -149,7 +149,7 @@ class WorkerGuard:
         ).start()
 
     def _make_worker_logger(self):
-        prefix = f"[WorkerGuard_dp{self.dp_rank}_tp{self.tp_rank}_pp{self.pp_rank}] "
+        prefix = f"[WorkerGuard_dp{self.dp_rank}_pp{self.pp_rank}_tp{self.tp_rank}] "
 
         def log(msg, *args, level="info", **kwargs):
             """
@@ -163,29 +163,32 @@ class WorkerGuard:
     def run(self):
         """Run the message receiving loop and handle control commands"""
         torch.cuda.set_device(self.device)
-        while True:
-            # Use blocking receive - will wait until a message arrives
-            has_msg, _, cmd_str = recv_router_dealer_message(self.cmd_socket)
-            if self.worker_guard_dead:
-                self.logger("Worker guard dead, exiting")
+        while not self.worker_guard_dead:
+            try:
+                # Use blocking receive - will wait until a message arrives
+                has_msg, _, cmd_str = recv_router_dealer_message(self.cmd_socket)
+                if has_msg:
+                    assert cmd_str is not None
+                    method, method_uuid, params = deserialize_method_call(cmd_str)
+                    self.logger("Executing command: %s", method)
+                    try:
+                        success = run_method(self, method, args=(), kwargs=params)
+                    except Exception as e:
+                        self.logger(
+                            "Error executing method %s: %s %s\n Call Stack:\n %s",
+                            method,
+                            type(e).__name__,
+                            e,
+                            "".join(traceback.format_tb(e.__traceback__)),
+                            level="error",
+                        )
+                        success = False
+                    self._send_execution_result(success, method_uuid)
+            except zmq.ZMQError:
+                # Socket was closed, exit loop.
+                self.logger("Command socket closed, stopping thread.", level="info")
                 break
-            if has_msg:
-                assert cmd_str is not None
-                method, method_uuid, params = deserialize_method_call(cmd_str)
-                self.logger("Executing command: %s", method)
-                try:
-                    success = run_method(self, method, args=(), kwargs=params)
-                except Exception as e:
-                    self.logger(
-                        "Error executing method %s: %s %s\n Call Stack:\n %s",
-                        method,
-                        type(e).__name__,
-                        e,
-                        "".join(traceback.format_tb(e.__traceback__)),
-                        level="error",
-                    )
-                    success = False
-                self._send_execution_result(success, method_uuid)
+        self.logger("Worker guard thread has stopped.")
 
     def pause_by_signal(self):
         self._set_device_communicator_status(False)
@@ -266,7 +269,7 @@ class WorkerGuard:
                 nccl_comm.available = active
                 nccl_comm.disabled = not active
 
-    def restart_worker(self):
+    def restore_worker(self):
         if self.communicator_aborted:
             torch.cuda.set_device(self.device)
             with set_current_vllm_config(self.vllm_config):

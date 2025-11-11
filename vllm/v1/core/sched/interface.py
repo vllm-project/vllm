@@ -83,8 +83,8 @@ class SchedulerInterface(ABC):
     def preempt_request(
         self,
         scheduled_timestamp: float | None = None,
-        preempted_req: Request | None = None,
-    ) -> Request:
+        preempted_req: Optional["Request"] = None,
+    ) -> "Request":
         """
         Preempt a running request and move it back to the waiting queue.
 
