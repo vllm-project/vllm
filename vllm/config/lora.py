@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 import torch
@@ -12,6 +11,7 @@ from typing_extensions import Self
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -90,7 +90,7 @@ class LoRAConfig:
         factors.append(self.lora_extra_vocab_size)
         factors.append(self.lora_vocab_padding_size)
 
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @model_validator(mode="after")

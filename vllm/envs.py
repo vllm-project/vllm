@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-import hashlib
 import json
 import os
 import sys
 import tempfile
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal
+
+from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
@@ -1646,6 +1647,6 @@ def compute_hash() -> str:
     ]
     factors.extend([os.getenv(var) for var in ray_noset_env_vars])
 
-    hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+    hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
 
     return hash_str
