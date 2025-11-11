@@ -70,20 +70,15 @@ class MotifMLP(nn.Module):
                 f"Unsupported activation: {hidden_act}. "
                 "Only poly_norm is supported for now."
             )
-        self.act_fn = PolyNorm()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.act_fn = PolyNorm(self.tp_size)
         self.intermediate_size = intermediate_size
-        tp_size = get_tensor_model_parallel_world_size()
-        if hidden_act == "poly_norm" and tp_size > 1:
-            raise NotImplementedError(
-                "Tensor parallelism for poly_norm is not supported yet. "
-                "Support will be added in the future."
-            )
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
         x = (
-            self.act_fn(x[..., : self.intermediate_size])
-            * x[..., self.intermediate_size :]
+            self.act_fn(x[..., : self.intermediate_size // self.tp_size])
+            * x[..., self.intermediate_size // self.tp_size :]
         )
         x, _ = self.down_proj(x)
         return x
@@ -113,6 +108,8 @@ class MotifAttention(nn.Module):
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
+        assert num_heads % num_noise_heads == 0
+        group_size = num_heads // num_noise_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
@@ -143,8 +140,10 @@ class MotifAttention(nn.Module):
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
-        assert self.num_heads % 2 == 0, "num_heads should be even"
-        assert self.num_kv_heads % 2 == 0, "num_heads should be even"
+        assert self.num_heads % group_size == 0, (
+            "num_heads should be multiple of (total_num_heads // num_noise_heads)"
+        )
+        assert self.num_kv_heads % 2 == 0, "num_kv_heads should be even"
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=hidden_size,
