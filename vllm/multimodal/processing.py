@@ -1724,6 +1724,16 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             modality: cache.is_cached(hashes) for modality, hashes in mm_hashes.items()
         }
 
+        mm_cached_values = {
+            modality: [
+                cache.get_and_update_item(None, mm_hash)
+                if mm_is_cached[modality][item_idx]
+                else None
+                for item_idx, mm_hash in enumerate(hashes)
+            ]
+            for modality, hashes in mm_hashes.items()
+        }
+
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
         merged_kwargs = defaultdict[str, list[MultiModalKwargsItem | None]](list)
@@ -1744,10 +1754,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     mm_missing_next_idx[modality] += 1
 
                     item = kwargs, updates
+                    kwargs, updates = cache.get_and_update_item(item, item_hash)
                 else:
-                    item = None
-
-                kwargs, updates = cache.get_and_update_item(item, item_hash)
+                    kwargs, updates = mm_cached_values[modality][item_idx]
 
                 merged_kwargs[modality].append(kwargs)
                 merged_prompt_updates[modality].append(
