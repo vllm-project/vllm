@@ -456,12 +456,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        if not config.use_mla:
-            stacked_params_mapping += [
-                (".qkv_proj", ".q_proj", "q"),
-                (".qkv_proj", ".k_proj", "k"),
-                (".qkv_proj", ".v_proj", "v"),
-            ]
         if getattr(config, "n_routed_experts", None):
             # Params for weights, fp8 weight scales, fp8 activation scales
             # (param_name, weight_name, expert_id, shard_id)
