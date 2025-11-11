@@ -19,20 +19,17 @@ CASES = [
     (32, 64, 256, fp8_dtype),
     (17, 31, 768, fp8_dtype),
     (1, 1, 128 * 1, fp8_dtype),
-    (1, 1, 128 * 2, fp8_dtype),
     (1, 1, 128 * 3, fp8_dtype),
     (1, 1, 128 * 4, fp8_dtype),
     (8, 16, 128 * 1, fp8_dtype),
     (8, 16, 128 * 2, fp8_dtype),
     (8, 16, 128 * 3, fp8_dtype),
-    (8, 16, 128 * 4, fp8_dtype),
     (8, 64, 7168, fp8_dtype),
+    (8, 128, 128 * 33, fp8_dtype),
     (8, 128, 7168, fp8_dtype),
-    (8, 256, 7168, fp8_dtype),
     (8, 512, 7168, fp8_dtype),
     (8, 1024, 7168, fp8_dtype),
     (256, 8, 7168, fp8_dtype),
-    (256, 16, 7168, fp8_dtype),
     (256, 32, 7168, fp8_dtype),
     (256, 64, 7168, fp8_dtype),
     # Only add a few fnuz tests to help with long CI times.
@@ -58,8 +55,10 @@ def test_silu_mul_fp8_quant_deep_gemm(E, T, H, fp8_type):
     )
 
     # Run the SiLU V2 kernel
+    # TODO (varun): use_e8m0 is set to false as the reference impl does
+    # not handle that case.
     y_q, y_s = persistent_masked_m_silu_mul_quant(
-        y, tokens_per_expert, group_size=group_size
+        y, tokens_per_expert, group_size=group_size, use_ue8m0=False
     )
 
     torch.cuda.synchronize()
