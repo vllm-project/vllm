@@ -44,16 +44,16 @@ This runs a quick test with text-only prompts to verify the setup works.
 
 ```bash
 # Use specific GPUs
-GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 # Use specific ports
-ENDPOINT_PORT=10001 ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+ENDPOINT_PORT=10001 bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 # Use specific model
-MODEL="Qwen/Qwen2.5-VL-3B-Instruct" ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+MODEL="Qwen/Qwen2.5-VL-3B-Instruct" bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 
 # Use specific storage path
-EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
+EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash ./tests/v1/ec_connector/integration/run_epd_correctness_test.sh
 ```
 
 ## How It Works

@@ -144,7 +144,7 @@ run_epd_1e_1pd() {
         --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
-        --max-num-batched-tokens 65536 \
+        --max-num-batched-tokens 114688 \
         --max-num-seqs 128 \
         --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
@@ -344,7 +344,7 @@ run_epd_1e_1p_1d() {
         --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
-        --max-num-batched-tokens 65536 \
+        --max-num-batched-tokens 114688 \
         --max-num-seqs 128 \
         --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
         --ec-transfer-config '{

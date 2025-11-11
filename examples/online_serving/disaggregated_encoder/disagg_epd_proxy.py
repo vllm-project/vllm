@@ -15,19 +15,6 @@ For MM input we:
        (one request per item, with **all text removed**).
     3. Wait for all of them to succeed.
     4. Forward the *original* request to a decode server.
-
-Usage
-For E + PD setup:
-$ python disagg_encoder_proxy.py \
-      --encode-servers-urls "http://e1:8001,http://e2:8002" \
-      --prefill-servers-urls "disable" \
-      --decode-servers-urls "http://pd1:8003,http://pd2:8004"
-
-For E + P + D setup:
-$ python disagg_encoder_proxy.py \
-      --encode-servers-urls "http://e1:8001,http://e2:8001" \
-      --prefill-servers-urls "http://p1:8003,http://p2:8004" \ 
-      --decode-servers-urls "http://d1:8005,http://d2:8006"
 """
 
 from __future__ import annotations
