@@ -45,7 +45,7 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # skip if there are no weights to process (for examplle, weight reloading)
+        # skip if there are no weights to process (for example, weight reloading)
         if not hasattr(layer, "q_scale"):
             assert not hasattr(layer, "k_scale")
             assert not hasattr(layer, "v_scale")
