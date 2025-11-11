@@ -632,14 +632,28 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_sequence_parallelism:
             # With pipeline parallelism or dynamo partitioning,
             # native rms norm tracing errors due to incorrect residual shape.
-            # Use custom rms norm to unblock.
+            # Use custom rms norm to unblock. In the future,
+            # the pass will operate on higher-level IR to avoid the issue.
             # TODO: https://github.com/vllm-project/vllm/issues/27894
             is_fullgraph = (
                 self.compilation_config.use_inductor_graph_partition
                 or len(self.compilation_config.splitting_ops) == 0
             )
             if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
-                self.compilation_config.custom_ops.append("+rms_norm")
+                if "-rms_norm" not in self.compilation_config.custom_ops:
+                    self.compilation_config.custom_ops.append("+rms_norm")
+                else:
+                    regime = (
+                        "Dynamo partition"
+                        if not is_fullgraph
+                        else "pipeline parallelism"
+                    )
+                    logger.warning_once(
+                        "Sequence parallelism not supported with"
+                        "native rms_norm when using %s, "
+                        "this will likely lead to an error.",
+                        regime,
+                    )
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():

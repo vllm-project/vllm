@@ -13,6 +13,7 @@ from vllm.compilation.sequence_parallelism import SequenceParallelismPass
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (
     CompilationConfig,
+    CUDAGraphMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,
@@ -255,6 +256,8 @@ def sequence_parallelism_pass_on_test_model(
     # configure vllm config for SequenceParallelismPass
     custom_ops_list = custom_ops.split(",") if custom_ops else []
     compilation_config = CompilationConfig(
+        splitting_ops=[],  # avoid automatic rms_norm enablement
+        cudagraph_mode=CUDAGraphMode.NONE,  # avoid piecewise warnings
         custom_ops=custom_ops_list,
         pass_config=PassConfig(
             enable_sequence_parallelism=True,
