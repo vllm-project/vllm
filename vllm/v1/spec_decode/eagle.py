@@ -24,7 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
@@ -104,11 +104,12 @@ class EagleProposer:
             )
 
         self.cudagraph_batch_sizes = (
-            list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
             if self.use_cuda_graph
             else []
         )
 
+        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
@@ -315,7 +316,12 @@ class EagleProposer:
             positions = target_positions[:, last_token_indices]
         else:
             positions = target_positions[last_token_indices]
-        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+        if self.method in (
+            "deepseek_mtp",
+            "ernie_mtp",
+            "longcat_flash_mtp",
+            "pangu_ultra_moe_mtp",
+        ):
             hidden_states = self.hidden_states[last_token_indices]
         else:
             hidden_states = hidden_states[last_token_indices]
@@ -939,7 +945,7 @@ class EagleProposer:
             self.vllm_config, DeepseekV32IndexerCache
         )
         draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
-        self.attn_layer_names = list(draft_attn_layer_names)
+        self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
         if self.indexer_layer_names:
@@ -1050,16 +1056,18 @@ class EagleProposer:
         num_tokens: int,
         use_cudagraphs=True,
     ) -> None:
-        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        # Determine if CUDA graphs should be used for this run.
+        cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
+        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-            if use_cudagraphs
-            else CUDAGraphMode.NONE,
+            cudagraph_runtime_mode=(
+                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
+            ),
         ):
             if self.supports_mm_inputs:
                 input_ids = None

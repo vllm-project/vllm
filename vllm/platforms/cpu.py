@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import glob
 import json
 import os
 import platform
@@ -13,6 +14,7 @@ from typing import TYPE_CHECKING
 import regex as re
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
@@ -150,7 +152,6 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        import vllm.envs as envs
         from vllm.utils.mem_constants import GiB_bytes
 
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
@@ -288,18 +289,26 @@ class CpuPlatform(Platform):
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Note: to avoid the error 'nthreads cannot be larger than environment
-        #  variable "NUMEXPR_MAX_THREADS" (64)'.
+        # variable "NUMEXPR_MAX_THREADS" (64)'.
         os.environ["NUMEXPR_MAX_THREADS"] = str(get_max_threads())
 
-        # Set default threads num for OpenMP parallel
-        os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        if envs.VLLM_CPU_OMP_THREADS_BIND != "nobind":
+            # Set default threads num for OpenMP parallel
+            os.environ["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        else:
+            # In this case, setting the OpenMP configuration via
+            # OMP_NUM_THREADS is up to the user.
+            logger.info("Disabling binding processes to CPU cores...")
 
         # Disable torch async compiling which won't work with daemonic processes
         os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 
+        # Disable multi-stream for shared experts as no Stream on CPU
+        os.environ["VLLM_DISABLE_SHARED_EXPERTS_STREAM"] = "1"
+
         # Intel OpenMP setting
-        ld_prealod_str = os.getenv("LD_PRELOAD", "")
-        if "libiomp5.so" in ld_prealod_str:
+        ld_preload_str = os.getenv("LD_PRELOAD", "")
+        if "libiomp5.so" in ld_preload_str:
             # The time(milliseconds) that a thread should wait after
             # completing the execution of a parallel region, before sleeping.
             os.environ["KMP_BLOCKTIME"] = "1"
@@ -309,6 +318,32 @@ class CpuPlatform(Platform):
             os.environ["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             os.environ["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
+
+        if (
+            platform.system() == "Linux"
+            and Platform.get_cpu_architecture()
+            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC)
+            and not ("libomp" in ld_preload_str or "libgomp" in ld_preload_str)
+        ):
+            # We need to LD_PRELOAD PyTorch's libgomp, otherwise only
+            # one core will be properly utilized when we thread-bind
+            # See: https://github.com/vllm-project/vllm/issues/27369
+            # TODO: Remove once:
+            # https://github.com/pytorch/pytorch/issues/166087 is fixed
+
+            # We need to find the location of PyTorch's libgomp
+            torch_pkg = os.path.dirname(torch.__file__)
+            site_root = os.path.dirname(torch_pkg)
+            torch_libs = os.path.join(site_root, "torch.libs")
+            pytorch_libgomp_so_candidates = glob.glob(
+                os.path.join(torch_libs, "libgomp-*.so*")
+            )
+            if pytorch_libgomp_so_candidates:
+                pytorch_libgomp_so = pytorch_libgomp_so_candidates[0]
+                if ld_preload_str:
+                    ld_preload_str += ":"
+                ld_preload_str += pytorch_libgomp_so
+                os.environ["LD_PRELOAD"] = ld_preload_str
 
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(

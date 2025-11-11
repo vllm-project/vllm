@@ -198,10 +198,10 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
-    AttentionMetadata,
     MLAAttentionImpl,
 )
 from vllm.attention.backends.utils import get_mla_dims
@@ -220,11 +220,12 @@ from vllm.model_executor.layers.linear import (
     UnquantizedLinearMethod,
 )
 from vllm.platforms import current_platform
-from vllm.utils import cdiv, round_down
 from vllm.utils.flashinfer import has_nvidia_artifactory
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -270,28 +271,15 @@ except ImportError:
     flashinfer_available = False
 
 
-def is_rocm_aiter_fp8bmm_enabled() -> bool:
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER_FP8BMM
-        and envs.VLLM_ROCM_USE_AITER
-    )
-
-
-if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
-    )
-
-    def dynamic_per_batched_tensor_quant(
-        x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
-    ):
-        DTYPE_MAX = torch.finfo(dtype).max
-        min_val, max_val = x.aminmax()
-        amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
-        scale = DTYPE_MAX / amax
-        x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
-        return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
+def dynamic_per_batched_tensor_quant(
+    x: torch.Tensor, dtype: torch.dtype = torch.float8_e4m3fn
+):
+    DTYPE_MAX = torch.finfo(dtype).max
+    min_val, max_val = x.aminmax()
+    amax = torch.maximum(min_val.abs(), max_val.abs()).clamp(min=1e-10)
+    scale = DTYPE_MAX / amax
+    x_scl_sat = (x * scale).clamp(min=-DTYPE_MAX, max=DTYPE_MAX)
+    return x_scl_sat.to(dtype).contiguous(), scale.float().reciprocal()
 
 
 logger = init_logger(__name__)
@@ -305,10 +293,6 @@ class MLACommonBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return MLACommonMetadata
 
     @staticmethod
     def get_builder_cls() -> type["MLACommonMetadataBuilder"]:
@@ -361,16 +345,16 @@ class MLACommonPrefillMetadata:
         workspace: torch.Tensor
 
         # for mla DCP
-        cp_chunk_seq_lens: list[list[int]] | None = None
-        origin_context_lens: list[int] | None = None
-        cp_cu_seq_lens: torch.Tensor | None = None
-        chunk_size: int | None = None
+        padded_local_chunk_seq_lens: list[list[int]] | None = None
+        local_context_lens_allranks: list[list[int]] | None = None
+        padded_local_cu_seq_lens: torch.Tensor | None = None
         cu_seq_lens_lst: list[list[int]] | None = None
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
+    query_seq_lens: torch.Tensor | None = None
 
 
 @dataclass
@@ -386,7 +370,6 @@ class CudnnPrefillMetadata(MLACommonPrefillMetadata):
     class ChunkedContextMetadata(MLACommonPrefillMetadata.ChunkedContextMetadata):
         seq_lens: torch.Tensor
 
-    query_seq_lens: torch.Tensor | None = None
     cudnn_workspace: torch.Tensor | None = None
 
 
@@ -457,6 +440,7 @@ def use_flashinfer_prefill() -> bool:
         not envs.VLLM_DISABLE_FLASHINFER_PREFILL
         and flashinfer_available
         and not envs.VLLM_USE_CUDNN_PREFILL
+        and not envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
         and current_platform.is_device_capability(100)
     )
 
@@ -467,6 +451,15 @@ def use_cudnn_prefill() -> bool:
         and envs.VLLM_USE_CUDNN_PREFILL
         and current_platform.is_device_capability(100)
         and has_nvidia_artifactory()
+    )
+
+
+def use_trtllm_ragged_deepseek_prefill() -> bool:
+    """Check if TRT-LLM ragged DeepSeek prefill should be used."""
+    return (
+        flashinfer_available
+        and envs.VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL
+        and current_platform.is_device_capability(100)
     )
 
 
@@ -535,6 +528,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         vllm_config: VllmConfig,
         device: torch.device,
         metadata_cls: type[M] | None = None,
+        supports_dcp_with_varlen: bool = False,
     ):
         self.metadata_cls = (
             metadata_cls if metadata_cls is not None else MLACommonMetadata
@@ -557,6 +551,8 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        self.dcp_local_block_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
 
         # Don't try to access the runner on AMD
         if self.aot_schedule:
@@ -593,6 +589,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         self._use_cudnn_prefill = use_cudnn_prefill()
         self._use_fi_prefill = use_flashinfer_prefill()
+        self._use_trtllm_ragged_prefill = use_trtllm_ragged_deepseek_prefill()
         self.prefill_metadata_cls = (
             FlashInferPrefillMetadata
             if self._use_fi_prefill
@@ -613,6 +610,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 get_per_layer_parameters(vllm_config, layer_names, MLACommonImpl)
             )
 
+        if self._use_trtllm_ragged_prefill:
+            self._workspace_buffer = torch.empty(
+                FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device=device
+            )
+
         if self._use_cudnn_prefill:
             self.cudnn_workspace = torch.empty(
                 CUDNN_WORKSPACE_SIZE * scheduler_config.max_num_seqs,
@@ -622,7 +624,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 
         supports_spec_decode = self.query_len_support != QueryLenSupport.SINGLE_ONLY
         self._init_reorder_batch_threshold(
-            self.reorder_batch_threshold, supports_spec_decode
+            self.reorder_batch_threshold, supports_spec_decode, supports_dcp_with_varlen
         )
 
         # Validate consistency between query_len_support and reorder_batch_threshold
@@ -777,15 +779,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             )
         )
 
-        # Note(hc): update seq_lens of decode reqs under DCP.
-        if self.dcp_world_size > 1:
-            assert dcp_local_seq_lens is not None
-            dcp_local_seq_lens[:num_decodes] = seq_lens[
-                :num_decodes
-            ] // self.dcp_world_size + (
-                self.dcp_rank <= (seq_lens[:num_decodes] - 1) % self.dcp_world_size
-            )
-
         assert num_decodes + num_prefills == num_reqs
         assert num_decode_tokens + num_prefill_tokens == num_tokens
 
@@ -794,11 +787,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             reqs_start = num_decodes  # prefill_start
 
             context_lens_cpu = num_computed_tokens_cpu[reqs_start:num_reqs]
-            # Note(hc): The context lengths in the perspective of dcp rank0.
-            cp_context_lens_cpu = torch.ceil(
-                context_lens_cpu.float() / self.dcp_world_size
-            ).int()
-            origin_context_lens = context_lens_cpu.tolist()
             max_context_len_cpu = context_lens_cpu.max().item()
             num_prefills_with_context_cpu = (context_lens_cpu > 0).sum().item()
             prefill_query_start_loc = (
@@ -854,32 +842,56 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 )
 
                 if self.dcp_world_size > 1:
+                    local_context_lens_allranks = get_dcp_local_seq_lens(
+                        context_lens_cpu,
+                        self.dcp_world_size,
+                        None,
+                        self.dcp_local_block_size,
+                    )
+                    # Note(qcs): The max local context lengths
+                    # padded to `dcp_local_block_size`.
+                    padded_local_context_lens_cpu = (
+                        cdiv(
+                            context_lens_cpu,
+                            self.dcp_virtual_block_size,
+                        )
+                        * self.dcp_local_block_size
+                    )
                     # Note(hc): The above max_context_chunk already enforces
                     # block_size alignment, DCP just need the block_size can
                     # be divisible by dcp_world_size, because DCP use
                     # cp_gather_cache which not require `cp_chunk_starts`
                     # aligned to page_size.
                     assert max_context_chunk % self.dcp_world_size == 0
-                    cp_max_context_chunk = max_context_chunk // self.dcp_world_size
-                    cp_chunk_starts = (
+                    padded_local_max_context_chunk_across_ranks = (
+                        cdiv(
+                            max_context_chunk,
+                            self.dcp_virtual_block_size,
+                        )
+                        * self.dcp_local_block_size
+                    )
+                    local_chunk_starts = (
                         torch.arange(num_chunks, dtype=torch.int32)
                         .unsqueeze(1)
                         .expand(-1, num_prefills)
-                        * cp_max_context_chunk
+                        * padded_local_max_context_chunk_across_ranks
                     )
-                    cp_chunk_ends = torch.min(
-                        cp_context_lens_cpu.unsqueeze(0),
-                        cp_chunk_starts + cp_max_context_chunk,
+                    local_chunk_ends = torch.min(
+                        padded_local_context_lens_cpu.unsqueeze(0),
+                        local_chunk_starts
+                        + padded_local_max_context_chunk_across_ranks,
                     )
-                    cp_chunk_seq_lens = (cp_chunk_ends - cp_chunk_starts).clamp(min=0)
+                    padded_local_chunk_seq_lens = (
+                        local_chunk_ends - local_chunk_starts
+                    ).clamp(min=0)
 
-                    cp_cu_seq_lens_cpu = torch.zeros(
+                    padded_local_cu_chunk_seq_lens_cpu = torch.zeros(
                         num_chunks, num_prefills + 1, dtype=torch.int32, pin_memory=True
                     )
                     torch.cumsum(
-                        cp_chunk_seq_lens,
+                        padded_local_chunk_seq_lens,
                         dim=1,
-                        out=cp_cu_seq_lens_cpu[:, 1:],
+                        out=padded_local_cu_chunk_seq_lens_cpu[:, 1:],
                         dtype=torch.int32,
                     )
 
@@ -891,15 +903,16 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 if self.dcp_world_size > 1:
                     chunked_context_metadata = chunked_context_metadata_cls(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
-                        starts=cp_chunk_starts.to(device, non_blocking=True),
-                        seq_tot=cp_chunk_seq_lens.sum(dim=1).tolist(),
+                        starts=local_chunk_starts.to(device, non_blocking=True),
+                        seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                         seq_lens=chunk_seq_lens,
                         workspace=self.chunked_prefill_workspace,
-                        cp_chunk_seq_lens=cp_chunk_seq_lens.tolist(),
-                        origin_context_lens=origin_context_lens,
-                        cp_cu_seq_lens=cp_cu_seq_lens_cpu.to(device, non_blocking=True),
-                        chunk_size=max_context_chunk,
+                        padded_local_chunk_seq_lens=padded_local_chunk_seq_lens.tolist(),
+                        local_context_lens_allranks=local_context_lens_allranks.tolist(),
+                        padded_local_cu_seq_lens=padded_local_cu_chunk_seq_lens_cpu.to(
+                            device, non_blocking=True
+                        ),
                         cu_seq_lens_lst=cu_seq_lens_cpu.tolist(),
                     )
                 else:
@@ -933,6 +946,11 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
                 )
                 prefill_metadata.cudnn_workspace = self.cudnn_workspace
+
+            if self._use_trtllm_ragged_prefill:
+                prefill_metadata.query_seq_lens = (
+                    prefill_query_start_loc[1:] - prefill_query_start_loc[:-1]
+                )
 
         decode_metadata = None
         if num_decodes > 0:
@@ -976,64 +994,52 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
 def reorg_kvcache(
     allgatered_kv_c_normed: torch.Tensor,
     allgatered_k_pe: torch.Tensor,
-    cp_chunk_seq_lens_lst: list[int],
-    origin_context_lens: list[int],
-    cp_world_size: int,
+    padded_local_chunk_seq_lens_lst: list[int],
+    local_context_lens_allranks: list[list[int]],
     sum_seq_len: int,
     max_seq_len: int,
-    chunk_size: int,
-    chunk_idx: int,
     toks: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    reorg kvcache after cp local gather to tp layout for attn kernel.
-
+    reorg and unpad kvcache after cp local gather to tp layout for attn kernel.
+    e.g.
+    allgatered_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T1_0, T1_1, ...,
+                              T0_4, T0_5, pad, pad, T1_2, pad, ...]
+    -> reorganized_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T0_4, T0_5,
+                                  T1_0, T1_1, T1_2, ...]
     Args:
-        cp_chunk_seq_lens_lst: chunk context lengths under CP.
-        origin_context_lens: origin full context lengths under CP.
-        cp_world_size: CP size.
+        padded_local_chunk_seq_lens_lst: local chunk context lengths
+            under current CP rank.
+        local_context_lens_allranks: local context lengths on each CP rank.
         sum_seq_len: the sum of cp_chunk_seq_lens_lst.
         max_seq_len: the max value of cp_chunk_seq_lens_lst.
-        chunk_size: equals to max_context_chunk from
-            chunked_context_metadata building.
-        chunk_idx: chunk idx of chunked_prefill.
         toks: the number of tokens for local gather cache.
     """
     kv_c_segments = []
     k_pe_segments = []
     src_token_idx = 0
     max_seq_len_check = 0
-    for cp_chunk_seq_len, origin_context_len in zip(
-        cp_chunk_seq_lens_lst, origin_context_lens
+    for padded_local_chunk_seq_len, local_context_lens in zip(
+        padded_local_chunk_seq_lens_lst, local_context_lens_allranks
     ):
-        chunk_context_len = chunk_size
-        if cp_chunk_seq_len != 0:
-            chunk_context_len = min(
-                chunk_context_len, origin_context_len - chunk_size * chunk_idx
-            )
-        cp_target_rank = (chunk_context_len - 1) % cp_world_size
         cur_seq_len = 0
-        for rank in range(cp_world_size):
-            if rank > cp_target_rank and cp_chunk_seq_len:
-                real_cp_chunk_seq_len = cp_chunk_seq_len - 1
-            else:
-                real_cp_chunk_seq_len = cp_chunk_seq_len
-            if real_cp_chunk_seq_len:
+        for rank, local_context_len in enumerate(local_context_lens):
+            if local_context_len != 0:
                 kv_c_segment = allgatered_kv_c_normed[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + real_cp_chunk_seq_len
+                    + local_context_len
                 ]
                 k_pe_segment = allgatered_k_pe[
                     rank * toks + src_token_idx : rank * toks
                     + src_token_idx
-                    + real_cp_chunk_seq_len
+                    + local_context_len
                 ]
                 kv_c_segments.append(kv_c_segment)
                 k_pe_segments.append(k_pe_segment)
-                cur_seq_len += real_cp_chunk_seq_len
+                cur_seq_len += local_context_len
         max_seq_len_check = max(max_seq_len_check, cur_seq_len)
-        src_token_idx += cp_chunk_seq_len
+        src_token_idx += padded_local_chunk_seq_len
     reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
     reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
     assert reorganized_kv_c_normed.shape[0] == sum_seq_len
@@ -1091,6 +1097,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self.kv_b_proj = kv_b_proj
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1140,7 +1147,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
@@ -1169,7 +1176,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dtype=torch.bfloat16,
                     device=self.W_K.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
                 )
 
@@ -1178,7 +1185,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dtype=torch.bfloat16,
                     device=self.W_V.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
@@ -1190,10 +1197,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_aiter_triton_fp8_bmm_enabled:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            x = aiter_triton_fp8_bmm(
+            x = rocm_aiter_ops.triton_fp8_bmm(
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
             )
             # Convert from (B, N, V) to (B, N * V)
@@ -1229,6 +1235,13 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             logger.debug_once("Using FlashInfer prefill for MLA")
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_fi
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_fi
+            self._pad_v = False
+        elif use_trtllm_ragged_deepseek_prefill():
+            logger.debug_once("Using TRT-LLM ragged DeepSeek prefill for MLA")
+            self._run_prefill_context_chunk = (
+                self._run_prefill_context_chunk_trtllm_ragged
+            )
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_trtllm_ragged
             self._pad_v = False
         elif use_cudnn_prefill():
             logger.debug_once("Using CUDNN prefill for MLA")
@@ -1266,6 +1279,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
                 get_current_vllm_config()
             )
+        )
+        self.dcp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(
@@ -1326,6 +1342,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
         assert prefill.prefill_main is not None
+
         ret = prefill.prefill_main.run(
             q=q,
             k=k,
@@ -1334,7 +1351,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
 
         if isinstance(ret, tuple):
-            # Convert from (q_len, num_heads) to (num_heads, q_len)
             return ret[0], ret[1].transpose(0, 1).contiguous()
         return ret
 
@@ -1384,12 +1400,14 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
     ):
         assert isinstance(prefill, FlashInferPrefillMetadata)
+
         attn_out, lse = prefill.prefill_chunks[chunk_idx].run(
             q=q,
             k=k,
             v=v,
             return_lse=True,
         )
+
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
 
@@ -1417,6 +1435,81 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # Indicates actual_seq_lens are on GPU or CPU.
             is_cuda_graph_compatible=True,
         )
+
+    def _run_prefill_new_tokens_trtllm_ragged(
+        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+    ):
+        """TRT-LLM ragged attention for new tokens (causal)."""
+        from flashinfer.prefill import trtllm_ragged_attention_deepseek
+
+        assert prefill.query_seq_lens is not None
+
+        ret = trtllm_ragged_attention_deepseek(
+            query=q,
+            key=k,
+            value=v,
+            workspace_buffer=self._workspace_buffer,
+            seq_lens=prefill.query_seq_lens,
+            max_q_len=prefill.max_query_len,
+            max_kv_len=prefill.max_query_len,
+            bmm1_scale=self.scale,
+            bmm2_scale=1.0,
+            o_sf_scale=1.0,
+            batch_size=prefill.query_seq_lens.shape[0],
+            window_left=-1,
+            cum_seq_lens_q=prefill.query_start_loc,
+            cum_seq_lens_kv=prefill.query_start_loc,
+            enable_pdl=False,
+            is_causal=True,
+            return_lse=return_softmax_lse,
+        )
+
+        if isinstance(ret, tuple):
+            # Convert from (q_len, num_heads) to (num_heads, q_len)
+            return ret[0], ret[1].transpose(0, 1).contiguous()
+        return ret
+
+    def _run_prefill_context_chunk_trtllm_ragged(
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+    ):
+        """TRT-LLM ragged attention for context chunks (non-causal)."""
+        from flashinfer.prefill import trtllm_ragged_attention_deepseek
+
+        assert prefill.chunked_context is not None
+        assert prefill.chunked_context.seq_lens[chunk_idx] is not None
+
+        out = torch.zeros(
+            q.shape[0],
+            q.shape[1],
+            v.shape[2],
+            device=q.device,
+            dtype=q.dtype,
+        )
+        self._workspace_buffer.fill_(0)
+
+        attn_out, lse = trtllm_ragged_attention_deepseek(
+            query=q,
+            key=k,
+            value=v,
+            workspace_buffer=self._workspace_buffer,
+            seq_lens=prefill.chunked_context.seq_lens[chunk_idx],
+            max_q_len=prefill.max_query_len,
+            max_kv_len=prefill.chunked_context.max_seq_lens[chunk_idx],
+            bmm1_scale=self.scale,
+            bmm2_scale=1.0,
+            o_sf_scale=1.0,
+            batch_size=prefill.chunked_context.seq_lens[chunk_idx].shape[0],
+            window_left=-1,
+            cum_seq_lens_q=prefill.query_start_loc,
+            cum_seq_lens_kv=prefill.chunked_context.cu_seq_lens[chunk_idx],
+            enable_pdl=False,
+            is_causal=False,
+            return_lse=True,
+            out=out,
+        )
+
+        # Convert from (q_len, num_heads) to (num_heads, q_len)
+        return attn_out, lse.transpose(0, 1).contiguous()
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         def get_layer_weight(layer):
@@ -1466,7 +1559,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
 
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_aiter_triton_fp8_bmm_enabled:
             W_K = W_UK.transpose(0, 1)  # 16 512 128
             W_V = W_UV.permute(1, 2, 0)  # 16 128 512
             self.W_K, self.W_K_scale = dynamic_per_batched_tensor_quant(
@@ -1495,7 +1588,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dtype=torch.bfloat16,
                     device=self.W_K.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
                 )
 
@@ -1504,7 +1597,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                     dtype=torch.bfloat16,
                     device=self.W_V.device,
                 )
-                aiter_triton_fp8_bmm(
+                rocm_aiter_ops.triton_fp8_bmm(
                     x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True
                 )
         else:
@@ -1591,10 +1684,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         assert attn_metadata.prefill is not None
         prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.chunked_context is not None
-        assert prefill_metadata.chunked_context.cp_chunk_seq_lens is not None
-        assert prefill_metadata.chunked_context.origin_context_lens is not None
-        assert prefill_metadata.chunked_context.cp_cu_seq_lens is not None
-        assert prefill_metadata.chunked_context.chunk_size is not None
+        assert prefill_metadata.chunked_context.padded_local_chunk_seq_lens is not None
+        assert prefill_metadata.chunked_context.local_context_lens_allranks is not None
+        assert prefill_metadata.chunked_context.padded_local_cu_seq_lens is not None
         assert prefill_metadata.chunked_context.cu_seq_lens_lst is not None
 
         output = None
@@ -1607,7 +1699,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 src_cache=kv_c_and_k_pe_cache,
                 dst=workspace,
                 block_table=prefill_metadata.block_table,
-                cu_seq_lens=prefill_metadata.chunked_context.cp_cu_seq_lens[i],
+                cu_seq_lens=prefill_metadata.chunked_context.padded_local_cu_seq_lens[
+                    i
+                ],
                 batch_size=attn_metadata.num_prefills,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
             )
@@ -1637,15 +1731,12 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             kv_c_normed, k_pe = reorg_kvcache(
                 allgatered_kv_c_normed,
                 allgatered_k_pe,
-                cp_chunk_seq_lens_lst=prefill_metadata.chunked_context.cp_chunk_seq_lens[
+                padded_local_chunk_seq_lens_lst=prefill_metadata.chunked_context.padded_local_chunk_seq_lens[
                     i
                 ],
-                origin_context_lens=prefill_metadata.chunked_context.origin_context_lens,
-                cp_world_size=dcp_world_size,
+                local_context_lens_allranks=prefill_metadata.chunked_context.local_context_lens_allranks,
                 sum_seq_len=prefill_metadata.chunked_context.cu_seq_lens_lst[i][-1],
                 max_seq_len=prefill_metadata.chunked_context.max_seq_lens[i],
-                chunk_size=prefill_metadata.chunked_context.chunk_size,
-                chunk_idx=i,
                 toks=toks,
             )
 
@@ -1855,7 +1946,6 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # Convert from (B, N, P) to (N, B, P)
             decode_q_nope = decode_q_nope.transpose(0, 1)
 
-            # Pads the head_dim if necessary (for the underlying kernel)
             if self.q_pad_num_heads is not None:
                 B, N, L = decode_q_pe.shape
                 decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
@@ -1863,9 +1953,9 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 decode_pe_padded.copy_(decode_q_pe)
                 decode_q_pe = decode_pe_padded
 
-            if is_rocm_aiter_fp8bmm_enabled():
+            if self.is_aiter_triton_fp8_bmm_enabled:
                 # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-                decode_ql_nope = aiter_triton_fp8_bmm(
+                decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                     decode_q_nope,
                     self.W_K,
                     self.W_K_scale,
