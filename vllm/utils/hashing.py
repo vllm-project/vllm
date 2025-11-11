@@ -5,9 +5,9 @@ from __future__ import annotations
 
 import hashlib
 import pickle
+from _hashlib import UnsupportedDigestmodError
 from collections.abc import Callable
 from typing import Any
-from _hashlib import UnsupportedDigestmodError
 
 import cbor2
 
