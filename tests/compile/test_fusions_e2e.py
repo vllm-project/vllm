@@ -74,7 +74,7 @@ if current_platform.is_cuda():
         ModelBackendTestCase(
             model_name="Qwen/Qwen3-30B-A3B",
             model_kwargs=dict(max_model_len=1024),
-            backend=_Backend.TRITON_ATTN,
+            backend=AttentionBackendEnum.TRITON_ATTN,
             attention_fusions=0,
             allreduce_fusions=97,
         ),
