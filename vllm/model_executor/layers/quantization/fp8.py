@@ -158,7 +158,7 @@ def get_fp8_moe_backend(block_quant: bool) -> Fp8MoeBackend:
         return Fp8MoeBackend.MARLIN
 
     # deepGEMM on supported platforms with block-quantized weights
-    if envs.VLLM_USE_DEEP_GEMM and block_quant:
+    if envs.VLLM_USE_DEEP_GEMM and envs.VLLM_MOE_USE_DEEP_GEMM and block_quant:
         if not has_deep_gemm():
             logger.warning_once("DeepGEMM backend requested but not available.")
         elif is_deep_gemm_supported():
