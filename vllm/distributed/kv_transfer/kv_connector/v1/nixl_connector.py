@@ -21,7 +21,7 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -876,9 +876,9 @@ class NixlConnectorWorker:
             use_mla=self.use_mla,
         )
         self.backend_name = backend.get_name()
-        attn_backend = backend_name_to_enum(self.backend_name)
-        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
-        self._use_pallas = attn_backend == _Backend.PALLAS
+        attn_backend = AttentionBackendEnum[self.backend_name]
+        self._use_flashinfer = attn_backend == AttentionBackendEnum.FLASHINFER
+        self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.debug("Detected attention backend %s", self.backend_name)

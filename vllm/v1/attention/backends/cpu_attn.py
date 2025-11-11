@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Optional
+from typing import ClassVar, Optional
 
 import numpy as np
 import torch
@@ -40,23 +40,16 @@ logger = init_logger(__name__)
 
 class TorchSDPABackend(AttentionBackend):
     accept_output_buffer: bool = False
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
 
     @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
+    def get_supported_head_sizes(cls) -> list[int]:
         attn_impl = _get_paged_attn_impl()
-        is_valid, supported_head_sizes = attn_impl.validate_head_size(head_size)
-        if not is_valid:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+        return attn_impl.get_supported_head_sizes()
 
     @staticmethod
     def get_name() -> str:
@@ -759,9 +752,8 @@ def _make_sliding_window_bias(
 
 class _PagedAttention:
     @staticmethod
-    def validate_head_size(head_size: int) -> tuple[bool, list[int]]:
-        SUPPORT_HS = [32, 64, 80, 96, 112, 128, 192, 256]
-        return head_size in SUPPORT_HS, SUPPORT_HS
+    def get_supported_head_sizes() -> list[int]:
+        return [32, 64, 80, 96, 112, 128, 192, 256]
 
     @staticmethod
     def get_kv_cache_shape(
@@ -861,8 +853,8 @@ class _PagedAttention:
 
 class _IPEXPagedAttention(_PagedAttention):
     @staticmethod
-    def validate_head_size(head_size: int) -> tuple[bool, list[int]]:
-        return True, []
+    def get_supported_head_sizes() -> list[int]:
+        return []
 
     @staticmethod
     def split_kv_cache(

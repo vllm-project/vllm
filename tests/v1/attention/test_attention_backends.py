@@ -15,7 +15,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import ModelConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -27,11 +27,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN,
-    _Backend.FLASHINFER,
-    _Backend.FLEX_ATTENTION,
-    _Backend.TRITON_ATTN,
-    _Backend.TREE_ATTN,
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLASHINFER,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    AttentionBackendEnum.TRITON_ATTN,
+    AttentionBackendEnum.TREE_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 
@@ -39,7 +39,7 @@ BACKENDS_TO_TEST = [
 try:
     import flashinfer  # noqa: F401
 except ImportError:
-    BACKENDS_TO_TEST.remove(_Backend.FLASHINFER)
+    BACKENDS_TO_TEST.remove(AttentionBackendEnum.FLASHINFER)
 
 
 def _convert_dtype_to_torch(dtype):
@@ -192,7 +192,7 @@ class MockAttentionLayer:
 
 
 def run_attention_backend(
-    backend: _Backend,
+    backend: AttentionBackendEnum,
     kv_cache_spec: FullAttentionSpec,
     layer_names: list[str],
     vllm_config,
@@ -211,13 +211,13 @@ def run_attention_backend(
 
     use_direct_block_mask = is_torch_equal_or_newer("2.9.0.dev0")
     if backend == "FLEX_ATTENTION_SLOW":
-        actual_backend = _Backend.FLEX_ATTENTION
+        actual_backend = AttentionBackendEnum.FLEX_ATTENTION
         use_direct_block_mask = False
 
     builder_cls, impl_cls = try_get_attention_backend(actual_backend)
 
     # Mock flashinfer's get_per_layer_parameters if needed
-    if actual_backend == _Backend.FLASHINFER:
+    if actual_backend == AttentionBackendEnum.FLASHINFER:
         import unittest.mock
 
         from vllm.v1.attention.backends.utils import PerLayerParameters
@@ -246,7 +246,7 @@ def run_attention_backend(
     else:
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
-        if actual_backend == _Backend.FLEX_ATTENTION:
+        if actual_backend == AttentionBackendEnum.FLEX_ATTENTION:
             builder.direct_build = use_direct_block_mask
         attn_metadata = builder.build(
             common_prefix_len=0,
@@ -289,7 +289,7 @@ def run_attention_backend(
 def _test_backend_correctness(
     batch_spec: BatchSpec,
     model: str,
-    backend_to_test: list[_Backend | str],
+    backend_to_test: list[AttentionBackendEnum | str],
     mask_mod,
     *,
     block_size: int = 16,
@@ -455,17 +455,20 @@ def _test_backend_correctness(
         # Select the appropriate KV cache format for each backend
         kv_cache_for_backend = kv_cache
         reset_kv_cache_layout = False
-        if backend_name in (_Backend.FLASHINFER, _Backend.TRITON_ATTN):
+        if backend_name in (
+            AttentionBackendEnum.FLASHINFER,
+            AttentionBackendEnum.TRITON_ATTN,
+        ):
             kv_cache_for_backend = kv_cache.transpose(0, 1)
 
-        if backend_name == _Backend.FLASHINFER:
+        if backend_name == AttentionBackendEnum.FLASHINFER:
             # For FlashInfer default to HND layout and
             kv_cache_for_backend = (
                 kv_cache_for_backend.transpose(2, 3).contiguous().transpose(2, 3)
             )
             set_kv_cache_layout("HND")
             reset_kv_cache_layout = True
-        elif backend_name == _Backend.TRITON_ATTN:
+        elif backend_name == AttentionBackendEnum.TRITON_ATTN:
             kv_cache_for_backend = kv_cache_for_backend.contiguous()
 
         try:
@@ -547,7 +550,9 @@ def test_causal_backend_correctness(
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     LARGE_BLOCK_BACKENDS = (
-        [_Backend.FLEX_ATTENTION] if is_torch_equal_or_newer("2.9.0.dev0") else []
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
     )
     SMALL_BLOCK_BACKENDS = [
         x for x in BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
@@ -573,9 +578,9 @@ def test_causal_backend_correctness(
 
 
 SLIDING_WINDOW_BACKENDS_TO_TEST = [
-    _Backend.FLASH_ATTN,
-    _Backend.FLEX_ATTENTION,
-    _Backend.TRITON_ATTN,
+    AttentionBackendEnum.FLASH_ATTN,
+    AttentionBackendEnum.FLEX_ATTENTION,
+    AttentionBackendEnum.TRITON_ATTN,
     "FLEX_ATTENTION_SLOW",
 ]
 
@@ -612,7 +617,9 @@ def test_sliding_window_backend_correctness(
     )
 
     LARGE_BLOCK_BACKENDS = (
-        [_Backend.FLEX_ATTENTION] if is_torch_equal_or_newer("2.9.0.dev0") else []
+        [AttentionBackendEnum.FLEX_ATTENTION]
+        if is_torch_equal_or_newer("2.9.0.dev0")
+        else []
     )
     SMALL_BLOCK_BACKENDS = [
         x for x in SLIDING_WINDOW_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS

@@ -150,11 +150,15 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
-            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
-            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+            # ROCM_AITER_FA is an optional backend
+            if find_spec(
+                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
+            ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata,
                 )

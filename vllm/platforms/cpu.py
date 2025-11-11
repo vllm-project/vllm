@@ -23,10 +23,10 @@ from .interface import CpuArchEnum, Platform, PlatformEnum
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
 else:
-    _Backend = None
+    AttentionBackendEnum = None
     VllmConfig = None
 
 
@@ -127,7 +127,7 @@ class CpuPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
@@ -137,9 +137,9 @@ class CpuPlatform(Platform):
         has_sink: bool,
         use_sparse: bool,
     ) -> str:
-        from vllm.attention.backends.registry import _Backend
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
-        if selected_backend and selected_backend != _Backend.TORCH_SDPA:
+        if selected_backend and selected_backend != AttentionBackendEnum.TORCH_SDPA:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         if use_mla:
             raise NotImplementedError("MLA is not supported on CPU.")
@@ -148,7 +148,7 @@ class CpuPlatform(Platform):
         logger.info("Using Torch SDPA backend.")
         if not use_v1:
             raise ValueError("CPU backend only supports V1.")
-        return "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+        return AttentionBackendEnum.TORCH_SDPA.get_path()
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
