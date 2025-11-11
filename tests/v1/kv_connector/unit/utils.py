@@ -6,6 +6,7 @@ from collections.abc import Callable
 from itertools import count
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -222,7 +223,7 @@ def create_model_runner_output(
 
     # Make sampled tokens.
     sampled_token = EOS_TOKEN_ID if use_eos else token_id
-    sampled_token_ids = [[sampled_token] for _ in req_ids]
+    sampled_token_ids = [np.array([sampled_token]) for _ in req_ids]
 
     kv_connector_output = (
         None
