@@ -679,6 +679,10 @@ class FusedMoE(CustomOp):
         )
 
     @property
+    def use_marlin_kernels(self):
+        return getattr(self.quant_method, "use_marlin", False)
+
+    @property
     def use_dp_chunking(self) -> bool:
         return (
             self.moe_parallel_config.use_pplx_kernels
