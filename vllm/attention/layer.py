@@ -123,6 +123,11 @@ def maybe_get_vit_flash_attn_backend(
         ):
             attn_backend = _Backend.FLASH_ATTN
             use_upstream_fa = True
+    elif current_platform.is_xpu():
+        assert attn_backend == _Backend.FLASH_ATTN, (
+            "XPU platform only supports FLASH_ATTN as vision attention backend."
+        )
+        use_upstream_fa = False
     else:
         return _Backend.TORCH_SDPA, None
 
@@ -133,7 +138,7 @@ def maybe_get_vit_flash_attn_backend(
             if use_upstream_fa:
                 from flash_attn import flash_attn_varlen_func
             else:
-                from vllm.vllm_flash_attn import flash_attn_varlen_func
+                from vllm.attention.utils.fa_utils import flash_attn_varlen_func
     else:
         flash_attn_varlen_func = None
 
@@ -521,22 +526,18 @@ class MultiHeadAttention(nn.Module):
         # If vllm native fa is selected, we use it directly.
         use_upstream_fa = False
 
-        if current_platform.is_xpu():
-            # currently, only torch_sdpa is supported on xpu
-            self.attn_backend = _Backend.TORCH_SDPA
-        else:
-            self.attn_backend = (
-                backend
-                if backend
-                in {
-                    _Backend.TORCH_SDPA,
-                    _Backend.XFORMERS,
-                    _Backend.PALLAS,
-                    _Backend.ROCM_AITER_FA,
-                    _Backend.FLASH_ATTN,
-                }
-                else _Backend.TORCH_SDPA
-            )
+        self.attn_backend = (
+            backend
+            if backend
+            in {
+                _Backend.TORCH_SDPA,
+                _Backend.XFORMERS,
+                _Backend.PALLAS,
+                _Backend.ROCM_AITER_FA,
+                _Backend.FLASH_ATTN,
+            }
+            else _Backend.TORCH_SDPA
+        )
 
         self.attn_backend, self._flash_attn_varlen_func = (
             maybe_get_vit_flash_attn_backend(
@@ -744,18 +745,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
+        if self.calculate_kv_scales:
+            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata = forward_context.attn_metadata
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-
-            # Mirror Attention.forward scale calculation path
-            if self.calculate_kv_scales and getattr(
-                attn_metadata, "enable_kv_scales_calculation", False
-            ):
-                self.calc_kv_scales(q, kv_c_normed, k_pe)
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
@@ -785,14 +783,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
                 return output
             else:
-                # We can still access forward context to check calculation flag
-                if self.calculate_kv_scales:
-                    forward_context = get_forward_context()
-                    attn_metadata = forward_context.attn_metadata
-                    if isinstance(attn_metadata, dict):
-                        attn_metadata = attn_metadata[self.layer_name]
-                    if getattr(attn_metadata, "enable_kv_scales_calculation", False):
-                        self.calc_kv_scales(q, kv_c_normed, k_pe)
                 return torch.ops.vllm.unified_mla_attention(
                     q,
                     kv_c_normed,
@@ -880,17 +870,13 @@ def maybe_calc_kv_scales(
     layer_name: str,
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
+    self = forward_context.no_compile_layers[layer_name]
 
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-
-    if attn_metadata is None or not getattr(
-        attn_metadata, "enable_kv_scales_calculation", False
-    ):
+    # Only calculate if the layer's calculate_kv_scales flag is True
+    # This flag gets set to False after the first forward pass
+    if not self.calculate_kv_scales:
         return
 
-    self = forward_context.no_compile_layers[layer_name]
     self.calc_kv_scales(query, key, value)
 
 
