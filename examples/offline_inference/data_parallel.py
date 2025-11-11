@@ -33,7 +33,7 @@ import os
 from time import sleep
 
 from vllm import LLM, SamplingParams
-from vllm.utils import get_open_port
+from vllm.utils.network_utils import get_open_port
 
 
 def parse_args():
@@ -95,7 +95,7 @@ def parse_args():
     parser.add_argument(
         "--compilation-config",
         type=int,
-        help=("Compilation optimization (O) level 0-3."),
+        help=("Compilation optimization (O) mode 0-3."),
     )
     parser.add_argument(
         "--quantization",
