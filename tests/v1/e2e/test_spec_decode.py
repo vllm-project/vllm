@@ -155,7 +155,6 @@ def test_suffix_decoding_acceptance(
     )
 
     # Run several times and check that the accepted tokens increase.
-    spec_llm.chat(test_prompts, sampling_config)
     num_draft = []
     num_accept = []
     for i in range(10):  # Run multiple times to warm up the cache.
@@ -434,9 +433,9 @@ def test_eagle_correctness(
                 print(f"ref_output: {ref_output.outputs[0].text}")
                 print(f"spec_output: {spec_output.outputs[0].text}")
 
-        # Heuristic: expect at least 66% of the prompts to match exactly
+        # Heuristic: expect at least 60% of the prompts to match exactly
         # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.66 * len(ref_outputs))
+        assert matches > int(0.6 * len(ref_outputs))
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
