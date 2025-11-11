@@ -160,6 +160,114 @@ def trtllm_prefill_attn_kvfp8_dequant(
     )
     return mock_kv_cache, mock_block_table
 
+@dataclass
+class BatchDCPPrefillPlanConfig:
+    """Parameters for BatchDCPPrefillWrapper.plan() method."""
+    qo_indptr_cpu: torch.Tensor
+    paged_kv_indptr_cpu: torch.Tensor
+    paged_kv_indices: torch.Tensor
+    paged_kv_last_page_len_cpu: torch.Tensor
+    prefill_start: int
+    page_size: int
+    num_qo_heads: int
+    dcp_world_size: int
+    num_kv_heads: int
+    head_dim: int
+    sm_scale: float
+    window_left: int
+    logits_soft_cap: float | None
+    q_data_type: torch.dtype
+    kv_cache_dtype: torch.dtype
+    prefill_fixed_split_size: int
+    disable_split_kv: bool
+
+
+class BatchDCPPrefillWrapper:
+    def __init__(
+        self,
+        workspace_buffer: torch.Tensor | None = None,
+    ):
+        self._context = BatchPrefillWithPagedKVCacheWrapper(
+            workspace_buffer, get_kv_cache_layout()
+        )
+        self._new_tokens = BatchPrefillWithRaggedKVCacheWrapper(
+            workspace_buffer, get_kv_cache_layout()
+        )
+
+    def plan(self, cfg: BatchDCPPrefillPlanConfig):
+        """Plan the prefill operation with given parameters."""
+        self._context.plan(
+            cfg.qo_indptr_cpu,
+            cfg.paged_kv_indptr_cpu,
+            cfg.paged_kv_indices,
+            cfg.paged_kv_last_page_len_cpu[cfg.prefill_start:],
+            cfg.num_qo_heads * cfg.dcp_world_size,
+            cfg.num_kv_heads,
+            cfg.head_dim,
+            cfg.page_size,
+            causal=False,  # This is context run
+            sm_scale=cfg.sm_scale,
+            window_left=cfg.window_left,
+            logits_soft_cap=cfg.logits_soft_cap,
+            q_data_type=cfg.q_data_type,
+            kv_data_type=cfg.kv_cache_dtype,
+            fixed_split_size=cfg.prefill_fixed_split_size,
+            disable_split_kv=cfg.disable_split_kv,
+        )
+        self._new_tokens.plan(
+            qo_indptr=cfg.qo_indptr_cpu,
+            kv_indptr=cfg.qo_indptr_cpu,
+            num_qo_heads=cfg.num_qo_heads,
+            num_kv_heads=cfg.num_kv_heads,
+            head_dim_qk=cfg.head_dim,
+            head_dim_vo=cfg.head_dim,
+            causal=True,  # This is newtokens run
+            sm_scale=cfg.sm_scale,
+            window_left=cfg.window_left,
+            logits_soft_cap=cfg.logits_soft_cap,
+            q_data_type=cfg.q_data_type,
+        )
+  
+    def run(
+            self,
+            layer: torch.nn.Module,
+            prefill_query: torch.Tensor,
+            kv_cache_permute: torch.Tensor,
+            key: torch.Tensor,
+            value: torch.Tensor,
+        ):
+        prefill_query_across_dcp = get_dcp_group().all_gather(
+            prefill_query.contiguous(), dim=1
+        )
+        output_context_tmp, lse_context_tmp = self._context.run(
+            prefill_query_across_dcp,
+            kv_cache_permute,
+            k_scale=layer._k_scale_float,
+            v_scale=layer._v_scale_float,
+            return_lse=True,
+        )
+        output_context, lse_context = cp_lse_ag_out_rs(
+            output_context_tmp, lse_context_tmp, get_dcp_group(), return_lse=True
+        )
+        lse_context = lse_context.transpose(0, 1).contiguous()
+
+        output_query, lse_query = self._new_tokens.run(
+            prefill_query,
+            key,
+            value,
+            return_lse=True,
+        )
+        lse_query = lse_query.transpose(0, 1).contiguous()
+
+        output = torch.empty_like(prefill_query)
+        merge_attn_states(
+            output,
+            output_context,
+            lse_context,
+            output_query,
+            lse_query,
+        )
+        return output
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
@@ -270,10 +378,7 @@ class FlashInferMetadata:
 
     prefill_wrapper: (
         BatchPrefillWithPagedKVCacheWrapper
-        | dict[
-            str,
-            BatchPrefillWithPagedKVCacheWrapper | BatchPrefillWithRaggedKVCacheWrapper,
-        ]
+        | BatchDCPPrefillWrapper
         | None
     ) = None
     decode_wrapper: BatchDecodeWithPagedKVCacheWrapper | None = None
@@ -466,14 +571,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ):
         if self._prefill_wrapper is None:
             if self.dcp_world_size > 1:
-                self._prefill_wrapper = {
-                    "context": BatchPrefillWithPagedKVCacheWrapper(
-                        self._get_workspace_buffer(), get_kv_cache_layout()
-                    ),
-                    "newtokens": BatchPrefillWithRaggedKVCacheWrapper(
-                        self._get_workspace_buffer(), get_kv_cache_layout()
-                    ),
-                }
+                self._prefill_wrapper = BatchDCPPrefillWrapper(
+                    workspace_buffer=self._get_workspace_buffer(),
+                )
             else:
                 self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
                     self._get_workspace_buffer(), get_kv_cache_layout()
@@ -639,6 +739,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.num_kv_heads,
             num_prefill_tokens,
             max_seq_len,
+            self.dcp_world_size,
             self.cache_dtype,
             self.q_data_type,
             is_prefill=True,
@@ -650,17 +751,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.num_kv_heads,
             num_decode_tokens,
             max_seq_len,
+            self.dcp_world_size,
             self.cache_dtype,
             self.q_data_type,
             is_prefill=False,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        if self.dcp_world_size > 1 and (prefill_use_trtllm or decode_use_trtllm):
-            raise NotImplementedError(
-                "Trtllm not support lse, please use flash attention "
-                "or FlashInfer backend."
-            )
 
         if not (prefill_use_trtllm and decode_use_trtllm):
             if self.has_sinks:
@@ -757,47 +854,33 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
                 if not attn_metadata.prefill_use_trtllm:
                     if self.dcp_world_size > 1:
-                        assert isinstance(attn_metadata.prefill_wrapper, dict)
-                        attn_metadata.prefill_wrapper["context"].plan(
-                            qo_indptr_cpu.to(self.device),
-                            paged_kv_indptr_cpu.to(self.device),
-                            paged_kv_indices,
-                            paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
-                            self.num_qo_heads * self.dcp_world_size,
-                            self.num_kv_heads,
-                            self.head_dim,
-                            self.page_size,
-                            causal=False,  # This is contxet run
+                        assert isinstance(attn_metadata.prefill_wrapper, BatchDCPPrefillWrapper)
+                        plan_cfgs = BatchDCPPrefillPlanConfig(
+                            qo_indptr_cpu=qo_indptr_cpu,
+                            paged_kv_indptr_cpu=paged_kv_indptr_cpu,
+                            paged_kv_indices=paged_kv_indices,
+                            paged_kv_last_page_len_cpu=paged_kv_last_page_len_cpu,
+                            prefill_start=prefill_start,
+                            page_size=self.page_size,
+                            num_qo_heads=self.num_qo_heads,
+                            dcp_world_size=self.dcp_world_size,
+                            num_kv_heads=self.num_kv_heads,
+                            head_dim=self.head_dim,
                             sm_scale=self.sm_scale,
                             window_left=self.window_left,
                             logits_soft_cap=self.logits_soft_cap,
                             q_data_type=self.q_data_type,
-                            kv_data_type=self.kv_cache_dtype,
-                            fixed_split_size=self.prefill_fixed_split_size,
+                            kv_cache_dtype=self.kv_cache_dtype,
+                            prefill_fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
                         )
-                        kv_query_indptr_cpu = qo_indptr_cpu.clone()
-                        attn_metadata.prefill_wrapper["newtokens"].plan(
-                            qo_indptr=qo_indptr_cpu.to(self.device),
-                            kv_indptr=kv_query_indptr_cpu.to(self.device),
-                            num_qo_heads=self.num_qo_heads,
-                            num_kv_heads=self.num_kv_heads,
-                            head_dim_qk=self.head_dim,
-                            head_dim_vo=self.head_dim,
-                            causal=True,  # This is newtokens run
-                            sm_scale=self.sm_scale,
-                            window_left=self.window_left,
-                            logits_soft_cap=self.logits_soft_cap,
-                            q_data_type=self.q_data_type,
-                        )
+                        attn_metadata.prefill_wrapper.plan(plan_cfgs)
                     else:
-                        # when dcp_world_size = 1, prefill_wrapper is not a dict
-                        assert not isinstance(attn_metadata.prefill_wrapper, dict)
                         attn_metadata.prefill_wrapper.plan(
-                            qo_indptr_cpu.to(self.device),
-                            paged_kv_indptr_cpu.to(self.device),
+                            qo_indptr_cpu,
+                            paged_kv_indptr_cpu,
                             paged_kv_indices,
-                            paged_kv_last_page_len_cpu[prefill_start:].to(self.device),
+                            paged_kv_last_page_len_cpu[prefill_start:],
                             self.num_qo_heads,
                             self.num_kv_heads,
                             self.head_dim,
@@ -1110,63 +1193,27 @@ class FlashInferImpl(AttentionImpl):
 
             if not attn_metadata.prefill_use_trtllm:
                 if self.dcp_world_size > 1:
-                    assert isinstance(prefill_wrapper, dict)
-                    for _, prefill_wrapper_i in prefill_wrapper.items():
-                        assert prefill_wrapper_i._window_left == self.window_left
-                        assert prefill_wrapper_i._logits_soft_cap == (
-                            self.logits_soft_cap or 0.0
-                        )
-                        assert prefill_wrapper_i._sm_scale == self.scale
-                else:
-                    # when dcp_world_size = 1, prefill_wrapper is not a dict
-                    assert not isinstance(prefill_wrapper, dict)
-                    assert prefill_wrapper._window_left == self.window_left
-                    assert prefill_wrapper._logits_soft_cap == (
-                        self.logits_soft_cap or 0.0
-                    )
-                    assert prefill_wrapper._sm_scale == self.scale
+                    assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
+                    assert prefill_wrapper._context._window_left == self.window_left
+                    assert prefill_wrapper._context._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._context._sm_scale == self.scale
+                    assert not prefill_wrapper._context.causal
+                    assert prefill_wrapper._new_tokens._window_left == self.window_left
+                    assert prefill_wrapper._new_tokens._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._new_tokens._sm_scale == self.scale
+                    assert prefill_wrapper._new_tokens.causal
 
-                if self.dcp_world_size > 1:
-                    prefill_query_across_dcp = get_dcp_group().all_gather(
-                        prefill_query.contiguous(), dim=1
-                    )
-                    assert not prefill_wrapper["context"]._causal
-                    output_context_tmp, lse_context_tmp = prefill_wrapper[
-                        "context"
-                    ].run(
-                        prefill_query_across_dcp,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        return_lse=True,
-                    )
-                    output_context, lse_context = cp_lse_ag_out_rs(
-                        output_context_tmp,
-                        lse_context_tmp,
-                        get_dcp_group(),
-                        return_lse=True,
-                    )
-                    lse_context = lse_context.transpose(0, 1).contiguous()
-
-                    assert prefill_wrapper["newtokens"]._causal
-                    output_query, lse_query = prefill_wrapper["newtokens"].run(
+                    output[num_decode_tokens:] = prefill_wrapper.run(
+                        layer,
                         prefill_query,
+                        kv_cache_permute,
                         key[num_decode_tokens:],
                         value[num_decode_tokens:],
-                        return_lse=True,
-                    )
-                    lse_query = lse_query.transpose(0, 1).contiguous()
-
-                    merge_attn_states(
-                        output[num_decode_tokens:],
-                        output_context,
-                        lse_context,
-                        output_query,
-                        lse_query,
                     )
                 else:
-                    # when dcp_world_size = 1, prefill_wrapper is not a dict
-                    assert not isinstance(prefill_wrapper, dict)
+                    assert prefill_wrapper._window_left == self.window_left
+                    assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._sm_scale == self.scale
                     assert prefill_wrapper._causal
                     prefill_wrapper.run(
                         prefill_query,
