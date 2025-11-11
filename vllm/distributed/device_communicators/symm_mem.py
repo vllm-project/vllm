@@ -99,10 +99,10 @@ class SymmMemCommunicator:
             handle = torch_symm_mem.rendezvous(self.buffer, self.group.group_name)
         except RuntimeError as e:
             logger.warning_once(
-                "SymmMemCommunicator: symmetric memory initialization failed. "
-                "Communicator is not available. "
-                "To suppress this warning set VLLM_ALLREDUCE_USE_SYMM_MEM=0",
-                exc_info=e,
+                "SymmMemCommunicator: symmetric memory initialization failed: %s "
+                "Communicator is not available. To suppress this warning set "
+                "VLLM_ALLREDUCE_USE_SYMM_MEM=0",
+                str(e),
             )
             return
         if handle.multicast_ptr == 0:
