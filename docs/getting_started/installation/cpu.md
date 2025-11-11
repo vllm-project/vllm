@@ -93,7 +93,7 @@ Currently, there are no pre-built CPU wheels.
 
 ## Related runtime environment variables
 
-- `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GiB space for KV cache), larger setting will allow vLLM running more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users. Default value is `0`.
+- `VLLM_CPU_KVCACHE_SPACE`: specify the KV Cache size (e.g, `VLLM_CPU_KVCACHE_SPACE=40` means 40 GiB space for KV cache), larger setting will allow vLLM to run more requests in parallel. This parameter should be set based on the hardware configuration and memory management pattern of users. Default value is `0`.
 - `VLLM_CPU_OMP_THREADS_BIND`: specify the CPU cores dedicated to the OpenMP threads, can be set as CPU id lists, `auto` (by default), or `nobind` (to disable binding to individual CPU cores and to inherit user-defined OpenMP variables). For example, `VLLM_CPU_OMP_THREADS_BIND=0-31` means there will be 32 OpenMP threads bound on 0-31 CPU cores. `VLLM_CPU_OMP_THREADS_BIND=0-31|32-63` means there will be 2 tensor parallel processes, 32 OpenMP threads of rank0 are bound on 0-31 CPU cores, and the OpenMP threads of rank1 are bound on 32-63 CPU cores. By setting to `auto`, the OpenMP threads of each rank are bound to the CPU cores in each NUMA node respectively. If set to `nobind`, the number of OpenMP threads is determined by the standard `OMP_NUM_THREADS` environment variable.
 - `VLLM_CPU_NUM_OF_RESERVED_CPU`: specify the number of CPU cores which are not dedicated to the OpenMP threads for each rank. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. Default value is `None`. If the value is not set and use `auto` thread binding, no CPU will be reserved for `world_size == 1`, 1 CPU per rank will be reserved for `world_size > 1`.
 - `CPU_VISIBLE_MEMORY_NODES`: specify visible NUMA memory nodes for vLLM CPU workers, similar to ```CUDA_VISIBLE_DEVICES```. The variable only takes effect when VLLM_CPU_OMP_THREADS_BIND is set to `auto`. The variable provides more control for the auto thread-binding feature, such as masking nodes and changing nodes binding sequence.
@@ -128,7 +128,7 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 
-- Default `auto` thread-binding is recommended for most cases. Ideally, each OpenMP thread will be bound to a dedicated physical core respectively, threads of each rank will be bound to a same NUMA node respectively, and 1 CPU per rank will be reserved for other vLLM components when `world_size > 1`. If have any performance problems or unexpected binding behaviours, please try to bind threads as following.
+- Default `auto` thread-binding is recommended for most cases. Ideally, each OpenMP thread will be bound to a dedicated physical core respectively, threads of each rank will be bound to the same NUMA node respectively, and 1 CPU per rank will be reserved for other vLLM components when `world_size > 1`. If you have any performance problems or unexpected binding behaviours, please try to bind threads as following.
 
 - On a hyper-threading enabled platform with 16 logical CPU cores / 8 physical CPU cores:
 
@@ -156,12 +156,12 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
     14   0      0    6 6:6:6:0          yes 2401.0000 800.0000  800.000
     15   0      0    7 7:7:7:0          yes 2401.0000 800.0000  800.000
 
-    # On this platform, it is recommend to only bind openMP threads on logical CPU cores 0-7 or 8-15
+    # On this platform, it is recommended to only bind openMP threads on logical CPU cores 0-7 or 8-15
     $ export VLLM_CPU_OMP_THREADS_BIND=0-7
     $ python examples/offline_inference/basic/basic.py
     ```
 
-- When deploy vLLM CPU backend on a multi-socket machine with NUMA and enable tensor parallel or pipeline parallel, each NUMA node is treated as a TP/PP rank. So be aware to set CPU cores of a single rank on a same NUMA node to avoid cross NUMA node memory access.
+- When deploying vLLM CPU backend on a multi-socket machine with NUMA and enable tensor parallel or pipeline parallel, each NUMA node is treated as a TP/PP rank. So be aware to set CPU cores of a single rank on the same NUMA node to avoid cross NUMA node memory access.
 
 ### How to decide `VLLM_CPU_KVCACHE_SPACE`?
 
@@ -171,7 +171,7 @@ This value is 4GB by default. Larger space can support more concurrent requests,
 
 First of all, please make sure the thread-binding and KV cache space are properly set and take effect. You can check the thread-binding by running a vLLM benchmark and observing CPU cores usage via `htop`.
 
-Inference batch size is an important parameter for the performance. Larger batch usually provides higher throughput, smaller batch provides lower latency. Tuning max batch size starts from default value to balance throughput and latency is an effective way to improve vLLM CPU performance on specific platforms. There are two important related parameters in vLLM:
+Inference batch size is an important parameter for the performance. A larger batch usually provides higher throughput, a smaller batch provides lower latency. Tuning the max batch size starting from the default value to balance throughput and latency is an effective way to improve vLLM CPU performance on specific platforms. There are two important related parameters in vLLM:
 
 - `--max-num-batched-tokens`, defines the limit of token numbers in a single batch, has more impacts on the first token performance. The default value is set as:
     - Offline Inference: `4096 * world_size`
@@ -192,8 +192,8 @@ vLLM CPU supports data parallel (DP), tensor parallel (TP) and pipeline parallel
 ### (x86 only) What is the purpose of `VLLM_CPU_MOE_PREPACK` and `VLLM_CPU_SGL_KERNEL`?
 
 - Both of them require `amx` CPU flag.
-    - `VLLM_CPU_MOE_PREPACK` can provides better performance for MoE models
-    - `VLLM_CPU_SGL_KERNEL` can provides better performance for MoE models and small-batch scenarios.
+    - `VLLM_CPU_MOE_PREPACK` can provide better performance for MoE models
+    - `VLLM_CPU_SGL_KERNEL` can provide better performance for MoE models and small-batch scenarios.
 
 ### Why do I see `get_mempolicy: Operation not permitted` when running in Docker?
 
