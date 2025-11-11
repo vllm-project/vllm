@@ -78,7 +78,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 RUN cd /vllm-workspace \
 	&& mkdir src \
 	&& mv vllm src/vllm \
-    && rm -rf vllm \
     && python3 -m pip install -e tests/vllm_test_utils \
     && python3 -m pip install pytest-shard
 
