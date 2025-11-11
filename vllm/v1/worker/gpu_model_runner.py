@@ -779,11 +779,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             resumed_from_preemption = req_id in req_data.resumed_req_ids
             num_output_tokens = req_data.num_output_tokens[i]
             req_index = self.input_batch.req_id_to_index.get(req_id)
-            prev_req_index = (
-                self.input_batch.prev_req_id_to_index.get(req_id)
-                if self.input_batch.prev_req_id_to_index
-                else None
-            )
             # prev_num_draft_len is used in async scheduling mode with
             # spec decode. it indicates if need to update num_computed_tokens
             # of the request. for example:
@@ -799,10 +794,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # when prev_num_draft_len > 0.
             if (
                 self.use_async_scheduling
-                and prev_req_index is not None
+                and req_index is not None
                 and (prev_draft_tokens_len := req_state.prev_num_draft_len)
             ):
-                num_accepted = valid_sampled_token_count[prev_req_index] - 1
+                num_accepted = valid_sampled_token_count[req_index] - 1
                 num_rejected = prev_draft_tokens_len - num_accepted
                 num_computed_tokens -= num_rejected
 
@@ -3020,6 +3015,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logprobs_tensors=sampler_output.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self.async_output_copy_stream,
+                vocab_size=self.input_batch.vocab_size,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
