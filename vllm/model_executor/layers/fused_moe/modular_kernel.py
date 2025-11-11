@@ -189,10 +189,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         router_logits: torch.Tensor,
         layer: torch.nn.Module,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Optionally transform the hidden states and router logits before expert
-        selection. Default implementation is a no-op.
-        """
         return hidden_states, router_logits
 
     def supports_async(self) -> bool:
@@ -322,10 +318,6 @@ class FusedMoEPrepareAndFinalize(ABC):
         output: torch.Tensor,
         layer: torch.nn.Module,
     ) -> torch.Tensor:
-        """
-        Optionally transform the tensor produced by the fused MoE kernel before
-        it is returned to the caller. Default implementation is a no-op.
-        """
         return output
 
     @property
