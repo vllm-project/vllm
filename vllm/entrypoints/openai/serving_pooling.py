@@ -122,9 +122,9 @@ class OpenAIServingPooling(OpenAIServing):
                 engine_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                if isinstance(engine_prompts, (str, bytes, bytearray)):
-                    engine_prompts = [engine_prompts]
-                elif not isinstance(engine_prompts, Sequence):
+                if not isinstance(engine_prompts, Sequence) or isinstance(
+                    engine_prompts, str | bytes | bytearray
+                ):
                     engine_prompts = [engine_prompts]
 
             elif isinstance(request, PoolingChatRequest):
@@ -239,7 +239,7 @@ class OpenAIServingPooling(OpenAIServing):
             )
             return self.io_processor.output_to_response(output)
 
-        assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
+        assert isinstance(request, PoolingCompletionRequest | PoolingChatRequest)
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
