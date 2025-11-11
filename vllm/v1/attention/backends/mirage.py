@@ -29,7 +29,6 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     get_kv_cache_layout,
-    split_decodes_and_prefills,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -68,7 +67,7 @@ class MirageAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "MPK_ATTENTION"
+        return "MIRAGE"
 
     @staticmethod
     def get_impl_cls() -> type["MirageAttentionImpl"]:
@@ -107,14 +106,6 @@ class MirageAttentionBackend(AttentionBackend):
 
 @dataclass
 class MirageAttentionMetadata:
-    num_actual_tokens: int  # Number of tokens excluding padding.
-
-    # For handling prefill decode split
-    num_decodes: int
-    num_decode_tokens: int
-    num_prefills: int
-    num_prefill_tokens: int
-
     # Meta tensors
     qo_indptr_gpu: torch.Tensor | None = None
     paged_kv_indptr_gpu: torch.Tensor | None = None
@@ -196,14 +187,6 @@ class MirageAttentionMetadataBuilder(AttentionMetadataBuilder[MirageAttentionMet
         fast_build: bool = False,
     ) -> MirageAttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
-        num_actual_tokens = common_attn_metadata.num_actual_tokens
-        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
-            split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
-                require_uniform=True,
-            )
-        )
 
         page_size = self.page_size
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
@@ -250,11 +233,6 @@ class MirageAttentionMetadataBuilder(AttentionMetadataBuilder[MirageAttentionMet
         # uses_spec_reorder = self.reorder_batch_threshold > 1
 
         attn_metadata = MirageAttentionMetadata(
-            num_actual_tokens=num_actual_tokens,
-            num_decodes=num_decodes,
-            num_decode_tokens=num_decode_tokens,
-            num_prefills=num_prefills,
-            num_prefill_tokens=num_prefill_tokens,
             qo_indptr_gpu=common_attn_metadata.query_start_loc,
             paged_kv_indptr_gpu=paged_kv_indptr,
             paged_kv_indices_gpu=paged_kv_indices,

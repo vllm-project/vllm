@@ -690,8 +690,12 @@ class VllmConfig:
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-            # disable cudagraph when enforce eager execution
-            if self.model_config is not None and self.model_config.enforce_eager:
+            # disable cudagraph when enforce eager execution or mirage backend is used
+            disable_cuda_graph = (
+                (self.model_config is not None and self.model_config.enforce_eager)
+                or (self.compilation_config.backend == "mirage_byname")
+            )
+            if disable_cuda_graph:
                 logger.info("Cudagraph is disabled under eager mode")
                 self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 # override related settings when enforce eager
@@ -703,6 +707,13 @@ class VllmConfig:
             self._set_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            
+        if self.compilation_config.backend == "mirage_byname":
+            if envs.VLLM_ATTENTION_BACKEND is None:
+                envs.VLLM_ATTENTION_BACKEND = "MIRAGE"
+            elif envs.VLLM_ATTENTION_BACKEND != "MIRAGE":
+                raise ValueError(f"Have to use MIRAGE attention backend when using mirage backend. Now it is {envs.VLLM_ATTENTION_BACKEND}")
+            assert self.cache_config.block_size % 64 == 0, "Block size must be a multiple of 64 for mirage backend."
 
         if self.cache_config.kv_sharing_fast_prefill:
             if (

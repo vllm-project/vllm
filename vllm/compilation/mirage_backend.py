@@ -1,13 +1,20 @@
+import os
 from collections import defaultdict
-from .backends import *
+import time
 from mirage import MPK, MPKMetadata, MirageModelConfig
 import re
-from vllm.config import ModelConfig, get_current_vllm_config
-from vllm.config.parallel import ParallelConfig
-from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.models.utils import extract_layer_index
+from typing import Any
+
 import torch
+import torch.fx as fx
+
+from vllm.config import CompilationConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config.parallel import ParallelConfig
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.logger import init_logger
+
+from .counter import compilation_counter
 
 logger = init_logger(__name__)
 
@@ -16,7 +23,8 @@ def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
     """Transfer FX placeholder debug names to model-like dotted names. Return a list of transferred names and input id.
 
     Example:
-        l_self_modules_layers_modules_17_modules_mlp_modules_gate_up_proj_parameters_weight_
+        l_self_modules_layers_modules_17_modules_mlp_\
+            modules_gate_up_proj_parameters_weight_
         -> model.layers.17.mlp.gate_up_proj.weight
 
     Notes:
@@ -26,14 +34,12 @@ def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
     """
     converted_names = []
     s_pattern = re.compile(r"^s\d+$") # s72 / s80
-    input_id = 0
 
-    for i, node in enumerate(placeholders):
+    for node in placeholders:
         name = node.name
         if name == 'l_input_ids_':
             final_name = 'input_ids'
             converted_names.append(final_name)
-            input_id = i
         elif name == 'l_positions_':
             final_name = 'positions'
             converted_names.append(final_name)
@@ -52,7 +58,7 @@ def transfer_tensor_names(placeholders: list[torch.fx.node.Node]) -> list[str]:
 
             converted_names.append(final_name)
 
-    return converted_names, input_id
+    return converted_names
 
 def build_model_config(
     model_config: ModelConfig,
@@ -111,14 +117,12 @@ def build_mpk_metadata(
     for layer_name in static_forward_context.keys():
         index2name[extract_layer_index(layer_name, 1)].append(layer_name)
 
-    for layer_index in sorted(index2name.keys()):
+    for layer_index in sorted(index2name):
         layer_names = index2name[layer_index]
         assert len(layer_names) == 1, "Multiple layers with the same layer index are not supported"
         layer_name = layer_names[0]
-        # logger.info(f"{layer_index} {layer_name}: attention num: {len(static_forward_context[layer_name].kv_cache)}; kv_cache.shape: {static_forward_context[layer_name].kv_cache[0].shape}")
         k_cache_tensors.append(static_forward_context[layer_name].kv_cache[0][0])
         v_cache_tensors.append(static_forward_context[layer_name].kv_cache[0][1])
-        # kv_cache_tensors shape: num_layers * (2, num_blocks, block_size, num_kv_heads, head_size)
     
     state_dict = {}
     input_token_ids = None
@@ -219,16 +223,7 @@ def build_mpk_metadata(
     return mpk_metadata
 
 class MirageBackend:
-    """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
-    where we customize the compilation.
-
-    The major work of this backend is to split the graph into
-    piecewise graphs, and pass them to the piecewise backend.
-
-    This backend also adds the PostGradPassManager to Inductor config,
-    which handles the post-grad passes.
-    """
+    """The compilation backend for Mirage Persistent Kernel."""
 
     vllm_config: VllmConfig
     compilation_config: CompilationConfig
@@ -236,32 +231,17 @@ class MirageBackend:
     # the graph we compiled
     graph: fx.GraphModule
 
-    input_buffers: list[torch.Tensor]
-
     def __init__(
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
     ):
-        # if the model is initialized with a non-empty prefix,
-        # then usually it's enough to use that prefix,
-        # e.g. language_model, vision_model, etc.
-        # when multiple parts are initialized as independent
-        # models, we need to use the model_tag to distinguish
-        # them, e.g. backbone (default), eagle_head, etc.
-        logger.info("[Mirage] Calling MirageBackend init!")
-        self.prefix = prefix or model_tag
-
-        # Passes to run on the graph post-grad.
-        self.post_grad_pass_manager = PostGradPassManager()
-
-        self.input_buffers = []
+        logger.debug("[Mirage] Calling MirageBackend init!")
 
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.model_config = vllm_config.model_config
         self.model_name = vllm_config.model_config.model
-
 
     def __call__(
         self, graph: fx.GraphModule, example_inputs
@@ -296,9 +276,15 @@ class MirageBackend:
         placeholders = [node for node in graph.graph.nodes if node.op == 'placeholder']
         assert len(placeholders) == len(example_inputs)
         
-        transfered_tensor_names, input_id = transfer_tensor_names(placeholders)
+        transfered_tensor_names = transfer_tensor_names(placeholders)
 
-        max_input_tokens = example_inputs[input_id].shape[0]
+        max_input_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        
+        # TODO(Jianan Ji): remove this after debugging
+        # with open('mirage_backends_graph.txt', 'w') as f:
+        #     f.write(graph.print_readable(print_output=False))
+        # with open("graph_structure.txt", "w", encoding="utf-8") as f:
+        #     f.write(str(graph.graph))
         
         
         self._called = True
@@ -310,11 +296,12 @@ class MirageBackend:
                 model_config = self.vllm_config.model_config
                 dtype = model_config.dtype
                 hidden_size = model_config.get_hidden_size()
-                # TODO(Jianan Ji): We'll want to run in eager instead of doing nothing
-                output_tensor = torch.zeros(max_input_tokens, hidden_size, device='cuda', dtype=dtype)
-                logger.info(f"[Mirage] Calling dumb_run_called, returning dummy output tensor with shape [{output_tensor.shape}]......!")
+                # # TODO(Jianan Ji): We'll want to run graph(*args) instead of doing nothing
+                output_tensor = torch.zeros(2, hidden_size, device='cuda', dtype=dtype)
+                # logger.info(f"[Mirage] Calling dumb_run_called, returning dummy output tensor with shape [{output_tensor.shape}]......!")
 
                 return (output_tensor,)
+                # return graph(*args)
             
             if not self.compiled:
                 # Compile only at the first call -- when we get real tensors
@@ -335,7 +322,4 @@ class MirageBackend:
             
             return (result_hidden_states,)
         
-        # return VllmSerializableFunction(
-        #     graph, example_inputs, self.prefix, compile_or_call
-        # )
         return compile_or_call
