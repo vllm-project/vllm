@@ -24,7 +24,6 @@ logger = init_logger(__name__)
 
 def start_async_worker(
     state: "EplbState",
-    model,
     rank_mapping: dict[int, int] | None = None,
     is_profile: bool = False,
 ) -> threading.Thread:
@@ -42,7 +41,6 @@ def start_async_worker(
             loop.run_until_complete(
                 transfer_run_periodically(
                     state=state,
-                    model=model,
                     ep_group=ep_group,
                     is_profile=is_profile,
                     rank_mapping=rank_mapping,
@@ -61,7 +59,6 @@ def start_async_worker(
 
 async def transfer_run_periodically(
     state: "EplbState",
-    model,
     ep_group: ProcessGroup,
     is_profile: bool = False,
     rank_mapping: dict[int, int] | None = None,
@@ -70,37 +67,44 @@ async def transfer_run_periodically(
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
 
-        current_num_layers = model.num_moe_layers
-        while state.layer_to_transfer < current_num_layers:
-            if not state.ep_buffer_ready and state.rebalanced:
-                assert state.new_physical_to_logical_map is not None
-                await asyncio.to_thread(state.buffer_lock.acquire)
-                try:
-                    if state.layer_to_transfer >= current_num_layers:
-                        break
+        for model_state in state.model_states.values():
+            if not model_state.is_async_enabled:
+                continue
 
-                    (
-                        state.is_unchanged,
-                        state.is_received_locally,
-                        state.experts_recv_loc,
-                    ) = await transfer_layer(
-                        old_global_expert_indices=state.physical_to_logical_map,
-                        new_global_expert_indices=state.new_physical_to_logical_map,
-                        expert_weights=model.expert_weights,
-                        expert_weights_buffer=state.expert_buffer,
-                        ep_group=ep_group,
-                        is_profile=is_profile,
-                        layer=state.layer_to_transfer,
-                        cuda_stream=cuda_stream,
-                        rank_mapping=rank_mapping,
-                    )
-                    event = torch.cuda.Event(blocking=False)
-                    cuda_stream.record_event(event)
-                    state.buffer_ready_event = event
-                    state.ep_buffer_ready = 1
-                finally:
-                    state.buffer_lock.release()
-            else:
-                await asyncio.sleep(0.001)
+            current_num_layers = model_state.model.num_moe_layers
+            while model_state.layer_to_transfer < current_num_layers:
+                if (
+                    not model_state.ep_buffer_ready
+                    and model_state.rebalanced
+                    and model_state.new_physical_to_logical_map is not None
+                ):
+                    await asyncio.to_thread(model_state.buffer_lock.acquire)
+                    try:
+                        if model_state.layer_to_transfer >= current_num_layers:
+                            break
+
+                        (
+                            model_state.is_unchanged,
+                            model_state.is_received_locally,
+                            model_state.experts_recv_loc,
+                        ) = await transfer_layer(
+                            old_global_expert_indices=model_state.physical_to_logical_map,
+                            new_global_expert_indices=model_state.new_physical_to_logical_map,
+                            expert_weights=model_state.model.expert_weights,
+                            expert_weights_buffer=model_state.expert_buffer,
+                            ep_group=ep_group,
+                            is_profile=is_profile,
+                            layer=model_state.layer_to_transfer,
+                            cuda_stream=cuda_stream,
+                            rank_mapping=rank_mapping,
+                        )
+                        event = torch.cuda.Event(blocking=False)
+                        cuda_stream.record_event(event)
+                        model_state.buffer_ready_event = event
+                        model_state.ep_buffer_ready = 1
+                    finally:
+                        model_state.buffer_lock.release()
+                else:
+                    await asyncio.sleep(0.001)
 
         state.rearrange_event.clear()
