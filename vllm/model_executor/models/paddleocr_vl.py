@@ -198,23 +198,18 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         if image_processor is None:
             image_processor = self.get_image_processor()
 
-        do_resize = True
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
-
-        if do_resize:
-            resized_height, resized_width = smart_resize(
-                height=image_height,
-                width=image_width,
-                factor=patch_size * merge_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
-            )
-            preprocessed_size = ImageSize(width=resized_width, height=resized_height)
-        else:
-            preprocessed_size = ImageSize(width=image_width, height=image_height)
+        resized_height, resized_width = smart_resize(
+            height=image_height,
+            width=image_width,
+            factor=patch_size * merge_size,
+            min_pixels=image_processor.min_pixels,
+            max_pixels=image_processor.max_pixels,
+        )
+        preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
         grid_t = 1
         grid_h = preprocessed_size.height // patch_size
@@ -227,8 +222,19 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
-        image_size = hf_config.vision_config.image_size
-        return ImageSize(height=image_size, width=image_size)
+
+        # See `smart_resize` for the calculation of the image size.
+        merge_size = hf_config.vision_config.spatial_merge_size
+        patch_size = hf_config.vision_config.patch_size
+        factor = merge_size * patch_size
+        max_num_tokens = self.get_image_processor().max_pixels // (factor**2)
+        # Find factors of max_num_tokens close to its square root
+        # to create a dummy image with a reasonable aspect ratio.
+        h_patches = int(math.sqrt(max_num_tokens))
+        while max_num_tokens % h_patches != 0:
+            h_patches -= 1
+        w_patches = max_num_tokens // h_patches
+        return ImageSize(height=h_patches * factor, width=w_patches * factor)
 
 
 class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessingInfo]):
