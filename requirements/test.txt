@@ -1165,7 +1165,7 @@ torchmetrics==1.7.4
     #   pytorch-lightning
     #   terratorch
     #   torchgeo
-torchvision==0.24.0+cu129
+torchvision==0.24.1+cu129
     # via
     #   -r requirements/test.in
     #   lightly
