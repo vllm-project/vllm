@@ -37,7 +37,7 @@ def select_2d_config(
         max_num_stages_2d = 4
         if head_size > 128:
             max_num_stages_2d = 2
-        if all_decode == False:
+        if not all_decode:
             num_stages_2d = 1
             num_warps = 2
         else:
@@ -124,16 +124,13 @@ def use_2d_kernel(
 ):
     if current_platform.is_rocm():
         cu_count = current_platform.get_cu_count()
-        if head_size < 128 or element_size == 1:
-            cu_mult = 4
-        else:
-            cu_mult = 2         
+        cu_mult = 4 if head_size < 128 or element_size == 1 else 2        
         target_num_prgms = cu_count * cu_mult
         return (
             (sliding_window > 0)
             or (max_seqlen_k <= 512)
             or (num_2d_prgms > target_num_prgms 
-                and (element_size > 1 or all_decode == False))
+                and (element_size > 1 or not all_decode))
         )
     else:
         return max_seqlen_q > 1 or num_2d_prgms > 128  
