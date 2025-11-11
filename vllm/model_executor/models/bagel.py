@@ -188,8 +188,8 @@ class PositionEmbedding(nn.Module):
 class BagelProcessingInfo(BaseProcessingInfo):
     """Processing information for BAGEL model."""
 
-    def get_hf_config(self):
-        return self.ctx.get_hf_config()
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"image": None}
 
     def get_mm_max_tokens_per_item(
         self,
