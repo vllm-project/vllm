@@ -456,7 +456,11 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
-        if not config.use_mla:
+        use_mha = (
+            config.model_type == "deepseek"
+            or config.qk_nope_head_dim + config.qk_rope_head_dim == 0
+        )
+        if use_mha:
             stacked_params_mapping += [
                 (".qkv_proj", ".q_proj", "q"),
                 (".qkv_proj", ".k_proj", "k"),
