@@ -55,15 +55,15 @@ def _get_backend_priorities(
             return [
                 AttentionBackendEnum.CUTLASS_MLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
-                AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
         else:
             return [
-                AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASH_ATTN_MLA,
+                AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
                 AttentionBackendEnum.FLASHMLA_SPARSE,

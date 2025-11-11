@@ -151,10 +151,8 @@ class MiMoForCausalLM(Qwen2ForCausalLM, nn.Module):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
 
         self.quant_config = quant_config
 
