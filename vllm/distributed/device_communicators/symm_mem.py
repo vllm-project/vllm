@@ -88,8 +88,6 @@ class SymmMemCommunicator:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
                 self.world_size
             ]
-        # TODO: Find the root cause of
-        # https://github.com/vllm-project/vllm/issues/26922 and fix throughly
         try:
             self.buffer = torch_symm_mem.empty(
                 self.max_size // self.dtype.itemsize,
