@@ -18,10 +18,10 @@ from typing import TYPE_CHECKING, Any, Optional
 import msgspec
 import numpy as np
 import torch
-from vllm.attention import AttentionBackend
 import zmq
 
 from vllm import envs
+from vllm.attention import AttentionBackend
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
