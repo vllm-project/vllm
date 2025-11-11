@@ -442,13 +442,6 @@ class VllmConfig:
         if self.compilation_config.pass_config.enable_async_tp:
             self.compilation_config.pass_config.enable_sequence_parallelism = True
 
-        if (
-            self.compilation_config.pass_config.enable_sequence_parallelism
-            and self.parallel_config.pipeline_parallel_size > 1
-        ):
-            # TODO: https://github.com/vllm-project/vllm/issues/27894
-            self.compilation_config.custom_ops.append("+rms_norm")
-
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode is not explicitly set by users, set default
             # value
@@ -635,6 +628,18 @@ class VllmConfig:
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
             self.compilation_config.set_splitting_ops_for_v1()
+
+        if self.compilation_config.pass_config.enable_sequence_parallelism:
+            # With pipeline parallelism or dynamo partitioning,
+            # native rms norm tracing errors due to incorrect residual shape.
+            # Use custom rms norm to unblock.
+            # TODO: https://github.com/vllm-project/vllm/issues/27894
+            is_fullgraph = (
+                self.compilation_config.use_inductor_graph_partition
+                or len(self.compilation_config.splitting_ops) == 0
+            )
+            if self.parallel_config.pipeline_parallel_size > 1 or not is_fullgraph:
+                self.compilation_config.custom_ops.append("+rms_norm")
 
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
