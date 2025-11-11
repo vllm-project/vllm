@@ -9,7 +9,7 @@
       return __VA_ARGS__();                                                   \
     }
 #else
-  #define AMX_DISPATCH(...)
+  #define AMX_DISPATCH(...) case cpu_attention::ISA::AMX:
 #endif
 
 #define CPU_ATTN_DISPATCH_CASE(HEAD_DIM, ...) \
