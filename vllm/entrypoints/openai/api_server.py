@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import asyncio
-import gc
 import hashlib
 import importlib
 import inspect
@@ -118,6 +116,7 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -153,8 +152,7 @@ async def lifespan(app: FastAPI):
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
-        gc.collect()
-        gc.freeze()
+        freeze_gc_heap()
         try:
             yield
         finally:
@@ -1280,10 +1278,16 @@ async def invocations(raw_request: Request):
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning(
+    logger.warning_once(
         "Torch Profiler is enabled in the API server. This should ONLY be "
         "used for local development!"
     )
+elif envs.VLLM_TORCH_CUDA_PROFILE:
+    logger.warning_once(
+        "CUDA Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!"
+    )
+if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
 
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
