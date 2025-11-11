@@ -286,6 +286,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
+        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             assert expert_load_view is not None
@@ -313,6 +314,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
+            num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_fused_moe_router=enable_fused_moe_router,
         )
 
     def get_fused_moe_quant_config(
@@ -348,6 +351,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
+        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
@@ -374,6 +378,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
             num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_fused_moe_router=enable_fused_moe_router,
         )
 
         if self.rocm_aiter_moe_enabled:

@@ -354,6 +354,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
+        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
@@ -373,7 +374,9 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
-        )
+            num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_fused_moe_router=enable_fused_moe_router,
+            )
 
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (

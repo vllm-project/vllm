@@ -256,6 +256,12 @@ class ParallelConfig:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
+    
+    enable_fused_shared_experts: bool = False
+    """Enable the fusion of the shared experts of the model with other experts."""
+    
+    enable_fused_moe_router: bool = False
+    """Use the fused grouped top-k MoE expert selection router"""
 
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
@@ -431,6 +437,8 @@ class ParallelConfig:
             factors.append(self.eplb_config.window_size)
             factors.append(self.eplb_config.step_interval)
             factors.append(self.eplb_config.num_redundant_experts)
+        factors.append(self.enable_fused_shared_experts)
+        factors.append(self.enable_fused_moe_router)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:
@@ -565,6 +573,8 @@ class ParallelConfig:
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
             )
+        self.enable_fused_shared_experts = envs.VLLM_USE_CUDA_FUSION_SHARED_EXPERTS
+        self.enable_fused_moe_router = envs.VLLM_USE_FUSED_MOE_ROUTER
 
     @property
     def use_ray(self) -> bool:

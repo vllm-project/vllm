@@ -1911,6 +1911,50 @@ def moe_lora_align_block_size(
         lora_ids,
     )
 
+def moe_fused_gate(
+    input_tensor: torch.Tensor,
+    bias: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+    topk: int,
+    num_fused_shared_experts: int = 0,
+    routed_scaling_factor: float = 0.0,
+    apply_routed_scaling_factor_on_output: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops._moe_C.moe_fused_gate(
+        input_tensor,
+        bias,
+        num_expert_group,
+        topk_group,
+        topk,
+        num_fused_shared_experts,
+        routed_scaling_factor,
+        apply_routed_scaling_factor_on_output,
+    )
+
+
+if hasattr(torch.ops._moe_C, "moe_fused_gate"):
+
+    @register_fake("_moe_C::moe_fused_gate")
+    def _moe_fused_gate_fake(
+        input_tensor: torch.Tensor,
+        bias: torch.Tensor,
+        num_expert_group: int,
+        topk_group: int,
+        topk: int,
+        num_fused_shared_experts: int = 0,
+        routed_scaling_factor: float = 1.0,
+        apply_routed_scaling_factor_on_output: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.empty(
+            (input_tensor.size(0), topk),
+            dtype=torch.float32,
+            device=input_tensor.device,
+        ), torch.empty(
+            (input_tensor.size(0), topk),
+            dtype=torch.int32,
+            device=input_tensor.device,
+        )
 
 def moe_wna16_gemm(
     input: torch.Tensor,
