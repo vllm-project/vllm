@@ -1756,7 +1756,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     item = kwargs, updates
                     kwargs, updates = cache.get_and_update_item(item, item_hash)
                 else:
-                    kwargs, updates = mm_cached_values[modality][item_idx]
+                    item = mm_cached_values[modality][item_idx]
+
+                kwargs, updates = cache.get_and_update_item(item, item_hash)
 
                 merged_kwargs[modality].append(kwargs)
                 merged_prompt_updates[modality].append(
