@@ -93,6 +93,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
+        self.global_to_physical: torch.Tensor | None = None
+        self.physical_to_global: torch.Tensor | None = None
+        self.local_expert_global_ids: torch.Tensor | None = None
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -109,6 +112,28 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int64
+
+    def set_expert_routing_info(
+        self,
+        global_to_physical: torch.Tensor,
+        physical_to_global: torch.Tensor,
+        local_expert_global_ids: torch.Tensor,
+    ) -> None:
+        self.global_to_physical = global_to_physical
+        self.physical_to_global = physical_to_global
+        self.local_expert_global_ids = local_expert_global_ids
+
+    def _map_global_to_physical_ids(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.global_to_physical is None:
+            return topk_ids
+        physical = self.global_to_physical[topk_ids.to(torch.long)]
+        return physical.to(topk_ids.dtype)
+
+    def _map_local_to_global_ids(self, expert_topk_ids: torch.Tensor) -> torch.Tensor:
+        if self.local_expert_global_ids is None:
+            return expert_topk_ids
+        global_ids = self.local_expert_global_ids[expert_topk_ids.to(torch.long)]
+        return global_ids.to(expert_topk_ids.dtype)
 
     def _do_quant(
         self,
@@ -200,9 +225,10 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             a1 = a1 * topk_weights.to(a1.dtype)
 
         # Dispatch
+        dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
         expert_x, expert_num_tokens, handle, _, hook = self.buffer.low_latency_dispatch(
             a1,
-            topk_ids,
+            dispatch_topk_ids,
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
@@ -284,11 +310,12 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             # weights have already been applied.
             combine_topk_weights = torch.ones_like(topk_weights)
 
+        combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
         _, _, recv_hook = self.buffer.low_latency_combine(
             fused_expert_output,
-            topk_ids,
+            combine_topk_ids,
             combine_topk_weights,
             handle,
             async_finish=False,
