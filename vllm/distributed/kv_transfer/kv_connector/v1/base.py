@@ -204,10 +204,17 @@ class KVConnectorBase_V1(ABC):
         Returns:
             ConnectorMetadata: the connector metadata.
         """
-
         # Should only be called while set to valid metadata.
         assert self._connector_metadata is not None
         return self._connector_metadata
+
+    def has_connector_metadata(self) -> bool:
+        """Check whether the connector metadata is currently set.
+
+        Returns:
+            bool: True if connector metadata exists, False otherwise.
+        """
+        return self._connector_metadata is not None
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
