@@ -5,7 +5,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional, Union
+from typing import TYPE_CHECKING, Any, NamedTuple, Union
 
 import torch
 
@@ -40,10 +40,14 @@ class BatchDescriptor(NamedTuple):
     False can also be used for an uniform decode batch to dispatch to the 
     cudagraph supporting non-uniform batches.
     """
-    num_reqs: Optional[int] = None
+    num_reqs: int | None = None
     """
     Number of requests in the batch. Can be None for PIECEWISE cudagraphs where
     we don't need to know the number of requests.
+    """
+    has_lora: bool = False
+    """
+    Whether this batch has active LoRA adapters.
     """
 
 

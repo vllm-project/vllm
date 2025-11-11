@@ -28,6 +28,7 @@ FILES = [
     "vllm/assets",
     "vllm/distributed",
     "vllm/entrypoints",
+    "vllm/executor",
     "vllm/inputs",
     "vllm/logging_utils",
     "vllm/multimodal",
@@ -35,22 +36,33 @@ FILES = [
     "vllm/transformers_utils",
     "vllm/triton_utils",
     "vllm/usage",
+    "vllm/v1/core",
+    "vllm/v1/engine",
 ]
 
 # After fixing errors resulting from changing follow_imports
 # from "skip" to "silent", move the following directories to FILES
 SEPARATE_GROUPS = [
     "tests",
+    # v0 related
     "vllm/attention",
     "vllm/compilation",
     "vllm/engine",
-    "vllm/executor",
     "vllm/inputs",
     "vllm/lora",
     "vllm/model_executor",
     "vllm/plugins",
     "vllm/worker",
-    "vllm/v1",
+    # v1 related
+    "vllm/v1/attention",
+    "vllm/v1/executor",
+    "vllm/v1/kv_offload",
+    "vllm/v1/metrics",
+    "vllm/v1/pool",
+    "vllm/v1/sample",
+    "vllm/v1/spec_decode",
+    "vllm/v1/structured_output",
+    "vllm/v1/worker",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.

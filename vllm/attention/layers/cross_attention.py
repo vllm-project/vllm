@@ -6,7 +6,6 @@ from copy import copy
 import numpy as np
 import torch
 
-from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionMetadata,
@@ -16,12 +15,12 @@ from vllm.attention.layer import Attention
 from vllm.attention.selector import get_attn_backend
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.kv_cache_interface import CrossAttentionSpec
+from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
 
 logger = init_logger(__name__)
 
@@ -150,15 +149,10 @@ class CrossAttention(Attention):
             kv_cache_dtype = "auto"
             block_size = 16
 
-        if envs.VLLM_USE_V1:
-            underlying_attn_backend = get_attn_backend(
-                head_size, dtype, kv_cache_dtype, block_size
-            )
-
-            attn_backend = create_cross_attention_backend(underlying_attn_backend)
-        else:
-            # in v0 cross attention is handled inside the backends
-            attn_backend = None
+        underlying_attn_backend = get_attn_backend(
+            head_size, dtype, kv_cache_dtype, block_size
+        )
+        attn_backend = create_cross_attention_backend(underlying_attn_backend)
 
         if attn_type is not None:
             assert attn_type == AttentionType.ENCODER_DECODER, (
@@ -173,4 +167,12 @@ class CrossAttention(Attention):
             attn_backend=attn_backend,
             attn_type=AttentionType.ENCODER_DECODER,
             **kwargs,
+        )
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        return CrossAttentionSpec(
+            block_size=vllm_config.cache_config.block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_size,
+            dtype=self.kv_cache_torch_dtype,
         )

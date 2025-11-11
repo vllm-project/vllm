@@ -27,6 +27,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from functools import cache
 from io import BytesIO
+from tempfile import NamedTemporaryFile
 from typing import Any, cast
 
 import numpy as np
@@ -39,7 +40,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 try:
     from datasets import load_dataset
@@ -58,7 +59,7 @@ except ImportError:
     librosa = PlaceholderModule("librosa")
 
 try:
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
@@ -478,13 +479,33 @@ class RandomDataset(BenchmarkDataset):
         batchsize: int = 1,
         **kwargs,
     ) -> list[SampleRequest]:
+        # validate total input tokens (prefix + sampled) is at least 1.
+        num_special = int(tokenizer.num_special_tokens_to_add())
+        real_input_len = max(0, int(input_len) - num_special)
+        min_sampled_input = math.floor(real_input_len * (1.0 - float(range_ratio)))
+        min_total_input = int(prefix_len) + min_sampled_input
+        if min_total_input < 1:
+            raise ValueError(
+                "--random-input-len is too small: with tokenizer special "
+                f"tokens {num_special} and --random-range-ratio {range_ratio}, "
+                "the minimum possible total input tokens (prefix + sampled) is "
+                f"{min_total_input}. Increase --random-input-len and/or "
+                "--random-prefix-len, or decrease --random-range-ratio so that "
+                "prefix_len + floor(max(0, random_input_len - num_special)) "
+                "* (1 - range_ratio) >= 1."
+            )
+
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
         )
 
-        # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
         vocab_size = tokenizer.vocab_size
+        prohibited_tokens = tokenizer.all_special_ids
+        all_tokens = np.arange(vocab_size)
+        allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
+
+        # Generate prefix once
+        prefix_token_ids = self.get_prefix(allowed_tokens, prefix_len)
 
         requests = []
         token_mismatch_total = 0
@@ -497,6 +518,7 @@ class RandomDataset(BenchmarkDataset):
                 input_len=int(input_lens[i]),
                 offset=int(offsets[i]),
                 index=i,
+                allowed_tokens=allowed_tokens,
             )
             token_mismatch_total += token_mismatch
             requests.append(
@@ -537,13 +559,17 @@ class RandomDataset(BenchmarkDataset):
         return requests
 
     def get_prefix(
-        self, tokenizer: PreTrainedTokenizerBase, prefix_len: int
+        self,
+        allowed_tokens: np.ndarray,
+        prefix_len: int,
     ) -> list[int]:
         """
         Get the prefix for the dataset.
         """
         return (
-            self._rng.integers(0, tokenizer.vocab_size, size=prefix_len).tolist()
+            allowed_tokens[
+                self._rng.integers(0, len(allowed_tokens), size=prefix_len)
+            ].tolist()
             if prefix_len > 0
             else []
         )
@@ -607,6 +633,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int,
         offset: int,
         index: int,
+        allowed_tokens: np.ndarray,
     ) -> tuple[str, int, int]:
         """
         Returns (prompt, total_input_len).
@@ -620,8 +647,11 @@ class RandomDataset(BenchmarkDataset):
         To avoid uncontrolled change of the prompt length,
         the encoded sequence is truncated before being decoded again.
         """
-        # Build the inner sequence by sampling sequentially from the vocab
-        inner_seq = ((offset + index + np.arange(input_len)) % vocab_size).tolist()
+        # Build the inner sequence by sampling
+        # sequentially from the allowed tokens
+        inner_seq = allowed_tokens[
+            (offset + index + np.arange(input_len)) % len(allowed_tokens)
+        ].tolist()
         token_sequence = prefix_token_ids + inner_seq
 
         # Decode, then re-encode and truncate to preserve token count invariants
@@ -756,7 +786,7 @@ class RandomMultiModalDataset(RandomDataset):
 
     Status:
     - Images: supported via synthetic RGB data.
-    - Video: not yet supported (TODO: implement video generation method).
+    - Video: supported via synthetic RGB data.
     - Audio: not yet supported.
 
     Sampling overview:
@@ -766,7 +796,7 @@ class RandomMultiModalDataset(RandomDataset):
        The maximum is further clamped to the sum of per-modality limits.
     2) Each item’s modality and shape is sampled from `bucket_config`, a dict
        mapping (height, width, num_frames) → probability. We treat
-       `num_frames`=1 as image and and `num_frames` > 1 as video.
+       `num_frames`=1 as image and `num_frames` > 1 as video.
        Entries with zero probability are removed and the rest are renormalized
        to sum to 1.
     3) Per-modality hard caps are enforced via `limit_mm_per_prompt`.
@@ -781,8 +811,7 @@ class RandomMultiModalDataset(RandomDataset):
     """
 
     IS_MULTIMODAL = True
-    # NOTE: video sampling is WIP. Setting it to 0.
-    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 0}
+    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 1}
 
     DEFAULT_BASE_ITEMS_PER_REQUEST = 1
     DEFAULT_NUM_MM_ITEMS_RANGE_RATIO = 0.0
@@ -812,12 +841,49 @@ class RandomMultiModalDataset(RandomDataset):
         )
         return Image.fromarray(random_pixels)
 
-    def generate_synthetic_video(self, width: int, height: int, num_frames: int) -> Any:
+    def generate_synthetic_video(
+        self, width: int, height: int, num_frames: int
+    ) -> dict:
         """Generate synthetic video with random values.
 
-        TODO: Finish this method.
+        Creates a video with random pixel values, encodes it to MP4 format,
+        and returns the content as bytes.
         """
-        raise NotImplementedError("Video sampling is WIP.")
+        import cv2
+
+        random_pixels = self._rng.integers(
+            0,
+            256,
+            (num_frames, height, width, 3),
+            dtype=np.uint8,
+        )
+
+        # Create a temporary video file in memory
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        fps = 30  # frames per second
+
+        with NamedTemporaryFile(suffix=".mp4", delete_on_close=False) as temp_file:
+            temp_path = temp_file.name
+
+            # Create video writer
+            video_writer = cv2.VideoWriter(
+                temp_path, fourcc=fourcc, fps=fps, frameSize=(width, height)
+            )
+
+            if not video_writer.isOpened():
+                raise RuntimeError("Failed to create video writer")
+
+            for frame in random_pixels:
+                video_writer.write(frame)
+
+            video_writer.release()
+            temp_file.close()
+
+            # Read the video file content
+            with open(temp_path, "rb") as f:
+                video_content = f.read()
+
+            return {"bytes": video_content}
 
     def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
         """Map the configuration to the modality."""
@@ -1028,16 +1094,6 @@ class RandomMultiModalDataset(RandomDataset):
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
-        # NOTE: Video sampling is WIP. Raise error if video is in bucket config
-        # and probability is non-zero.
-        if any(
-            self.map_config_to_modality(cfg) == "video" and p > 0
-            for cfg, p in bucket_config.items()
-        ):
-            raise NotImplementedError(
-                "Video sampling not implemented; set its probability to 0."
-            )
-
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
@@ -1055,9 +1111,24 @@ class RandomMultiModalDataset(RandomDataset):
             bucket_config,
         )
 
-        # Generate prefix once
-        prefix_token_ids = self.get_prefix(tokenizer, prefix_len)
         vocab_size = tokenizer.vocab_size
+        # Can't use tokenizer.all_special_ids since
+        # it returns ONLY ids from special_tokens_map.json
+        # We want to exclude placeholder tokens and all
+        # tokens that indicate start/end of image as it
+        # may break prompt replacement logic.
+        prohibited_tokens = list(
+            tok_id
+            for tok_id, token in tokenizer.added_tokens_decoder.items()
+            if token.special
+        )
+        all_tokens = np.arange(vocab_size)
+        allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
+        logger.debug(
+            "Sampling from %d out of %d (vocab size)", len(allowed_tokens), vocab_size
+        )
+        # Generate prefix once
+        prefix_token_ids = self.get_prefix(allowed_tokens, prefix_len)
         # Add synthetic multimodal items to each request
         mm_requests = []
         token_mismatch_total = 0
@@ -1070,6 +1141,7 @@ class RandomMultiModalDataset(RandomDataset):
                 input_len=int(input_lens[i]),
                 offset=int(offsets[i]),
                 index=i,
+                allowed_tokens=allowed_tokens,
             )
             token_mismatch_total += token_mismatch
             # Get multimodal item iterator for a given request
@@ -1640,6 +1712,11 @@ def get_samples(args, tokenizer) -> list[SampleRequest]:
             dataset_class = MTBenchDataset
             args.hf_split = "train"
         elif (
+            args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+            or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
+        ):
+            dataset_class = MultiModalConversationDataset
+        elif (
             args.dataset_path in ConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in ConversationDataset.SUPPORTED_DATASET_PATHS
         ):
@@ -2200,11 +2277,70 @@ class HuggingFaceDataset(BenchmarkDataset):
 
 
 class ConversationDataset(HuggingFaceDataset):
-    """Dataset for conversation data with multimodal support."""
+    """Dataset for text-only conversation data."""
+
+    SUPPORTED_DATASET_PATHS = {
+        "Aeala/ShareGPT_Vicuna_unfiltered",
+    }
+    IS_MULTIMODAL = False
+
+    def sample(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        num_requests: int,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list:
+        # Filter examples with at least 2 conversations
+        filtered_data = self.data.filter(lambda x: len(x["conversations"]) >= 2)
+        sampled_requests = []
+        ind = 0
+        dynamic_output = output_len is None
+
+        for item in filtered_data:
+            if len(sampled_requests) >= num_requests:
+                break
+            conv = item["conversations"]
+            prompt, completion = conv[0]["value"], conv[1]["value"]
+
+            prompt_ids = tokenizer(prompt).input_ids
+            completion_ids = tokenizer(completion).input_ids
+            prompt_len = len(prompt_ids)
+            completion_len = len(completion_ids)
+            output_len = completion_len if dynamic_output else output_len
+            assert isinstance(output_len, int) and output_len > 0
+            if dynamic_output and not is_valid_sequence(prompt_len, completion_len):
+                continue
+            mm_content = process_image(item["image"]) if "image" in item else None
+            if enable_multimodal_chat:
+                # Note: when chat is enabled the request prompt_len is no longer
+                # accurate and we will be using request output to count the
+                # actual prompt len and output len
+                prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+            sampled_requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=output_len,
+                    multi_modal_data=mm_content,
+                    request_id=request_id_prefix + str(ind),
+                )
+            )
+            ind += 1
+        self.maybe_oversample_requests(
+            sampled_requests, num_requests, request_id_prefix, no_oversample
+        )
+        return sampled_requests
+
+
+class MultiModalConversationDataset(HuggingFaceDataset):
+    """Dataset for multimodal conversation data."""
 
     SUPPORTED_DATASET_PATHS = {
         "lmms-lab/LLaVA-OneVision-Data",
-        "Aeala/ShareGPT_Vicuna_unfiltered",
     }
     IS_MULTIMODAL = True
 
@@ -2979,13 +3115,14 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
         requests = []
         token_mismatch_total = 0
         for _ in range(num_prefixes):
-            prefix_tokens = _generate_exact_length_tokens(prefix_len)
+            prefix_tokens, prefix_mismatch = _generate_exact_length_tokens(prefix_len)
+            token_mismatch_total += prefix_mismatch
 
             for _ in range(prompts_per_prefix):
-                suffix_tokens, token_mistmatch = _generate_exact_length_tokens(
+                suffix_tokens, suffix_mismatch = _generate_exact_length_tokens(
                     suffix_len
                 )
-                token_mismatch_total += token_mistmatch
+                token_mismatch_total += suffix_mismatch
                 combined_tokens = prefix_tokens + suffix_tokens
                 prompt = tokenizer.decode(combined_tokens)
                 prompt_len = len(combined_tokens)

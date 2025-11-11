@@ -24,12 +24,10 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
-from vllm.model_executor.layers.quantization.awq import (
-    AWQLinearMethod,
-    is_layer_skipped_awq,
-)
+from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8LinearMethod
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
+from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
@@ -139,7 +137,9 @@ class IPEXConfig(QuantizationConfig):
     ) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if self.method == "awq":
-                if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+                if is_layer_skipped(
+                    prefix, self.modules_to_not_convert, self.packed_modules_mapping
+                ):
                     return UnquantizedLinearMethod()
                 return IPEXAWQLinearMethod(self)
             if self.method == "gptq":
@@ -399,6 +399,7 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
         import intel_extension_for_pytorch as ipex
 
+        ep_rank_start = self.moe.ep_rank * self.moe.num_local_experts
         layer.ipex_fusion = ipex.llm.modules.GatedMLPMOE(
             layer.w13_weight,
             layer.w2_weight,
@@ -407,6 +408,7 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
             a1_scale_inv=layer.w13_input_scale,
             a2_scale_inv=layer.w2_input_scale,
             use_prepack=True,
+            experts_start_id=ep_rank_start,
         )
 
     def get_fused_moe_quant_config(
