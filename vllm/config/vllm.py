@@ -422,16 +422,13 @@ class VllmConfig:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
                 self.compilation_config.mode = CompilationMode.NONE
-        else:
-            assert self.compilation_config.mode >= CompilationMode.NONE
-            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation mode and backend.
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
-                and self.compilation_config.mode > CompilationMode.NONE
+                and self.compilation_config.mode != CompilationMode.NONE
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
@@ -608,17 +605,19 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        assert (
-            self.parallel_config.dcp_kv_cache_interleave_size
-            <= self.cache_config.block_size
-            and self.cache_config.block_size
-            % self.parallel_config.dcp_kv_cache_interleave_size
-            == 0
-        ), (
-            f"Block_size({self.cache_config.block_size}) should be "
-            "greater than or equal to and divisible by dcp_kv_cache_interleave_size "
-            f"({self.parallel_config.dcp_kv_cache_interleave_size})."
-        )
+        # If DCP, ensure the block size is right.
+        if self.parallel_config.decode_context_parallel_size > 1:
+            assert (
+                self.parallel_config.dcp_kv_cache_interleave_size
+                <= self.cache_config.block_size
+                and self.cache_config.block_size
+                % self.parallel_config.dcp_kv_cache_interleave_size
+                == 0
+            ), (
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by dcp_kv_cache_interleave_size "
+                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+            )
 
         assert (
             self.parallel_config.dcp_kv_cache_interleave_size == 1

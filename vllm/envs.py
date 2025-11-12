@@ -109,10 +109,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_ROCM_USE_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = True
+    VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
@@ -146,6 +147,7 @@ if TYPE_CHECKING:
     VLLM_TPU_MOST_MODEL_LEN: int | None = None
     VLLM_TPU_USING_PATHWAYS: bool = False
     VLLM_USE_DEEP_GEMM: bool = True
+    VLLM_MOE_USE_DEEP_GEMM: bool = True
     VLLM_USE_DEEP_GEMM_E8M0: bool = True
     VLLM_DEEP_GEMM_WARMUP: Literal[
         "skip",
@@ -157,6 +159,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "latency"
+    VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -198,7 +201,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -221,7 +224,7 @@ if TYPE_CHECKING:
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
-    VLLM_FLATTEN_LOGPROBS: bool = False
+    VLLM_FLAT_LOGPROBS: bool = False
     VLLM_USE_V2_MODEL_RUNNER: bool = False
 
 
@@ -625,14 +628,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
     # - "FLASHINFER_MLA": use FlashInfer for MLA
     # - "CUTLASS_MLA": use CUTLASS for MLA
-    # All possible options loaded dynamically from _Backend enum
+    # All possible options loaded dynamically from AttentionBackendEnum
     "VLLM_ATTENTION_BACKEND": env_with_choices(
         "VLLM_ATTENTION_BACKEND",
         None,
         lambda: list(
             __import__(
-                "vllm.attention.backends.registry", fromlist=["_Backend"]
-            )._Backend.__members__.keys()
+                "vllm.attention.backends.registry", fromlist=["AttentionBackendEnum"]
+            ).AttentionBackendEnum.__members__.keys()
         ),
     ),
     # If set, vllm will use flashinfer sampler
@@ -926,8 +929,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use aiter rope.
     # By default is disabled.
-    "VLLM_ROCM_USE_TRITON_ROPE": lambda: (
-        os.getenv("VLLM_ROCM_USE_TRITON_ROPE", "False").lower() in ("true", "1")
+    "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
@@ -944,6 +947,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "True").lower()
         in ("true", "1")
+    ),
+    # Whether to use aiter triton kernels for gemm ops.
+    # By default is enabled.
+    "VLLM_ROCM_USE_AITER_TRITON_GEMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_GEMM", "True").lower() in ("true", "1")
     ),
     # use rocm skinny gemms
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
@@ -1111,6 +1119,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Allow use of DeepGemm kernels for fused moe ops.
     "VLLM_USE_DEEP_GEMM": lambda: bool(int(os.getenv("VLLM_USE_DEEP_GEMM", "1"))),
+    # Allow use of DeepGemm specifically for MoE fused ops (overrides only MoE).
+    "VLLM_MOE_USE_DEEP_GEMM": lambda: bool(
+        int(os.getenv("VLLM_MOE_USE_DEEP_GEMM", "1"))
+    ),
     # Whether to use E8M0 scaling when DeepGEMM is used on Blackwell GPUs.
     "VLLM_USE_DEEP_GEMM_E8M0": lambda: bool(
         int(os.getenv("VLLM_USE_DEEP_GEMM_E8M0", "1"))
@@ -1226,6 +1238,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     #     Uses TensorRT-LLM kernels optimized for low-latency inference.
     "VLLM_FLASHINFER_MOE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_MOE_BACKEND", "latency", ["throughput", "latency"]
+    ),
+    # Control the workspace buffer size for the FlashInfer backend.
+    "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
+        os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
@@ -1374,7 +1390,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
@@ -1471,11 +1487,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
-    # Flag to enable FlattenLogprobs whose GC overhead is significantly smaller than
+    # Flag to enable FlatLogprobs whose GC overhead is significantly smaller than
     # the original list[dict[int, Logprob]] approach.
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
-    # FlattenLogprobs.
-    "VLLM_FLATTEN_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLATTEN_LOGPROBS", "0"))),
+    # FlatLogprobs.
+    "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))
@@ -1568,6 +1584,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_SAMPLER",
         "VLLM_DISABLED_KERNELS",
         "VLLM_USE_DEEP_GEMM",
+        "VLLM_MOE_USE_DEEP_GEMM",
         "VLLM_USE_DEEP_GEMM_E8M0",
         "VLLM_USE_FUSED_MOE_GROUPED_TOPK",
         "VLLM_USE_FLASHINFER_MOE_FP16",
@@ -1576,6 +1593,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
+        "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE",
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
@@ -1588,9 +1606,10 @@ def compute_hash() -> str:
         "VLLM_ROCM_USE_AITER_MLA",
         "VLLM_ROCM_USE_AITER_MHA",
         "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_ROCM_USE_TRITON_ROPE",
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
         "VLLM_ROCM_USE_AITER_FP8BMM",
         "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION",
+        "VLLM_ROCM_USE_AITER_TRITON_GEMM",
         "VLLM_ROCM_USE_SKINNY_GEMM",
         "VLLM_ROCM_FP8_PADDING",
         "VLLM_ROCM_MOE_PADDING",

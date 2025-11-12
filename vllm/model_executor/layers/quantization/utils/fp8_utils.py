@@ -12,6 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -54,89 +55,13 @@ def cutlass_scaled_mm(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
-    is_hopper: bool | None = None,
 ) -> torch.Tensor:
-    if is_hopper is None:
-        is_hopper = current_platform.is_device_capability(90)
     return ops.cutlass_scaled_mm(
         A,
         B.T,
         out_dtype=output_dtype,
         scale_a=As,
-        # SM90 block FP8 requires row-major scale_b, which we do ahead of time
-        scale_b=Bs if block_size is not None and is_hopper else Bs.T,
-    )
-
-
-def rocm_aiter_gemm_w8a8_blockscale_impl(
-    input_2d: torch.Tensor,
-    weight: torch.Tensor,
-    input_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    group_size: int,
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    def is_aiter_triton_kernel_tuned(n, k):
-        return (n, k) in [
-            (1024, 8192),
-            (2112, 7168),
-            (3072, 1536),
-            (32768, 8192),
-            (4096, 7168),
-            (4608, 7168),
-            (512, 7168),
-            (7168, 2048),
-            (7168, 256),
-            (8192, 1024),
-            (8192, 32768),
-        ]
-
-    n, k = weight.shape
-    if input_scale is not None:
-        q_input = input_2d
-    elif not current_platform.is_fp8_fnuz() and is_aiter_triton_kernel_tuned(n, k):
-        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
-
-        # MI350 case uses triton kernel
-        q_input, input_scale = per_token_group_quant_fp8(
-            input_2d,
-            group_size,
-            column_major_scales=False,
-            use_ue8m0=False,
-        )
-    else:
-        # MI300 uses tuned AITER ASM/C++ kernel
-        import aiter as rocm_aiter
-        from aiter import gemm_a8w8_blockscale, get_hip_quant
-
-        aiter_per1x128_quant = get_hip_quant(rocm_aiter.QuantType.per_1x128)
-        q_input, input_scale = aiter_per1x128_quant(
-            input_2d.contiguous(), quant_dtype=rocm_aiter.dtypes.fp8
-        )
-
-    return gemm_a8w8_blockscale(
-        q_input, weight, input_scale, weight_scale, dtype=output_dtype
-    )
-
-
-def rocm_aiter_gemm_w8a8_blockscale_fake(
-    input_2d: torch.Tensor,
-    weight: torch.Tensor,
-    input_scale: torch.Tensor,
-    weight_scale: torch.Tensor,
-    group_size: int,
-    output_dtype: torch.dtype = torch.float16,
-) -> torch.Tensor:
-    m = input_2d.shape[0]
-    n = weight.shape[0]
-    return torch.empty(m, n, dtype=output_dtype, device=input_2d.device)
-
-
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_gemm_w8a8_blockscale",
-        op_func=rocm_aiter_gemm_w8a8_blockscale_impl,
-        fake_impl=rocm_aiter_gemm_w8a8_blockscale_fake,
+        scale_b=Bs.T,
     )
 
 
@@ -201,7 +126,7 @@ def _padded_cutlass(
     padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
 
     output = cutlass_scaled_mm(
-        padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype, True
+        padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype
     )
     return output[0 : qx.shape[0], ...]
 
@@ -374,7 +299,6 @@ class W8A8BlockFp8LinearOp:
                 weight_scale,
                 list(self.weight_group_shape),
                 input_2d.dtype,
-                False,
             )
 
     def _run_aiter(
@@ -385,13 +309,40 @@ class W8A8BlockFp8LinearOp:
         input_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert self.act_quant_group_shape == GroupShape(1, 128)
-        return torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale(
-            input_2d,
+
+        n, k = weight.shape
+
+        use_triton = (
+            not current_platform.is_fp8_fnuz()
+            and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
+        )
+
+        if use_triton:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
+        else:
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_w8a8_blockscale
+
+        if input_scale is not None:
+            q_input = input_2d
+        # MI350 case uses triton kernel
+        elif use_triton:
+            q_input, input_scale = per_token_group_quant_fp8(
+                input_2d,
+                self.act_quant_group_shape.col,
+                column_major_scales=False,
+                use_ue8m0=False,
+            )
+        # MI300 uses tuned AITER ASM/C++ kernel
+        else:
+            q_input, input_scale = rocm_aiter_ops.per_1x128_fp8_quant(input_2d)
+
+        return gemm_a8w8_blockscale_op(
+            q_input,
             weight,
             input_scale,
             weight_scale,
-            self.act_quant_group_shape.col,
-            input_2d.dtype,
+            list(self.weight_group_shape),
+            output_dtype=input_2d.dtype,
         )
 
     def _run_triton(
@@ -971,15 +922,6 @@ def requant_weight_ue8m0_inplace(
         s_old.copy_(s_requant)
 
 
-def check_aiter_fp8_linear_support() -> bool:
-    """AITER is only supported on ROCm for MI3XX"""
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_LINEAR
-    )
-
-
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
@@ -1178,9 +1120,7 @@ def process_fp8_weight_block_strategy(
     return weight, weight_scale
 
 
-def maybe_post_process_fp8_weight_block(
-    layer: torch.nn.Module, cutlass_block_fp8_supported: bool
-):
+def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     assert layer.weight_block_size is not None
 
     from vllm.utils.deep_gemm import (
@@ -1198,15 +1138,6 @@ def maybe_post_process_fp8_weight_block(
         block_sz = tuple(layer.weight_block_size)
         requant_weight_ue8m0_inplace(
             layer.weight.data, layer.weight_scale.data, block_sz
-        )
-    # SM90 Block FP8 CUTLASS requires row-major weight scales
-    elif (
-        current_platform.is_device_capability(90)
-        and cutlass_block_fp8_supported
-        and not should_use_deepgemm
-    ):
-        layer.weight_scale = torch.nn.Parameter(
-            layer.weight_scale.data.T.contiguous(), requires_grad=False
         )
 
 
