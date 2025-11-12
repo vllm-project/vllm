@@ -1581,6 +1581,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        assert self.num_bits == 4, "only supporting w4"
         layer.w13_weight = layer.w13_weight_packed
         layer.w2_weight = layer.w2_weight_packed
         assert all([w is not None for w in [layer.w13_weight, layer.w2_weight]])
@@ -1593,9 +1594,21 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
                 max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
+                w13_g_idx=layer.w13_weight_g_idx,
+                w2_g_idx=layer.w2_weight_g_idx,
+                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
             )
         else:
-            return MarlinExperts(self.moe_quant_config)
+            return MarlinExperts(
+                quant_config=self.moe_quant_config,
+                w13_g_idx=layer.w13_weight_g_idx,
+                w2_g_idx=layer.w2_weight_g_idx,
+                w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+                w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
+                is_k_full=self.is_k_full,
+            )
 
     def apply(
         self,

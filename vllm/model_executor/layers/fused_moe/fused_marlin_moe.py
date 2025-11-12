@@ -499,12 +499,33 @@ def batched_fused_marlin_moe(
 
 
 class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
+    def __init__(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        w13_g_idx: torch.Tensor | None = None,
+        w2_g_idx: torch.Tensor | None = None,
+        w13_g_idx_sort_indices: torch.Tensor | None = None,
+        w2_g_idx_sort_indices: torch.Tensor | None = None,
+        is_k_full: bool = False,
+    ):
         # TODO (varun) : Enable activation quantization
         assert quant_config.use_mxfp4_w4a16 or quant_config.use_int4_w4a16, (
             "Supports only mxfp4_w4a16 or int4_w4a16"
         )
+        self.w13_g_idx = w13_g_idx
+        self.w2_g_idx = w2_g_idx
+        self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
+        self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
+        self.is_k_full = is_k_full
         super().__init__(quant_config)
+
+    @property
+    def quant_type_id(self) -> int:
+        return (
+            scalar_types.uint4b8.id
+            if self.quant_config.use_int4_w4a16
+            else scalar_types.float4_e2m1f.id
+        )
 
     def moe_problem_size(
         self,
@@ -535,8 +556,23 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class MarlinExperts(MarlinExpertsBase):
-    def __init__(self, quant_config: FusedMoEQuantConfig):
-        super().__init__(quant_config)
+    def __init__(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        w13_g_idx: torch.Tensor | None = None,
+        w2_g_idx: torch.Tensor | None = None,
+        w13_g_idx_sort_indices: torch.Tensor | None = None,
+        w2_g_idx_sort_indices: torch.Tensor | None = None,
+        is_k_full: bool = False,
+    ):
+        super().__init__(
+            quant_config,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            is_k_full,
+        )
 
     def supports_expert_map(self) -> bool:
         return True
@@ -618,11 +654,7 @@ class MarlinExperts(MarlinExpertsBase):
             gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_type_id=(
-                scalar_types.uint4b8.id
-                if self.quant_config.use_int4_w4a16
-                else scalar_types.float4_e2m1f.id
-            ),  # works only for w4a16
+            quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
@@ -634,6 +666,10 @@ class MarlinExperts(MarlinExpertsBase):
             # output buffer allocation. Please refer to workspace_shapes().
             intermediate_cache13=workspace2,
             intermediate_cache2=workspace13,
+            g_idx1=self.w13_g_idx,
+            g_idx2=self.w2_g_idx,
+            sort_indices1=self.w13_g_idx_sort_indices,
+            sort_indices2=self.w2_g_idx_sort_indices,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
@@ -656,8 +692,20 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         max_num_tokens: int,
         num_dispatchers: int,
         quant_config: FusedMoEQuantConfig,
+        w13_g_idx: torch.Tensor | None = None,
+        w2_g_idx: torch.Tensor | None = None,
+        w13_g_idx_sort_indices: torch.Tensor | None = None,
+        w2_g_idx_sort_indices: torch.Tensor | None = None,
+        is_k_full: bool = False,
     ):
-        super().__init__(quant_config)
+        super().__init__(
+            quant_config,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            is_k_full,
+        )
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -726,11 +774,7 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             gating_output=None,
-            quant_type_id=(
-                scalar_types.uint4b8.id
-                if self.quant_config.use_int4_w4a16
-                else scalar_types.float4_e2m1f.id
-            ),  # works only for w4a16
+            quant_type_id=self.quant_type_id,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
@@ -738,4 +782,9 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             output=output,
             intermediate_cache13=workspace13,
             intermediate_cache2=workspace2,
+            g_idx1=self.w13_g_idx,
+            g_idx2=self.w2_g_idx,
+            sort_indices1=self.w13_g_idx_sort_indices,
+            sort_indices2=self.w2_g_idx_sort_indices,
+            is_k_full=self.is_k_full,
         )
