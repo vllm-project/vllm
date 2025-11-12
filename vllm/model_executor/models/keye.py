@@ -346,6 +346,13 @@ def apply_rotary_pos_emb_flashatt(
         from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
     elif current_platform.is_rocm():
         from flash_attn.ops.triton.rotary import apply_rotary as apply_rotary_emb
+    else:
+        # For other platforms, use PyTorch fallback
+        from vllm.model_executor.layers.rotary_embedding.common import (
+            apply_rotary_emb_torch,
+        )
+
+        apply_rotary_emb = partial(apply_rotary_emb_torch, is_neox_style=True)
 
     q_embed = apply_rotary_emb(q.float(), cos.float(), sin.float()).type_as(q)
     k_embed = apply_rotary_emb(k.float(), cos.float(), sin.float()).type_as(k)
