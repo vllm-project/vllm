@@ -77,7 +77,7 @@ def test_ngram_proposer():
     # No match.
     token_ids_cpu = np.array([[1, 2, 3, 4, 5]])
     result = get_ngram_proposer(min_n=2, max_n=2, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -88,7 +88,7 @@ def test_ngram_proposer():
     # No match for 4-gram.
     token_ids_cpu = np.array([[1, 2, 3, 4, 1, 2, 3]])
     result = get_ngram_proposer(min_n=4, max_n=4, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -99,7 +99,7 @@ def test_ngram_proposer():
     # No match for 4-gram but match for 3-gram.
     token_ids_cpu = np.array([[1, 2, 3, 4, 1, 2, 3]])
     result = get_ngram_proposer(min_n=3, max_n=4, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -111,7 +111,7 @@ def test_ngram_proposer():
     # In this case, the proposer should return the 4-gram match.
     token_ids_cpu = np.array([[2, 3, 4, 5, 1, 2, 3, 4, 1, 2, 3, 4]])
     result = get_ngram_proposer(min_n=3, max_n=4, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -122,7 +122,7 @@ def test_ngram_proposer():
     # Match for 2-gram and 3-gram, but not 4-gram.
     token_ids_cpu = np.array([[3, 4, 5, 2, 3, 4, 1, 2, 3, 4]])
     result = get_ngram_proposer(min_n=2, max_n=4, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -133,7 +133,7 @@ def test_ngram_proposer():
     # Multiple 3-gram matched, but always pick the first one.
     token_ids_cpu = np.array([[1, 2, 3, 100, 1, 2, 3, 200, 1, 2, 3, 300, 1, 2, 3]])
     result = get_ngram_proposer(min_n=3, max_n=3, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -144,7 +144,7 @@ def test_ngram_proposer():
     # check empty input
     token_ids_cpu = np.array([[]])
     result = get_ngram_proposer(min_n=2, max_n=2, k=2).propose(
-        sampled_token_ids=[[0]],
+        sampled_token_ids=[np.array([0])],
         req_ids=["0"],
         num_tokens_no_spec=np.array([len(c) for c in token_ids_cpu]),
         token_ids_cpu=token_ids_cpu,
@@ -157,7 +157,7 @@ def test_ngram_proposer():
     # second request has 3 tokens and no match. Padded with -1 for max len 5
     token_ids_cpu = np.array([[1, 2, 3, 1, 2], [4, 5, 6, -1, -1]])
     result = get_ngram_proposer(min_n=2, max_n=2, k=2).propose(
-        sampled_token_ids=[[0], [1]],
+        sampled_token_ids=[np.array([0]), np.array([1])],
         req_ids=["0", "1"],
         num_tokens_no_spec=np.array([5, 3]),
         token_ids_cpu=token_ids_cpu,
@@ -181,7 +181,7 @@ def test_ngram_proposer():
     input_2[:3] = [4, 5, 6]
     token_ids_cpu = np.array([input_1, input_2])
     result = ngram_proposer.propose(
-        sampled_token_ids=[[0], [1]],
+        sampled_token_ids=[np.array([0]), np.array([1])],
         req_ids=["0", "1"],
         num_tokens_no_spec=np.array([len(input_1), 3]),
         token_ids_cpu=token_ids_cpu,
