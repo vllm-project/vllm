@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import numpy as np
@@ -21,12 +21,14 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention import AttentionBackend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     CopyBlocksOp,
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
 )
@@ -51,6 +53,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
@@ -93,15 +96,12 @@ _NIXL_SUPPORTED_DEVICE = {
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
-class NixlAgentMetadata(
-    msgspec.Struct,
-    omit_defaults=True,  # type: ignore[call-arg]
-    # required for @cached_property.
-    dict=True,
-):
+@dataclass
+class NixlAgentMetadata(KVConnectorHandshakeMetadata):
     engine_id: str
     agent_metadata: bytes
     kv_caches_base_addr: list[int]
+    device_id: int
     num_blocks: int
     block_lens: list[int]
     attn_backend_name: str
@@ -152,7 +152,14 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 
 class NixlConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
@@ -222,6 +229,18 @@ class NixlConnector(KVConnectorBase_V1):
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.set_xfer_handshake_metadata(metadata)
 
     ############################################################
     # Worker Side Methods
@@ -299,6 +318,21 @@ class NixlConnector(KVConnectorBase_V1):
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.shutdown()
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata for this connector.
+        This metadata is used for out-of-band connector handshake
+        between P/D workers.
+
+        Returns:
+            KVConnectorHandshakeMetadata: the handshake metadata.
+            None if no handshake metadata is available.
+        """
+        assert self.connector_worker is not None
+        return self.connector_worker.xfer_handshake_metadata
 
 
 class NixlConnectorScheduler:
@@ -312,11 +346,15 @@ class NixlConnectorScheduler:
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
             + vllm_config.parallel_config.data_parallel_rank
-            * vllm_config.parallel_config.tensor_parallel_size
         )
         assert vllm_config.kv_transfer_config is not None
         self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
         logger.info("Initializing NIXL Scheduler %s", engine_id)
+
+        # Background thread for handling new handshake requests.
+        self._nixl_handshake_listener_t: threading.Thread | None = None
+        self._encoded_xfer_handshake_metadata: dict[int, Any] = {}
+        self._stop_event = threading.Event()
 
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
@@ -329,6 +367,89 @@ class NixlConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
+
+    def shutdown(self):
+        self._stop_event.set()
+        if self._nixl_handshake_listener_t is not None:
+            self._nixl_handshake_listener_t.join()
+            self._nixl_handshake_listener_t = None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for this connector.
+
+        Args:
+            metadata (dict): the handshake metadata to set.
+        """
+        encoded_data: dict[int, bytes] = {}
+        encoder = msgspec.msgpack.Encoder()
+        for tp_rank, rank_metadata in metadata.items():
+            if not isinstance(rank_metadata, NixlAgentMetadata):
+                raise ValueError(
+                    "NixlConnectorScheduler expects NixlAgentMetadata for "
+                    "handshake metadata."
+                )
+            encoded_data[tp_rank] = encoder.encode(rank_metadata)
+            logger.debug(
+                "Tp rank %d: encoded NixlAgentMetadata size: %s bytes",
+                tp_rank,
+                str(len(encoded_data[tp_rank])),
+            )
+        self._encoded_xfer_handshake_metadata = encoded_data
+
+        # Only start the listener when we have metadata to serve.
+        if self._nixl_handshake_listener_t is None:
+            ready_event = threading.Event()
+            self._nixl_handshake_listener_t = threading.Thread(
+                target=self._nixl_handshake_listener,
+                args=(
+                    encoded_data,
+                    ready_event,
+                    self._stop_event,
+                    self.side_channel_port,
+                ),
+                daemon=True,
+                name="nixl_handshake_listener",
+            )
+            self._nixl_handshake_listener_t.start()
+            ready_event.wait()  # Wait for listener ZMQ socket to be ready.
+
+    @staticmethod
+    def _nixl_handshake_listener(
+        encoded_data: dict[int, Any],
+        ready_event: threading.Event,
+        stop_event: threading.Event,
+        port: int,
+    ):
+        """Background thread for getting new NIXL handshakes."""
+        # NOTE(rob): this is a simple implementation. We will move
+        # to a better approach via HTTP endpoint soon.
+
+        # Listen for new requests for metadata.
+        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
+        path = make_zmq_path("tcp", host, port)
+        logger.debug("Starting listening on path: %s", path)
+        with zmq_ctx(zmq.ROUTER, path) as sock:
+            sock.setsockopt(zmq.RCVTIMEO, 1000)
+            ready_event.set()
+            while True:
+                try:
+                    identity, _, msg = sock.recv_multipart()
+                except zmq.Again:
+                    if stop_event.is_set():
+                        break
+                    continue
+                # Decode the message which contains (GET_META_MSG, rank)
+                msg, target_tp_rank = msgspec.msgpack.decode(msg)
+                logger.debug(
+                    "Received message for tp rank %s",
+                    target_tp_rank,
+                )
+                if msg != GET_META_MSG:
+                    logger.warning("Connection listener got unexpected message %s", msg)
+                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -537,8 +658,6 @@ class NixlConnectorScheduler:
 class NixlConnectorWorker:
     """Implementation of Worker side methods"""
 
-    _POLL_TIMEOUT = 0.1  # Handshake thread polls for stop event every 100ms
-
     @dataclass
     class TpKVTopology:
         """
@@ -551,6 +670,33 @@ class NixlConnectorWorker:
         remote_tp_size: dict[EngineId, int]
         is_mla: bool
         total_num_kv_heads: int
+        attn_backend: type[AttentionBackend]
+
+        def __post_init__(self):
+            # Figure out whether the first dimension of the cache is K/V
+            # or num_blocks. This is used to register the memory regions correctly.
+            kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+            )
+            # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
+            # we just mock num_blocks to 1 for the dimension check below.
+            self._is_kv_layout_blocks_first = (
+                len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+            )
+
+            attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
+            self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
+
+        @property
+        def is_kv_layout_blocks_first(self) -> bool:
+            return self._is_kv_layout_blocks_first
+
+        @property
+        def split_k_and_v(self) -> bool:
+            # Whether to register regions for K and V separately (when present).
+            return not (
+                self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first
+            )
 
         def tp_ratio(
             self,
@@ -651,16 +797,6 @@ class NixlConnectorWorker:
         # Map of engine_id -> {rank0: agent_name0, rank1: agent_name1..}.
         self._remote_agents: dict[EngineId, dict[int, str]] = defaultdict(dict)
 
-        # NIXL handshake port.
-        # NOTE(rob): Within a DP group, each DP rank gets its own
-        # base port (which is sent in the KVTransferParams).
-        # Each TP rank listens/queries on the base_port + tp_rank.
-        self.side_channel_port: int = (
-            envs.VLLM_NIXL_SIDE_CHANNEL_PORT
-            + vllm_config.parallel_config.data_parallel_rank
-            * vllm_config.parallel_config.tensor_parallel_size
-        )
-
         # Metadata.
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -706,6 +842,7 @@ class NixlConnectorWorker:
         # Map of engine_id -> kv_caches_base_addr. For TP case, each local
         # rank will still only pull from a single remote TP worker.
         self.kv_caches_base_addr: dict[EngineId, list[int]] = {}
+        self.device_id: int = 0
 
         # Number of NIXL regions. Currently one region per cache
         # (so 1 per layer for MLA, otherwise 2 per layer)
@@ -736,9 +873,8 @@ class NixlConnectorWorker:
         # requests that skipped transfer (handshake or transfer failures)
         self._failed_recv_reqs: set[ReqId] = set()
 
-        # Background thread for handling new handshake requests.
-        self._nixl_handshake_listener_t: threading.Thread | None = None
-        self._nixl_handshake_listener_stop_event: threading.Event | None = None
+        # Handshake metadata of this worker for NIXL transfers.
+        self.xfer_handshake_metadata: NixlAgentMetadata | None = None
         # Background thread for initializing new NIXL handshakes.
         self._handshake_initiation_executor = ThreadPoolExecutor(
             # NIXL is not guaranteed to be thread-safe, limit 1 worker.
@@ -768,9 +904,6 @@ class NixlConnectorWorker:
             use_mla=self.use_mla,
         )
         self.backend_name = backend.get_name()
-        attn_backend = backend_name_to_enum(self.backend_name)
-        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
-        self._use_pallas = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.debug("Detected attention backend %s", self.backend_name)
@@ -788,43 +921,9 @@ class NixlConnectorWorker:
             remote_tp_size=self._tp_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backend=backend,
         )
-
-    @staticmethod
-    def _nixl_handshake_listener(
-        metadata: NixlAgentMetadata,
-        ready_event: threading.Event,
-        stop_event: threading.Event,
-        base_port: int,
-        tp_rank: int,
-    ):
-        """Background thread for getting new NIXL handshakes."""
-        # NOTE(rob): this is a simple implementation. We will move
-        # to a better approach via HTTP endpoint soon.
-
-        encoder = msgspec.msgpack.Encoder()
-        encoded_data = encoder.encode(metadata)
-        size_in_bytes = len(encoded_data)
-        logger.debug("Size of encoded NixlAgentMetadata: %s bytes", str(size_in_bytes))
-
-        # Listen for new requests for metadata.
-        host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
-        path = make_zmq_path("tcp", host, base_port + tp_rank)
-        logger.debug("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock:
-            ready_event.set()
-            poller = zmq.Poller()
-            poller.register(sock, zmq.POLLIN)
-            while not stop_event.is_set():
-                events = dict(
-                    poller.poll(timeout=NixlConnectorWorker._POLL_TIMEOUT * 1000)
-                )
-                if sock not in events:
-                    continue
-                identity, _, msg = sock.recv_multipart()
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data))
+        self._use_pallas = self.kv_topo._use_pallas
 
     def _nixl_handshake(
         self,
@@ -844,16 +943,17 @@ class NixlConnectorWorker:
         # Handshake only with the remote TP rank that current local rank will
         # pull from. With homogeneous TP it happens to be the same rank_i.
         p_remote_rank = self.kv_topo.get_target_remote_rank(remote_tp_size)
-        path = make_zmq_path("tcp", host, port + p_remote_rank)
+        path = make_zmq_path("tcp", host, port)
         logger.debug(
-            "Querying metadata on path: %s at remote rank %s", path, p_remote_rank
+            "Querying metadata on path: %s at remote tp rank %s", path, p_remote_rank
         )
 
         # Send query for the request.
         with zmq_ctx(zmq.REQ, path) as sock:
+            msg = msgspec.msgpack.encode((GET_META_MSG, p_remote_rank))
             # Set receive timeout to 5 seconds to avoid hanging on dead server
             sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
-            sock.send(GET_META_MSG)
+            sock.send(msg)
             metadata_bytes = sock.recv()
             decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
             metadata = decoder.decode(metadata_bytes)
@@ -1003,16 +1103,19 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are registered in the same region
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
+        split_k_and_v = self.kv_topo.split_k_and_v
         tensor_size_bytes = None
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
+        self.device_id = self.tp_rank
         for layer_name, cache_or_caches in xfer_buffers.items():
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
 
             for cache in cache_list:
                 base_addr = cache.data_ptr()
+                if not self.use_host_buffer and current_platform.is_cuda_alike():
+                    self.device_id = cache.device.index
                 if base_addr in seen_base_addresses:
                     continue
 
@@ -1039,8 +1142,12 @@ class NixlConnectorWorker:
                     assert tensor_size_bytes == curr_tensor_size_bytes, (
                         "All kv cache tensors must have the same size"
                     )
+                # Need to make sure the device ID is non-negative for NIXL,
+                # Torch uses -1 to indicate CPU tensors while NIXL uses explicit
+                # memory type.
+                self.device_id = max(cache.get_device(), 0)
                 caches_data.append(
-                    (base_addr, curr_tensor_size_bytes, self.tp_rank, "")
+                    (base_addr, curr_tensor_size_bytes, self.device_id, "")
                 )
 
         logger.debug(
@@ -1061,7 +1168,7 @@ class NixlConnectorWorker:
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        if self._use_flashinfer:
+        if self.kv_topo.is_kv_layout_blocks_first:
             for i in range(len(self.slot_size_per_layer)):
                 assert self.slot_size_per_layer[i] % 2 == 0
                 self.slot_size_per_layer[i] //= 2
@@ -1087,9 +1194,9 @@ class NixlConnectorWorker:
                 block_offset = block_id * self.block_len_per_layer[i]
                 addr = base_addr + block_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, self.tp_rank))
+                blocks_data.append((addr, kv_block_len, self.device_id))
 
-            if self._use_flashinfer:
+            if self.kv_topo.is_kv_layout_blocks_first:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -1098,12 +1205,13 @@ class NixlConnectorWorker:
                     addr = base_addr + block_offset
                     # Register addresses for V cache (K registered first).
                     v_addr = addr + kv_block_len
-                    blocks_data.append((v_addr, kv_block_len, self.tp_rank))
+                    blocks_data.append((v_addr, kv_block_len, self.device_id))
         logger.debug(
-            "Created %s blocks for src engine %s and rank %s",
+            "Created %s blocks for src engine %s and rank %s on device id %s",
             len(blocks_data),
             self.engine_id,
             self.tp_rank,
+            self.device_id,
         )
 
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
@@ -1135,10 +1243,11 @@ class NixlConnectorWorker:
             assert len(self.block_window_per_layer) == self.num_layers
 
         # After KV Caches registered, listen for new connections.
-        metadata = NixlAgentMetadata(
+        self.xfer_handshake_metadata = NixlAgentMetadata(
             engine_id=self.engine_id,
             agent_metadata=self.nixl_wrapper.get_agent_metadata(),
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
+            device_id=self.device_id,
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
             attn_backend_name=self.backend_name,
@@ -1146,22 +1255,6 @@ class NixlConnectorWorker:
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,
         )
-        ready_event, stop_event = threading.Event(), threading.Event()
-        self._nixl_handshake_listener_t = threading.Thread(
-            target=self._nixl_handshake_listener,
-            args=(
-                metadata,
-                ready_event,
-                stop_event,
-                self.side_channel_port,
-                self.tp_rank,
-            ),
-            daemon=True,
-            name="nixl_handshake_listener",
-        )
-        self._nixl_handshake_listener_t.start()
-        self._nixl_handshake_listener_stop_event = stop_event
-        ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
     def add_remote_agent(
         self,
@@ -1263,15 +1356,17 @@ class NixlConnectorWorker:
                 # self.block_len == remote_block_len//tp_ratio bytes.
                 addr = base_addr + block_offset + rank_offset
                 # (addr, len, device id)
-                blocks_data.append((addr, kv_block_len, remote_tp_rank))
+                blocks_data.append((addr, kv_block_len, nixl_agent_meta.device_id))
 
-            if self._use_flashinfer:
+            if self.kv_topo.is_kv_layout_blocks_first:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_lens[i]
                     addr = base_addr + block_offset + rank_offset
                     v_addr = addr + nixl_agent_meta.block_lens[i] // 2
-                    blocks_data.append((v_addr, kv_block_len, remote_tp_rank))
+                    blocks_data.append(
+                        (v_addr, kv_block_len, nixl_agent_meta.device_id)
+                    )
 
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
@@ -1346,7 +1441,7 @@ class NixlConnectorWorker:
             remote_block_size = remote_block_len // (
                 self.slot_size_per_layer[0] * tp_ratio
             )
-            if self._use_flashinfer:
+            if self.kv_topo.is_kv_layout_blocks_first:
                 # With flashinfer, KV are sent in the same message.
                 remote_block_size //= 2
 
@@ -1426,7 +1521,7 @@ class NixlConnectorWorker:
         - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
 
         """
-        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
+        split_k_and_v = self.kv_topo.split_k_and_v
         inv_order = [0, 2, 1, 3]
         sample_cache = list(self.device_kv_caches.values())[0][0]
         target_shape = list(sample_cache.shape)
@@ -1806,7 +1901,7 @@ class NixlConnectorWorker:
         For FlashInfer, this is half the length of the whole block, as K and V
         share the same region.
         """
-        if self._use_flashinfer:
+        if self.kv_topo.is_kv_layout_blocks_first:
             # For indexing only half (either just the K or V part).
             block_len = self.block_len_per_layer[layer_idx] // 2
         else:
@@ -1839,14 +1934,6 @@ class NixlConnectorWorker:
     def shutdown(self):
         """Shutdown the connector worker."""
         self._handshake_initiation_executor.shutdown(wait=False)
-        if self._nixl_handshake_listener_stop_event is not None:
-            self._nixl_handshake_listener_stop_event.set()
-            self._nixl_handshake_listener_stop_event = None
-        if self._nixl_handshake_listener_t is not None:
-            # Generous timeout to allow the thread to exit
-            self._nixl_handshake_listener_t.join(timeout=self._POLL_TIMEOUT * 10)
-            assert not self._nixl_handshake_listener_t.is_alive()
-            self._nixl_handshake_listener_t = None
         for handles in self._recving_transfers.values():
             for handle, _ in handles:
                 self.nixl_wrapper.release_xfer_handle(handle)

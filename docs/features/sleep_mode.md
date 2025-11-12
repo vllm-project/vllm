@@ -13,6 +13,9 @@ Key benefits:
 !!! note
     This feature is only supported on CUDA platform.
 
+!!! note
+    For more information, see this [Blog Post](https://blog.vllm.ai/2025/10/26/sleep-mode.html).
+
 ## Sleep levels
 
 Level 1 sleep will offload the model weights and discard the KV cache. The content of KV cache is forgotten. Level 1 sleep is good for sleeping and waking up the engine to run the same model again. The model weights are backed up in CPU memory. Please make sure there's enough CPU memory to store the model weights. Level 2 sleep will discard both the model weights and the KV cache (while the model's buffers are kept in CPU, like rope scaling tensors). The content of both the model weights and KV cache is forgotten. Level 2 sleep is good for sleeping and waking up the engine to run a different model or update the model, where previous model weights are not needed, e.g. RLHF weight update.
@@ -31,11 +34,27 @@ llm = LLM("Qwen/Qwen3-0.6B", enable_sleep_mode=True)
 #### Python API
 
 ```python
+# Sleep level 1
 # Put the engine to sleep (level=1: offload weights to CPU RAM, discard KV cache)
 llm.sleep(level=1)
 
 # Wake up the engine (restore weights)
 llm.wake_up()
+```
+
+```python
+# Sleep level 2
+# Put the engine to sleep (level=2: discard both weights and KV cache)
+llm.sleep(level=2)
+
+# Reallocate weights memory only
+llm.wake_up(tags=["weights"])
+
+# Load weights in-place
+llm.collective_rpc("reload_weights")
+
+# Reallocate KV cache
+llm.wake_up(tags=["kv_cache"])
 ```
 
 #### RLHF weight updates
@@ -69,10 +88,30 @@ VLLM_SERVER_DEV_MODE=1 vllm serve Qwen/Qwen3-0.6B \
   --port 8000
 ```
 
+Below is an example of how to sleep and wake up a model in level 1.
+
+```bash
+curl -X POST 'http://localhost:8000/sleep?level=1'
+curl -X POST 'http://localhost:8000/wake_up'
+```
+
+And this is an example of how to sleep and wake up a model in level 2.
+
+```bash
+curl -X POST 'http://localhost:8000/sleep?level=2'
+# Reallocate weights memory only
+curl -X POST 'http://localhost:8000/wake_up?tags=weights'
+# Load weights in-place
+curl -X POST 'http://localhost:8000/collective_rpc' -H 'Content-Type: application/json' -d '{"method":"reload_weights"}'
+# Reallocate KV cache
+curl -X POST 'http://localhost:8000/wake_up?tags=kv_cache'
+```
+
 #### HTTP endpoints
 
 - `POST /sleep?level=1` — Put the model to sleep (`level=1`).
 - `POST /wake_up` — Wake up the model. Supports optional `tags` query parameters for partial wake-up (e.g., `?tags=weights`).
+- `POST /collective_rpc` — Perform a collective remote procedure call (RPC).
 - `GET /is_sleeping` — Check if the model is sleeping.
 
 !!! note
