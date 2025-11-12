@@ -35,15 +35,14 @@ class BatchDescriptor(NamedTuple):
     """
 
     num_tokens: int
-    uniform_decode: bool = False
-    """
-    False can also be used for an uniform decode batch to dispatch to the 
-    cudagraph supporting non-uniform batches.
-    """
     num_reqs: int | None = None
     """
     Number of requests in the batch. Can be None for PIECEWISE cudagraphs where
-    we don't need to know the number of requests.
+    were the cudagraphs can handle any number of requests.
+    """
+    uniform: bool = False
+    """
+    True if all the requests in the batch have the same number of tokens.
     """
     has_lora: bool = False
     """

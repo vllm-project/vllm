@@ -12,14 +12,14 @@ logger = init_logger(__name__)
 
 class CUDAGraphKey(NamedTuple):
     num_tokens: int
-    uniform_decode: bool
+    uniform: bool
     has_lora: bool
 
     @staticmethod
     def from_batch_descriptor(batch_descriptor: BatchDescriptor):
         return CUDAGraphKey(
             batch_descriptor.num_tokens,
-            batch_descriptor.uniform_decode,
+            batch_descriptor.uniform,
             batch_descriptor.has_lora,
         )
 
@@ -27,9 +27,7 @@ class CUDAGraphKey(NamedTuple):
         """
         Return a non-uniform version of current CUDAGraphKey.
         """
-        return CUDAGraphKey(
-            self.num_tokens, uniform_decode=False, has_lora=self.has_lora
-        )
+        return CUDAGraphKey(self.num_tokens, uniform=False, has_lora=self.has_lora)
 
 
 class CudagraphDispatcher:
@@ -101,7 +99,7 @@ class CudagraphDispatcher:
             return BatchDescriptor(
                 num_tokens=num_tokens,
                 num_reqs=num_reqs,
-                uniform_decode=uniform_decode,
+                uniform=uniform_decode,
                 has_lora=has_lora,
             )
         num_reqs = min(num_tokens, max_num_seqs)
@@ -109,7 +107,7 @@ class CudagraphDispatcher:
         return BatchDescriptor(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
-            uniform_decode=uniform_decode,
+            uniform=uniform_decode,
             has_lora=has_lora,
         )
 
@@ -210,7 +208,6 @@ class CudagraphDispatcher:
             num_tokens, uniform_decode, has_lora
         )
 
-        print("dispatching batch descriptor: ", batch_descriptor)
         key = CUDAGraphKey.from_batch_descriptor(batch_descriptor)
 
         def check_batch_desc(mode: CUDAGraphMode, key: CUDAGraphKey):
