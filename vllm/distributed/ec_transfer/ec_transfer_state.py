@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TYPE_CHECKING
 
-from vllm import envs
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
@@ -38,9 +37,6 @@ def ensure_ec_transfer_initialized(vllm_config: "VllmConfig") -> None:
         vllm_config.ec_transfer_config.is_ec_transfer_instance
         and _EC_CONNECTOR_AGENT is None
     ):
-        if envs.VLLM_USE_V1:
-            _EC_CONNECTOR_AGENT = ECConnectorFactory.create_connector(
-                config=vllm_config, role=ECConnectorRole.WORKER
-            )
-        else:
-            raise ValueError("V0 is no longer supported")
+        _EC_CONNECTOR_AGENT = ECConnectorFactory.create_connector(
+            config=vllm_config, role=ECConnectorRole.WORKER
+        )
