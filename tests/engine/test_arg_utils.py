@@ -243,22 +243,22 @@ def test_optimization_level(arg, expected):
 
 
 @pytest.mark.parametrize(
-    ("arg1", "arg2", "expected"),
+    ("args", "expected"),
     [
-        ("-O", "1", "1"),
-        ("-O", "2", "2"),
-        ("-O", "3", "3"),
+        (["-O", "1"], "1"),
+        (["-O", "2"], "2"),
+        (["-O", "3"], "3"),
     ],
 )
-def test_optimization_level_space_separated(arg1, arg2, expected):
+def test_optimization_level_space_separated(args, expected):
     """
     Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args([arg1, arg2])
-    assert args.optimization_level == expected
-    assert args.compilation_config.mode is None
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.optimization_level == expected
+    assert parsed_args.compilation_config.mode is None
 
 
 @pytest.mark.parametrize(
