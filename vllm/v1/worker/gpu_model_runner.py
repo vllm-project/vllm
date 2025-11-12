@@ -3474,7 +3474,13 @@ class GPUModelRunner(
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
-        total_num_scheduled_tokens = int(num_scheduled_tokens.sum())
+
+        num_tokens_unpadded = int(num_scheduled_tokens.sum())
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens_unpadded)
+        # Check that sequence_parallelism padding did not mess up the uniform decode
+        # batch shape
+        assert not uniform_decode or num_tokens_padded == num_tokens_unpadded
+
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
         # Disable DP padding when running eager
@@ -3483,18 +3489,19 @@ class GPUModelRunner(
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
         ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_tokens_unpadded=total_num_scheduled_tokens,
+            num_tokens_unpadded=num_tokens_unpadded,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=allow_microbatching,
             allow_dp_padding=allow_dp_padding,
-            num_tokens_padded=total_num_scheduled_tokens,
+            num_tokens_padded=num_tokens_padded,
             uniform_decode=uniform_decode,
             num_scheduled_tokens_per_request=num_scheduled_tokens,
         )
-        num_tokens_after_padding = num_tokens
+
+        num_tokens_padded = num_tokens_padded
         if num_tokens_across_dp is not None:
             dp_rank = self.parallel_config.data_parallel_rank
-            num_tokens_after_padding = int(num_tokens_across_dp[dp_rank])
+            num_tokens_padded = int(num_tokens_across_dp[dp_rank])
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
@@ -3532,27 +3539,27 @@ class GPUModelRunner(
             remove_lora,
         ):
             # Make sure padding doesn't exceed max_num_tokens
-            assert num_tokens_after_padding <= self.max_num_tokens
-            model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
+            assert num_tokens_padded <= self.max_num_tokens
+            model_kwargs = self._init_model_kwargs(num_tokens_padded)
             if self.supports_mm_inputs and not self.model_config.is_encoder_decoder:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_after_padding]
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
                 model_kwargs = {
                     **model_kwargs,
                     **self._dummy_mm_kwargs(num_reqs),
                 }
             elif self.enable_prompt_embeds:
                 input_ids = None
-                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_after_padding]
-                model_kwargs = self._init_model_kwargs(num_tokens_after_padding)
+                inputs_embeds = self.inputs_embeds.gpu[:num_tokens_padded]
+                model_kwargs = self._init_model_kwargs(num_tokens_padded)
             else:
-                input_ids = self.input_ids.gpu[:num_tokens_after_padding]
+                input_ids = self.input_ids.gpu[:num_tokens_padded]
                 inputs_embeds = None
 
             if self.uses_mrope:
-                positions = self.mrope_positions.gpu[:, :num_tokens_after_padding]
+                positions = self.mrope_positions.gpu[:, :num_tokens_padded]
             else:
-                positions = self.positions.gpu[:num_tokens_after_padding]
+                positions = self.positions.gpu[:num_tokens_padded]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
@@ -3567,23 +3574,20 @@ class GPUModelRunner(
                     )
 
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
-                    num_tokens_after_padding, None, False
+                    num_tokens_padded, None, False
                 )
 
             _cg_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens_after_padding,
+                    num_tokens=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     has_lora=activate_lora and self.lora_config is not None,
                 )
                 if not is_profile
-                else (
-                    CUDAGraphMode.NONE,
-                    BatchDescriptor(num_tokens_after_padding),
-                )
+                else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
             )
 
-            num_tokens_after_padding = batch_descriptor.num_tokens
+            num_tokens_padded = batch_descriptor.num_tokens
 
             if cudagraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
@@ -3602,16 +3606,16 @@ class GPUModelRunner(
                 # Adjust values to reflect a single ubatch.
                 # TODO(sage,lucas): this is cruft that should be addressed in
                 #  the padding refactor.
-                num_tokens_after_padding = ubatch_slices[0].num_tokens
+                num_tokens_padded = ubatch_slices[0].num_tokens
                 if num_tokens_across_dp is not None:
-                    num_tokens_across_dp[:] = num_tokens_after_padding
+                    num_tokens_across_dp[:] = num_tokens_padded
 
             with (
                 self.maybe_randomize_inputs(input_ids),
                 set_forward_context(
                     attn_metadata,
                     self.vllm_config,
-                    num_tokens=num_tokens_after_padding,
+                    num_tokens=num_tokens_padded,
                     num_tokens_across_dp=num_tokens_across_dp,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
                     batch_descriptor=batch_descriptor,
