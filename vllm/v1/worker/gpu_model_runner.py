@@ -892,38 +892,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
-        image_grid_thw = []
-        video_grid_thw = []
-        second_per_grid_ts = []
-        audio_feature_lengths = []
-        use_audio_in_video = False
-        for mm_feature in req_state.mm_features:
-            mm_item = mm_feature.data
-            if mm_item is None:
-                continue
-            mm_input = mm_item.get_data()
-            if (t := mm_input.get("image_grid_thw")) is not None:
-                image_grid_thw.append(t.tolist())
-            if (t := mm_input.get("video_grid_thw")) is not None:
-                video_grid_thw.append(t.tolist())
-            if (t := mm_input.get("second_per_grid_ts")) is not None:
-                second_per_grid_ts.append(t)
-            if (t := mm_input.get("audio_feature_lengths")) is not None:
-                audio_feature_lengths.append(t)
-            if mm_input.get("use_audio_in_video") is True:
-                use_audio_in_video = True
-
-        assert supports_mrope(self.get_model()), "M-RoPE support is not implemented."
+        model = self.get_model()
+        assert supports_mrope(model), "M-RoPE support is not implemented."
 
         req_state.mrope_positions, req_state.mrope_position_delta = (
-            self.model.get_mrope_input_positions(
+            model.get_mrope_input_positions(
                 req_state.prompt_token_ids,
-                hf_config=self.model_config.hf_config,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                audio_feature_lengths=audio_feature_lengths,
-                use_audio_in_video=use_audio_in_video,
+                req_state.mm_features,
             )
         )
 
@@ -4371,7 +4346,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             """
             for backend in backends:
                 is_supported = False
-                for supported_size in backend.get_supported_kernel_block_size():
+                for supported_size in backend.supported_kernel_block_sizes:
                     if isinstance(supported_size, int):
                         if block_size == supported_size:
                             is_supported = True
@@ -4402,7 +4377,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         all_int_supported_sizes = set(
             supported_size
             for backend in backends
-            for supported_size in backend.get_supported_kernel_block_size()
+            for supported_size in backend.supported_kernel_block_sizes
             if isinstance(supported_size, int)
         )
 
