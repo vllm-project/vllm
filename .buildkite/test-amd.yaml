@@ -230,6 +230,7 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_8
+  # grade: Blocking
   gpu: h100
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -294,7 +295,7 @@ steps:
 
 - label: Regression Test # 7min
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
@@ -309,7 +310,7 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  #grade: Blocking
+  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -378,6 +379,7 @@ steps:
 - label: V1 Test attention (H100) # 10min
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
+  # grade: Blocking
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
@@ -532,7 +534,7 @@ steps:
 
 - label: Cudagraph test
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   source_file_dependencies:
   - tests/v1/cudagraph
@@ -918,6 +920,7 @@ steps:
   timeout_in_minutes: 70
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - vllm/multimodal/
@@ -988,6 +991,7 @@ steps:
 - label: Transformers Nightly Models Test
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_1
+  # grade: Blocking
   working_dir: "/vllm-workspace/"
   optional: true
   commands:
@@ -1338,6 +1342,7 @@ steps:
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_4
+  # grade: Blocking
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -1354,6 +1359,7 @@ steps:
 - label: Distributed Tests (A100) # optional
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_4
+  # grade: Blocking
   gpu: a100
   optional: true
   num_gpus: 4
@@ -1368,8 +1374,9 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 - label: LM Eval Large Models # optional
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  # grade: Blocking
   gpu: a100
   optional: true
   num_gpus: 4
@@ -1383,8 +1390,9 @@ steps:
 
 ##### H100 test #####
 - label: LM Eval Large Models (H100) # optional
-  mirror_hardwares: [amdexperimental]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  # grade: Blocking
   gpu: h100
   optional: true
   num_gpus: 4
@@ -1400,6 +1408,7 @@ steps:
 - label: Distributed Tests (H200) # optional
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_2
+  # grade: Blocking
   gpu: h200
   optional: true
   working_dir: "/vllm-workspace/"
@@ -1428,6 +1437,7 @@ steps:
 - label: Prime-RL Integration Test # 15min
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_2
+  # grade: Blocking
   timeout_in_minutes: 30
   optional: true
   num_gpus: 2
@@ -1441,6 +1451,7 @@ steps:
 - label: DeepSeek V2-Lite Accuracy
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_4
+  # grade: Blocking
   timeout_in_minutes: 60
   gpu: h100
   optional: true
@@ -1452,6 +1463,7 @@ steps:
 - label: Qwen3-30B-A3B-FP8-block Accuracy
   mirror_hardwares: [amdexperimental]
   agent_pool: mi325_4
+  # grade: Blocking
   timeout_in_minutes: 60
   gpu: h100
   optional: true
