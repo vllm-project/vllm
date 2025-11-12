@@ -505,8 +505,7 @@ class EplbState:
             cuda_device_index=self.cuda_device_index,
             new_physical_to_logical_map=new_physical_to_logical_map,
             new_logical_to_physical_map=new_logical_to_physical_map,
-            new_logical_replica_count=new_logical_replica_count
-
+            new_logical_replica_count=new_logical_replica_count,
         )
         self.model_states[model_config.compute_hash()] = model_state
 
