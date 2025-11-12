@@ -268,6 +268,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        resumable: bool | None = False,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -298,6 +299,7 @@ class AsyncLLM(EngineClient):
                 trace_headers,
                 priority,
                 data_parallel_rank,
+                resumable,
             )
             if isinstance(prompt, str):
                 prompt_text = prompt
@@ -342,6 +344,17 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
+    async def resume_request(
+        self,
+        request_id: str,
+        *,
+        prompt_token_ids: Optional[list[int]] = None,
+        finish_forever: Optional[bool] = False,
+    ):
+        await self.engine_core.resume_request_async(
+            request_id, prompt_token_ids, finish_forever=finish_forever
+        )
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -359,6 +372,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        resumable: Optional[bool] = False,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -411,6 +425,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                resumable=resumable,
             )
 
             # The output_handler task pushes items into the queue.

@@ -44,6 +44,7 @@ class Request:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+        resumable: bool = False,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -61,6 +62,8 @@ class Request:
         self.status = RequestStatus.WAITING
         self.events: list[EngineCoreEvent] = []
         self.stop_reason: int | str | None = None
+
+        self.resumable = resumable
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
@@ -148,6 +151,7 @@ class Request:
             priority=request.priority,
             trace_headers=request.trace_headers,
             block_hasher=block_hasher,
+            resumable=request.resumable,
         )
 
     def append_output_token_ids(
@@ -209,9 +213,11 @@ class RequestStatus(enum.IntEnum):
     """Status of a request."""
 
     WAITING = enum.auto()
+    WAITING_FOR_RESUME = enum.auto()
     WAITING_FOR_FSM = enum.auto()
     WAITING_FOR_REMOTE_KVS = enum.auto()
     RUNNING = enum.auto()
+    RUNNING_FROM_RESUME = enum.auto()
     PREEMPTED = enum.auto()
     # Note: anything after PREEMPTED will be considered
     # as a finished status.

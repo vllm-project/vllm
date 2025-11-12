@@ -206,6 +206,7 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+        leftover_running: list[Request] = []
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -227,6 +228,13 @@ class Scheduler(SchedulerInterface):
             num_new_tokens = min(
                 num_new_tokens, max_total_tokens - 1 - request.num_computed_tokens
             )
+            if request.resumable and (
+                request.status == RequestStatus.WAITING_FOR_RESUME
+            ):
+                # Skip this request if it's not ready to resume.
+                req_index += 1
+                leftover_running.append(request)
+                continue
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -592,7 +600,7 @@ class Scheduler(SchedulerInterface):
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
         assert token_budget >= 0
-        assert len(self.running) <= self.max_num_running_reqs
+        assert len(self.running) - len(leftover_running) <= self.max_num_running_reqs
         # Since some requests in the RUNNING queue may not be scheduled in
         # this step, the total number of scheduled requests can be smaller than
         # len(self.running).
@@ -713,7 +721,10 @@ class Scheduler(SchedulerInterface):
             num_tokens = num_scheduled_tokens[req_id] - len(
                 spec_decode_tokens.get(req_id, ())
             )
-            if self.use_pp:
+            # For last chunk of a resumable request, its resumable flag has
+            # been set to false and ready_to_resume is true that indicates
+            # the "forever" semantic. See also: "self.resume_request".
+            if self.use_pp or req.status == RequestStatus.RUNNING_FROM_RESUME:
                 # When using PP, the scheduler sends the sampled tokens back,
                 # because there's no direct communication between the first-
                 # stage worker and the last-stage worker. Otherwise, we don't
@@ -1118,6 +1129,10 @@ class Scheduler(SchedulerInterface):
             if stopped:
                 del new_token_ids[num_new:]  # Trim new tokens if needed.
                 break
+
+            if request.resumable:
+                request.status = RequestStatus.WAITING_FOR_RESUME
+
         return new_token_ids, stopped
 
     def _free_encoder_inputs(self, request: Request) -> None:
@@ -1175,6 +1190,26 @@ class Scheduler(SchedulerInterface):
         self.requests[request.request_id] = request
         if self.log_stats:
             request.record_event(EngineCoreEventType.QUEUED)
+
+    def resume_request(
+        self,
+        request_id: str,
+        prompt_token_ids: Optional[list[int]] = None,
+        finish_forever: Optional[bool] = False,
+    ) -> None:
+        if request_id not in self.requests:
+            raise ValueError(f"Invalid request ID: {request_id}")
+        request = self.requests[request_id]
+        if request.is_finished():
+            raise ValueError(f"Request {request_id} is already finished.")
+        assert request.status == RequestStatus.WAITING_FOR_RESUME, request.status
+        if finish_forever:
+            request.resumable = False
+            if not prompt_token_ids:
+                prompt_token_ids = [0]
+        if prompt_token_ids:
+            request.append_output_token_ids(prompt_token_ids)
+        request.status = RequestStatus.RUNNING_FROM_RESUME
 
     def finish_requests(
         self,
