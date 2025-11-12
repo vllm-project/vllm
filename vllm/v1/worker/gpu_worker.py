@@ -616,7 +616,7 @@ class Worker(WorkerBase):
                 SchedulerOutput.make_empty(), dummy_run=True
             )
         else:
-            self.model_runner._dummy_run(num_tokens=1, skip_eplb=True)
+            self.model_runner._dummy_run(1, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
