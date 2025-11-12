@@ -77,12 +77,12 @@ class Gemma3ImagePixelInputs(TensorSchema):
 
 
 class Gemma3ImageEmbeddingInputs(TensorSchema):
-
     type: Literal["image_embeds"] = "image_embeds"
     image_embeds: Annotated[
         torch.Tensor,
         TensorShape("ni", "nf", "hs"),
     ]
+
 
 Gemma3ImageInputs: TypeAlias = Gemma3ImagePixelInputs | Gemma3ImageEmbeddingInputs
 
