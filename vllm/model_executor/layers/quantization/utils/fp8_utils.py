@@ -328,7 +328,7 @@ class W8A8BlockFp8LinearOp:
         if use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
-            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_w8a8_blockscale
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
         if input_scale is not None:
             q_input = input_2d

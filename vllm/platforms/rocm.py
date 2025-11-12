@@ -325,6 +325,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CUDAGraphMode
 
         cache_config = vllm_config.cache_config
@@ -332,9 +333,7 @@ class RocmPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         is_eager_execution = compilation_config == CUDAGraphMode.NONE
 
-        use_aiter_rms_norm = (
-            envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        )
+        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
 
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
