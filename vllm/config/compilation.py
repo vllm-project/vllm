@@ -55,6 +55,12 @@ class CUDAGraphMode(enum.Enum):
     FULL = 2
     FULL_DECODE_ONLY = (FULL, NONE)
     FULL_AND_PIECEWISE = (FULL, PIECEWISE)
+    # WARMUP is used for the dummy runs prior to CUDA graph capture.
+    # This is to differentiate from NONE because in some use cases, static
+    # and dynamic shapes are two different code paths. We need to ensure
+    # static shapes code path is called during CUDA graph capture, and dynamic
+    # shapes are used during eager mode calls.
+    WARMUP = 3
 
     def decode_mode(self) -> "CUDAGraphMode":
         return CUDAGraphMode(self.value[0]) if self.separate_routine() else self
@@ -83,8 +89,22 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
+    def valid_compilation_modes(self) -> bool:
+        return self in [
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ]
+
     def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+        return self in [
+            CUDAGraphMode.NONE,
+            CUDAGraphMode.PIECEWISE,
+            CUDAGraphMode.FULL,
+            CUDAGraphMode.WARMUP,
+        ]
 
     def __str__(self) -> str:
         return self.name
@@ -713,6 +733,9 @@ class CompilationConfig:
                     "since full_cuda_graph is deprecated."
                 )
             self.cudagraph_mode = CUDAGraphMode.FULL
+
+        if self.cudagraph_mode is not None:
+            assert self.cudagraph_mode.valid_compilation_modes()
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
