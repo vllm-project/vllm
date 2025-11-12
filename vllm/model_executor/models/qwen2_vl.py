@@ -34,7 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature
 from transformers.models.qwen2_vl import Qwen2VLImageProcessor, Qwen2VLProcessor
 from transformers.models.qwen2_vl.configuration_qwen2_vl import (
     Qwen2VLConfig,
@@ -70,6 +70,7 @@ from vllm.multimodal.inputs import (
     ImageItem,
     ModalityData,
     MultiModalDataDict,
+    MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,
@@ -1240,21 +1241,17 @@ class Qwen2VLForConditionalGeneration(
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        """Get M-RoPE input positions for Qwen2-VL model."""
-        if image_grid_thw is None:
-            image_grid_thw = []
-        if video_grid_thw is None:
-            video_grid_thw = []
-        if second_per_grid_ts is None:
-            second_per_grid_ts = []
+        kwargs = MultiModalFeatureSpec.gather_kwargs(
+            mm_features,
+            {"image_grid_thw", "video_grid_thw", "second_per_grid_ts"},
+        )
+        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
+        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
+        second_per_grid_ts = kwargs.get("second_per_grid_ts", [])
 
+        hf_config = self.config
         image_token_id = hf_config.image_token_id
         video_token_id = hf_config.video_token_id
         vision_start_token_id = hf_config.vision_start_token_id
@@ -1291,20 +1288,12 @@ class Qwen2VLForConditionalGeneration(
             else:
                 ed_video = len(input_tokens) + 1
             if ed_image < ed_video:
-                t, h, w = (
-                    image_grid_thw[image_index][0],
-                    image_grid_thw[image_index][1],
-                    image_grid_thw[image_index][2],
-                )
+                t, h, w = image_grid_thw[image_index]
                 image_index += 1
                 remain_images -= 1
                 ed = ed_image
             else:
-                t, h, w = (
-                    video_grid_thw[video_index][0],
-                    video_grid_thw[video_index][1],
-                    video_grid_thw[video_index][2],
-                )
+                t, h, w = video_grid_thw[video_index]
                 video_second_per_grid_t = 1.0
                 if second_per_grid_ts:
                     video_second_per_grid_t = second_per_grid_ts[video_index]

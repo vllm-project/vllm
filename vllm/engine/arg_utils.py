@@ -1743,9 +1743,6 @@ class EngineArgs:
                 )
                 _raise_unsupported_error(feature_name=name)
 
-        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
-            _raise_unsupported_error(feature_name="sliding window (CPU backend)")
-
     def _set_default_args(
         self, usage_context: UsageContext, model_config: ModelConfig
     ) -> None:
