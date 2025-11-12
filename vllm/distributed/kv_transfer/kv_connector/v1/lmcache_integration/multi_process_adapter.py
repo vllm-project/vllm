@@ -219,7 +219,7 @@ class LMCacheMPWorkerAdapter:
             self.mq_client,
             RequestType.STORE,
             [keys, self.instance_id, op.block_ids, event.ipc_handle()],
-        )
+        ).to_cuda_future()
         self.store_futures[request_id] = (future, [])
 
     @_lmcache_nvtx_annotate
@@ -231,7 +231,7 @@ class LMCacheMPWorkerAdapter:
             self.mq_client,
             RequestType.RETRIEVE,
             [keys, self.instance_id, op.block_ids, event.ipc_handle()],
-        )
+        ).to_cuda_future()
         self.retrieve_futures[request_id] = (future, [])
 
     @_lmcache_nvtx_annotate
@@ -250,7 +250,7 @@ class LMCacheMPWorkerAdapter:
             self.mq_client,
             RequestType.STORE,
             [keys, self.instance_id, block_ids, event.ipc_handle()],
-        )
+        ).to_cuda_future()
         self.store_futures[request_ids[0]] = (future, request_ids[1:])
 
     @_lmcache_nvtx_annotate
@@ -269,7 +269,7 @@ class LMCacheMPWorkerAdapter:
             self.mq_client,
             RequestType.RETRIEVE,
             [keys, self.instance_id, block_ids, event.ipc_handle()],
-        )
+        ).to_cuda_future()
         self.retrieve_futures[request_ids[0]] = (future, request_ids[1:])
 
     @_lmcache_nvtx_annotate
