@@ -1057,7 +1057,8 @@ def test_kv_connector_basic(is_async: bool):
     )
 
 
-def test_external_prefix_cache_metrics():
+@pytest.mark.parametrize("is_async", [False, True])
+def test_external_prefix_cache_metrics(is_async: bool):
     """
     Verify connector prefix cache metrics are updated
     correctly when the scheduler processes requests with KV connector hits.
@@ -1067,7 +1068,9 @@ def test_external_prefix_cache_metrics():
     NUM_MATCHED_NEW_TOKENS = 4
     scheduler = create_scheduler(
         enable_prefix_caching=False,
-        use_kv_connector=mock_kv(matched_tokens=NUM_MATCHED_NEW_TOKENS, is_async=False),
+        use_kv_connector=mock_kv(
+            matched_tokens=NUM_MATCHED_NEW_TOKENS, is_async=is_async
+        ),
     )
 
     # --- Prepare simple requests ---
@@ -1079,9 +1082,15 @@ def test_external_prefix_cache_metrics():
         num_tokens=NUM_TOKENS,
         max_tokens=MAX_TOKENS,
     )
+    req_ids = []
+    req_to_index = {}
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        req_ids.append(request.request_id)
+        req_to_index[request.request_id] = i
 
-    for req in requests:
-        scheduler.add_request(req)
+    if is_async:
+        _step_until_kv_transfer_finished(scheduler, req_ids)
 
     # --- Trigger scheduling and simulate model output ---
     output = scheduler.schedule()
