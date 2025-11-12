@@ -550,6 +550,9 @@ def rearrange_expert_weights_inplace(
 
     old_global_expert_indices_cpu = old_global_expert_indices.cpu()
     new_global_expert_indices_cpu = new_global_expert_indices.cpu()
+
+    # NOTE(bowen): We need this synchronize to run, but I don't know why.
+    # If you figure out the reason, please let me know -- thank you!
     torch.cuda.synchronize()
 
     # Group layers into batches of up to max_group_layers and perform grouped shuffle
