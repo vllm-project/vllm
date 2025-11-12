@@ -965,7 +965,6 @@ class CompilationConfig:
             return
 
         assert self.max_cudagraph_capture_size is not None
-
         rounded_sizes = sorted(
             set(
                 round_up(size, multiple_of)
