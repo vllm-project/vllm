@@ -364,9 +364,7 @@ def main() -> None:
 
     # Measure multiple iterations (single code path with optional profiling)
     measure_time = args.profile_dir is None
-    activities = [ProfilerActivity.CPU]
-    if torch.cuda.is_available():
-        activities.append(ProfilerActivity.CUDA)
+    activities = [ProfilerActivity.CPU, ProfilerActivity.CUDA]
 
     if args.profile_dir:
         os.makedirs(args.profile_dir, exist_ok=True)
@@ -374,31 +372,32 @@ def main() -> None:
         os.makedirs(out_dir, exist_ok=True)
         profiler_cm = profile(
             activities=activities,
-            record_shapes=True,
-            profile_memory=True,
             with_stack=True,
-            with_modules=True,
-            on_trace_ready=tensorboard_trace_handler(out_dir),
+            with_modules=False,
+            on_trace_ready=tensorboard_trace_handler(out_dir, use_gzip=True),
         )
     else:
         profiler_cm = nullcontext()
-
+    num_iters = args.num_iters if measure_time else 1
     times: list[float] = []
     with profiler_cm as prof:
-        for _ in range(max(1, int(args.num_iters))):
+        for _ in range(max(1, num_iters)):
             if measure_time and rank == 0:
                 if torch.cuda.is_available():
                     torch.cuda.synchronize()
                 t0 = time.perf_counter()
 
-            rearrange_expert_weights_inplace(
-                old_global_expert_indices=old_global_map,
-                new_global_expert_indices=new_global_map,
-                expert_weights=expert_weights,  # type: ignore[arg-type]
-                ep_group=ep_group,
-                is_profile=False,
-                rank_mapping=None,
-            )
+            with torch.autograd.profiler.record_function(
+                "EPLB/rearrange_expert_weights_inplace"
+            ):
+                rearrange_expert_weights_inplace(
+                    old_global_expert_indices=old_global_map,
+                    new_global_expert_indices=new_global_map,
+                    expert_weights=expert_weights,  # type: ignore[arg-type]
+                    ep_group=ep_group,
+                    is_profile=False,
+                    rank_mapping=None,
+                )
 
             dist.barrier()
             if measure_time and rank == 0:

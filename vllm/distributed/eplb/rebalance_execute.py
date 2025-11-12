@@ -545,6 +545,260 @@ def shuffle_layer(
                 weight[dst].copy_(buffer[dst])
 
 
+def shuffle_layer_pack(
+    num_local_experts: int,
+    ep_rank: int,
+    old_indices_group: Sequence[Sequence[int]],
+    new_indices_group: Sequence[Sequence[int]],
+    expert_weights_group: Sequence[Iterable[torch.Tensor]],
+    expert_weights_buffer: Sequence[torch.Tensor],
+    ep_group: ProcessGroup,
+    peer_send_buffers: dict[int, torch.Tensor],
+    peer_recv_buffers: dict[int, torch.Tensor],
+    layer_elem_offsets: list[int],
+) -> None:
+    """
+    Perform expert weights rearrangement for a group of layers in one batched P2P.
+    Steps:
+      1) Build per-peer send/recv plans across all layers in the group.
+      2) Pack send buffers per peer, start non-blocking P2P communication.
+      3) Perform intra-rank local moves using expert_weights_buffer for all layers.
+      4) Wait for all P2P, then unpack received buffers directly into expert weights.
+    """
+    assert len(old_indices_group) == len(new_indices_group) == len(expert_weights_group)
+    group_size = len(old_indices_group)
+
+    # Validate dtype/device consistency and prepare layout info
+    first_weights_list = list(expert_weights_group[0])
+    dtypes = {w.dtype for w in first_weights_list}
+    assert len(dtypes) == 1, "All expert weights in a layer must share dtype"
+    dtype = first_weights_list[0].dtype
+    device = first_weights_list[0].device
+
+    elem_offsets = layer_elem_offsets
+    elems_per_weight = [
+        elem_offsets[i + 1] - elem_offsets[i] for i in range(len(elem_offsets) - 1)
+    ]
+    elems_per_expert = elem_offsets[-1]
+
+    # Helper mapping per layer
+    def build_local_maps_for_layer(
+        old_indices: Sequence[int],
+        new_indices: Sequence[int],
+    ) -> tuple[list[bool], dict[int, int], dict[int, int]]:
+        local2global = partial(
+            idx_local_to_global,
+            local_cnt=num_local_experts,
+            ep_rank=ep_rank,
+        )
+        is_unchanged = [
+            old_indices[local2global(i)] == new_indices[local2global(i)]
+            for i in range(num_local_experts)
+        ]
+        experts_send_loc: dict[int, int] = {}
+        experts_recv_loc: dict[int, int] = {}
+        # Local send candidates
+        for src in range(num_local_experts):
+            expert = old_indices[local2global(src)]
+            if expert == -1:
+                continue
+            if expert not in experts_send_loc:
+                experts_send_loc[expert] = src
+        # Identify local moves to avoid including them in experts_recv_loc
+        is_received_locally = is_unchanged[:]
+        for src in range(num_local_experts):
+            src_global = local2global(src)
+            for dst in range(num_local_experts):
+                dst_global = local2global(dst)
+                if is_received_locally[dst]:
+                    continue
+                if old_indices[src_global] == -1 or new_indices[dst_global] == -1:
+                    continue
+                if old_indices[src_global] == new_indices[dst_global]:
+                    is_received_locally[dst] = True
+        for dst in range(num_local_experts):
+            if is_received_locally[dst]:
+                continue
+            expert = new_indices[local2global(dst)]
+            if expert == -1:
+                continue
+            if expert not in experts_recv_loc:
+                experts_recv_loc[expert] = dst
+        return is_unchanged, experts_send_loc, experts_recv_loc
+
+    # Build per-peer expert lists across layers
+    send_peers_group: dict[
+        int, list[tuple[int, int]]
+    ] = {}  # peer -> list[(layer_idx, expert)]
+    recv_peers_group: dict[int, list[tuple[int, int]]] = {}
+    layer_is_unchanged: list[list[bool]] = []
+    layer_experts_send_loc: list[dict[int, int]] = []
+    layer_experts_recv_loc: list[dict[int, int]] = []
+
+    for layer_idx in range(group_size):
+        old_indices = old_indices_group[layer_idx]
+        new_indices = new_indices_group[layer_idx]
+        is_unchanged, experts_send_loc, experts_recv_loc = build_local_maps_for_layer(
+            old_indices, new_indices
+        )
+        layer_is_unchanged.append(is_unchanged)
+        layer_experts_send_loc.append(experts_send_loc)
+        layer_experts_recv_loc.append(experts_recv_loc)
+
+        # Build per-peer routing for this layer and merge into group-level maps
+        for expert, _src in sorted(experts_send_loc.items()):
+            ranks_to_send, ranks_to_recv = get_ep_ranks_with_expert(
+                expert,
+                num_local_experts,
+                old_indices,
+                new_indices,
+            )
+            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+            sender_pos = ranks_to_send.index(ep_rank)
+            recv_begin = sender_pos * num_dst_per_sender
+            recv_end = recv_begin + num_dst_per_sender
+            recv_ranks = ranks_to_recv[recv_begin:recv_end]
+            remainder_start = len(ranks_to_send) * num_dst_per_sender
+            recver_pos = remainder_start + sender_pos
+            if recver_pos < len(ranks_to_recv):
+                recv_ranks.append(ranks_to_recv[recver_pos])
+            for dst_rank in recv_ranks:
+                send_peers_group.setdefault(dst_rank, []).append((layer_idx, expert))
+
+        for expert, _dst in sorted(experts_recv_loc.items()):
+            ranks_to_send, ranks_to_recv = get_ep_ranks_with_expert(
+                expert,
+                num_local_experts,
+                old_indices,
+                new_indices,
+            )
+            num_dst_per_sender = len(ranks_to_recv) // len(ranks_to_send)
+            recver_pos = ranks_to_recv.index(ep_rank)
+            remainder_start = len(ranks_to_send) * num_dst_per_sender
+            if recver_pos < remainder_start:
+                src_rank = ranks_to_send[recver_pos // num_dst_per_sender]
+            else:
+                src_rank = ranks_to_send[recver_pos - remainder_start]
+            recv_peers_group.setdefault(src_rank, []).append((layer_idx, expert))
+
+    # Prepare per-peer buffers and post irecvs first
+    p2p_ops: list[P2POp] = []
+    recv_buffers: dict[int, torch.Tensor] = {}
+    recv_orders: dict[int, list[tuple[int, int]]] = {}
+
+    for peer_rank, items in sorted(recv_peers_group.items()):
+        experts_order = sorted(items)  # sort by (layer_idx, expert) for determinism
+        if not experts_order:
+            continue
+        need_rows = len(experts_order)
+        pre_buf = peer_recv_buffers.get(peer_rank)
+        if (
+            pre_buf is not None
+            and need_rows <= pre_buf.shape[0]
+            and pre_buf.shape[1] == elems_per_expert
+        ):
+            recv_buf = pre_buf[:need_rows].reshape(-1)
+        else:
+            recv_buf = torch.empty(
+                need_rows * elems_per_expert, dtype=dtype, device=device
+            )
+        src_global = get_global_rank(ep_group, peer_rank)
+        p2p_ops.append(P2POp(torch.distributed.irecv, recv_buf, src_global))
+        recv_buffers[peer_rank] = recv_buf
+        recv_orders[peer_rank] = experts_order
+
+    # Pack and post sends
+    send_buffers: dict[int, torch.Tensor] = {}
+    for peer_rank, items in sorted(send_peers_group.items()):
+        experts_order = sorted(items)
+        if not experts_order:
+            continue
+        need_rows = len(experts_order)
+        pre_buf = peer_send_buffers.get(peer_rank)
+        if (
+            pre_buf is not None
+            and need_rows <= pre_buf.shape[0]
+            and pre_buf.shape[1] == elems_per_expert
+        ):
+            send_buf = pre_buf[:need_rows].reshape(-1)
+        else:
+            send_buf = torch.empty(
+                need_rows * elems_per_expert, dtype=dtype, device=device
+            )
+
+        # Pack across layers
+        for i, (layer_idx, expert) in enumerate(experts_order):
+            weights_list = list(expert_weights_group[layer_idx])
+            src = layer_experts_send_loc[layer_idx][expert]
+            base = i * elems_per_expert
+            for k, w in enumerate(weights_list):
+                vec = w[src].reshape(-1)
+                start = base + elem_offsets[k]
+                send_buf.narrow(0, start, vec.numel()).copy_(vec)
+
+        dst_global = get_global_rank(ep_group, peer_rank)
+        p2p_ops.append(P2POp(torch.distributed.isend, send_buf, dst_global))
+        send_buffers[peer_rank] = send_buf
+
+    # Start all P2P ops
+    reqs = batch_isend_irecv(p2p_ops) if p2p_ops else []
+
+    for layer_idx in range(group_size):
+        is_unchanged = layer_is_unchanged[layer_idx]
+        weights_list = list(expert_weights_group[layer_idx])
+        buffers_list = list(expert_weights_buffer)
+        old_indices = old_indices_group[layer_idx]
+        new_indices = new_indices_group[layer_idx]
+        local2global = partial(
+            idx_local_to_global,
+            local_cnt=num_local_experts,
+            ep_rank=ep_rank,
+        )
+        # Stage local moves into tmp buffer using expert -> src mapping
+        experts_send_loc = layer_experts_send_loc[layer_idx]
+        for dst in range(num_local_experts):
+            if is_unchanged[dst]:
+                continue
+            dst_global = local2global(dst)
+            expert = new_indices[dst_global]
+            if expert == -1:
+                continue
+            src_local = experts_send_loc.get(expert)
+            if src_local is None:
+                continue
+            for w, b in zip(weights_list, buffers_list):
+                b[dst].copy_(w[src_local])
+        # Move from tmp buffer to expert weights
+        for dst in range(num_local_experts):
+            if is_unchanged[dst]:
+                continue
+            dst_global = local2global(dst)
+            expert = new_indices[dst_global]
+            if expert == -1:
+                continue
+            src_local = experts_send_loc.get(expert)
+            if src_local is None:
+                continue
+            for w, b in zip(weights_list, buffers_list):
+                w[dst].copy_(b[dst])
+
+    # Wait for P2P requests
+    for req in reqs:
+        req.wait()
+
+    # Unpack received buffers directly into expert weights
+    for peer_rank, experts_order in recv_orders.items():
+        recv_buf = recv_buffers[peer_rank]
+        for i, (layer_idx, expert) in enumerate(experts_order):
+            weights_list = list(expert_weights_group[layer_idx])
+            dst = layer_experts_recv_loc[layer_idx][expert]
+            base = i * elems_per_expert
+            for k, w in enumerate(weights_list):
+                num = elems_per_weight[k]
+                slice_view = recv_buf.narrow(0, base + elem_offsets[k], num)
+                w[dst].copy_(slice_view.view_as(w[dst]))
+
+
 def rearrange_expert_weights_inplace(
     old_global_expert_indices: torch.Tensor,
     new_global_expert_indices: torch.Tensor,
@@ -637,28 +891,52 @@ def rearrange_expert_weights_inplace(
     old_global_expert_indices_cpu = old_global_expert_indices.cpu()
     new_global_expert_indices_cpu = new_global_expert_indices.cpu()
     torch.cuda.synchronize()
-    for layer in range(num_moe_layers):
-        shuffle_layer(
+    # for layer in range(num_moe_layers):
+    #     shuffle_layer(
+    #         num_local_physical_experts,
+    #         ep_rank,
+    #         old_global_expert_indices_cpu[layer].tolist(),
+    #         new_global_expert_indices_cpu[layer].tolist(),
+    #         expert_weights[layer],
+    #         expert_weights_buffer,
+    #         ep_group,
+    #         peer_send_buffers=peer_send_buffers,
+    #         peer_recv_buffers=peer_recv_buffers,
+    #         layer_elem_offsets=layer_elem_offsets,
+    #     )
+    # old_shuffle_layer(
+    #     num_local_physical_experts,
+    #     ep_rank,
+    #     old_global_expert_indices_cpu[layer].tolist(),
+    #     new_global_expert_indices_cpu[layer].tolist(),
+    #     expert_weights[layer],
+    #     expert_weights_buffer,
+    #     ep_group,
+    # )
+    # Group layers into batches of up to max_group_layers and perform grouped shuffle
+    start = 0
+    while start < num_moe_layers:
+        end = min(start + max_group_layers, num_moe_layers)
+        old_group = [
+            old_global_expert_indices_cpu[i].tolist() for i in range(start, end)
+        ]
+        new_group = [
+            new_global_expert_indices_cpu[i].tolist() for i in range(start, end)
+        ]
+        weights_group = [expert_weights[i] for i in range(start, end)]
+        shuffle_layer_pack(
             num_local_physical_experts,
             ep_rank,
-            old_global_expert_indices_cpu[layer].tolist(),
-            new_global_expert_indices_cpu[layer].tolist(),
-            expert_weights[layer],
+            old_group,
+            new_group,
+            weights_group,
             expert_weights_buffer,
             ep_group,
-            peer_send_buffers=peer_send_buffers,
-            peer_recv_buffers=peer_recv_buffers,
-            layer_elem_offsets=layer_elem_offsets,
+            peer_send_buffers,
+            peer_recv_buffers,
+            layer_elem_offsets,
         )
-        # old_shuffle_layer(
-        #     num_local_physical_experts,
-        #     ep_rank,
-        #     old_global_expert_indices_cpu[layer].tolist(),
-        #     new_global_expert_indices_cpu[layer].tolist(),
-        #     expert_weights[layer],
-        #     expert_weights_buffer,
-        #     ep_group,
-        # )
+        start = end
 
 
 def _map_old_expert_indices_with_rank_mapping(
