@@ -502,13 +502,13 @@ class MambaMixer2(MambaBase, CustomOp):
             projected_states = projected_states * mup_vector
 
         # 2. Prepare inputs for conv + SSM
-        gate, hidden_states_B_C, dt = torch.split(
-            projected_states,
-            [
-                self.intermediate_size // self.tp_size,
-                self.conv_dim // self.tp_size,
-                self.num_heads // self.tp_size,
-            ],
+        gate_size = self.intermediate_size // self.tp_size
+        conv_size = self.conv_dim // self.tp_size
+        dt_size = self.num_heads // self.tp_size
+
+        hidden_states_B_C, dt = torch.split(
+            projected_states[..., gate_size:],
+            [conv_size, dt_size],
             dim=-1,
         )
 
@@ -529,10 +529,11 @@ class MambaMixer2(MambaBase, CustomOp):
             self.prefix,
         )
 
-        # 4. gated MLP
+        # 4. gated MLP (extract gate after the custom op to avoid graph break)
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
+        gate = projected_states[..., :gate_size]
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
