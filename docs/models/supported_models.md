@@ -75,12 +75,12 @@ This section details the necessary modifications to make to a Transformers compa
 To make your model compatible with the Transformers backend, it needs:
 
 1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
-    1. If your model is encoder-only:
-        - Add `is_causal = False` to `MyAttention`.
-    2. If your model is mixture-of-experts (MoE):
-        - Your sparse MoE block must have an attribute called `experts`.
-        - The class of `experts` (`MyExperts`) must inherit from `nn.ModuleList`.
-        - `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
+    - If your model is encoder-only:
+        1. Add `is_causal = False` to `MyAttention`.
+    - If your model is mixture-of-experts (MoE):
+        1. Your sparse MoE block must have an attribute called `experts`.
+        2. The class of `experts` (`MyExperts`) must inherit from `nn.ModuleList`.
+        3. `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
 
