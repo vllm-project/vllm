@@ -37,6 +37,7 @@ Below you'll find slides and recordings from our previous meetups:
 ## Get Involved
 
 **Want to host or speak at a vLLM meetup?** We're always looking for speakers and sponsors for our meetups. Whether you want to:
+
 - Share your vLLM feature, use case, project extension, or deployment experience
 - Host a meetup in your city
 - Sponsor an event
