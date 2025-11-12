@@ -498,11 +498,14 @@ class WorkerProc:
             self.worker_response_mq: MessageQueue = MessageQueue(1, 1)
             self.rpc_response_handles = []
         else:
-            # When multi-node
-            # Initialize remote MessageQueue for receiving SchedulerOutput cross node
+            # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
             self.rpc_broadcast_mq = get_inner_dp_world_group().create_mq_broadcaster(
                 external_writer_handle=input_shm_handle,
-                # we will wait until ready later
+                # Since there is external_writer_handle from executor proc,
+                # where the ready signal from actual writer is sent out of the
+                # create_mq_broadcaster method and after this setup, we make it
+                # non blocking. The handshake will be triggered when
+                # worker.rpc_broadcast_mq.wait_until_ready() is called
                 blocking=False,
             )
             # Initializes remote message queue for sending the model output to the
