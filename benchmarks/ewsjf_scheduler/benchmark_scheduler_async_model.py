@@ -1,12 +1,7 @@
-import json
-import random
 import os
 import time
 import asyncio
-import pandas as pd
-
-# from benchmarks.benchmark_async_fcfs import main_fcfs
-# from benchmarks.benchmark_schedulers_data import get_data_shuffled
+from datasets import load_dataset
 from vllm import SamplingParams
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -45,12 +40,13 @@ async def send_requests_with_rate_limit(engine, prompts, sampling_params, reques
     return tasks
 
 
-async def main_ewsjf(num_samples, min_range, max_range, queues_config):
+async def main_ewsjf(queues_config):
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=100, min_tokens=1)
-    dataset = pd.read_csv(f'/home/chaya/data_{num_samples}_{min_range}_{max_range}.csv')
-    prompts = dataset['input'].tolist()
 
-    rates = [1000, 500, 100, 60, 40, 20, 10]
+    dataset = load_dataset("ChayaLevi/data-100-2000")
+    prompts = list(dataset['train']['input'])
+
+    rates = [100]#[1000, 500, 100, 60, 40, 20, 10]
 
     external_parameters = {"queues_config": queues_config, "step_size": 1500}
     engine_args = AsyncEngineArgs(
@@ -65,12 +61,13 @@ async def main_ewsjf(num_samples, min_range, max_range, queues_config):
         await run_engine(engine_args, prompts, sampling_params, rates[i])
 
 
-async def main_fcfs(num_samples, min_range, max_range):
+async def main_fcfs():
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=100, min_tokens=1)
-    dataset = pd.read_csv(f'/home/chaya/data_{num_samples}_{min_range}_{max_range}.csv')
-    prompts = dataset['input'].tolist()
 
-    rates = [1000, 500, 100, 60, 40, 20, 10]
+    dataset = load_dataset("ChayaLevi/data-100-2000")
+    prompts = list(dataset['train']['input'])
+
+    rates = [100]#[1000, 500, 100, 60, 40, 20, 10]
     engine_args = AsyncEngineArgs(
         model="meta-llama/Meta-Llama-3-8B",
         # tensor_parallel_size=2
@@ -80,10 +77,10 @@ async def main_fcfs(num_samples, min_range, max_range):
         await run_engine(engine_args, prompts, sampling_params, rates[i])
 
 
-async def main(num_samples, min_range, max_range, queues_config):
-    await main_ewsjf(num_samples, min_range, max_range, queues_config)
+async def main(queues_config):
+    await main_ewsjf(queues_config)
 
-    await main_fcfs(num_samples, min_range, max_range)
+    await main_fcfs()
 
 
 async def run_engine(engine_args, prompts, sampling_params, rate):
@@ -176,6 +173,6 @@ if __name__ == "__main__":
                  {'boundaries': (1865, 1927)},
                  {'boundaries': (1928, 2000)}]
 
-    asyncio.run(main_ewsjf(30000, 100, 2000, queues_30_100_2000))
-    # asyncio.run(main_fcfs(30000, 100, 2000))
-    # asyncio.run(main(50000, 1000, 7500, queues_30_1000_7500))
+    # asyncio.run(main_ewsjf(queues_30_100_2000))
+    # asyncio.run(main_fcfs())
+    asyncio.run(main(queues_30_100_2000))
