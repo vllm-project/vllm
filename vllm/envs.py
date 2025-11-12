@@ -1486,8 +1486,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
 
     # Flag to prefix each log line with a human friendly and coloured process name.
-    # The feature goes against standard log formatter, if you want to keep this information simply set VLLM_ENABLE_PREFIX_PROC_LOGS=0 and
-    # add %(processName)s to the log format.
+    # The feature goes against standard log formatter, if you want to keep this 
+    # information simply set VLLM_ENABLE_PREFIX_PROC_LOGS=0 and add %(processName)s
+    # to the log format.
     "VLLM_ENABLE_PREFIX_PROC_LOGS": lambda: bool(
         int(os.getenv("VLLM_ENABLE_PREFIX_PROC_LOGS", "1"))
     ),
