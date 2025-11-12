@@ -225,6 +225,9 @@ def test_media_io_kwargs_parser(arg, expected):
 @pytest.mark.parametrize(
     ("args", "expected"),
     [
+        (["-O", "1"], "1"),
+        (["-O", "2"], "2"),
+        (["-O", "3"], "3"),
         (["-O0"], "0"),
         (["-O1"], "1"),
         (["-O2"], "2"),
@@ -232,25 +235,6 @@ def test_media_io_kwargs_parser(arg, expected):
     ],
 )
 def test_optimization_level(args, expected):
-    """
-    Test optimization levels (-O0, -O1, -O2, -O3) now map to optimization_level.
-    """
-
-    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    parsed_args = parser.parse_args(args)
-    assert parsed_args.optimization_level == expected
-    assert parsed_args.compilation_config.mode is None
-
-
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        (["-O", "1"], "1"),
-        (["-O", "2"], "2"),
-        (["-O", "3"], "3"),
-    ],
-)
-def test_optimization_level_space_separated(args, expected):
     """
     Test space-separated optimization levels (-O 1, -O 2, -O 3) map to
     optimization_level.

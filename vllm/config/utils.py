@@ -16,11 +16,8 @@ from typing_extensions import runtime_checkable
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
-
-    from vllm.config import VllmConfig
 else:
     DataclassInstance = Any
-    VllmConfig = object
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=ConfigType)

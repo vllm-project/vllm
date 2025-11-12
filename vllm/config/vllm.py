@@ -72,13 +72,13 @@ class OptimizationLevel(IntEnum):
     """O3: Currently the same as -O2s."""
 
 
-is_quantized = False
-is_dense = False
+IS_QUANTIZED = False
+IS_DENSE = False
 # The optimizations that depend on these properties currently set to False
 # in all cases.
 # if model_config is not None:
-#     is_quantized = lambda c: c.model_config.is_quantized()
-#     is_sequential = lambda c: not c.model_config.is_model_moe()
+#     IS_QUANTIZED = lambda c: c.model_config.is_quantized()
+#     IS_DENSE = lambda c: not c.model_config.is_model_moe()
 # See https://github.com/vllm-project/vllm/issues/25689.
 
 
@@ -89,7 +89,7 @@ def enable_fusion(cfg):
     ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
 
 
-optimization_level_00 = {
+OPTIMIZATION_LEVEL_00 = {
     "pass_config": {
         "enable_noop": False,
         "enable_fusion": False,
@@ -101,7 +101,7 @@ optimization_level_00 = {
     "cudagraph_mode": CUDAGraphMode.NONE,
     "use_inductor_graph_partition": False,
 }
-optimization_level_01 = {
+OPTIMIZATION_LEVEL_01 = {
     "pass_config": {
         "enable_noop": True,
         "enable_fusion": enable_fusion,
@@ -113,36 +113,36 @@ optimization_level_01 = {
     "cudagraph_mode": CUDAGraphMode.PIECEWISE,
     "use_inductor_graph_partition": False,
 }
-optimization_level_02 = {
+OPTIMIZATION_LEVEL_02 = {
     "pass_config": {
         "enable_noop": True,
         "enable_fusion": enable_fusion,
         "enable_fi_allreduce_fusion": False,
-        "enable_attn_fusion": is_quantized,
-        "enable_sequence_parallelism": is_dense,
-        "enable_async_tp": is_dense,
+        "enable_attn_fusion": IS_QUANTIZED,
+        "enable_sequence_parallelism": IS_DENSE,
+        "enable_async_tp": IS_DENSE,
     },
     "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
     "use_inductor_graph_partition": False,
 }
-optimization_level_03 = {
+OPTIMIZATION_LEVEL_03 = {
     "pass_config": {
         "enable_noop": True,
         "enable_fusion": enable_fusion,
         "enable_fi_allreduce_fusion": False,
-        "enable_attn_fusion": is_quantized,
-        "enable_sequence_parallelism": is_dense,
-        "enable_async_tp": is_dense,
+        "enable_attn_fusion": IS_QUANTIZED,
+        "enable_sequence_parallelism": IS_DENSE,
+        "enable_async_tp": IS_DENSE,
     },
     "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
     "use_inductor_graph_partition": False,
 }
 
-optimization_level_to_config = {
-    OptimizationLevel.O0: optimization_level_00,
-    OptimizationLevel.O1: optimization_level_01,
-    OptimizationLevel.O2: optimization_level_02,
-    OptimizationLevel.O3: optimization_level_03,
+OPTIMIZATION_LEVEL_TO_CONFIG = {
+    OptimizationLevel.O0: OPTIMIZATION_LEVEL_00,
+    OptimizationLevel.O1: OPTIMIZATION_LEVEL_01,
+    OptimizationLevel.O2: OPTIMIZATION_LEVEL_02,
+    OptimizationLevel.O3: OPTIMIZATION_LEVEL_03,
 }
 
 
@@ -593,7 +593,7 @@ class VllmConfig:
                 custom_ops.append("+quant_fp8")
 
         if self.compilation_config.mode is None:
-            if self.optimization_level.value > OptimizationLevel.O0.value:
+            if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
                 self.compilation_config.mode = CompilationMode.NONE
@@ -607,7 +607,7 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
-        default_config = optimization_level_to_config[self.optimization_level]
+        default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE

@@ -258,8 +258,7 @@ class FlexibleArgumentParser(ArgumentParser):
                 # also handle -O=<optimization_level> here
                 optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
                 optimization_level = arg[2]
-                processed_args.append("--optimization-level")
-                processed_args.append(optimization_level)
+                processed_args += ["--optimization-level", optimization_level]
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
