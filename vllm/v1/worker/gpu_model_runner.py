@@ -4167,14 +4167,16 @@ class GPUModelRunner(
             return attn_groups
 
         attention_backend_maps = []
-        attention_backend_set: set[type[AttentionBackend]] = set()
+        attention_backend_list = []
         for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
             attn_backends = get_attn_backends_for_group(kv_cache_group_spec)
             attention_backend_maps.append(attn_backends[0])
-            attention_backend_set.update(attn_backends[1])
+            attention_backend_list.append(attn_backends[1])
 
         # Resolve cudagraph_mode before actually initialize metadata_builders
-        self._check_and_update_cudagraph_mode(attention_backend_set)
+        self._check_and_update_cudagraph_mode(
+            attention_backend_list, kv_cache_config.kv_cache_groups
+        )
 
         for i, attn_backend_map in enumerate(attention_backend_maps):
             self.attn_groups.append(create_attn_groups(attn_backend_map, i))
@@ -4203,22 +4205,31 @@ class GPUModelRunner(
         self.calculate_reorder_batch_threshold()
 
     def _check_and_update_cudagraph_mode(
-        self, attention_backends: set[type[AttentionBackend]]
+        self,
+        attention_backends: list[set[type[AttentionBackend]]],
+        kv_cache_groups: list[KVCacheGroupSpec],
     ) -> None:
         """
         Resolve the cudagraph_mode when there are multiple attention
-        backends with potential conflicting CUDA graph support.
+        groups with potential conflicting CUDA graph support.
         Then initialize the cudagraph_dispatcher based on the resolved
         cudagraph_mode.
         """
         min_cg_support = AttentionCGSupport.ALWAYS
         min_cg_backend_name = None
 
-        for attn_backend in attention_backends:
-            builder_cls = attn_backend.get_builder_cls()
-            if builder_cls.cudagraph_support.value < min_cg_support.value:
-                min_cg_support = builder_cls.cudagraph_support
-                min_cg_backend_name = attn_backend.__name__
+        for attn_backend_set, kv_cache_group in zip(
+            attention_backends, kv_cache_groups
+        ):
+            for attn_backend in attn_backend_set:
+                builder_cls = attn_backend.get_builder_cls()
+
+                cg_support = builder_cls.get_cudagraph_support(
+                    self.vllm_config, kv_cache_group.kv_cache_spec
+                )
+                if cg_support.value < min_cg_support.value:
+                    min_cg_support = cg_support
+                    min_cg_backend_name = attn_backend.__name__
         # Flexible resolve the cudagraph mode
         cudagraph_mode = self.compilation_config.cudagraph_mode
         # check cudagraph for mixed batch is supported
