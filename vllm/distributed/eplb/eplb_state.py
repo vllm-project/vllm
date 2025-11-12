@@ -132,23 +132,76 @@ class EplbModelState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
+    expert_buffer: list[torch.Tensor]
+    """
+    The buffer to store the expert weights during transfer.
+    """
+    buffer_lock: threading.Lock
+    """
+    The lock to protect the expert buffer.
+    """
+    buffer_ready_event: torch.cuda.Event | None
+    """
+    CUDA event recorded when the async worker finishes filling the buffer.
+    The main thread waits on this before consuming the buffer.
+    """
+    ep_buffer_ready: int
+    """
+    The flag indicates whether the expert buffer is ready for transfer.
+    0 or 1.
+    """
+    layer_to_transfer: int
+    """
+    The layer index to transfer in async mode.
+    """
+    rebalanced: bool
+    """
+    The flag indicates whether the experts rebalance have been computed.
+    """
+    pending_global_ready_check: bool
+    """
+    Whether the async EPLB needs to poll peers for buffer readiness.
+    """
+    is_unchanged: list[bool]
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    The size is same as the num of physical experts in the current layer.
+    """
+    is_received_locally: list[bool]
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    The size is same as the num of physical experts in the current layer.
+    """
+    experts_recv_loc: dict[int, int]
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    The size is same as the num of physical experts in the current layer.
+    """
+    is_async_enabled: bool
+    """
+    The flag indicates whether the EPLB is running in async mode.
+    """
+    cuda_device_index: int | None
+    """
+    CUDA device index for the async EPLB worker thread.
+    """
+    new_physical_to_logical_map: torch.Tensor | None = None
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    the size is same as physical_to_logical_map
+    """
+    new_logical_to_physical_map: torch.Tensor | None = None
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    the size is same as logical_to_physical_map
+    """
+    new_logical_replica_count: torch.Tensor | None = None
+    """
+    intermediate variable between `move_to_buffer` and `move_to_workspace`.
+    the size is same as logical_replica_count
+    """    
     model_name: str
     model: MixtureOfExperts
-    expert_buffer: list[torch.Tensor]
-    buffer_lock: threading.Lock
-    buffer_ready_event: torch.cuda.Event | None
-    ep_buffer_ready: int
-    layer_to_transfer: int
-    rebalanced: bool
-    pending_global_ready_check: bool
-    is_unchanged: list[bool]
-    is_received_locally: list[bool]
-    experts_recv_loc: dict[int, int]
-    is_async_enabled: bool
-    cuda_device_index: int | None
-    new_physical_to_logical_map: torch.Tensor | None = None
-    new_logical_to_physical_map: torch.Tensor | None = None
-    new_logical_replica_count: torch.Tensor | None = None
 
 
 class EplbState:
@@ -787,6 +840,9 @@ class EplbState:
                         time_end - time_start,
                     )    
             else:
+                eplb_model_state.new_physical_to_logical_map = new_physical_to_logical_map
+                eplb_model_state.new_logical_to_physical_map = new_logical_to_physical_map
+                eplb_model_state.new_logical_replica_count = new_logical_replica_count
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True
