@@ -596,6 +596,7 @@ def safetensors_weights_iterator(
         loading_desc += " (eager)"
 
     state_dict = {}
+    leftover_state_dict: dict[str, torch.Tensor] = {}
 
     for st_file in tqdm(
         hf_weights_files,
@@ -608,7 +609,8 @@ def safetensors_weights_iterator(
                 state_dict = load(f.read())
             yield from state_dict.items()
         elif safetensors_load_strategy == "torchao":
-            is_last_file = st_file == hf_weights_files[-1]
+            # we can't load flattened torchao tensor subclasses directly into the model
+            # instead we reconstruct the subclasses here before returning
             if not torchao_version_at_least("0.15.0"):
                 raise ValueError(
                     "Please use torchao version >= 0.15.0 \
@@ -621,11 +623,18 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
                     state_dict[name] = f.get_tensor(name)
+
+                # update with leftover tensor data from previous iteration, if any
+                state_dict.update(leftover_state_dict)
                 metadata = f.metadata()
-                updated_state_dict = unflatten_tensor_state_dict(
-                    state_dict, metadata, is_last_file
+                # due to sharded checkpoints, we are not guaranteed that we have all
+                # tensor subclass data on one file
+                # state_dict has the leftover data from this step and we wait for
+                # missing information to be provided in a future iteration
+                unflattened_state_dict, leftover_state_dict = (
+                    unflatten_tensor_state_dict(state_dict, metadata)
                 )
-            yield from updated_state_dict.items()
+            yield from unflattened_state_dict.items()
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
