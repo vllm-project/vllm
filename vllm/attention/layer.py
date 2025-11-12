@@ -757,6 +757,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
+            q = torch.cat((q_nope, q_pe), dim=-1)
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
         if self.use_direct_call:
