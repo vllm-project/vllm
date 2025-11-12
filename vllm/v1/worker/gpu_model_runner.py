@@ -3183,7 +3183,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         process_weights_after_loading: bool = True,
     ) -> None:
         from vllm.model_executor.model_loader.online_quantization import (
-            restore_weights_for_loading,
+            restore_weights_for_reloading,
         )
         from vllm.model_executor.model_loader.utils import (
             process_weights_after_loading as _process_after_loading,
@@ -3213,7 +3213,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if process_weights_after_loading:
             # restore model to checkpoint format
             if hasattr(model, "weight_loading_metadata"):
-                restore_weights_for_loading(model)
+                restore_weights_for_reloading(model)
             else:
                 logger.warning("Quant config is not supported")
 

@@ -90,10 +90,10 @@ def process_weights_after_loading(
 ) -> None:
     # to avoid circular dependency
     from vllm.model_executor.model_loader.online_quantization import (
-        maybe_save_metadata_and_attributes_for_weight_reloading,
+        record_weights_for_reloading,
     )
 
-    maybe_save_metadata_and_attributes_for_weight_reloading(model, model_config)
+    record_weights_for_reloading(model, model_config)
 
     for _, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)

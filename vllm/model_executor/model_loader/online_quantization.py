@@ -65,9 +65,7 @@ ONLINE_RELOAD_QUANT_CONFIGS = {
 #    load_weights
 
 
-def maybe_save_metadata_and_attributes_for_weight_reloading(
-    model: nn.Module, model_config: ModelConfig
-):
+def record_weights_for_reloading(model: nn.Module, model_config: ModelConfig):
     # this function should be called at the start of `process_weights_after_loading`
     from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
@@ -81,10 +79,8 @@ def maybe_save_metadata_and_attributes_for_weight_reloading(
             for name, param in model.named_parameters()
         }
 
-    return model.weight_loading_metadata
 
-
-def restore_weights_for_loading(model: nn.Module):
+def restore_weights_for_reloading(model: nn.Module):
     assert hasattr(model, "weight_loading_metadata")
     metadata: dict[str, torch.Tensor] = model.weight_loading_metadata
     model_param_names = dict(model.named_parameters(remove_duplicate=False)).keys()
@@ -111,30 +107,35 @@ def restore_weights_for_loading(model: nn.Module):
 
 
 def _copy_to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    new_tensor = tensor.to("meta")
-    new_tensor.__class__ = tensor.__class__
-    new_tensor.__dict__ = deepcopy(tensor.__dict__)
-    new_tensor._original_device = tensor.device
-    return new_tensor
+    meta_tensor = tensor.to("meta")
+    meta_tensor.__class__ = tensor.__class__
+    meta_tensor.__dict__ = deepcopy(tensor.__dict__)
+    meta_tensor._original_device = tensor.device
+
+    return meta_tensor
 
 
-def _tensors_alike(tensor: torch.Tensor | None, meta: torch.Tensor) -> bool:
+def _tensors_alike(tensor: torch.Tensor | None, meta_tensor: torch.Tensor) -> bool:
     if tensor is None:
         return False
 
     return (
-        tensor.device == meta._original_device
-        and tensor.dtype == meta.dtype
-        and tensor.shape == meta.shape
-        and tensor.__dict__ == meta.__dict__
+        tensor.device == meta_tensor._original_device
+        and tensor.dtype == meta_tensor.dtype
+        and tensor.shape == meta_tensor.shape
+        and tensor.__dict__ == meta_tensor.__dict__
     )
 
 
-def _materialize_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
-    return torch.empty_strided(
-        size=tuple(tensor.size()),
-        stride=tuple(tensor.stride()),
-        dtype=tensor.dtype,
-        device=tensor._original_device,
-        requires_grad=False,  # set below to match input
+def _materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
+    tensor = torch.empty_strided(
+        size=tuple(meta_tensor.size()),
+        stride=tuple(meta_tensor.stride()),
+        dtype=meta_tensor.dtype,
+        device=meta_tensor._original_device,
+        requires_grad=meta_tensor.requires_grad,
     )
+    tensor.__class__ = meta_tensor.__class__
+    tensor.__dict__ = deepcopy(meta_tensor.__dict__)
+
+    return tensor
