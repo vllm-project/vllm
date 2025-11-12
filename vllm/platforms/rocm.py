@@ -49,25 +49,8 @@ _ROCM_UNSUPPORTED_MODELS: list[str] = []
 
 # Models partially supported by ROCm.
 # Architecture -> Reason.
-_ROCM_SWA_REASON = (
-    "Sliding window attention (SWA) is not yet supported in "
-    "Triton flash attention. For half-precision SWA support, "
-    "please use CK flash attention by setting "
-    "`VLLM_USE_TRITON_FLASH_ATTN=0`"
-)
-_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {
-    "Qwen2ForCausalLM": _ROCM_SWA_REASON,
-    "MistralForCausalLM": _ROCM_SWA_REASON,
-    "MixtralForCausalLM": _ROCM_SWA_REASON,
-    "PaliGemmaForConditionalGeneration": (
-        "ROCm flash attention does not yet fully support 32-bit precision on PaliGemma"
-    ),
-    "Phi3VForCausalLM": (
-        "ROCm Triton flash attention may run into compilation errors due to "
-        "excessive use of shared memory. If this happens, disable Triton FA "
-        "by setting `VLLM_USE_TRITON_FLASH_ATTN=0`"
-    ),
-}
+_ROCM_SWA_REASON = ()
+_ROCM_PARTIALLY_SUPPORTED_MODELS: dict[str, str] = {}
 _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a0": "AMD_Instinct_MI300A",
     "0x74a1": "AMD_Instinct_MI300X",
@@ -230,7 +213,6 @@ class RocmPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink,
         use_sparse,
@@ -240,12 +222,6 @@ class RocmPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on ROCm.")
-
-        if not use_v1:
-            raise RuntimeError(
-                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-                "to select a supported backend."
-            )
 
         if use_mla:
             if selected_backend is None:
