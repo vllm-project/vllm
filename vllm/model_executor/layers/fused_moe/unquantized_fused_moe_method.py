@@ -110,9 +110,15 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
         if self.rocm_aiter_moe_enabled:
+            if (
+                self.moe.moe_parallel_config.dp_size > 1
+                and self.moe.moe_parallel_config.use_ep
+            ):
+                from .prepare_finalize import FusedMoENaivePrepareAndFinalize
+
+                return FusedMoENaivePrepareAndFinalize()
             return None
-        else:
-            return super().maybe_make_prepare_finalize()
+        return super().maybe_make_prepare_finalize()
 
     def select_gemm_impl(
         self,
@@ -387,6 +393,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 activation=activation,
                 apply_router_weight_on_input=apply_router_weight_on_input,
             )
+
         elif self.flashinfer_cutlass_moe_enabled:
             return self.flashinfer_cutlass_moe(
                 hidden_states=x,

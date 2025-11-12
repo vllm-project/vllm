@@ -17,7 +17,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
-    get_ep_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -1683,41 +1682,9 @@ class FusedMoE(CustomOp):
         if self.gate is not None:
             router_logits, _ = self.gate(hidden_states)
 
-        moe_hidden_states = hidden_states
-        moe_router_logits = router_logits
-        naive_all2all = self.moe_parallel_config.use_all2all_kernels and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
-        if naive_all2all:
-            ep_group = get_ep_group()
-            moe_hidden_states, moe_router_logits = ep_group.dispatch(
-                moe_hidden_states, moe_router_logits, self.is_sequence_parallel
-            )
-        else:
-            ep_group = None
-
-        def maybe_combine(output):
-            if ep_group is None:
-                return output
-
-            def combine_tensor(tensor):
-                if tensor.numel() == 0:
-                    return tensor
-                return ep_group.combine(tensor, self.is_sequence_parallel)
-
-            if isinstance(output, tuple):
-                if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                    fused, zero_result = output
-                    return combine_tensor(fused), zero_result
-                shared_output, fused_output = output
-                return shared_output, combine_tensor(fused_output)
-            return combine_tensor(output)
-
         if use_chunked_impl:
-            return maybe_combine(
-                self.forward_impl_chunked(
-                    moe_hidden_states, moe_router_logits, has_separate_shared_experts
-                )
+            return self.forward_impl_chunked(
+                hidden_states, router_logits, has_separate_shared_experts
             )
 
         # If there are shared experts but we are not using a modular kernel, the
@@ -1758,8 +1725,8 @@ class FusedMoE(CustomOp):
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
-                x=moe_hidden_states,
-                router_logits=moe_router_logits,
+                x=hidden_states,
+                router_logits=router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
                 use_grouped_topk=self.use_grouped_topk,
@@ -1793,8 +1760,6 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
-
-            final_hidden_states = maybe_combine(final_hidden_states)
 
             if (
                 self.zero_expert_num is not None

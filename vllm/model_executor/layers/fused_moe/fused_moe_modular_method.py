@@ -119,6 +119,9 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                     f"{self.old_quant_method.__class__.__name__}."
                 )
 
+        prepare_finalize = self.fused_experts.prepare_finalize
+        x, router_logits = prepare_finalize.preprocess_inputs(x, router_logits, layer)
+
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -159,6 +162,12 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             assert not isinstance(result, tuple), (
                 "Shared + zero experts are mutually exclusive not yet supported"
             )
+            result = prepare_finalize.postprocess_tensor(result, layer)
             return result, zero_expert_result
         else:
-            return result
+            if isinstance(result, tuple):
+                return (
+                    result[0],
+                    prepare_finalize.postprocess_tensor(result[1], layer),
+                )
+            return prepare_finalize.postprocess_tensor(result, layer)
