@@ -111,6 +111,7 @@ async def test_function_tool_use(
             "forecast for the next 5 days, in fahrenheit?",
         },
     ]
+    print(f"------{tools}------")
     response = await client.responses.create(
         model=model_name,
         input=prompt,

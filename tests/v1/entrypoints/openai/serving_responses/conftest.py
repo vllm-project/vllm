@@ -22,6 +22,7 @@ def default_server_args():
         "hermes",
         "--reasoning-parser",
         "qwen3",
+        "--log-error-stack",
     ]
 
 
