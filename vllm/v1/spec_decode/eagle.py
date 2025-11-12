@@ -1019,7 +1019,6 @@ class EagleProposer:
                 logger.info(
                     "Draft model embed_tokens are initialized from the checkpoint "
                     "weights. Keeping separate embedding weights from the target model."
-                    "Keeping separate embedding weights from the target model."
                 )
         else:
             logger.info(
