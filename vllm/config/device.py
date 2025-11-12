@@ -3,7 +3,7 @@
 
 import hashlib
 from dataclasses import field
-from typing import Any, Literal, Optional, Union
+from typing import Any, Literal
 
 import torch
 from pydantic import ConfigDict, SkipValidation
@@ -19,7 +19,7 @@ Device = Literal["auto", "cuda", "cpu", "tpu", "xpu"]
 class DeviceConfig:
     """Configuration for the device to use for vLLM execution."""
 
-    device: SkipValidation[Optional[Union[Device, torch.device]]] = "auto"
+    device: SkipValidation[Device | torch.device | None] = "auto"
     """Device type for vLLM execution.
     This parameter is deprecated and will be
     removed in a future release.
@@ -45,20 +45,21 @@ class DeviceConfig:
         # the device/platform information will be summarized
         # by torch/vllm automatically.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(),
-                               usedforsecurity=False).hexdigest()
+        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     def __post_init__(self):
         if self.device == "auto":
             # Automated device type detection
             from vllm.platforms import current_platform
+
             self.device_type = current_platform.device_type
             if not self.device_type:
                 raise RuntimeError(
                     "Failed to infer device type, please set "
                     "the environment variable `VLLM_LOGGING_LEVEL=DEBUG` "
-                    "to turn on verbose logging to help debug the issue.")
+                    "to turn on verbose logging to help debug the issue."
+                )
         else:
             # Device type is assigned explicitly
             if isinstance(self.device, str):
