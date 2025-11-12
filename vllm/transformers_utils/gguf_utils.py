@@ -122,10 +122,9 @@ def maybe_patch_hf_config_from_gguf(
     Args:
         model: Model path string
         hf_config: HuggingFace config to patch in-place
-        architectures: Original architecture list
 
     Returns:
-        Updated architecture list (unchanged if not Gemma3 GGUF multimodal)
+        Updated HuggingFace config (unchanged if not Gemma3 GGUF multimodal)
     """
     mmproj_path = detect_gguf_multimodal(model)
     if mmproj_path is not None:
