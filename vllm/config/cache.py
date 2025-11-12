@@ -167,6 +167,7 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
+            # `cpu_offload_gb` does not use `torch.compile` yet.
             "cpu_offload_gb",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",

@@ -158,7 +158,7 @@ class PassConfig:
             current_platform.get_device_capability().to_int(), {}
         )
 
-    def uuid(self):
+    def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -538,7 +538,7 @@ class CompilationConfig:
         """
         # Opt-out: default-include declared fields; keep a tiny exclude set;
         # normalize types; keep SHA-256. For nested opaque configs, include a
-        # stable identifier (e.g., pass_config.uuid()) instead of object id.
+        # stable identifier (e.g., pass_config.compute_hash()) instead of object id.
 
         ignored_factors = {
             # Paths/dirs and runtime/metrics that don’t affect compiled graph
