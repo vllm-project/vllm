@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
-    VLLM_USE_TRITON_FLASH_ATTN: bool = True
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
@@ -100,7 +99,6 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
-    VLLM_USE_V1: bool = True
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -159,6 +157,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_FP8: bool = False
     VLLM_USE_FLASHINFER_MOE_FP4: bool = False
     VLLM_FLASHINFER_MOE_BACKEND: Literal["throughput", "latency"] = "latency"
+    VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -200,7 +199,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -521,10 +520,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the nccl
     # library file in the locations specified by `LD_LIBRARY_PATH`
     "LD_LIBRARY_PATH": lambda: os.environ.get("LD_LIBRARY_PATH", None),
-    # flag to control if vllm should use triton flash attention
-    "VLLM_USE_TRITON_FLASH_ATTN": lambda: (
-        os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in ("true", "1")
-    ),
     # Use separate prefill and decode kernels for V1 attention instead of
     # the unified triton kernel.
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": lambda: (
@@ -626,14 +621,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "FLASH_ATTN_MLA": use FlashAttention for MLA
     # - "FLASHINFER_MLA": use FlashInfer for MLA
     # - "CUTLASS_MLA": use CUTLASS for MLA
-    # All possible options loaded dynamically from _Backend enum
+    # All possible options loaded dynamically from AttentionBackendEnum
     "VLLM_ATTENTION_BACKEND": env_with_choices(
         "VLLM_ATTENTION_BACKEND",
         None,
         lambda: list(
             __import__(
-                "vllm.attention.backends.registry", fromlist=["_Backend"]
-            )._Backend.__members__.keys()
+                "vllm.attention.backends.registry", fromlist=["AttentionBackendEnum"]
+            ).AttentionBackendEnum.__members__.keys()
         ),
     ),
     # If set, vllm will use flashinfer sampler
@@ -883,8 +878,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
     ),
-    # If set, use the V1 code path.
-    "VLLM_USE_V1": lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
@@ -1237,6 +1230,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_FLASHINFER_MOE_BACKEND": env_with_choices(
         "VLLM_FLASHINFER_MOE_BACKEND", "latency", ["throughput", "latency"]
     ),
+    # Control the workspace buffer size for the FlashInfer backend.
+    "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
+        os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
     # the blockscale tensor of activations NVFP4 Quantization.
@@ -1384,7 +1381,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
@@ -1533,16 +1530,6 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def set_vllm_use_v1(use_v1: bool):
-    if is_set("VLLM_USE_V1"):
-        raise ValueError(
-            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
-            "explicitly by the user. Please raise this as a Github "
-            "Issue and explicitly set VLLM_USE_V1=0 or 1."
-        )
-    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
-
-
 def compute_hash() -> str:
     """
     WARNING: Whenever a new key is added to this environment
@@ -1562,7 +1549,6 @@ def compute_hash() -> str:
         "VLLM_PP_LAYER_PARTITION",
         "VLLM_MLA_DISABLE",
         "VLLM_FLASH_ATTN_MAX_NUM_SPLITS_FOR_CUDA_GRAPH",
-        "VLLM_USE_TRITON_FLASH_ATTN",
         "VLLM_USE_TRITON_AWQ",
         "VLLM_DP_RANK",
         "VLLM_DP_SIZE",
@@ -1583,6 +1569,7 @@ def compute_hash() -> str:
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS",
         "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16",
+        "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE",
         "VLLM_USE_CUDNN_PREFILL",
         "VLLM_USE_TRTLLM_RAGGED_DEEPSEEK_PREFILL",
         "VLLM_USE_TRTLLM_ATTENTION",
