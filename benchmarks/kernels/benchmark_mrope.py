@@ -6,9 +6,9 @@
 #
 # The CSV file (named with current date/time) contains these columns:
 # model_name, tp_size, num_tokens, num_heads, num_kv_heads, head_dim, max_position,
-# rope_theta, is_neox_style, rope_scaling, dtype, torch_mean, torch_median, torch_p99,
-# torch_min, torch_max, triton_mean, triton_median, triton_p99, triton_min, triton_max,
-# speedup
+# rope_theta, is_neox_style, rope_parameters, dtype, torch_mean, torch_median,
+# torch_p99, torch_min, torch_max, triton_mean, triton_median, triton_p99, triton_min,
+# triton_max, speedup
 #
 # == Usage Examples ==
 #
@@ -88,7 +88,7 @@ def benchmark_mrope(
     max_position: int = 8192,
     rope_theta: float = 10000,
     is_neox_style: bool = True,
-    rope_scaling: dict[str, Any] = None,
+    rope_parameters: dict[str, Any] = None,
     dtype: torch.dtype = torch.bfloat16,
     seed: int = 0,
     warmup_iter: int = 10,
@@ -104,7 +104,7 @@ def benchmark_mrope(
         max_position=max_position,
         base=rope_theta,
         is_neox_style=is_neox_style,
-        rope_scaling=rope_scaling,
+        rope_parameters=rope_parameters,
         dtype=dtype,
     ).to(device=device)
 
@@ -205,7 +205,7 @@ def benchmark_mrope(
             max_position,
             rope_theta,
             is_neox_style,
-            str(rope_scaling),
+            str(rope_parameters),
             str(dtype).split(".")[-1],
             torch_stats["mean"],
             torch_stats["median"],
@@ -257,7 +257,7 @@ if __name__ == "__main__":
             "max_position",
             "rope_theta",
             "is_neox_style",
-            "rope_scaling",
+            "rope_parameters",
             "dtype",
             "torch_mean",
             "torch_median",
@@ -317,7 +317,7 @@ if __name__ == "__main__":
                         max_position=max_position,
                         rope_theta=rope_theta,
                         is_neox_style=is_neox_style,
-                        rope_scaling=config.rope_scaling,
+                        rope_parameters=config.rope_parameters,
                         dtype=getattr(torch, args.dtype),
                         seed=args.seed,
                         warmup_iter=args.warmup_iter,
