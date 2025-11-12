@@ -23,7 +23,6 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -200,7 +199,6 @@ class ArceeModel(nn.Module):
         self.quant_config = quant_config
         self.config = config
         self.vocab_size = config.vocab_size
-        self.org_vocab_size = config.vocab_size
 
         # Word embeddings (parallelized if using pipeline parallel)
         if get_pp_group().is_first_rank or (
@@ -209,7 +207,6 @@ class ArceeModel(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
             )
         else:
@@ -383,13 +380,10 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         if get_pp_group().is_last_rank:
             # Determine vocabulary size (including any LoRA extra tokens
             # for padded LM head)
-            self.unpadded_vocab_size = config.vocab_size
 
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=vllm_config.quant_config,
                 bias=getattr(config, "lm_head_bias", False),
                 prefix=f"{prefix}.lm_head",
@@ -399,7 +393,7 @@ class ArceeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
             logit_scale = getattr(config, "logit_scale", 1.0)
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, config.vocab_size, logit_scale
+                config.vocab_size, scale=logit_scale
             )
         else:
             # Placeholder for lm_head on non-last ranks

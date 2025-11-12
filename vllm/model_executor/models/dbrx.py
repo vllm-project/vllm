@@ -25,7 +25,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -209,12 +208,14 @@ class DbrxAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.Wqkv",
         )
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -439,21 +440,17 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         if config.tie_word_embeddings:
             raise ValueError("tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
-        self.unpadded_vocab_size = config.vocab_size
+
         self.transformer = DbrxModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "transformer")
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors
         )
