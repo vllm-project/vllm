@@ -478,6 +478,7 @@ def run_method(
         func = partial(method, obj)  # type: ignore
     return func(*args, **kwargs)
 
+
 class PydanticMsgspecMixin:
     @classmethod
     def __get_pydantic_core_schema__(
