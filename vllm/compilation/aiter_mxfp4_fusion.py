@@ -146,7 +146,7 @@ class AddRMSNormMXFP4GemmPattern:
             pm_pass)
 
 
-class ROCmFusionPass(VllmPatternMatcherPass):
+class MXFP4FusionPass(VllmPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
