@@ -852,6 +852,7 @@ VLM_TEST_SETTINGS = {
             )
         ],
         marks=[
+            # TODO: remove skip when upgrading Transformers to v4.57.2
             pytest.mark.skip(
                 "Broken in Transformers v4.57.1, should be fixed in v4.57.2"
             )
