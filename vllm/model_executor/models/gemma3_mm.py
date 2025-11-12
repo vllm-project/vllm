@@ -20,7 +20,12 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageEmbeddingItems, ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageEmbeddingItems,
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -69,6 +74,7 @@ class Gemma3ImagePixelInputs(TensorSchema):
     pixel_values: Annotated[torch.Tensor, TensorShape("p", 3, "h", "w")]
 
     num_patches: Annotated[torch.Tensor, TensorShape("bn")]
+
 
 class Gemma3ImageEmbeddingInputs(TensorSchema):
 
@@ -344,11 +350,18 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
         image_token = hf_processor.boi_token
 
         def get_replacement_gemma3(item_idx: int):
-            images = mm_items.get_items("image", (ImageEmbeddingItems, ImageProcessorItems))
+            images = mm_items.get_items(
+                "image", (ImageEmbeddingItems, ImageProcessorItems)
+            )
 
             if isinstance(images, ImageEmbeddingItems):
                 # For image embedding inputs, only support no crops cases since it's not supported in hf processor anyway https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/processing_gemma3.py#L155
-                return self.info.get_image_repl(image_width=None,image_height=None, num_crops=0, processor=hf_processor)
+                return self.info.get_image_repl(
+                    image_width=None,
+                    image_height=None,
+                    num_crops=0,
+                    processor=hf_processor
+                )
 
             image_size = images.get_image_size(item_idx)
             return self.info.get_image_repl(
@@ -583,7 +596,7 @@ class Gemma3ForConditionalGeneration(
         elif image_embeds is not None:
             return Gemma3ImageEmbeddingInputs(
                 image_embeds=image_embeds,
-                type='image_embeds',
+                type="image_embeds",
             )
 
     def _image_pixels_to_features(
