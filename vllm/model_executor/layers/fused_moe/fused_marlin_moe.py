@@ -501,7 +501,9 @@ def batched_fused_marlin_moe(
 class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
     def __init__(self, quant_config: FusedMoEQuantConfig):
         # TODO (varun) : Enable activation quantization
-        assert quant_config.use_mxfp4_w4a16, "Supports only mxfp4_w4a16"
+        assert quant_config.use_mxfp4_w4a16 or quant_config.use_int4_w4a16, (
+            "Supports only mxfp4_w4a16 or int4_w4a16"
+        )
         super().__init__(quant_config)
 
     def moe_problem_size(
@@ -616,7 +618,11 @@ class MarlinExperts(MarlinExpertsBase):
             gating_output=None,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            quant_type_id=scalar_types.float4_e2m1f.id,  # works only for w4a16
+            quant_type_id=(
+                scalar_types.uint4b8.id
+                if self.quant_config.use_int4_w4a16
+                else scalar_types.float4_e2m1f.id
+            ),  # works only for w4a16
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
@@ -720,8 +726,11 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             w1_scale=self.w1_scale,
             w2_scale=self.w2_scale,
             gating_output=None,
-            quant_type_id=scalar_types.float4_e2m1f.id,  # works only for w4a16
-            apply_router_weight_on_input=apply_router_weight_on_input,
+            quant_type_id=(
+                scalar_types.uint4b8.id
+                if self.quant_config.use_int4_w4a16
+                else scalar_types.float4_e2m1f.id
+            ),  # works only for w4a16
             global_num_experts=global_num_experts,
             activation=activation,
             expert_map=expert_map,
