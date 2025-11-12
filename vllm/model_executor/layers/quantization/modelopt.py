@@ -1734,9 +1734,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
 
-        elif (
-            self.allow_flashinfer
-            and self.flashinfer_moe_backend in (FlashinferMoeBackend.CUTLASS, FlashinferMoeBackend.CUTEDSL)
+        elif self.allow_flashinfer and self.flashinfer_moe_backend in (
+            FlashinferMoeBackend.CUTLASS,
+            FlashinferMoeBackend.CUTEDSL,
         ):
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
                 flashinfer_cutlass_moe_fp4,
