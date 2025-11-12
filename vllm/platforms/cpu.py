@@ -131,7 +131,6 @@ class CpuPlatform(Platform):
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
@@ -144,8 +143,6 @@ class CpuPlatform(Platform):
             raise NotImplementedError("MLA is not supported on CPU.")
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on CPU.")
-        if not use_v1:
-            raise ValueError("CPU backend only supports V1.")
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod

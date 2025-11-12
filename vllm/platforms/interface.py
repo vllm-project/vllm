@@ -215,7 +215,6 @@ class Platform:
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,

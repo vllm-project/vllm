@@ -48,7 +48,6 @@ class XPUPlatform(Platform):
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse,
@@ -76,7 +75,7 @@ class XPUPlatform(Platform):
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
-                f"with use_v1: {use_v1} use_mla: {use_mla}"
+                f"with use_mla: {use_mla}"
             )
 
         logger.info("Using Flash Attention backend.")
