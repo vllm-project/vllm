@@ -132,6 +132,8 @@ class EplbModelState:
     See:
     https://github.com/vllm-project/vllm/pull/22167#pullrequestreview-3086143856
     """
+    model_name: str
+    model: MixtureOfExperts
     expert_buffer: list[torch.Tensor]
     """
     The buffer to store the expert weights during transfer.
@@ -199,9 +201,7 @@ class EplbModelState:
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
     the size is same as logical_replica_count
-    """    
-    model_name: str
-    model: MixtureOfExperts
+    """
 
 
 class EplbState:
@@ -484,13 +484,13 @@ class EplbState:
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
         model_state = EplbModelState(
-            physical_to_logical_map,
-            logical_to_physical_map,
-            logical_replica_count,
-            expert_load_pass,
-            expert_load_window,
-            model_config.model,
-            model,
+            physical_to_logical_map=physical_to_logical_map,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
+            expert_load_pass=expert_load_pass,
+            expert_load_window=expert_load_window,
+            model_name=model_config.model,
+            model=model,
             expert_buffer=expert_buffer,
             buffer_lock=threading.Lock(),
             buffer_ready_event=None,
@@ -503,6 +503,10 @@ class EplbState:
             experts_recv_loc={},
             is_async_enabled=self.is_async,
             cuda_device_index=self.cuda_device_index,
+            new_physical_to_logical_map=new_physical_to_logical_map,
+            new_logical_to_physical_map=new_logical_to_physical_map,
+            new_logical_replica_count=new_logical_replica_count
+
         )
         self.model_states[model_config.compute_hash()] = model_state
 
@@ -611,12 +615,9 @@ class EplbState:
                         eplb_model_state
                     )
 
-                if (
-                    eplb_model_state.ep_buffer_ready
-                    and (
-                        not eplb_model_state.pending_global_ready_check
-                        or all_ranks_buffer_ready
-                    )
+                if eplb_model_state.ep_buffer_ready and (
+                    not eplb_model_state.pending_global_ready_check
+                    or all_ranks_buffer_ready
                 ):
                     self.move_to_workspace(
                         model_state=eplb_model_state,
@@ -829,7 +830,9 @@ class EplbState:
                     eplb_model_state.logical_to_physical_map.copy_(
                         new_logical_to_physical_map
                     )
-                    eplb_model_state.logical_replica_count.copy_(new_logical_replica_count)
+                    eplb_model_state.logical_replica_count.copy_(
+                        new_logical_replica_count
+                    )
                 if is_main_rank:
                     assert time_start is not None
                     torch.cuda.synchronize()
@@ -838,10 +841,14 @@ class EplbState:
                         "Rearranged experts%sin %.2f seconds.",
                         " (profile) " if is_profile else " ",
                         time_end - time_start,
-                    )    
+                    )
             else:
-                eplb_model_state.new_physical_to_logical_map = new_physical_to_logical_map
-                eplb_model_state.new_logical_to_physical_map = new_logical_to_physical_map
+                eplb_model_state.new_physical_to_logical_map = (
+                    new_physical_to_logical_map
+                )
+                eplb_model_state.new_logical_to_physical_map = (
+                    new_logical_to_physical_map
+                )
                 eplb_model_state.new_logical_replica_count = new_logical_replica_count
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
@@ -966,9 +973,7 @@ class EplbState:
                     str(e),
                 )
 
-    def post_eplb(
-        self, model_state: EplbModelState, is_profile: bool = False
-    ) -> None:
+    def post_eplb(self, model_state: EplbModelState, is_profile: bool = False) -> None:
         assert model_state.new_physical_to_logical_map is not None
         assert model_state.new_logical_to_physical_map is not None
         assert model_state.new_logical_replica_count is not None
