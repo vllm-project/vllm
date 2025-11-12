@@ -219,7 +219,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "nvidia/Llama-3_3-Nemotron-Super-49B-v1",
         trust_remote_code=True,
     ),
-    "DeepseekForCausalLM": _HfExamplesInfo("deepseek-ai/deepseek-llm-7b-chat"),
+    "DeepseekForCausalLM": _HfExamplesInfo(
+        "deepseek-ai/deepseek-moe-16b-base",
+        trust_remote_code=True,
+    ),
     "DeepseekV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/DeepSeek-V2-Lite-Chat",
         trust_remote_code=True,
@@ -240,7 +243,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
-    "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
+    "Gemma2ForCausalLM": _HfExamplesInfo(
+        "google/gemma-2-9b", extras={"tiny": "google/gemma-2-2b-it"}
+    ),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
@@ -391,8 +396,6 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "Plamo2ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-2-1b",
-        max_transformers_version="4.55.4",
-        transformers_version_reason="HF model uses remote code that is not compatible with latest Transformers",  # noqa: E501
         trust_remote_code=True,
     ),
     "QWenLMHeadModel": _HfExamplesInfo(
