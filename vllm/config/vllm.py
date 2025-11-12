@@ -570,9 +570,9 @@ class VllmConfig:
             or self.compilation_config.mode == CompilationMode.NONE
         ):
             logger.warning(
-                "Warning Compilation was disabled by user settings,"
+                "Inductor compilation was disabled by user settings,"
                 "Optimizations settings that are only active during"
-                "compilation will be ignored."
+                "Inductor compilation will be ignored."
             )
 
         def has_blocked_weights():
