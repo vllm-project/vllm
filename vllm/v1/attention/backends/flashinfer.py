@@ -231,8 +231,16 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def supports_sink(cls) -> bool:
         """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
-        from vllm.utils.flashinfer import supports_trtllm_attention
+        from vllm.utils.flashinfer import (
+            force_use_trtllm_attention,
+            supports_trtllm_attention,
+        )
 
+        # Respect explicit disable flag (e.g., VLLM_USE_TRTLLM_ATTENTION=0)
+        if force_use_trtllm_attention() is False:
+            return False
+
+        # Check if TRTLLM is supported on this platform
         return supports_trtllm_attention()
 
     @classmethod

@@ -218,9 +218,13 @@ def has_nvidia_artifactory() -> bool:
 @functools.cache
 def supports_trtllm_attention() -> bool:
     """
-    TRTLLM attention is supported if the platform is SM100 and
-    NVIDIA artifactory is accessible
+    TRTLLM attention is supported if the platform is SM100,
+    NVIDIA artifactory is accessible, and batch-invariant mode is not enabled.
     """
+    # Batch-invariant mode disables TRTLLM attention
+    if vllm_is_batch_invariant():
+        return False
+
     # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
     return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
@@ -239,9 +243,6 @@ def force_use_trtllm_attention() -> bool | None:
     return `True` if TRTLLM attention is forced to be used,
     return `False` if TRTLLM attention is forced to be not used.
     """
-    if vllm_is_batch_invariant():
-        logger.info_once("VLLM_USE_TRTLLM_ATTENTION is disabled for batch-invariant")
-        return False
     return _force_use_trtllm_attention(envs.VLLM_USE_TRTLLM_ATTENTION)
 
 
