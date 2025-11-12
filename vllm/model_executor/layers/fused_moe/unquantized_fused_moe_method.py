@@ -351,6 +351,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
+        layer_id = getattr(layer, "layer_id", 0)
 
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
             hidden_states=x,
@@ -374,6 +375,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             zero_expert_num=zero_expert_num,
             zero_expert_type=zero_expert_type,
             num_fused_shared_experts=layer.num_fused_shared_experts,
+            layer_id=layer_id,
         )
 
         if self.rocm_aiter_moe_enabled:

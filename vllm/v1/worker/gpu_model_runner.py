@@ -158,6 +158,9 @@ from .utils import (
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer)
+from vllm.distributed import get_tensor_model_parallel_rank
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -1393,6 +1396,10 @@ class GPUModelRunner(
                 blk_table_tensor = blk_table.get_device_tensor(num_reqs)
                 slot_mapping = blk_table.slot_mapping.gpu[:total_num_scheduled_tokens]
 
+                if self.model_config.enable_return_routed_experts:
+                    assert len(self.kv_cache_config.kv_cache_groups) == 1
+                    self.slot_mapping = slot_mapping.cpu()
+
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
                 blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
@@ -2519,6 +2526,9 @@ class GPUModelRunner(
                 "State error: sample_tokens() must be called "
                 "after execute_model() returns None."
             )
+
+        RoutedExpertsCapturer.get_instance().clear_buffer()
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("gpu_model_runner: preprocess"):
             with self.synchronize_input_prep():
@@ -2831,19 +2841,22 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            if self.model_config.enable_return_routed_experts and get_tensor_model_parallel_rank() == 0:
+                RoutedExpertsCapturer.get_instance().save_captured_experts(indices=self.slot_mapping)
+
             output = ModelRunnerOutput(
-                req_ids=req_ids_output_copy,
-                req_id_to_index=req_id_to_index_output_copy,
-                sampled_token_ids=valid_sampled_token_ids,
-                logprobs=logprobs_lists,
-                prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
-                kv_connector_output=kv_connector_output,
-                ec_connector_output=ec_connector_output
-                if self.supports_mm_inputs
-                else None,
-                num_nans_in_logits=num_nans_in_logits,
-            )
+                    req_ids=req_ids_output_copy,
+                    req_id_to_index=req_id_to_index_output_copy,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict=prompt_logprobs_dict,
+                    pooler_output=[],
+                    kv_connector_output=kv_connector_output,
+                    ec_connector_output=ec_connector_output
+                    if self.supports_mm_inputs
+                    else None,
+                    num_nans_in_logits=num_nans_in_logits,
+                )
 
         if not self.use_async_scheduling:
             return output
@@ -4804,6 +4817,22 @@ class GPUModelRunner(
                     f"{layer.impl.__class__.__name__} "
                     "does not return the softmax lse for decode."
                 )
+
+        self.init_routed_experts_capturer()
+
+    def init_routed_experts_capturer(self):
+        logger.info(f"Initializing routed experts capturer, enable_return_routed_experts: {self.model_config.enable_return_routed_experts}")
+        routed_experts_capturer = RoutedExpertsCapturer.create(
+            self.model_config.enable_return_routed_experts
+        )
+        block_size = self.cache_config.block_size
+        self.max_num_kv_tokens = ((self.kv_cache_config.num_blocks // len(self.kv_cache_config.kv_cache_groups)) + 1) * block_size
+        routed_experts_capturer.init_buffer(
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_num_kv_tokens=self.max_num_kv_tokens,
+            model_config=self.model_config,
+            enable_shared_memory= get_tensor_model_parallel_rank() == 0
+        )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
         """
