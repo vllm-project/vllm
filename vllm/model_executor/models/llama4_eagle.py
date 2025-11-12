@@ -176,7 +176,8 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         )
         # draft model quantization config may differ from target model
         quant_config = VllmConfig.get_quantization_config(
-            vllm_config.speculative_config.draft_model_config, vllm_config.load_config
+            vllm_config.speculative_config.draft_model_config,
+            vllm_config.speculative_config.draft_load_config or vllm_config.load_config,
         )
         self.model = LlamaModel(
             vllm_config=vllm_config,
