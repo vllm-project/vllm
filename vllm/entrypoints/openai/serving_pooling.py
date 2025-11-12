@@ -239,7 +239,7 @@ class OpenAIServingPooling(OpenAIServing):
             )
             return self.io_processor.output_to_response(output)
 
-        assert isinstance(request, PoolingCompletionRequest | PoolingChatRequest)
+        assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
         num_prompts = len(engine_prompts)
 
         # Non-streaming response
