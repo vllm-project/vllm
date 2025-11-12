@@ -261,7 +261,6 @@ def test_shared_storage_connector_hashes(
     shared_storage_path,
     processor,
     input_cases,
-    eager,
 ):
     """
     Tests that SharedStorageConnector saves KV to the storage locations
