@@ -6,7 +6,7 @@ import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import reduce
 from itertools import product
@@ -46,7 +46,11 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.forward_context import (
+    BatchDescriptor,
+    get_forward_context,
+    set_forward_context,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -304,6 +308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.use_alibi = model_config.uses_alibi
 
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
+        self.is_prefix_lm = self.model_config.is_prefix_lm()
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -1874,6 +1879,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 is_embed=pos_info.is_embed,
             )
 
+        if self.is_prefix_lm:
+            image_doc_ranges = []
+            for _, pos_info in mm_hashes_pos:
+                img_doc_range = pos_info.extract_embeds_range()
+                image_doc_ranges.extend(img_doc_range)
+
+            attn_metadata_group = get_forward_context().attn_metadata
+            for attn_metadata in attn_metadata_group.values():
+                attn_metadata.mm_prefix_range = image_doc_ranges
+
     def _gather_mm_embeddings(
         self,
         scheduler_output: "SchedulerOutput",
@@ -2577,15 +2592,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     scheduler_output.total_num_scheduled_tokens
                 )
 
-            (
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-            ) = self._preprocess(
-                scheduler_output, num_input_tokens, intermediate_tensors
+            preprocess_ctx = (
+                nullcontext()
+                if not self.is_prefix_lm
+                else set_forward_context(
+                    attn_metadata=attn_metadata, vllm_config=self.vllm_config
+                )
             )
+            with preprocess_ctx:
+                (
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
+                )
 
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len

@@ -174,6 +174,27 @@ class PlaceholderRange:
 
         return int(self.is_embed.sum().item())
 
+    def extract_embeds_range(self) -> list[tuple[int, int]]:
+        """Extract the start and end indices of the embedded region.
+
+        Returns:
+            A tuple `(start, end)` representing the start (inclusive)
+            and end (exclusive) indices of the embedded region.
+            Returns `None` if `is_embed` is `None`.
+        """
+        if self.is_embed is None:
+            return [(self.offset, self.offset + self.length)]
+
+        mask_i = self.is_embed.int()
+        starts = torch.nonzero(
+            torch.diff(mask_i, prepend=mask_i.new_zeros(1)) == 1
+        ).flatten()
+        ends = torch.nonzero(
+            torch.diff(mask_i, append=mask_i.new_zeros(1)) == -1
+        ).flatten()
+        ranges = torch.stack((starts, ends), dim=1)
+        return [tuple(x) for x in ranges.tolist()]
+
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, self.__class__):
             return False

@@ -16,6 +16,7 @@ from torch.nn.attention.flex_attention import (
     and_masks,
     create_block_mask,
     flex_attention,
+    or_masks,
 )
 
 from vllm.attention.backends.abstract import (
@@ -309,6 +310,7 @@ class FlexAttentionMetadata:
     kv_block_size: int = 16
     transformed_score_mod: _score_mod_signature | None = None
     sliding_window: int | None = None
+    mm_prefix_range: list[tuple[int, int]] | None = None
 
     def _convert_physical_to_logical(
         self,
@@ -428,6 +430,39 @@ class FlexAttentionMetadata:
 
         return final_mask_mod if self.causal else sliding_window_mask_mod
 
+    def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
+        """Creates the prefix LM mask_mod function for FlexAttention."""
+
+        def prefix_lm_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            kv_idx: torch.Tensor,
+        ):
+            mask = torch.zeros_like(q_idx, dtype=torch.bool)
+            for start, end in self.mm_prefix_range or []:
+                doc_mask_q = (q_idx >= start) & (q_idx <= end)
+                doc_mask_kv = (kv_idx >= start) & (kv_idx <= end)
+                mask = mask | (doc_mask_q & doc_mask_kv)
+            return mask
+
+        def final_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            physical_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            (is_valid, logical_q_idx, logical_kv_idx) = (
+                self._convert_physical_to_logical(self.doc_ids, q_idx, physical_kv_idx)
+            )
+            return torch.where(
+                is_valid,
+                prefix_lm_mask_mod(b, h, logical_q_idx, logical_kv_idx),
+                False,
+            )
+
+        return final_mask_mod
+
     def get_mask_mod(self):
         # Stage-1: initialize the base mask_mod
         # (causal mask for decoder or bidirectional mask for encoder)
@@ -441,6 +476,10 @@ class FlexAttentionMetadata:
             # Add sliding window mask for sliding window attention
             sliding_window_mask_mod = self.get_sliding_window_mask_mod()
             mask_mod = and_masks(mask_mod, sliding_window_mask_mod)
+        if self.mm_prefix_range:
+            # Add prefix LM mask for vision-language prefix LM attention
+            prefix_lm_mask_mod = self.get_prefix_lm_mask_mod()
+            mask_mod = or_masks(mask_mod, prefix_lm_mask_mod)
         return mask_mod
 
     def get_transformed_score_mod(self) -> _score_mod_signature | None:
@@ -777,6 +816,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        needs_rebuild_block_mask = False
         if attn_metadata.sliding_window != self.sliding_window:
             attn_metadata.sliding_window = self.sliding_window
             if attn_metadata.direct_build:
@@ -788,9 +828,14 @@ class FlexAttentionImpl(AttentionImpl):
                 )
                 # update mask mod in attention metadata
                 attn_metadata.mask_mod = attn_metadata.get_mask_mod()
-                attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
-            else:
-                attn_metadata.block_mask = attn_metadata.build_block_mask()
+            needs_rebuild_block_mask = True
+
+        if attn_metadata.mm_prefix_range:
+            attn_metadata.mask_mod = attn_metadata.get_mask_mod()
+            needs_rebuild_block_mask = True
+
+        if needs_rebuild_block_mask:
+            attn_metadata.block_mask = attn_metadata._build_block_mask_direct()
 
         if not attn_metadata.causal:
             assert self.attn_type == AttentionType.ENCODER_ONLY
