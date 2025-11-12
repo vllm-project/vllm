@@ -402,7 +402,7 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
-def _rocm_block_fp8_quant_impl(
+def _rocm_aiter_block_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
     use_triton: bool,
@@ -422,7 +422,7 @@ def _rocm_block_fp8_quant_impl(
         return aiter_per1x128_quant(x.contiguous(), quant_dtype=dtypes.fp8)
 
 
-def _rocm_block_fp8_quant_fake(
+def _rocm_aiter_block_fp8_quant_fake(
     x: torch.Tensor,
     group_size: int,
     use_triton: bool,
@@ -663,10 +663,10 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_block_fp8_quant",
-                op_func=_rocm_block_fp8_quant_impl,
+                op_name="rocm_aiter_block_fp8_quant",
+                op_func=_rocm_aiter_block_fp8_quant_impl,
                 mutates_args=[],
-                fake_impl=_rocm_block_fp8_quant_fake,
+                fake_impl=_rocm_aiter_block_fp8_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -977,7 +977,9 @@ class rocm_aiter_ops:
         group_size: int,
         use_triton: bool,
     ) -> tuple[torch.Tensor, ...]:
-        return torch.ops.vllm.rocm_block_fp8_quant(input_2d, group_size, use_triton)
+        return torch.ops.vllm.rocm_aiter_block_fp8_quant(
+            input_2d, group_size, use_triton
+        )
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:

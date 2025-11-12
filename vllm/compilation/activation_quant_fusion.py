@@ -79,7 +79,7 @@ class ActivationQuantPattern(ABC):
 
 
 if rocm_aiter_ops.is_enaled():
-    AITER_BLOCK_GEMM_OP = torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
+    AITER_BLOCK_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_block_fp8_quant.default
     FUSED_SILU_MUL_QUANT_OP = (
         torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
     )
@@ -91,40 +91,22 @@ if rocm_aiter_ops.is_enaled():
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
-                gemm_weight: torch.Tensor,
-                gemm_weight_scale: torch.Tensor,
+                use_triton: bool,
             ):
                 at1 = self.silu_and_mul_matcher.forward_custom(input)
-                at2 = AITER_BLOCK_GEMM_OP(
-                    input_2d=at1,
-                    weight=gemm_weight,
-                    input_scale=None,
-                    weight_scale=gemm_weight_scale,
-                    group_size=128,
-                    output_dtype=input.dtype,
-                )
-                return at2
+                at2 = AITER_BLOCK_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                return at2[0], at2[1]
 
             def replacement(
                 input: torch.Tensor,
-                gemm_weight: torch.Tensor,
-                gemm_weight_scale: torch.Tensor,
+                use_triton: bool,
             ):
-                at1 = FUSED_SILU_MUL_QUANT_OP(x=input)
-                at2 = AITER_BLOCK_GEMM_OP(
-                    input_2d=at1[0],
-                    weight=gemm_weight,
-                    input_scale=at1[1],
-                    weight_scale=gemm_weight_scale,
-                    group_size=128,
-                    output_dtype=input.dtype,
-                )
-                return at2
+                at = FUSED_SILU_MUL_QUANT_OP(x=input)
+                return at[0], at[1]
 
             inputs = [
                 self.silu_and_mul_matcher.inputs()[0],
-                torch.empty(4, 32, dtype=FP8_DTYPE),  # gemm_weight
-                empty_fp32(1, 1),  # gemm_weight_scale
+                False,  # use_triton
             ]
 
             register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
