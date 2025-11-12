@@ -24,7 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
@@ -40,131 +40,16 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+from vllm.v1.spec_decode.utils import (
+    eagle_prepare_inputs_padded_kernel,
+    eagle_prepare_next_token_padded_kernel,
+)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
-
-
-@triton.jit
-def _eagle_prepare_inputs_padded_kernel(
-    cu_num_draft_tokens_ptr,  # [num_reqs]
-    valid_sampled_tokens_count_ptr,  # [num_reqs]
-    query_start_loc_gpu_ptr,  # [num_reqs + 1]
-    token_indices_to_sample_ptr,  # [num_reqs] (output)
-    num_reqs,  # tl.int32
-):
-    """
-    Fused kernel for Eagle prepare_input_padded. This kernel computes the
-    token index to sample for each request, taking into account the number
-    of draft tokens and the number of valid sampled tokens (which is one more than
-    the number of accepted tokens).
-    """
-    req_idx = tl.program_id(axis=0)
-    if req_idx >= num_reqs:
-        return
-
-    # Calculate num_draft_tokens from cu_num_draft_tokens, which is an inclusive
-    # cumulative sum (first entry is the first value, not zero).
-    cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
-
-    num_draft_tokens = 0
-    if req_idx == 0:
-        num_draft_tokens = cu_draft_curr
-    else:
-        cu_draft_prev = tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
-        num_draft_tokens = cu_draft_curr - cu_draft_prev
-
-    valid_count = tl.load(valid_sampled_tokens_count_ptr + req_idx)
-    num_rejected_tokens = num_draft_tokens + 1 - valid_count
-
-    # query_start_loc[req_idx + 1] is the start position of the next request,
-    # which is one past the last token of this request.
-    q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1) - 1
-
-    index_to_sample = q_last_tok_idx - num_rejected_tokens
-    tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)
-
-
-@triton.jit
-def _eagle_prepare_next_token_padded_kernel(
-    sampled_token_ids_ptr,  # [num_reqs, num_sampled_tokens_per_req]
-    discard_request_indices_ptr,  # [num_discarded_requests]
-    backup_next_token_ids_ptr,  # [num_reqs]
-    next_token_ids_ptr,  # [num_reqs] (output)
-    valid_sampled_tokens_count_ptr,  # [num_reqs] (output)
-    vocab_size,  # tl.int32
-    num_discarded_requests,  # tl.int32
-    num_sampled_tokens_per_req,  # tl.int32 (num_spec_tokens + 1)
-    num_reqs,  # tl.int32
-    stride_sampled_token_ids,  # tl.int32 (stride for dim 0)
-    BLOCK_SIZE_TOKENS: tl.constexpr,  # Power-of-2 >= num_sampled_tokens_per_req
-    BLOCK_SIZE_DISCARD: tl.constexpr,  # Block size for checking for discarded requests
-):
-    """
-    Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
-    number of valid (1 + accepted) tokens for each request, and the corresponding
-    "next" token id to sample from during speculative decoding. This is the
-    "last accepted token" from the sampled tokens, or the backup token if no
-    tokens were accepted or if the request is in the discard list.
-    """
-    req_idx = tl.program_id(axis=0)
-    if req_idx >= num_reqs:
-        return
-
-    # Check if this request is discarded.
-    # Since there are few discarded requests, we can do a simple search here,
-    # and should almost always finish in a single block-iteration.
-    is_discarded = False
-    req_idx_64 = req_idx.to(tl.int64)
-    discard_offs = tl.arange(0, BLOCK_SIZE_DISCARD)
-    for i in range(0, tl.cdiv(num_discarded_requests, BLOCK_SIZE_DISCARD)):
-        mask = (discard_offs + i * BLOCK_SIZE_DISCARD) < num_discarded_requests
-        discarded_idx_block = tl.load(
-            discard_request_indices_ptr + discard_offs + i * BLOCK_SIZE_DISCARD,
-            mask=mask,
-            other=-1,
-        )
-        # Check if req_idx is in this block
-        if tl.sum(tl.where(discarded_idx_block == req_idx_64, 1, 0)) > 0:
-            is_discarded = True
-
-    if is_discarded:
-        backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
-        valid_count = tl.full((), 0, dtype=tl.uint32)
-        tl.store(next_token_ids_ptr + req_idx, backup_token)
-        tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
-    else:
-        # Count the number of valid tokens among the sampled tokens.
-        token_offs = tl.arange(0, BLOCK_SIZE_TOKENS)
-        token_mask = token_offs < num_sampled_tokens_per_req
-
-        row_ptr = sampled_token_ids_ptr + req_idx * stride_sampled_token_ids
-        token_ids = tl.load(row_ptr + token_offs, mask=token_mask, other=-1)
-
-        # Rejected tokens are -1, valid tokens are in [0, vocab_size)
-        is_valid_mask = (token_ids != -1) & (token_ids < vocab_size) & token_mask
-        valid_count = tl.sum(is_valid_mask)
-
-        if valid_count > 0:
-            # Guaranteed to be well-defined since
-            # valid_count > 0 implies is_valid_mask is not empty
-            last_valid_index = tl.max(tl.where(is_valid_mask, token_offs, -1))
-
-            # Select the token at that index, using a sum trick since
-            # we don't want to load again to access token_ids[last_valid_index].
-            last_valid_token = tl.sum(
-                tl.where(token_offs == last_valid_index, token_ids, 0)
-            )
-            tl.store(next_token_ids_ptr + req_idx, last_valid_token)
-        else:
-            # No valid tokens found, use backup token
-            backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
-            tl.store(next_token_ids_ptr + req_idx, backup_token)
-
-        tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
 
 
 class EagleProposer:
@@ -184,8 +69,6 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
-        if self.draft_model_config.max_model_len < self.max_model_len:
-            self.max_model_len = self.draft_model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
@@ -520,13 +403,6 @@ class EagleProposer:
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
 
-            if exceeds_max_model_len.any().item():
-                raise RuntimeError(
-                    "Some requests have exceeded the max model length during "
-                    "speculative decoding. Please ensure that the draft model "
-                    "generates tokens within the model's maximum context length."
-                )
-
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
             common_attn_metadata.seq_lens_cpu += 1
@@ -697,7 +573,7 @@ class EagleProposer:
         BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
         BLOCK_SIZE_DISCARD = 32  # A small-ish block size for vectorized discard search
 
-        _eagle_prepare_next_token_padded_kernel[grid](
+        eagle_prepare_next_token_padded_kernel[grid](
             sampled_token_ids,
             discard_request_indices,
             backup_tokens_gpu,
@@ -736,7 +612,7 @@ class EagleProposer:
 
         # Kernel grid: one program per request (row)
         grid = (num_reqs,)
-        _eagle_prepare_inputs_padded_kernel[grid](
+        eagle_prepare_inputs_padded_kernel[grid](
             spec_decode_metadata.cu_num_draft_tokens,
             valid_sampled_tokens_count,
             common_attn_metadata.query_start_loc,
