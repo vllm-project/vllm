@@ -360,7 +360,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                     image_width=None,
                     image_height=None,
                     num_crops=0,
-                    processor=hf_processor
+                    processor=hf_processor,
                 )
 
             image_size = images.get_image_size(item_idx)
