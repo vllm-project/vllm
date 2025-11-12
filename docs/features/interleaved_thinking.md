@@ -46,10 +46,11 @@ To use interleaved thinking with tool calls, specify a model that supports this 
     
     
     def get_current_weather(location: str, unit: "str"):
-        return (
-            "The weather in Dallas, Texas is 85 degrees fahrenheit.     It is "
-            "partly cloudly, with highs in the 90's."
-        )
+        """Get the current weather in a given location"""
+        if unit == "celsius":
+            return f"The current temperature in {location} is 22°C."
+        else:
+            return f"The current temperature in {location} is 72°F."
     
     
     tools = [
@@ -80,18 +81,13 @@ To use interleaved thinking with tool calls, specify a model that supports this 
         tool_choice="auto",
     )
     
-    print(response)
     tool_call = response.choices[0].message.tool_calls[0].function
-    
-    print(f"reasoning: {response.choices[0].message.reasoning}")
-    print(f"Function called: {tool_call.name}")
-    print(f"Arguments: {tool_call.arguments}")
     
     messages.append(
         {
             "role": "assistant",
             "tool_calls": response.choices[0].message.tool_calls,
-            "reasoning": response.choices[0].message.reasoning,
+            "reasoning": response.choices[0].message.reasoning, # append reasoning
         }
     )
     
@@ -103,7 +99,6 @@ To use interleaved thinking with tool calls, specify a model that supports this 
         tool_to_call = available_tools[call.function.name]
         args = json.loads(call.function.arguments)
         result = tool_to_call(**args)
-        print("tool_to_call result: ", result)
         messages.append(
             {
                 "role": "tool",
@@ -118,7 +113,6 @@ To use interleaved thinking with tool calls, specify a model that supports this 
         tools=tools,
         tool_choice="auto",
     )
-    print("Final response after tool call:")
     print(response_2.choices[0].message.content)
     ```
 This example demonstrates how to set up interleaved thinking with tool calls using a weather retrieval function. The model reasons about the tool results before generating the final response.
