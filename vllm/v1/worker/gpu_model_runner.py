@@ -2420,11 +2420,20 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-
-                with self.timed_encoder_operation(
-                    should_time, mm_lora_refs, current_item_idx, num_items
-                ):
-                    curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
+                batch_descriptor = BatchDescriptor(
+                    num_tokens=mm_kwargs_group["pixel_values"].shape[0],
+                )
+                with set_forward_context(
+                        None,
+                        vllm_config=self.vllm_config,
+                        cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
+                        batch_descriptor=batch_descriptor,
+                    ), self.timed_encoder_operation(
+                        should_time, mm_lora_refs, current_item_idx, num_items
+                    ):
+                    curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
+                    # logger.info("cuda graph mm embedding complete!")
+                    # logger.info(f"curr_group_outputs: {curr_group_outputs}")
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -4592,12 +4601,11 @@ class GPUModelRunner(
             """Finds two factors of n that are closest to its square root."""
             h = int(math.sqrt(n))
             while h > 0:
+                h-=h&1
                 if n % h == 0:
                     return h, n // h
                 h -= 1
             return 1, n
-
-        h_patches, w_patches = find_square_like_factors(num_image_tokens)
 
         # The first dimension of pixel_values corresponds to the total number of
         # tokens (patches).
@@ -4611,11 +4619,19 @@ class GPUModelRunner(
 
         # image_grid_thw specifies the grid layout for a single image.
         # Shape: (1, 3) for (t, h, w) patch counts.
-        image_grid_thw = torch.tensor(
-            [[1, h_patches, w_patches]],
-            dtype=torch.long,
-            device=self.device
-        )
+        if num_image_tokens == 3060:
+            image_grid_thw = torch.tensor(
+                [[1, 46, 34], [1, 44, 34]],
+                dtype=torch.long,
+                device=self.device
+            )
+        else:
+            h_patches, w_patches = find_square_like_factors(num_image_tokens)
+            image_grid_thw = torch.tensor(
+                [[1, h_patches, w_patches]],
+                dtype=torch.long,
+                device=self.device
+            )
 
         return {
             "pixel_values": pixel_values,
@@ -4908,13 +4924,6 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE and self.supports_mm_inputs:
-                    # TODO: This will be improved to support different shapes.
-                    dummy_mm_inputs = self._get_dummy_vit_input(1024)
-                    # logger.info("st.!!!!!!!!!!!!!!!!!!!")
-                    # self.model.visual(dummy_mm_inputs["pixel_values"], grid_thw=dummy_mm_inputs["image_grid_thw"])
-                    self.model.get_multimodal_embeddings(**dummy_mm_inputs)
-                    # logger.info("ed!!!!!!!!!!!!!!!!!!!")
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -5157,6 +5166,31 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
+    @torch.inference_mode()
+    def _dummy_mm_encoder_run(
+        self,
+        cudagraph_runtime_mode: CUDAGraphMode | None = None,
+    ) -> None:
+        logger.info("In _dummy_mm_encoder_run")
+        capture_sizes = [16, 32, 64, 128, 256, 512, 1024, 3060, 3128]
+        if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE and self.supports_mm_inputs:
+            # TODO: This will be improved to support different shapes.
+            for capture_size in capture_sizes:
+                logger.info(f"Capturing {capture_size}")
+                dummy_mm_inputs = self._get_dummy_vit_input(capture_size)
+                batch_descriptor = BatchDescriptor(
+                                    num_tokens=capture_size,
+                                )
+                with (
+                    set_forward_context(
+                        None,
+                        vllm_config=self.vllm_config,
+                        cudagraph_runtime_mode=cudagraph_runtime_mode,
+                        batch_descriptor=batch_descriptor,
+                    ),
+                ):
+                    self.model.get_multimodal_embeddings(**dummy_mm_inputs)
+
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
@@ -5368,6 +5402,9 @@ class GPUModelRunner(
                 num_active_loras=num_active_loras,
                 is_graph_capturing=True,
             )
+
+        self._dummy_mm_encoder_run(cudagraph_runtime_mode)
+
         self.maybe_remove_all_loras(self.lora_config)
 
     def initialize_attn_backend(self, kv_cache_config: KVCacheConfig) -> None:

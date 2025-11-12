@@ -641,6 +641,9 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 prefix=f"{prefix}.merger",
             )
 
+        self._persistent_hidden_states_buffer = torch.empty((4096, 1176), device=self.device, dtype=self.dtype)
+        self._persistent_rotary_pos_emb_buffer = torch.empty((4096, 40), device=self.device, dtype=self.dtype)
+
     @property
     def dtype(self) -> torch.dtype:
         return self.patch_embed.proj.weight.dtype
@@ -784,7 +787,13 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_window_seqlens: list = [torch.tensor([0], dtype=torch.int32)]
         cu_seqlens: list = []
 
-        hidden_states = x.to(device=self.device, dtype=self.dtype)
+        # logger.info(f"X Shape: {x.shape}")
+        if seq_len < 4096:
+            hidden_states = self._persistent_hidden_states_buffer[:seq_len]
+            hidden_states.copy_(x, non_blocking=True)
+        else:
+            hidden_states = x.to(device=self.device, dtype=self.dtype)
+
         hidden_states = self.patch_embed(hidden_states)
 
         window_index_id = 0
@@ -838,18 +847,36 @@ class Qwen2_5_VisionTransformer(nn.Module):
         rotary_pos_emb_sin = rotary_pos_emb_sin.to(
             device=self.device, non_blocking=True
         )
+        rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
+        if seq_len < 4096:
+            rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(rotary_pos_emb)
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
             device=hidden_states.device, non_blocking=True
         )
+        original_hidden_states = hidden_states  # 这只是引用，不是拷贝
+        # logger.info(f"Before Copy, original address: {original_hidden_states.storage().data_ptr()}")
+        # logger.info(f"Original Numel: {original_hidden_states.numel()}")
+        # Step 2: 执行一些转换操作（这些会创建新张量）
+        tmp = original_hidden_states.reshape(seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1)
+        tmp = tmp[window_index, :, :]
+        tmp = tmp.reshape(seq_len, -1)
+        tmp = tmp.unsqueeze(1)
+        # logger.info(f"Tmp Numel: {tmp.numel()}")
+        # Step 3: 将结果拷贝回原始张量的显存地址中（这是原地拷贝！）
+        original_storage = original_hidden_states.storage()
+        tmp_storage = tmp.storage()
+        original_storage.copy_(tmp_storage)
 
-        hidden_states = hidden_states.reshape(
-            seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
-        )
-        hidden_states = hidden_states[window_index, :, :]
-        hidden_states = hidden_states.reshape(seq_len, -1)
+        # Step 4: 创建一个使用原始显存、具有新 shape 的 view
+        # 条件：original numel 必须等于新 shape 的总元素数
+        new_shape = tmp.shape  # (seq_len, 1, new_hidden_dim)
+        hidden_states = original_hidden_states.view(new_shape)
+        # 现在 hidden_states.shape == new_shape，且使用和 original 相同的显存
+        # logger.info(f"After Copy, original address: {original_hidden_states.storage().data_ptr()}")
+        # logger.info(f"After Copy, tmp address: {tmp.storage().data_ptr()}")
 
-        hidden_states = hidden_states.unsqueeze(1)
+        # logger.info(f"Before Input to Vision Block, Shape: {hidden_states.shape}")
 
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
