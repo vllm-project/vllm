@@ -361,7 +361,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 def generate_tokens(request: Request) -> ServingTokens | None:
-    return request.app.state.openai_serving_tokens
+    return request.app.state.serving_tokens
 
 
 @router.get("/health", response_class=Response)
@@ -1918,8 +1918,7 @@ async def init_app_state(
         if "generate" in supported_tasks
         else None
     )
-    # TODO remove oai prefix
-    state.openai_serving_tokens = (
+    state.serving_tokens = (
         ServingTokens(
             engine_client,
             state.openai_serving_models,
