@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from itertools import repeat
 from typing import Any
 
 import pytest
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
+from vllm.config import SpeculativeConfig
 from vllm.logprobs import Logprob
 from vllm.sampling_params import StructuredOutputsParams
+from vllm.v1.metrics.reader import Metric
 
 from ...conftest import VllmRunner
 from ...models.utils import check_outputs_equal
@@ -32,79 +35,95 @@ class TestPreemptAndAsyncScheduling:
     )
 
     def test_with_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
-        """Test consistency of combos of async scheduling, spec decoding."""
-
-        # use no_spec_decoding with async_scheduling as baseline run,
-        # the main puspose is to validate spec decoding with async_scheduling
-        # doesn't  make accuracy worser.
-        self.preempt_and_async_scheduling_e2e(
-            monkeypatch,
-            MTP_MODEL,
-            [{}],
-            test_preemptions=[False],
-            executors=["mp"],
-            async_schedulings=[True],
-            spec_configs=[None, {"method": "mtp", "num_speculative_tokens": 2}],
-        )
-
-    def test_acceptance_rate_with_spec_decoding(self, monkeypatch: pytest.MonkeyPatch):
-        """Test consistency and acceptance rate of combos of
-        async scheduling, spec decoding.
+        """Test consistency and acceptance rates with some different combos of
+        preemption, executor, async scheduling, prefill chunking,
+        spec decoding model length.
         """
-        # use spec_decoding with sync_scheduling as baseline run,
-        # then it's convenient to validate async_scheduling with spec_decoding
-        # doesn't make acceptance rate worser.
-        self.preempt_and_async_scheduling_e2e(
+
+        spec_config = {"method": "mtp", "num_speculative_tokens": 2}
+        spec_config_short = {
+            "method": "mtp",
+            "num_speculative_tokens": 2,
+            "max_model_len": 50,
+        }
+
+        # test_preemption, executor, async_scheduling,
+        # spec_config, test_prefill_chunking
+        test_configs = [
+            (False, "mp", False, None, False),
+            (False, "mp", False, spec_config, False),
+            (True, "mp", False, spec_config, True),
+            (True, "uni", False, spec_config_short, True),
+            (False, "mp", True, spec_config, False),
+            (True, "mp", True, spec_config, False),
+            (False, "mp", True, spec_config_short, True),
+            (True, "uni", True, spec_config, False),
+            (True, "uni", True, spec_config_short, False),
+            # Async scheduling + preemption + chunked prefill need to be fixed.
+            #  (True, "mp", True, spec_config, True),
+            #  (True, "uni", True, spec_config_short, True),
+        ]
+
+        self.run_tests(
             monkeypatch,
             MTP_MODEL,
+            test_configs,
             [{}],
-            test_preemptions=[False],
-            executors=["mp"],
-            async_schedulings=[False, True],
-            spec_configs=[{"method": "mtp", "num_speculative_tokens": 2}],
         )
 
+    # Use smaller model, runs faster.
     def test_without_spec_decoding(
         self,
         sample_json_schema,
         monkeypatch: pytest.MonkeyPatch,
     ):
         """Test consistency of combos of async scheduling, preemption,
-        uni/multiproc executor with spec decoding."""
-        sampling_param_tests: list[dict[str, Any]] = [
+        uni/multiproc executor, prefill chunking."""
+        struct_outputs = StructuredOutputsParams(json=sample_json_schema)
+        test_sampling_params: list[dict[str, Any]] = [
             dict(),
             # dict(min_tokens=20),
             dict(presence_penalty=-1.0),
             dict(bad_words=["the", " the"]),
             dict(logprobs=2),
             dict(logprobs=2, presence_penalty=-1.0),
-            dict(structured_outputs=StructuredOutputsParams(json=sample_json_schema)),
+            dict(structured_outputs=struct_outputs),
             dict(
-                structured_outputs=StructuredOutputsParams(json=sample_json_schema),
+                structured_outputs=struct_outputs,
                 logprobs=2,
                 presence_penalty=-1.0,
             ),
         ]
-        self.preempt_and_async_scheduling_e2e(
+
+        # test_preemption, executor, async_scheduling,
+        # spec_config, test_prefill_chunking
+        test_configs = [
+            (False, "mp", False, None, False),
+            (True, "mp", False, None, True),
+            (False, "mp", True, None, False),
+            (False, "uni", True, None, False),
+            (True, "mp", True, None, False),
+            (True, "uni", True, None, False),
+            (False, "mp", True, None, True),
+            # Async scheduling + preemption + chunked prefill need to be fixed.
+            # (True, "mp", True, None, True),
+            # (True, "uni", True, None, True),
+        ]
+
+        self.run_tests(
             monkeypatch,
             MODEL,
-            sampling_param_tests,
-            test_preemptions=[False, True],
-            executors=["mp", "uni"],
-            async_schedulings=[False, True],
-            spec_configs=[None],
+            test_configs,
+            test_sampling_params,
         )
 
     @dynamo_config.patch(cache_size_limit=16)
-    def preempt_and_async_scheduling_e2e(
+    def run_tests(
         self,
         monkeypatch: pytest.MonkeyPatch,
         model: str,
-        sampling_param_tests: list[dict[str, Any]],
-        test_preemptions: list[bool],
-        executors: list[str],
-        async_schedulings: list[bool],
-        spec_configs: list[dict | None],
+        test_configs: list[tuple],
+        test_sampling_params: list[dict[str, Any]],
     ):
         """Test consistency of combos of async scheduling, preemption,
         uni/multiproc executor with spec decoding."""
@@ -113,78 +132,34 @@ class TestPreemptAndAsyncScheduling:
             m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
             # m.setenv("VLLM_BATCH_INVARIANT", "1")
             outputs: list[tuple[str, list, list]] = []
-            for test_preemption in test_preemptions:
-                for executor in executors:
-                    for async_scheduling in async_schedulings:
-                        for spec_config in spec_configs:
-                            spec_decoding = spec_config is not None
-                            cache_arg: dict[str, Any] = (
-                                dict(num_gpu_blocks_override=32)
-                                if test_preemption
-                                else dict(gpu_memory_utilization=0.7)
-                            )
-                            test_config = (
-                                f"executor={executor}, preemption={test_preemption}, "
-                                f"async_sched={async_scheduling}, "
-                                f"spec_decoding={spec_decoding}"
-                            )
-                            print("-" * 80)
-                            print(f"---- TESTING: {test_config}")
-                            print("-" * 80)
-                            with VllmRunner(
-                                model,
-                                max_model_len=512,
-                                enforce_eager=True,
-                                async_scheduling=async_scheduling,
-                                distributed_executor_backend=executor,
-                                dtype="float32",  # avoid precision errors
-                                speculative_config=spec_config,
-                                disable_log_stats=False,
-                                **cache_arg,
-                            ) as vllm_model:
-                                results = []
-                                acceptance_rates = []
-                                for override_params in sampling_param_tests:
-                                    print(
-                                        f"----------- RUNNING PARAMS: {override_params}"
-                                    )
-                                    results.append(
-                                        vllm_model.generate(
-                                            self.example_prompts,
-                                            sampling_params=SamplingParams(
-                                                **self.default_params,
-                                                **override_params,
-                                            ),
-                                            return_logprobs=True,
-                                        )
-                                    )
-                                    acceptance_rates.append(
-                                        _calc_average_acceptance_rate(vllm_model)
-                                    )
+            for n, (
+                test_preemption,
+                executor,
+                async_scheduling,
+                spec_config,
+                test_prefill_chunking,
+            ) in enumerate(test_configs, 1):
+                test_str = f"{n}/{len(test_configs)}"
+                test_results = self.run_test(
+                    model,
+                    test_str,
+                    test_sampling_params,
+                    test_preemption,
+                    executor,
+                    async_scheduling,
+                    spec_config,
+                    test_prefill_chunking=test_prefill_chunking,
+                )
+                outputs.append(test_results)
 
-                                if not outputs and len(results) > 1:
-                                    # First check that the different parameter configs
-                                    # actually result in different output.
-                                    for (
-                                        other_test_outs,
-                                        other_test_logprobs,
-                                    ), params in zip(
-                                        results[1:], sampling_param_tests[1:]
-                                    ):
-                                        with pytest.raises(AssertionError):
-                                            check_outputs_equal(
-                                                outputs_0_lst=results[0][0],
-                                                outputs_1_lst=other_test_outs,
-                                                name_0=f"baseline params={params}",
-                                                name_1=f"other params={params}",
-                                            )
-                                            assert _all_logprobs_match(
-                                                results[0][1], other_test_logprobs
-                                            )
+        baseline_config, baseline_tests, _ = outputs[0]
+        _, _, baseline_acceptances = next(
+            (o for o in outputs if o[2] is not None), (None, None, None)
+        )
 
-                                outputs.append((test_config, results, acceptance_rates))
-
-        baseline_config, baseline_tests, base_acceptance_rates = outputs[0]
+        print(
+            f"BASELINE: config=[{baseline_config}], accept_rates={baseline_acceptances}"
+        )
 
         failure = None
         for test_config, test_outputs, test_acceptance_rates in outputs[1:]:
@@ -193,10 +168,10 @@ class TestPreemptAndAsyncScheduling:
                 test_logprobs,
             ), test_acceptance_rate, params in zip(
                 baseline_tests,
-                base_acceptance_rates,
+                baseline_acceptances or repeat(None),
                 test_outputs,
-                test_acceptance_rates,
-                sampling_param_tests,
+                test_acceptance_rates or repeat(None),
+                test_sampling_params,
             ):
                 try:
                     check_outputs_equal(
@@ -205,26 +180,125 @@ class TestPreemptAndAsyncScheduling:
                         name_0=f"baseline=[{baseline_config}], params={params}",
                         name_1=f"config=[{test_config}], params={params}",
                     )
-
                     assert _all_logprobs_match(base_logprobs, test_logprobs)
 
-                    # only check acceptance rate if spec decoding is used.
-                    if base_acceptance_rate > 0 and test_acceptance_rate > 0:
-                        # because the acceptance rate can vary, we use a looser
-                        # tolerance here.
-                        assert (
-                            pytest.approx(test_acceptance_rate, rel=5e-2)
-                            == base_acceptance_rate
-                        )
-
-                    print(f"PASSED: config=[{test_config}], params={params}")
+                    if (
+                        base_acceptance_rate is not None
+                        and test_acceptance_rate is not None
+                    ):
+                        if "spec_mml=None" in test_config:
+                            # because the acceptance rate can vary, we use a looser
+                            # tolerance here.
+                            assert (
+                                pytest.approx(test_acceptance_rate, rel=5e-2)
+                                == base_acceptance_rate
+                            )
+                        else:
+                            # Currently the reported acceptance rate is expected to be
+                            # lower when we skip drafting altogether.
+                            assert test_acceptance_rate > 0.05
+                    print(
+                        f"PASSED: config=[{test_config}], params={params}"
+                        f" accept_rate={test_acceptance_rate}"
+                    )
                 except AssertionError as e:
-                    print(f"FAILED: config=[{test_config}], params={params}")
+                    print(
+                        f"FAILED: config=[{test_config}], params={params}"
+                        f" accept_rate={test_acceptance_rate}"
+                    )
                     if failure is None:
                         failure = e
 
         if failure is not None:
             raise failure
+
+    def run_test(
+        self,
+        model: str,
+        test_str: str,
+        sampling_param_tests: list[dict[str, Any]],
+        test_preemption: bool,
+        executor: str,
+        async_scheduling: bool,
+        spec_config: SpeculativeConfig | None,
+        test_prefill_chunking: bool,
+    ):
+        spec_decoding = spec_config is not None
+        cache_arg: dict[str, Any] = (
+            dict(num_gpu_blocks_override=32)
+            if test_preemption
+            else dict(gpu_memory_utilization=0.7)
+        )
+        spec_mml = (spec_config or {}).get("max_model_len")
+        test_config = (
+            f"executor={executor}, preemption={test_preemption}, "
+            f"async_sched={async_scheduling}, "
+            f"chunk_prefill={test_prefill_chunking}, "
+            f"spec_decoding={spec_decoding}, spec_mml={spec_mml}"
+        )
+        max_batched_tokens = 48 if test_prefill_chunking else None
+        print("-" * 80)
+        print(f"---- TESTING {test_str}: {test_config}")
+        print("-" * 80)
+        with VllmRunner(
+            model,
+            max_model_len=512,
+            max_num_batched_tokens=max_batched_tokens,
+            enforce_eager=True,
+            async_scheduling=async_scheduling,
+            distributed_executor_backend=executor,
+            dtype="float32",  # avoid precision errors
+            speculative_config=spec_config,
+            disable_log_stats=False,
+            **cache_arg,
+        ) as vllm_model:
+            results = []
+            acceptance_rates: list[float] | None = [] if spec_decoding else None
+            for override_params in sampling_param_tests:
+                metrics_before = vllm_model.llm.get_metrics()
+                print(f"----------- RUNNING PARAMS: {override_params}")
+                results.append(
+                    vllm_model.generate(
+                        self.example_prompts,
+                        sampling_params=SamplingParams(
+                            **self.default_params,
+                            **override_params,
+                        ),
+                        return_logprobs=True,
+                    )
+                )
+                metrics_after = vllm_model.llm.get_metrics()
+                if acceptance_rates is not None:
+                    acceptance_rate = _get_acceptance_rate(
+                        metrics_before, metrics_after
+                    )
+                    acceptance_rates.append(acceptance_rate)
+                    print(f"ACCEPTANCE RATE {acceptance_rate}")
+
+                if test_preemption:
+                    preemptions = _get_count(
+                        metrics_before,
+                        metrics_after,
+                        "vllm:num_preemptions",
+                    )
+                    assert preemptions > 0, "preemption test had no preemptions"
+
+        if len(results) > 1:
+            # First check that the different parameter configs
+            # actually result in different output.
+            for (other_test_outs, other_test_logprobs), params in zip(
+                results[1:], sampling_param_tests[1:]
+            ):
+                with pytest.raises(AssertionError):
+                    check_outputs_equal(
+                        outputs_0_lst=results[0][0],
+                        outputs_1_lst=other_test_outs,
+                        name_0=f"baseline params={params}",
+                        name_1=f"other params={params}",
+                    )
+                    assert _all_logprobs_match(results[0][1], other_test_logprobs)
+
+        return test_config, results, acceptance_rates
 
 
 def _all_logprobs_match(req_a, req_b) -> bool:
@@ -248,17 +322,13 @@ def _logprobs_match(lps_a: dict[int, Logprob], lps_b: dict[int, Logprob]) -> boo
     )
 
 
-def _calc_average_acceptance_rate(vllm_model: VllmRunner) -> float:
-    metrics = vllm_model.llm.get_metrics()
-    num_draft = []
-    num_accept = []
-    for metric in metrics:
-        if metric.name == "vllm:spec_decode_num_draft_tokens":
-            num_draft.append(metric.value)
-        if metric.name == "vllm:spec_decode_num_accepted_tokens":
-            num_accept.append(metric.value)
-    acceptance_rates = []
-    for draft, accept in zip(num_draft, num_accept):
-        acceptance_rate = accept / draft if draft > 0 else 0
-        acceptance_rates.append(acceptance_rate)
-    return sum(acceptance_rates) / len(acceptance_rates) if acceptance_rates else 0
+def _get_acceptance_rate(before: list[Metric], after: list[Metric]) -> float:
+    draft = _get_count(before, after, "vllm:spec_decode_num_draft_tokens")
+    accept = _get_count(before, after, "vllm:spec_decode_num_accepted_tokens")
+    return accept / draft if draft > 0 else 0.0
+
+
+def _get_count(before: list[Metric], after: list[Metric], name: str) -> int:
+    before_val = next(m.value for m in before if m.name == name)
+    after_val = next(m.value for m in after if m.name == name)
+    return after_val - before_val
