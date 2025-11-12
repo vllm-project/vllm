@@ -303,11 +303,17 @@ class Scheduler(SchedulerInterface):
                             scheduled_spec_decode_tokens.pop(
                                 preempted_req.request_id, None
                             )
-                            scheduled_encoder_inputs.pop(preempted_req.request_id, None)
-                            # TODO: To be optimal we should reset the
-                            # encoder_compute_budget here too.
-                            # (it should be very rare to preempt a prefilling
-                            # request though)
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                                preempted_req.request_id, None
+                            )
+                            if preempted_encoder_inputs:
+                                # Restore encoder compute budget if the preempted
+                                # request had encoder inputs scheduled in this step.
+                                num_tokens_to_restore = sum(
+                                    preempted_req.get_num_encoder_tokens(i)
+                                    for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_tokens_to_restore
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
