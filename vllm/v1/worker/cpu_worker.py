@@ -69,13 +69,15 @@ class CPUWorker(Worker):
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4]
                 )
-            elif current_platform.get_cpu_architecture() == CpuArchEnum.X86:
+            elif cpu_arch == CpuArchEnum.X86:
                 # For x86 SMT-2, use 1 CPU per core
                 self.local_omp_cpuid = self._get_autobind_cpu_ids(
                     lambda cpus: cpus[-1:]
                 )
             else:
-                self.local_omp_cpuid = "all"
+                self.local_omp_cpuid = "nobind"
+        elif omp_cpuids == "nobind":
+            self.local_omp_cpuid = "nobind"
         else:
             local_dp_rank = self.parallel_config.data_parallel_rank_local
             omp_cpuids = omp_cpuids.split("|")
@@ -86,7 +88,7 @@ class CPUWorker(Worker):
                 ]
             self.local_omp_cpuid = omp_cpuids[self.rank]
 
-        if self.local_omp_cpuid != "all":
+        if self.local_omp_cpuid != "nobind":
             ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
