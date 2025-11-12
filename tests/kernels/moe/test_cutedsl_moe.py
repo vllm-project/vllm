@@ -12,8 +12,9 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
 )
 from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked as cutedsl_gmm_masked,
+)
+from vllm.utils.flashinfer import (
     scaled_fp4_grouped_quantize,
-    silu_and_mul_scaled_nvfp4_experts_quantize,
 )
 
 if torch.cuda.get_device_capability() < (10, 0):
@@ -319,12 +320,12 @@ def test_flashinfer_cutedsl_moe_masked(
 
     w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
         w1,
-        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,        
+        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,  # noqa: E501
         w1_global_scale,
     )
     w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
         w2,
-        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,        
+        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,  # noqa: E501
         w2_global_scale,
     )
 
