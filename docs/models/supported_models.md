@@ -78,9 +78,9 @@ To make your model compatible with the Transformers backend, it needs:
     1. If your model is encoder-only:
         - Add `is_causal = False` to `MyAttention`.
     2. If your model is mixture-of-experts (MoE):
-        - Your MoE block must have an attribute called `experts`.
-        - `experts` must inherit from `nn.ModuleList`.
-        - The `forward` method of `experts` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
+        - Your sparse MoE block must have an attribute called `experts`.
+        - The class of `experts` (`MyExperts`) must inherit from `nn.ModuleList`.
+        - `MyExperts.forward` must accept `hidden_states`, `top_k_index`, `top_k_weights`.
 2. `MyAttention` must use `ALL_ATTENTION_FUNCTIONS` to call attention.
 3. `MyModel` must contain `_supports_attention_backend = True`.
 
@@ -93,8 +93,7 @@ from transformers import PreTrainedModel
 from torch import nn
 
 class MyAttention(nn.Module):
-    # Only do this for encoder-only models
-    is_causal = False 
+    is_causal = False  # Only do this for encoder-only models
 
     def forward(self, hidden_states, **kwargs):
         ...
@@ -108,12 +107,12 @@ class MyAttention(nn.Module):
         )
         ...
 
-# A class like this would only be needed for MoE models
+# Only do this for mixture-of-experts models
 class MyExperts(nn.ModuleList):
     def forward(self, hidden_states, top_k_index, top_k_weights):
         ...
 
-# A class like this would only be needed for MoE models
+# Only do this for mixture-of-experts models
 class MySparseMoEBlock(nn.Module):
     def __init__(self, config):
         ...
