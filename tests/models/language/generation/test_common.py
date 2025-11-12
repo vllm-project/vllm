@@ -38,7 +38,11 @@ AITER_MODEL_LIST = [
     [
         pytest.param(
             "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[pytest.mark.core_model, pytest.mark.slow_test],
+            marks=[
+                pytest.mark.core_model,
+                pytest.mark.slow_test,
+                pytest.mark.cpu_model,
+            ],
         ),
         pytest.param(
             "openai-community/gpt2",  # gpt2
@@ -56,6 +60,10 @@ AITER_MODEL_LIST = [
             ],
         ),
         pytest.param(
+            "google/gemma-2-2b-it",  # test hybrid attention
+            marks=[pytest.mark.cpu_model],
+        ),
+        pytest.param(
             "zai-org/chatglm3-6b",  # chatglm (text-only)
         ),
         pytest.param(
@@ -64,7 +72,6 @@ AITER_MODEL_LIST = [
         ),
         pytest.param(
             "openbmb/MiniCPM3-4B",
-            # fused_moe not supported on CPU
             marks=[pytest.mark.core_model, large_gpu_mark(min_gb=32)],
         ),
         pytest.param(
@@ -93,11 +100,7 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model],
-        ),
-        pytest.param(
-            "allenai/OLMoE-1B-7B-0924-Instruct",
-            marks=[pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
     ],
