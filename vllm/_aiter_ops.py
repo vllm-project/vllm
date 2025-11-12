@@ -760,7 +760,7 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_block_fp8_quant",
+                op_name="rocm_aiter_group_fp8_quant",
                 op_func=_rocm_aiter_group_fp8_quant_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_group_fp8_quant_fake,
