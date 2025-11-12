@@ -544,6 +544,14 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
         # 1.1: Process the multi-query part
         if spec_sequence_masks is not None:
+            print(f"SMOR: [QWEN3-NEXT-FORWARD-CORE] spec_sequence_masks is not None")
+            print(f"SMOR: [QWEN3-NEXT-FORWARD-CORE] conv_state_indices: {spec_state_indices_tensor[:, 0][
+                    : attn_metadata.num_spec_decodes
+                ]}")
+            print(f"SMOR: [QWEN3-NEXT-FORWARD-CORE] num_accepted_tokens: {num_accepted_tokens}")
+            print(f"SMOR: [QWEN3-NEXT-FORWARD-CORE] query_start_loc: {spec_query_start_loc}")
+            print(f"SMOR: [QWEN3-NEXT-FORWARD-CORE] max_spec_len: {spec_state_indices_tensor.size(-1)}")
+
             mixed_qkv_spec = causal_conv1d_update(
                 mixed_qkv_spec,
                 conv_state,

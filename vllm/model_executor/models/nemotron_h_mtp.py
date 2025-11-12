@@ -222,6 +222,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
         **kwargs: object,
     ) -> torch.Tensor:
         """Forward - applies attention-based MTP."""
+        print(f"[MTP-DRAFT-FORWARD]")
         hidden_states = self.model(
             input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
         )
@@ -247,7 +248,6 @@ class NemotronHMTP(nn.Module, SupportsPP):
         loaded_params: set[str] = set()
         
         for name, loaded_weight in weights:
-            print(f"SMOR: name: {name}")
             # Skip tied embeddings if configured
             if self.config.tie_word_embeddings and name.endswith("lm_head.weight"):
                 continue

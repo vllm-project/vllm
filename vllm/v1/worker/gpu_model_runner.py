@@ -2456,6 +2456,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "after execute_model() returns None."
             )
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        print(f"\n{'#'*80}")
+        print(f"[EXECUTE-MODEL] Starting execution with {num_scheduled_tokens} scheduled tokens")
+        print(f"[EXECUTE-MODEL] Spec decode tokens: {scheduler_output.scheduled_spec_decode_tokens}")
+        print(f"{'#'*80}\n")
         with record_function_or_nullcontext("Preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
@@ -2536,6 +2540,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        print(f"[TARGET-MODEL-FORWARD] Calling target model with {num_input_tokens} tokens")
         with (
             set_forward_context(
                 attn_metadata,
@@ -2556,6 +2561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
+        print(f"[TARGET-MODEL-FORWARD] Target model forward completed")
 
         with record_function_or_nullcontext("Postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -2634,6 +2640,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # Nothing to do (PP non-final rank case), output isn't used.
             return None  # noqa
 
+        print(f"[SAMPLE-TOKENS] Starting sampling and draft generation")
         # Unpack ephemeral state.
         (
             scheduler_output,
@@ -2658,6 +2665,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
+            print(f"[PROPOSE-DRAFTS] Starting draft token proposal with sampled_token_ids: {sampled_token_ids if isinstance(sampled_token_ids, list) else sampled_token_ids.shape}")
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("Draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
@@ -2670,6 +2678,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_metadata,
                     spec_decode_common_attn_metadata,
                 )
+            print(f"[PROPOSE-DRAFTS] Draft token proposal completed: {self._draft_token_ids if isinstance(self._draft_token_ids, list) else self._draft_token_ids.shape}")
 
         use_padded_batch_for_eagle = (
             self.speculative_config

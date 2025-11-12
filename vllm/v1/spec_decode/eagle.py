@@ -215,6 +215,7 @@ class EagleProposer:
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
+        print(f"\n[EAGLE-PROPOSE-START] propose() called with num_tokens={num_tokens}, batch_size={batch_size}, num_spec={self.num_speculative_tokens}")
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -287,6 +288,9 @@ class EagleProposer:
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
+        print(f"[EAGLE-PROPOSE] Calling draft model.forward() for initial draft token 0")
+        print(f"[EAGLE-PROPOSE] num_input_tokens is: {num_input_tokens}")
+        print(f"[EAGLE-PROPOSE] self.num_speculative_tokens:{self.num_speculative_tokens}")
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -310,6 +314,7 @@ class EagleProposer:
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1:
             draft_token_ids = logits.argmax(dim=-1)
+            print(f"[EAGLE-PROPOSE] Early exit with 1 spec token: {draft_token_ids.tolist()}")
             return draft_token_ids.view(-1, 1)
 
         if self.uses_mrope:
@@ -366,7 +371,10 @@ class EagleProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
+        
+        print(f"[EAGLE-PROPOSE] Starting draft generation loop for {self.num_speculative_tokens} tokens (method={self.method})")
         for token_index in range(self.num_speculative_tokens - 1):
+            print(f"[EAGLE-PROPOSE] Generating draft token {token_index + 1}/{self.num_speculative_tokens - 1}")
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
@@ -454,6 +462,7 @@ class EagleProposer:
                 inputs_embeds = None
 
             # Run the model.
+            print(f"[EAGLE-PROPOSE] Calling draft model.forward() for token {token_index + 1}")
             with set_forward_context(
                 per_layer_attn_metadata,
                 self.vllm_config,
@@ -475,9 +484,11 @@ class EagleProposer:
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
             draft_token_ids_list.append(draft_token_ids)
+            print(f"[EAGLE-PROPOSE] Generated draft token {token_index + 1}: {draft_token_ids.tolist()}")
 
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
+        print(f"[EAGLE-PROPOSE-END] propose() returning draft_token_ids: {draft_token_ids.tolist()}\n")
         return draft_token_ids
 
     def prepare_next_token_ids_cpu(
