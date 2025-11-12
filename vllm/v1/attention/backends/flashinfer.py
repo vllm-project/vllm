@@ -164,29 +164,6 @@ def trtllm_prefill_attn_kvfp8_dequant(
     return mock_kv_cache, mock_block_table
 
 
-@dataclass
-class BatchDCPPrefillPlanConfig:
-    """Parameters for BatchDCPPrefillWrapper.plan() method."""
-
-    qo_indptr_cpu: torch.Tensor
-    paged_kv_indptr_cpu: torch.Tensor
-    paged_kv_indices: torch.Tensor
-    paged_kv_last_page_len_cpu: torch.Tensor
-    prefill_start: int
-    page_size: int
-    num_qo_heads: int
-    dcp_world_size: int
-    num_kv_heads: int
-    head_dim: int
-    sm_scale: float
-    window_left: int
-    logits_soft_cap: float | None
-    q_data_type: torch.dtype
-    kv_cache_dtype: torch.dtype
-    prefill_fixed_split_size: int
-    disable_split_kv: bool
-
-
 class BatchDCPPrefillWrapper:
     def __init__(
         self,
@@ -199,38 +176,57 @@ class BatchDCPPrefillWrapper:
             workspace_buffer, get_kv_cache_layout()
         )
 
-    def plan(self, cfg: BatchDCPPrefillPlanConfig):
+    def plan(
+        self,
+        qo_indptr_cpu: torch.Tensor,
+        paged_kv_indptr_cpu: torch.Tensor,
+        paged_kv_indices: torch.Tensor,
+        paged_kv_last_page_len_cpu: torch.Tensor,
+        prefill_start: int,
+        page_size: int,
+        num_qo_heads: int,
+        dcp_world_size: int,
+        num_kv_heads: int,
+        head_dim: int,
+        sm_scale: float,
+        window_left: int,
+        logits_soft_cap: float | None,
+        q_data_type: torch.dtype,
+        kv_cache_dtype: torch.dtype,
+        prefill_fixed_split_size: int,
+        disable_split_kv: bool,
+    ):
         """Plan the prefill operation with given parameters."""
         self._context.plan(
-            cfg.qo_indptr_cpu,
-            cfg.paged_kv_indptr_cpu,
-            cfg.paged_kv_indices,
-            cfg.paged_kv_last_page_len_cpu[cfg.prefill_start :],
-            cfg.num_qo_heads * cfg.dcp_world_size,
-            cfg.num_kv_heads,
-            cfg.head_dim,
-            cfg.page_size,
+            qo_indptr_cpu,
+            paged_kv_indptr_cpu,
+            paged_kv_indices,
+            paged_kv_last_page_len_cpu[prefill_start:],
+            num_qo_heads * dcp_world_size,
+            num_kv_heads,
+            head_dim,
+            page_size,
             causal=False,  # This is context run
-            sm_scale=cfg.sm_scale,
-            window_left=cfg.window_left,
-            logits_soft_cap=cfg.logits_soft_cap,
-            q_data_type=cfg.q_data_type,
-            kv_data_type=cfg.kv_cache_dtype,
-            fixed_split_size=cfg.prefill_fixed_split_size,
-            disable_split_kv=cfg.disable_split_kv,
+            sm_scale=sm_scale,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
+            kv_data_type=kv_cache_dtype,
+            fixed_split_size=prefill_fixed_split_size,
+            disable_split_kv=disable_split_kv,
         )
         self._new_tokens.plan(
-            qo_indptr=cfg.qo_indptr_cpu,
-            kv_indptr=cfg.qo_indptr_cpu,
-            num_qo_heads=cfg.num_qo_heads,
-            num_kv_heads=cfg.num_kv_heads,
-            head_dim_qk=cfg.head_dim,
-            head_dim_vo=cfg.head_dim,
+            qo_indptr=qo_indptr_cpu,
+            kv_indptr=qo_indptr_cpu,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim_qk=head_dim,
+            head_dim_vo=head_dim,
             causal=True,  # This is newtokens run
-            sm_scale=cfg.sm_scale,
-            window_left=cfg.window_left,
-            logits_soft_cap=cfg.logits_soft_cap,
-            q_data_type=cfg.q_data_type,
+            sm_scale=sm_scale,
+            window_left=window_left,
+            logits_soft_cap=logits_soft_cap,
+            q_data_type=q_data_type,
         )
 
     def run(
@@ -240,6 +236,7 @@ class BatchDCPPrefillWrapper:
         kv_cache_permute: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
+        out: torch.Tensor,
     ):
         prefill_query_across_dcp = get_dcp_group().all_gather(
             prefill_query.contiguous(), dim=1
@@ -264,15 +261,14 @@ class BatchDCPPrefillWrapper:
         )
         lse_query = lse_query.transpose(0, 1).contiguous()
 
-        output = torch.empty_like(prefill_query)
         merge_attn_states(
-            output,
+            out,
             output_context,
             lse_context,
             output_query,
             lse_query,
         )
-        return output
+        return out
 
 
 class FlashInferBackend(AttentionBackend):
@@ -847,7 +843,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         assert isinstance(
                             attn_metadata.prefill_wrapper, BatchDCPPrefillWrapper
                         )
-                        plan_cfgs = BatchDCPPrefillPlanConfig(
+                        attn_metadata.prefill_wrapper.plan(
                             qo_indptr_cpu=qo_indptr_cpu,
                             paged_kv_indptr_cpu=paged_kv_indptr_cpu,
                             paged_kv_indices=paged_kv_indices,
@@ -866,7 +862,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                             prefill_fixed_split_size=self.prefill_fixed_split_size,
                             disable_split_kv=self.disable_split_kv,
                         )
-                        attn_metadata.prefill_wrapper.plan(plan_cfgs)
                     else:
                         assert isinstance(
                             attn_metadata.prefill_wrapper,
@@ -1203,12 +1198,13 @@ class FlashInferImpl(AttentionImpl):
                     assert prefill_wrapper._new_tokens._sm_scale == self.scale
                     assert prefill_wrapper._new_tokens.causal
 
-                    output[num_decode_tokens:] = prefill_wrapper.run(
+                    prefill_wrapper.run(
                         layer,
                         prefill_query,
                         kv_cache_permute,
                         key[num_decode_tokens:],
                         value[num_decode_tokens:],
+                        out=output[num_decode_tokens:],
                     )
                 else:
                     assert isinstance(

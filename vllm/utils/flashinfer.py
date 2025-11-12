@@ -265,7 +265,8 @@ def use_trtllm_attention(
     # Decode context parallel is not supported
     if dcp_world_size > 1:
         logger.warning_once(
-            "Trtllm not support lse, please use flash attention or FlashInfer backend."
+            "Trtllm does not support returning LSE and as a result"
+            "does not support DCP, reverting to FlashInfer"
         )
         return False
 
