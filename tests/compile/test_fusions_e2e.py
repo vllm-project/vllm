@@ -68,7 +68,7 @@ if current_platform.is_cuda():
                 attention_fusion=48,
                 allreduce_fusion=96,
                 sequence_parallel=96,
-                async_tp=190,
+                async_tp=95, # mlp is moe, no fusion there
             ),
         ),
     ]
