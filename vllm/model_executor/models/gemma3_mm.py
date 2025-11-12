@@ -355,7 +355,8 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
             )
 
             if isinstance(images, ImageEmbeddingItems):
-                # For image embedding inputs, only support no crops cases since it's not supported in hf processor anyway https://github.com/huggingface/transformers/blob/main/src/transformers/models/gemma3/processing_gemma3.py#L155
+                # For image embedding inputs, only support no crops cases
+                # since it's not supported in hf processor anyway
                 return self.info.get_image_repl(
                     image_width=None,
                     image_height=None,
