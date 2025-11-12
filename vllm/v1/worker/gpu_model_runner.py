@@ -31,6 +31,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     update_config,
 )
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -54,6 +55,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -173,9 +178,6 @@ from .utils import (
     bind_kv_cache,
     sanity_check_mm_encoder_outputs,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer)
-from vllm.distributed import get_tensor_model_parallel_rank
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -3499,8 +3501,8 @@ class GPUModelRunner(
                 and get_tensor_model_parallel_rank() == 0
             ):
                 RoutedExpertsCapturer.get_instance().save_captured_experts(
-                indices=self.slot_mapping
-            )
+                    indices=self.slot_mapping
+                )
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,

@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_router import FusedMoERouter
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -48,9 +51,6 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer
-)
 
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record
