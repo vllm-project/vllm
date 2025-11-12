@@ -402,6 +402,82 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
+def _rocm_block_fp8_quant_impl(
+    x: torch.Tensor,
+    group_size: int,
+    use_triton: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if use_triton:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+            per_token_group_quant_fp8,
+        )
+
+        return per_token_group_quant_fp8(
+            x, group_size, column_major_scales=False, use_ue8m0=False
+        )
+    else:
+        from aiter import QuantType, dtypes, get_hip_quant
+
+        aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
+        return aiter_per1x128_quant(x.contiguous(), quant_dtype=dtypes.fp8)
+
+
+def _rocm_block_fp8_quant_fake(
+    x: torch.Tensor,
+    group_size: int,
+    use_triton: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+
+    M, N = x.shape
+    x_fp8 = torch.empty((M, N), dtype=dtypes.fp8, device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
+def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+    from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+
+    return act_mul_and_fp8_group_quant(
+        x,
+        activation="silu",
+        group_size=group_size,
+        dtype_quant=dtypes.fp8,
+    )
+
+
+def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
+    x: torch.Tensor,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+
+    M, N = x.shape
+    assert N % 2 == 0
+    N_half = N // 2
+    x_fp8 = torch.empty((M, N_half), dtype=dtypes.fp8, device=x.device)
+    out_bs = torch.empty(
+        (
+            M,
+            (N_half + group_size - 1) // group_size,
+        ),
+        dtype=torch.float32,
+        device=x.device,
+    )
+    return x_fp8, out_bs
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -586,6 +662,21 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_block_fp8_quant",
+                op_func=_rocm_block_fp8_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_block_fp8_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_act_mul_and_fp8_group_quant",
+                op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -881,14 +972,12 @@ class rocm_aiter_ops:
         return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
     @staticmethod
-    def per_1x128_fp8_quant(
+    def block_fp8_quant(
         input_2d: torch.Tensor,
+        group_size: int,
+        use_triton: bool,
     ) -> tuple[torch.Tensor, ...]:
-        """Only applies quantization method for fp8 data type only."""
-        from aiter import QuantType, dtypes, get_hip_quant
-
-        aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-        return aiter_per1x128_quant(input_2d.contiguous(), quant_dtype=dtypes.fp8)
+        return torch.ops.vllm.rocm_block_fp8_quant(input_2d, group_size, use_triton)
 
     @staticmethod
     def is_triton_gemm_w8a8_tuned(n: int, k: int) -> bool:
