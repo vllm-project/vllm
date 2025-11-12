@@ -684,19 +684,12 @@ def test_vllm_config_defaults_are_none():
 def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
 
-    model_config = None
-    if model_id is not None:
-        model_config = ModelConfig(model_id)
-        vllm_config = VllmConfig(
-            model_config=model_config,
-            compilation_config=compiliation_config,
-            optimization_level=optimization_level,
-        )
-    else:
-        vllm_config = VllmConfig(
-            compilation_config=compiliation_config,
-            optimization_level=optimization_level,
-        )
+    model_config = ModelConfig(model_id) if model_id is not None else None
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        compilation_config=compiliation_config,
+        optimization_level=optimization_level,
+    )
 
     # Use the global optimization level defaults
     default_config = OPTIMIZATION_LEVEL_TO_CONFIG[optimization_level]
