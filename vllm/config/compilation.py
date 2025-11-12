@@ -961,16 +961,26 @@ class CompilationConfig:
                 )
 
     def adjust_cudagraph_sizes_to_be_multipe_of(self, multiple_of: int):
-        new_sizes = sorted(
-            [
-                round_up(size, multiple_of)
-                for size in self.compilation_config.cudagraph_capture_sizes
-            ]
+        if not self.cudagraph_capture_sizes:
+            return
+
+        rounded_sizes = sorted(
+            round_up(size, multiple_of)
+            for size in self.cudagraph_capture_sizes
+            if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
         )
-        if new_sizes[-1] > self.compilation_config.max_cudagraph_capture_size:
-            new_sizes = new_sizes[:-1]
-        self.compilation_config.max_cudagraph_capture_size = new_sizes[-1]
-        self.compilation_config.cudagraph_capture_sizes = new_sizes
+
+        if len(rounded_sizes) == 0:
+            logger.warning(
+                "No valid cudagraph sizes after rounding to multiple of "
+                " num_speculative_tokens + 1 (%d); please adjust num_speculative_tokens"
+                " or max_cudagraph_capture_size (or cudagraph_capture_sizes)",
+                multiple_of,
+            )
+            return
+
+        self.max_cudagraph_capture_size = rounded_sizes[-1]
+        self.cudagraph_capture_sizes = rounded_sizes
 
     def compute_bs_to_padded_graph_size(self):
         # pre-compute the mapping from batch size to padded graph size
