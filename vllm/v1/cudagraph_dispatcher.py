@@ -146,15 +146,6 @@ class CudagraphDispatcher:
 
         self.keys_initialized = True
 
-    def _is_compatible(
-        self, batch_descriptor: BatchDescriptor, candidate: BatchDescriptor
-    ) -> bool:
-        """Check if candidate cudagraph can handle the batch request."""
-        if candidate.num_reqs is None:
-            return True
-        assert batch_descriptor.num_reqs is not None
-        return candidate.num_reqs >= batch_descriptor.num_reqs
-
     def dispatch(
         self,
         num_tokens: int,
