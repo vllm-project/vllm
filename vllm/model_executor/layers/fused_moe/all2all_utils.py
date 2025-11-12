@@ -15,9 +15,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    FusedMoENaivePrepareAndFinalize,
-)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_pplx
 
@@ -159,9 +156,4 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
         )
-    elif moe.dp_size > 1 and moe.use_ep:
-        # EP+DP without a specialized all2all backend:
-        # use naive dispatch/combine.
-        return FusedMoENaivePrepareAndFinalize()
-
     return prepare_finalize

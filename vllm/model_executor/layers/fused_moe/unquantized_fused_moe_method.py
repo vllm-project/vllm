@@ -108,18 +108,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def allow_inplace(self) -> bool:
         return True
 
-    def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
-        if self.rocm_aiter_moe_enabled:
-            if (
-                self.moe.moe_parallel_config.dp_size > 1
-                and self.moe.moe_parallel_config.use_ep
-            ):
-                from .prepare_finalize import FusedMoENaivePrepareAndFinalize
-
-                return FusedMoENaivePrepareAndFinalize()
-            return None
-        return super().maybe_make_prepare_finalize()
-
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,

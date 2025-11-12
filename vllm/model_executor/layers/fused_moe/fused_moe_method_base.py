@@ -55,14 +55,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
 
         prepare_finalize = maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
 
-        if (
-            prepare_finalize is None
-            and self.moe.moe_parallel_config.dp_size > 1
-            and self.moe.moe_parallel_config.use_ep
-        ):
-            from .prepare_finalize import FusedMoENaivePrepareAndFinalize
+        if prepare_finalize is None and self.moe.dp_size > 1 and self.moe.use_ep:
+            from .naive_epdp_prepare_finalize import NaiveEPDPPrepareAndFinalize
 
-            prepare_finalize = FusedMoENaivePrepareAndFinalize()
+            prepare_finalize = NaiveEPDPPrepareAndFinalize(
+                is_sequence_parallel=self.moe.is_sequence_parallel,
+                ep_size=self.moe.ep_size,
+            )
 
         return prepare_finalize
 

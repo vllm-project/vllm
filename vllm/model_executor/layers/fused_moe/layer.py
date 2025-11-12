@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Literal, get_args, overload
+from typing import Any, Literal, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -17,6 +17,7 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
+    get_ep_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -30,7 +31,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    grouped_topk,
+    zero_experts_compute_triton,
+)
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
@@ -39,6 +43,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 )
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
+    rocm_aiter_grouped_topk,
 )
 from vllm.model_executor.layers.fused_moe.routing_simulator import RoutingSimulator
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -55,9 +60,12 @@ from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import current_stream, direct_register_custom_op
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+NaiveEPDPPrepareAndFinalize: Any
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record
+    from .naive_epdp_prepare_finalize import NaiveEPDPPrepareAndFinalize
 else:
+    NaiveEPDPPrepareAndFinalize = None  # type: ignore[assignment]
 
     def eplb_map_to_physical_and_record(
         topk_ids: torch.Tensor,
@@ -69,11 +77,6 @@ else:
         # CPU fallback: no EPLB so just return as is
         return topk_ids
 
-
-from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa: E501
-    rocm_aiter_grouped_topk,
-)
 
 logger = init_logger(__name__)
 
@@ -514,6 +517,7 @@ class FusedMoE(CustomOp):
             hidden_dim=hidden_size,
             num_local_experts=self.local_num_experts,
             moe_parallel_config=self.moe_parallel_config,
+            is_sequence_parallel=self.is_sequence_parallel,
             in_dtype=moe_in_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
@@ -1721,8 +1725,26 @@ class FusedMoE(CustomOp):
             else nullcontext()
         )
 
+        modular_prepare_finalize = None
+        if isinstance(self.quant_method, FusedMoEModularMethod):
+            modular_prepare_finalize = self.quant_method.fused_experts.prepare_finalize
+
+        do_naive_dispatch = False
+        if (
+            self.dp_size > 1
+            and modular_prepare_finalize is not None
+            and NaiveEPDPPrepareAndFinalize is not None
+            and isinstance(modular_prepare_finalize, NaiveEPDPPrepareAndFinalize)
+        ):
+            do_naive_dispatch = True
+
         with sp_ctx:
             # Matrix multiply.
+            if do_naive_dispatch:
+                hidden_states, router_logits = get_ep_group().dispatch(
+                    hidden_states, router_logits, self.is_sequence_parallel
+                )
+
             final_hidden_states = self.quant_method.apply(
                 layer=self,
                 x=hidden_states,
