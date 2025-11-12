@@ -317,3 +317,17 @@ async def process_chat_template(
                     model_config.model,
                 )
     return resolved_chat_template
+
+
+async def process_score_template(
+    args_score_template: Path | str | None,
+) -> str | None:
+    """Load and return the score template from file.
+
+    Args:
+        args_score_template: Path to template file
+
+    Returns:
+        The loaded template string, or None if not provided
+    """
+    return load_chat_template(args_score_template)

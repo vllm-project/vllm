@@ -642,6 +642,24 @@ You can find the documentation for cross encoder models at [sbert.net](https://w
 
 Code example: [examples/pooling/score/openai_cross_encoder_score.py](../../examples/pooling/score/openai_cross_encoder_score.py)
 
+#### Score Template
+
+Some scoring models may require a specific prompt format to work correctly. You can specify a custom score template
+using the `--score-template` parameter. This template is a Jinja2 template that specifies how query and document
+pairs are formatted before being sent to the model.
+
+```bash
+vllm serve <model> --score-template ./path-to-score-template.jinja
+```
+
+The template should use `{{ query }}` and `{{ document }}` variables to represent the query and document text respectively.
+An example template file (`examples/template_score_basic.jinja`):
+
+```jinja2
+Query: {{ query }}
+Document: {{ document }}
+```
+
 #### Single inference
 
 You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.

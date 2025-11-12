@@ -114,6 +114,10 @@ class FrontendArgs:
     """Whether to trust the chat template provided in the request. If False,
     the server will always use the chat template specified by `--chat-template`
     or the ones from tokenizer."""
+    score_template: str | None = None
+    """The file path to the score template, or the prompt template
+    for scoring/reranking models. This template will be used to format query and
+    document pairs. Supports Jinja2 syntax with `query` and `document` variables."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     ssl_keyfile: str | None = None
@@ -287,6 +291,9 @@ def validate_parsed_serve_args(args: argparse.Namespace):
 
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
+
+    # Ensure that the score template is valid; raises if it likely isn't
+    validate_chat_template(args.score_template)
 
     # Enable auto tool needs a tool call parser to be valid
     if args.enable_auto_tool_choice and not args.tool_call_parser:

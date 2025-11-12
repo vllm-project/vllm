@@ -18,6 +18,8 @@ LORA_MODULE = {
 }
 CHATML_JINJA_PATH = VLLM_PATH / "examples/template_chatml.jinja"
 assert CHATML_JINJA_PATH.exists()
+SCORE_BASIC_JINJA_PATH = VLLM_PATH / "examples/template_score_basic.jinja"
+assert SCORE_BASIC_JINJA_PATH.exists()
 
 
 @pytest.fixture
@@ -190,6 +192,21 @@ def test_chat_template_validation_for_happy_paths(serve_parser):
 def test_chat_template_validation_for_sad_paths(serve_parser):
     """Ensure validation fails if the chat template doesn't exist"""
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
+def test_score_template_validation_for_happy_paths(serve_parser):
+    """Ensure validation passes if the score template exists"""
+    args = serve_parser.parse_args(
+        args=["--score-template", SCORE_BASIC_JINJA_PATH.absolute().as_posix()]
+    )
+    validate_parsed_serve_args(args)
+
+
+def test_score_template_validation_for_sad_paths(serve_parser):
+    """Ensure validation fails if the score template doesn't exist"""
+    args = serve_parser.parse_args(args=["--score-template", "does/not/exist"])
     with pytest.raises(ValueError):
         validate_parsed_serve_args(args)
 
