@@ -495,7 +495,9 @@ def _support_torch_compile(
                 InliningInstructionTranslator, "inline_call_", patched_inline_call
             ),
             torch._dynamo.config.patch(**dynamo_config_patches),
-            maybe_use_cudagraph_partition_wrapper(self.vllm_config),
+            maybe_use_cudagraph_partition_wrapper(
+                self.vllm_config, self.no_weak_ref_output
+            ),
             _torch27_patch_tensor_subclasses(),
         ):
             if envs.VLLM_USE_AOT_COMPILE:

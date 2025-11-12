@@ -94,8 +94,7 @@ class TorchCompileWithNoGuardsWrapper:
             raise RuntimeError("Compilation mode cannot be NO_COMPILATION")
 
         backend = vllm_config.compilation_config.init_backend(
-            vllm_config,
-            no_weak_ref_output
+            vllm_config, no_weak_ref_output
         )
         options = {}
 

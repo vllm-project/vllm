@@ -286,17 +286,39 @@ def test_conditional_compile_enable_if(use_inductor_graph_partition, monkeypatch
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
 
-def test_no_weak_ref_output_decorator():
+@pytest.mark.parametrize("use_inductor_graph_partition", [True, False])
+def test_no_weak_ref_output_decorator(use_inductor_graph_partition, monkeypatch):
+    # disable compile cache so that we can count the number of compilations
+    # appropriately
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
+
     # piecewise
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_cudagraph=True,
-            splitting_ops=["silly.attention"],
+            splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
+            use_inductor_graph_partition=use_inductor_graph_partition,
         )
     )
     cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
+
+    expected_num_graphs_seen = 1
+    expected_num_cudagraph_captured = (
+        4  # num_cudagraph_sizes * num cudagraphs to capture
+    )
+    if use_inductor_graph_partition:
+        expected_num_piecewise_graphs_seen = 1
+        expected_num_piecewise_capturable_graphs_seen = 1
+        expected_num_backend_compilations = 1
+    else:
+        expected_num_piecewise_graphs_seen = 3
+        expected_num_piecewise_capturable_graphs_seen = 2
+        expected_num_backend_compilations = 2
 
     @support_torch_compile(no_weak_ref_output=False)
     class A(nn.Module):
@@ -330,12 +352,11 @@ def test_no_weak_ref_output_decorator():
 
     # A has support_torch_compile
     with compilation_counter.expect(
-        num_graphs_seen=1,
-        num_piecewise_graphs_seen=3,
-        num_piecewise_capturable_graphs_seen=2,
-        num_backend_compilations=2,
-        num_cudagraph_captured=4,
-        # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        num_graphs_seen=expected_num_graphs_seen,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
+        num_cudagraph_captured=expected_num_cudagraph_captured,
     ):
         run_model(vllm_config, mod_A, cudagraph_runtime_mode)
 
@@ -346,11 +367,11 @@ def test_no_weak_ref_output_decorator():
 
     # B also has support_torch_compile
     with compilation_counter.expect(
-        num_graphs_seen=1,
-        num_piecewise_graphs_seen=3,
-        num_piecewise_capturable_graphs_seen=2,
-        num_backend_compilations=2,
-        num_cudagraph_captured=4,
+        num_graphs_seen=expected_num_graphs_seen,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
+        num_cudagraph_captured=expected_num_cudagraph_captured,
     ):
         run_model(vllm_config, mod_B, cudagraph_runtime_mode)
 
@@ -361,10 +382,10 @@ def test_no_weak_ref_output_decorator():
 
     # C has support_torch_compile
     with compilation_counter.expect(
-        num_graphs_seen=1,
-        num_piecewise_graphs_seen=3,
-        num_piecewise_capturable_graphs_seen=2,
-        num_backend_compilations=2,
-        num_cudagraph_captured=4,
+        num_graphs_seen=expected_num_graphs_seen,
+        num_piecewise_graphs_seen=expected_num_piecewise_graphs_seen,
+        num_piecewise_capturable_graphs_seen=expected_num_piecewise_capturable_graphs_seen,
+        num_backend_compilations=expected_num_backend_compilations,
+        num_cudagraph_captured=expected_num_cudagraph_captured,
     ):
         run_model(vllm_config, mod_C, cudagraph_runtime_mode)
