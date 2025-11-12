@@ -223,6 +223,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLAT_LOGPROBS: bool = False
+    VLLM_ENABLE_PREFIX_PROX_LOGS: bool = True
 
 
 def get_default_cache_root():
