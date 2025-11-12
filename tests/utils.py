@@ -1325,7 +1325,8 @@ class TestFP8Layer(torch.nn.Module):
         weight_quant_key (QuantKey): Key for weight quantization configuration.
         weight (torch.Tensor): Weight tensor for linear transformation.
         weight_scale (torch.Tensor): Per-tensor or per-group scale for weights.
-        input_scale (torch.Tensor): Scale tensor for input quantization.
+        input_scale (torch.Tensor, optional): Scale tensor for input quantization.
+            Defaults to None.
         out_dtype (torch.dtype, optional): Output tensor data type.
             Defaults to torch.get_default_dtype().
     """
@@ -1336,7 +1337,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_quant_key: QuantKey,
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
-        input_scale: torch.Tensor,
+        input_scale: torch.Tensor | None = None,
         out_dtype: torch.dtype | None = None,
         force_kernel: FP8ScaledMMLinearKernel | None = None,
     ):
