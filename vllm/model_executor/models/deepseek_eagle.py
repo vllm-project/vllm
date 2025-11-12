@@ -25,7 +25,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV3ForCausalLM,
 )
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 
 @support_torch_compile
@@ -243,6 +243,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             name, loaded_weight = inputs
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, loaded_weight
 
         loader = AutoWeightsLoader(

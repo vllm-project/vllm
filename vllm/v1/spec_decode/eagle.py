@@ -1000,15 +1000,15 @@ class EagleProposer:
 
             if not self.model.has_own_embed_tokens:
                 logger.info(
-                    "Draft model embed_tokens are uninitialized. "
-                    "Sharing vocab embedding with the target model."
+                    "Draft model embed_tokens are not initialized from the checkpoint weights. "
+                    "Assuming draft model should share the embedding weights with the target model to save memory."
                 )
                 del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
             else:
                 logger.info(
-                    "Draft model embed_tokens are already initialized. "
-                    "Keeping separate vocab embedding from the target model."
+                    "Draft model embed_tokens are initialized from the checkpoint weights. "
+                    "Keeping separate embedding weights from the target model."
                 )
         else:
             logger.info(
@@ -1030,15 +1030,15 @@ class EagleProposer:
                 and not self.model.has_own_lm_head
             ):
                 logger.info(
-                    "Draft model lm_head is uninitialized. "
-                    "Sharing lm_head with the target model."
+                    "Draft model lm_head is not initialized from the checkpoint weights. "
+                    "Assuming draft model should share the lm_head weights with the target model to save memory."
                 )
                 del self.model.lm_head
                 self.model.lm_head = target_language_model.lm_head
             else:
                 logger.info(
-                    "Draft model lm_head is already initialized. "
-                    "Keeping separate lm_head from the target model."
+                    "Draft model lm_head is initialized from the checkpoint weights. "
+                    "Keeping separate lm_head weights from the target model."
                 )
 
     @torch.inference_mode()

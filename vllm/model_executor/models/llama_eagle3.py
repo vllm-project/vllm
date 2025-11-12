@@ -24,7 +24,7 @@ from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -327,12 +327,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             if "embed_tokens" in name:
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
-
-            # To prevent overriding with target model's layers
-            if "lm_head" in name:
-                self.has_own_lm_head = True
-            if "embed_tokens" in name:
-                self.has_own_embed_tokens = True
+            process_eagle_weight(self, name)
 
         skip_substrs = []
         if not includes_draft_id_mapping:
