@@ -123,7 +123,7 @@ class OpenAIServingPooling(OpenAIServing):
                     prompt=validated_prompt, request_id=request_id
                 )
                 if not isinstance(engine_prompts, Sequence) or isinstance(
-                    engine_prompts, str | bytes | bytearray
+                    engine_prompts, (str, bytes, bytearray)
                 ):
                     engine_prompts = [engine_prompts]
 
