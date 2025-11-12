@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
-from enum import Enum
+from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypeVar
