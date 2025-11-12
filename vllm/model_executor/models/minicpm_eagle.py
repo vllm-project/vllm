@@ -43,7 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle, SupportsLoRA, SupportsPP
 from .minicpm import MiniCPMAttention as EagleMiniCPMAttention
 from .minicpm import MiniCPMMLP as EagleMiniCPMMLP
 from .minicpm import MiniCPMMoE as EagleMiniCPMMoE
@@ -52,6 +52,7 @@ from .utils import (
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
+    process_eagle_weight,
 )
 
 
@@ -289,7 +290,7 @@ class EagleMiniCPMModel(nn.Module):
         return loaded_params
 
 
-class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -376,8 +377,13 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        def transform(inputs):
+            name, loaded_weight = inputs
+            process_eagle_weight(self, name)
+            return name, loaded_weight
+
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
-        return loader.load_weights(weights)
+        return loader.load_weights(map(transform, weights))

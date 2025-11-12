@@ -58,7 +58,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -529,7 +529,9 @@ class LlamaModel(nn.Module):
         return loaded_params
 
 
-class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class LlamaForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
         "gate_up_proj": ["gate_proj", "up_proj"],
