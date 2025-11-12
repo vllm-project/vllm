@@ -150,11 +150,15 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
-            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
-            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+            # ROCM_AITER_FA is an optional backend
+            if find_spec(
+                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
+            ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata,
                 )
@@ -316,7 +320,12 @@ class EagleProposer:
             positions = target_positions[:, last_token_indices]
         else:
             positions = target_positions[last_token_indices]
-        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+        if self.method in (
+            "deepseek_mtp",
+            "ernie_mtp",
+            "longcat_flash_mtp",
+            "pangu_ultra_moe_mtp",
+        ):
             hidden_states = self.hidden_states[last_token_indices]
         else:
             hidden_states = hidden_states[last_token_indices]
