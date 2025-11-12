@@ -900,7 +900,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             if self.use_async_scheduling:
                 req_state.prev_num_draft_len = num_spec_tokens
                 if num_spec_tokens and self._draft_token_ids is None:
-                    scheduler_output.total_num_scheduled_spec_tokens -= num_spec_tokens
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
                     scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
@@ -1067,10 +1066,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.is_token_ids.copy_to_gpu(total_num_scheduled_tokens)
             return
 
-        total_without_spec = (
-            total_num_scheduled_tokens
-            - scheduler_output.total_num_scheduled_spec_tokens
-        )
         # Async scheduling case, where some decode requests from the previous
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the GPU from prev_sampled_token_ids.
@@ -1082,6 +1077,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         prev_draft_token_indices: list[int] = []
         indices_match = True
         max_flattened_index = -1
+        total_num_spec_tokens = 0
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
 
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
@@ -1090,6 +1086,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # We need to compute the flattened input_ids index of the
                 # last token in each common request.
                 draft_len = len(scheduled_spec_tokens.get(req_id, ()))
+                total_num_spec_tokens += draft_len
                 flattened_index = cu_num_tokens[cur_index].item() - 1
                 # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
                 # sample_flattened_indices = [0, 2, 5]
@@ -1109,6 +1106,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
         num_commmon_tokens = len(sample_flattened_indices)
+        total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
         if num_commmon_tokens < total_without_spec:
             # If not all requests are decodes from the last iteration,
             # We need to copy the input_ids_cpu to the GPU first.
@@ -2655,8 +2653,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # number of requests, optimize it later.
         if (
             self.use_async_scheduling
+            and self.num_spec_tokens
             and self._draft_token_ids is None
-            and scheduler_output.total_num_scheduled_spec_tokens
         ):
             scheduler_output = deepcopy(scheduler_output)
 

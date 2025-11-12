@@ -22,7 +22,7 @@ class AsyncScheduler(Scheduler):
             pending_structured_output_tokens |= (
                 request.use_structured_output and request.num_output_placeholders > 0
             )
-            cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, []))
+            cur_num_spec_tokens = len(spec_decode_tokens.get(req_id, ()))
             if (
                 request.num_computed_tokens
                 == request.num_tokens
