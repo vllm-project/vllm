@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.nn import LayerNorm
 from transformers.models.qwen2_vl import Qwen2VLProcessor
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import (
     check_upstream_fa_availability,
     maybe_get_vit_flash_attn_backend,
@@ -256,6 +256,7 @@ class DotsVisionAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
 
@@ -288,7 +289,9 @@ class DotsVisionAttention(nn.Module):
         )
         # Select attention backend
         self.attn_backend = get_vit_attn_backend(
-            self.hidden_size_per_attention_head, torch.get_default_dtype()
+            self.hidden_size_per_attention_head,
+            torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
         self.use_upstream_fa = False
 
@@ -296,20 +299,21 @@ class DotsVisionAttention(nn.Module):
             maybe_get_vit_flash_attn_backend(
                 self.attn_backend,
                 self.use_upstream_fa,
+                attn_backend_override=attn_backend_override,
             )
         )
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN,
-            _Backend.TORCH_SDPA,
-            _Backend.XFORMERS,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.XFORMERS,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }:
             raise RuntimeError(
                 f"Unsupported vision attention backend: {self.attn_backend}"
             )
         self.is_flash_attn_backend = self.attn_backend in {
-            _Backend.FLASH_ATTN,
-            _Backend.ROCM_AITER_FA,
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
         }
 
     def forward(
@@ -357,7 +361,7 @@ class DotsVisionAttention(nn.Module):
                 self.num_attention_heads_per_partition,
                 self.hidden_size_per_attention_head,
             )
-        elif self.attn_backend == _Backend.TORCH_SDPA:
+        elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             outputs = []
             for i in range(1, len(cu_seqlens)):
                 s = int(cu_seqlens[i - 1])
@@ -369,7 +373,7 @@ class DotsVisionAttention(nn.Module):
                 out_i = out_i.permute(0, 2, 1, 3)
                 outputs.append(out_i)
             context_layer = torch.cat(outputs, dim=1) if outputs else q[:, :0]
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             from xformers import ops as xops
             from xformers.ops.fmha.attn_bias import BlockDiagonalMask
 
@@ -510,6 +514,7 @@ class DotsVisionBlock(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ):
         super().__init__()
 
@@ -521,6 +526,7 @@ class DotsVisionBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
             use_data_parallel=use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.norm1 = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
         self.mlp = DotsSwiGLUFFN(
@@ -561,6 +567,7 @@ class DotsVisionTransformer(nn.Module):
         require_post_norm: bool | None = None,
         prefix: str = "",
         use_data_parallel: bool = False,
+        attn_backend_override: AttentionBackendEnum | None = None,
     ) -> None:
         super().__init__()
         self.config = config
@@ -571,12 +578,15 @@ class DotsVisionTransformer(nn.Module):
         head_dim = config.embed_dim // config.num_attention_heads
         self.rotary_pos_emb = VisionRotaryEmbedding(head_dim // 2)
         self.attn_backend = get_vit_attn_backend(
-            head_size=head_dim, dtype=torch.get_default_dtype()
+            head_size=head_dim,
+            dtype=torch.get_default_dtype(),
+            attn_backend_override=attn_backend_override,
         )
-        if self.attn_backend != _Backend.FLASH_ATTN and check_upstream_fa_availability(
-            torch.get_default_dtype()
+        if (
+            self.attn_backend != AttentionBackendEnum.FLASH_ATTN
+            and check_upstream_fa_availability(torch.get_default_dtype())
         ):
-            self.attn_backend = _Backend.FLASH_ATTN
+            self.attn_backend = AttentionBackendEnum.FLASH_ATTN
         self.out_hidden_size = config.hidden_size
         # Keep blocks for compatibility with other vision towers
         num_layers = (
@@ -591,6 +601,7 @@ class DotsVisionTransformer(nn.Module):
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{i}",
                     use_data_parallel=use_data_parallel,
+                    attn_backend_override=attn_backend_override,
                 )
                 for i in range(num_layers)
             ]
@@ -656,11 +667,11 @@ class DotsVisionTransformer(nn.Module):
     ) -> tuple[int | None, list[int] | None]:
         max_seqlen, seqlens = None, None
         if (
-            self.attn_backend == _Backend.FLASH_ATTN
-            or self.attn_backend == _Backend.ROCM_AITER_FA
+            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
+            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
         ):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-        elif self.attn_backend == _Backend.XFORMERS:
+        elif self.attn_backend == AttentionBackendEnum.XFORMERS:
             seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
         return max_seqlen, seqlens
 
@@ -750,11 +761,17 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             self.config.vision_config = vision_config
         else:
             vision_config = self.config.vision_config
+        attn_backend_override = (
+            multimodal_config.mm_encoder_attn_backend
+            if multimodal_config is not None
+            else None
+        )
         self.vision_tower = DotsVisionTransformer(
             vision_config,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
             use_data_parallel=self.use_data_parallel,
+            attn_backend_override=attn_backend_override,
         )
         self.language_model: Qwen2ForCausalLM = init_vllm_registered_model(
             vllm_config=vllm_config,

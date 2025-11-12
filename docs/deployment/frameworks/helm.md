@@ -13,7 +13,7 @@ Before you begin, ensure that you have the following:
 - A running Kubernetes cluster
 - NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at [https://github.com/NVIDIA/k8s-device-plugin](https://github.com/NVIDIA/k8s-device-plugin)
 - Available GPU resources in your cluster
-- An S3 with the model which will be deployed
+- (Optional) An S3 bucket or other storage with the model weights, if using automatic model download
 
 ## Installing the chart
 
@@ -61,10 +61,16 @@ The following table describes configurable parameters of the chart in `values.ya
 | deploymentStrategy | object | {} | Deployment strategy configuration |
 | externalConfigs | list | [] | External configuration |
 | extraContainers | list | [] | Additional containers configuration |
-| extraInit | object | {"pvcStorage":"1Gi","s3modelpath":"relative_s3_model_path/opt-125m", "awsEc2MetadataDisabled": true} | Additional configuration for the init container |
-| extraInit.pvcStorage | string | "1Gi" | Storage size of the s3 |
-| extraInit.s3modelpath | string | "relative_s3_model_path/opt-125m" | Path of the model on the s3 which hosts model weights and config files |
-| extraInit.awsEc2MetadataDisabled | boolean | true | Disables the use of the Amazon EC2 instance metadata service |
+| extraInit | object | {"modelDownload":{"enabled":true},"initContainers":[],"pvcStorage":"1Gi"} | Additional configuration for init containers |
+| extraInit.modelDownload | object | {"enabled":true} | Model download functionality configuration |
+| extraInit.modelDownload.enabled | bool | true | Enable automatic model download job and wait container |
+| extraInit.modelDownload.image | object | {"repository":"amazon/aws-cli","tag":"2.6.4","pullPolicy":"IfNotPresent"} | Image for model download operations |
+| extraInit.modelDownload.waitContainer | object | {} | Wait container configuration (command, args, env) |
+| extraInit.modelDownload.downloadJob | object | {} | Download job configuration (command, args, env) |
+| extraInit.initContainers | list | [] | Custom init containers (appended after model download if enabled) |
+| extraInit.pvcStorage | string | "1Gi" | Storage size for the PVC |
+| extraInit.s3modelpath | string | "relative_s3_model_path/opt-125m" | (Optional) Path of the model on S3 |
+| extraInit.awsEc2MetadataDisabled | bool | true | (Optional) Disable AWS EC2 metadata service |
 | extraPorts | list | [] | Additional ports configuration |
 | gpuModels | list | ["TYPE_GPU_USED"] | Type of gpu used |
 | image | object | {"command":["vllm","serve","/data/","--served-model-name","opt-125m","--host","0.0.0.0","--port","8000"],"repository":"vllm/vllm-openai","tag":"latest"} | Image configuration |
@@ -98,3 +104,36 @@ The following table describes configurable parameters of the chart in `values.ya
 | serviceName | string | "" | Service name |
 | servicePort | int | 80 | Service port |
 | labels.environment | string | test | Environment name |
+
+## Configuration Examples
+
+### Using S3 Model Download (Default)
+
+```yaml
+extraInit:
+  modelDownload:
+    enabled: true
+  pvcStorage: "10Gi"
+  s3modelpath: "models/llama-7b"
+```
+
+### Using Custom Init Containers Only
+
+For use cases like llm-d where you need custom sidecars without model download:
+
+```yaml
+extraInit:
+  modelDownload:
+    enabled: false
+  initContainers:
+    - name: llm-d-routing-proxy
+      image: ghcr.io/llm-d/llm-d-routing-sidecar:v0.2.0
+      imagePullPolicy: IfNotPresent
+      ports:
+        - containerPort: 8080
+          name: proxy
+      securityContext:
+        runAsUser: 1000
+      restartPolicy: Always
+  pvcStorage: "10Gi"
+```

@@ -38,7 +38,7 @@ class CompiledMod(torch.nn.Module):
 def make_vllm_config() -> VllmConfig:
     return VllmConfig(
         compilation_config=CompilationConfig(
-            level=CompilationMode.VLLM_COMPILE,
+            mode=CompilationMode.VLLM_COMPILE,
         )
     )
 
