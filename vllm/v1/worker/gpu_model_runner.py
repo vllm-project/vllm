@@ -4325,6 +4325,8 @@ class GPUModelRunner(
         # we need to adjust the cudagraph sizes to be a multiple of the uniform
         # decode query length to avoid: https://github.com/vllm-project/vllm/issues/28207
         # temp-fix: https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
+        # Will be removed in the near future when we have seperate cudagraph capture
+        # sizes for decode and mixed prefill-decode.
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and cudagraph_mode.separate_routine()
@@ -4333,6 +4335,8 @@ class GPUModelRunner(
             self.compilation_config.adjust_cudagraph_sizes_to_be_multipe_of(
                 self.uniform_decode_query_len
             )
+            self.cudagraph_batch_sizes = self.compilation_config.cudagraph_capture_sizes
+
         self.compilation_config.compute_bs_to_padded_graph_size()
 
         # Trigger cudagraph dispatching keys initialization after

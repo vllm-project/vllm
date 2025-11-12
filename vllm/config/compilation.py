@@ -961,13 +961,17 @@ class CompilationConfig:
                 )
 
     def adjust_cudagraph_sizes_to_be_multipe_of(self, multiple_of: int):
-        if not self.cudagraph_capture_sizes:
+        if not self.cudagraph_capture_sizes or multiple_of <= 1:
             return
 
+        assert self.max_cudagraph_capture_size is not None
+
         rounded_sizes = sorted(
-            round_up(size, multiple_of)
-            for size in self.cudagraph_capture_sizes
-            if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
+            set(
+                round_up(size, multiple_of)
+                for size in self.cudagraph_capture_sizes
+                if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
+            )
         )
 
         if len(rounded_sizes) == 0:
