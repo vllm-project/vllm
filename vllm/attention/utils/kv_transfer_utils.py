@@ -42,11 +42,11 @@ def maybe_transfer_kv_layer(func: Callable) -> Callable:
 
         # Extract attention context (layer-specific metadata, layer, and kv_cache)
         attn_metadata, attn_layer, kv_cache = get_attention_context(layer_name)
-        if attn_metadata is None:
+        connector = get_kv_transfer_group()
+        if attn_metadata is None or not connector.has_connector_metadata():
             return func(*args, **kwargs)
 
         # Wait for KV layer on entry
-        connector = get_kv_transfer_group()
         connector.wait_for_layer_load(layer_name)
 
         # Execute the function
