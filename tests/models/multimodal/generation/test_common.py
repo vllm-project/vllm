@@ -9,11 +9,13 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
+from packaging.version import Version
 from transformers import (
     AutoModel,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils.func_utils import identity
@@ -851,12 +853,7 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 4},
             )
         ],
-        marks=[
-            # TODO: remove skip when upgrading Transformers to v4.57.2
-            pytest.mark.skip(
-                "Broken in Transformers v4.57.1, should be fixed in v4.57.2"
-            )
-        ],
+        marks=[pytest.mark.skip(Version(TRANSFORMERS_VERSION) > Version("4.57.1"))],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122
     "qwen2_5_vl-windows-attention": VLMTestInfo(
