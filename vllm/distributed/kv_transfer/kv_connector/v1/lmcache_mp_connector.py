@@ -179,11 +179,6 @@ class LMCacheMPRequestTracker:
         This function will be called when processing the cached requests.
         """
         self.num_stored_blocks += num_new_blocks
-        # NOTE: when having a new request, we will first see the num computed
-        # tokens before seeing the allocated block ids.
-        # assert self.num_stored_blocks <= len(self.allocated_block_ids), \
-        #        "The number of stored blocks should not exceed the number "\
-        #        "of allocated blocks"
 
     def update_block_ids(
         self,
@@ -338,6 +333,14 @@ class LMCacheMPConnectorMetadata(KVConnectorMetadata):
 
 
 class LMCacheMPConnector(KVConnectorBase_V1):
+    """
+    The connector for LMCache multi-process mode.
+
+    Extra configs (kv_transfer_config.extra_config):
+    - lmcache.mp.host: the host of the LMCache server.
+    - lmcache.mp.port: the port of the LMCache server.
+    """
+
     def __init__(
         self,
         vllm_config: "VllmConfig",
@@ -346,7 +349,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
     ):
         super().__init__(vllm_config, role, kv_cache_config)
 
-        server_url = "tcp://localhost:5555"
+        server_host = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.host", "tcp://localhost"
+        )
+        server_port = vllm_config.kv_transfer_config.get_from_extra_config(
+            "lmcache.mp.port", 5555
+        )
+
+        server_url = f"{server_host}:{server_port}"
         zmq_context = zmq.Context.instance()
         if self.role == KVConnectorRole.SCHEDULER:
             self.scheduler_adapter = create_scheduler_adapter(
@@ -600,8 +610,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if ret == 0:
             return 0, False
 
-        # logger.warning("Got %d matched tokens for request %s!",
-        #               ret, request.request_id)
         assert (
             ret % (self.scheduler_adapter.num_blocks_per_chunk() * self.vllm_block_size)
             == 0
@@ -643,7 +651,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         # NOTE: the `blocks` are NEW BLOCKS allocated for this request.
         tracker = self._get_request_tracker(request.request_id)
         block_ids = reformat_block_ids(blocks.get_block_ids())
-        # logger.warning("In update_state_after_alloc the block ids are: %s", block_ids)
 
         # No matter we need to retrieve or not, we need to update
         # the block ids into the tracker
@@ -659,10 +666,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 if condition
                 else LMCacheMPRequestState.READY
             )
-        # elif tracker.state == LMCacheMPRequestState.WAITING_FOR_LOAD:
-        #    # Second time, the request is ready for inference
-        #    tracker.state = LMCacheMPRequestState.READY
-        # logger.warning("Change request tracker state to %s", tracker.state)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
