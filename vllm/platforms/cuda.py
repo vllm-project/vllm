@@ -336,17 +336,10 @@ class CudaPlatformBase(Platform):
         dtype: torch.dtype,
         kv_cache_dtype: "CacheDType | None",
         block_size: int | None,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
     ) -> str:
-        if not use_v1:
-            raise RuntimeError(
-                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-                "to select a supported backend."
-            )
-
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 

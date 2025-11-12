@@ -213,7 +213,6 @@ class RocmPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink,
         use_sparse,
@@ -223,12 +222,6 @@ class RocmPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on ROCm.")
-
-        if not use_v1:
-            raise RuntimeError(
-                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-                "to select a supported backend."
-            )
 
         if use_mla:
             if selected_backend is None:
