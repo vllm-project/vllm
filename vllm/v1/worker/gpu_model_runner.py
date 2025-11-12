@@ -2524,11 +2524,10 @@ class GPUModelRunner(
                 )
                 uniform_decode = (
                     (max_num_scheduled_tokens == self.uniform_decode_query_len)
-                    and (num_reqs == max_num_scheduled_tokens)
-                    # Enforce that sequence parallelism padding did not mess up the
-                    # uniform batch shape (can happen with MTP=2,4 etc. where the
-                    # decode/validation query lengths are odd numbers)
-                    and (num_tokens_padded == num_tokens_unpadded)
+                    # TODO(lucas): sequence parallelism padding can force us out of
+                    # uniform decode and as a result FULL cudagraphs; we should
+                    # add a warning to users when this occurs.
+                    and (num_tokens_padded == max_num_scheduled_tokens * num_reqs)
                 )
 
                 # Disable DP padding when running eager to avoid excessive padding when
@@ -3571,34 +3570,18 @@ class GPUModelRunner(
                     num_tokens_after_padding, None, False
                 )
 
-            # filter out the valid batch descriptor
-            has_lora = activate_lora and self.lora_config is not None
-            if is_profile:
-                # During profiling, don't pad or dispatch
-                _cg_mode = CUDAGraphMode.NONE
-                batch_descriptor = BatchDescriptor(
-                    num_tokens=num_tokens_after_padding,
-                    num_reqs=num_reqs,
-                    uniform=uniform_decode,
-                    has_lora=has_lora,
-                )
-            elif cudagraph_runtime_mode is not None:
-                # During CUDA graph capture, use the explicitly provided mode
-                # but still create a padded batch descriptor
-                _cg_mode = cudagraph_runtime_mode
-                batch_descriptor = self.cudagraph_dispatcher._create_padded_batch_descriptor(
-                    num_tokens_after_padding,
-                    uniform_decode,
-                    has_lora,
-                )
-            else:
-                # Normal execution: dispatch to find the appropriate CUDA graph
-                _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+            _cg_mode, batch_descriptor = (
+                self.cudagraph_dispatcher.dispatch(
                     num_tokens=num_tokens_after_padding,
                     uniform_decode=uniform_decode,
-                    has_lora=has_lora,
-                    use_cascade_attn=False,
+                    has_lora=activate_lora and self.lora_config is not None,
                 )
+                if not is_profile
+                else (
+                    CUDAGraphMode.NONE,
+                    BatchDescriptor(num_tokens_after_padding),
+                )
+            )
 
             num_tokens_after_padding = batch_descriptor.num_tokens
 
