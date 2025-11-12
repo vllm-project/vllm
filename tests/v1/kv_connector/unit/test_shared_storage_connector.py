@@ -136,7 +136,7 @@ def build_llm_instance(eager: bool, shared_storage_path: Path):
     return LLM(**engine_args_dict)
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def shared_storage_path(tmp_path_factory):
     """Create a shared storage path for all tests in this session."""
     return tmp_path_factory.mktemp("kv_storage")
