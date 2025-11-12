@@ -398,13 +398,14 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     rope_parameters_keys = ("rope_parameters", "rope_scaling")
     rope_parameters = getattr_iter(text_config, rope_parameters_keys, None)
 
+    # Forward compatibility for Transformers v5
+    # (can be removed once Transformers v4 is no longer supported)
+    cls_attr = getattr(type(text_config), "rope_scaling", None)
+    if not isinstance(cls_attr, property):
+        text_config.rope_parameters = rope_parameters
+        delattr(text_config, "rope_scaling")
+
     if rope_parameters is not None:
-        # Forward compatibility for Transformers v5
-        # (can be removed once Transformers v4 is no longer supported)
-        cls_attr = getattr(type(text_config), "rope_scaling", None)
-        if not isinstance(cls_attr, property):
-            text_config.rope_parameters = rope_parameters
-            delattr(text_config, "rope_scaling")
         # Handle nested rope_parameters in interleaved sliding attention models
         if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
             for rope_parameters_layer_type in rope_parameters.values():
