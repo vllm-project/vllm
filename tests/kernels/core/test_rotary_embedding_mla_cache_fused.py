@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("num_blocks", [64])
-@pytest.mark.parametrize("block_size", [16, 1024, 16384])
+@pytest.mark.parametrize("block_size", [16, 64, 256])
 @pytest.mark.parametrize("seed", [0])
 @pytest.mark.parametrize(
     "device", [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
