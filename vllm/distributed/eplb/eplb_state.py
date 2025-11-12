@@ -66,7 +66,7 @@ class RebalanceTaskArgs:
 class ExpertMapperArgs:
     num_moe_layers: int
     policy_type: ExpertMapperPolicy
-    phyhsical_to_logical_map: torch.Tensor
+    physical_to_logical_map: torch.Tensor
 
 
 @dataclass
@@ -158,15 +158,13 @@ class EplbAsyncState:
     """
     Asynchronous process manager.
     """
+
     _async_processor: EPLBProcess | None = None
     """
     Number of iterations to wait before applying a redistribution plan.
     """
     num_wait_worker_iterations: int = 0
-    """
-    A gate to trigger asynchronous expert load rebalancing and weight transfer.
-    """
-    enable_async: bool = False
+
     """
     Arguments passed to expert mapper strategy
     """
@@ -207,7 +205,21 @@ class EplbAsyncState:
     """
     reqs: list[Any] = field(default_factory=list)
 
-    def rebalance_task(self, input_args, expert_mapper_args) -> None:
+    def __init__(
+        self,
+        num_wait_worker_iterations: int,
+        expert_mapper_args: ExpertMapperArgs,
+    ) -> None:
+        self.num_wait_worker_iterations = num_wait_worker_iterations
+        self.expert_mapper_args = expert_mapper_args
+        # Initialize asynchronous process manager
+        self._async_processor = EPLBProcess(target_func=rebalance_experts)
+
+    def rebalance_task(
+        self,
+        input_args: RebalanceTaskArgs,
+        expert_mapper_args: ExpertMapperArgs,
+    ) -> None:
         # Submit task to asynchronous process
         if self._async_processor is None:
             logger.error("Async processor is not initialized, cannot submit task")
@@ -247,15 +259,20 @@ class EplbAsyncState:
 
     def step_before_forward(
         self,
-        model,
-        expert_rearrangement_step,
-        expert_rearrangement_step_interval,
+        model: MixtureOfExperts,
+        expert_rearrangement_step: int,
+        expert_rearrangement_step_interval: int,
     ) -> None:
         """
         Executes operations before the model's forward pass.
         If the EPLB process indicates it should process (e.g., a rearrangement
         is pending), it initiates asynchronous shuffling for each MoE layer.
         """
+        if self._async_processor is None:
+            logger.error(
+                "Async processor is not initialized, cannot transfer expert weight"
+            )
+            return None
         if self.update_expert_map_and_weight_flag(
             expert_rearrangement_step,
             expert_rearrangement_step_interval,
@@ -377,9 +394,9 @@ class EplbAsyncState:
 
     def step_after_forward(
         self,
-        eplb_model_state,
-        expert_rearrangement_step,
-        expert_rearrangement_step_interval,
+        eplb_model_state: EplbModelState,
+        expert_rearrangement_step: int,
+        expert_rearrangement_step_interval: int,
     ):
         model = eplb_model_state.model
         if self.rebalance_expert_weight_flag(
@@ -415,7 +432,7 @@ class EplbAsyncState:
             assert self.expert_mapper_args is not None, (
                 "expert_mapper_args is not initialized"
             )
-            self.expert_mapper_args.phyhsical_to_logical_map = (
+            self.expert_mapper_args.physical_to_logical_map = (
                 eplb_model_state.physical_to_logical_map.cpu()
             )
             expert_mapper_args = self.expert_mapper_args
@@ -437,7 +454,9 @@ class EplbAsyncState:
             cur_layer_id = self.cur_layer_id
 
             if phy2log_map.shape[1] != updated_phy2log_map.shape[1]:
-                phy2log_map[cur_layer_id] = updated_phy2log_map[cur_layer_id].to(phy2log_map.device)
+                phy2log_map[cur_layer_id] = updated_phy2log_map[cur_layer_id].to(
+                    phy2log_map.device
+                )
             else:
                 phy2log_map[cur_layer_id].copy_(updated_phy2log_map[cur_layer_id])
             max_physical_slots = updated_log2phy_map.shape[-1]
@@ -462,9 +481,7 @@ class EplbAsyncState:
                     self.buffer_tensor_list[buffer_tensor_id],
                 ):
                     expert_tensor.copy_(buffer_tensor)
-        logger.debug(
-            "[EPLB] finished update expert weight for layer: %s", cur_layer_id
-        )
+        logger.debug("[EPLB] finished update expert weight for layer: %s", cur_layer_id)
         expert_rearrangement_step += 1
         if expert_rearrangement_step >= (
             expert_rearrangement_step_interval
@@ -476,14 +493,15 @@ class EplbAsyncState:
 
     def compute_and_set_moe_load(
         self,
-        eplb_model_state,
+        eplb_model_state: EplbModelState,
     ) -> torch.Tensor:
         """
         Computes the MoE load across all ranks and sets it in the shared dictionary.
         It gathers local expert load from all ranks and combines them.
 
         Returns:
-            The gathered MoE load tenso with shape (num_moe_layers, num_logical_expert).
+            The gathered MoE load tenso with shape
+            (num_moe_layers, num_logical_expert).
         """
         local_load = eplb_model_state.expert_load_pass.clone()
 
@@ -495,9 +513,7 @@ class EplbAsyncState:
             if (
                 self._gather_buffer is None
                 or self._gather_buffer.shape[0] != ep_world_size
-                or tuple(self._gather_buffer.shape[1:]) != tuple(
-                    local_load.shape
-                )
+                or tuple(self._gather_buffer.shape[1:]) != tuple(local_load.shape)
             ):
                 shape = (ep_world_size, *local_load.shape)
                 self._gather_buffer = torch.empty(
@@ -550,7 +566,11 @@ class EplbAsyncState:
             )
         return global_expert_load
 
-    def rebalance_expert_weight_flag(self, step, step_interval) -> bool:
+    def rebalance_expert_weight_flag(
+        self,
+        expert_rearrangement_step: int,
+        expert_rearrangement_step_interval: int,
+    ) -> bool:
         """
         Determines whether expert rebalancing should be triggered in the current
         iteration. This typically occurs right before the expert weight update phase.
@@ -558,9 +578,14 @@ class EplbAsyncState:
         Returns:
             True if it's time to trigger rebalancing, False otherwise.
         """
-        return step == step_interval - 1
+        return expert_rearrangement_step == expert_rearrangement_step_interval - 1
 
-    def update_expert_map_and_weight_flag(self, step, step_interval, num_moe_layers) -> bool:
+    def update_expert_map_and_weight_flag(
+        self,
+        expert_rearrangement_step: int,
+        expert_rearrangement_step_interval: int,
+        num_moe_layers: int,
+    ) -> bool:
         """
         Determines if expert maps should be updated in the current iteration. This
         is typically true for a short window after the EPLB update and worker wait.
@@ -568,15 +593,10 @@ class EplbAsyncState:
         Returns:
             True if expert maps should be updated, False otherwise
         """
-        map_update_counter = step - step_interval + self.num_wait_worker_iterations
+        map_update_counter = expert_rearrangement_step - (
+            expert_rearrangement_step_interval - self.num_wait_worker_iterations
+        )
         return 0 <= map_update_counter < num_moe_layers
-
-    def __post_init__(self) -> None:
-        # Initialize asynchronous process manager
-        if self.enable_async:
-            self._async_processor = EPLBProcess(
-                target_func=rebalance_experts
-            )
 
     def __del__(self):
         """Clean up async process resources"""
@@ -598,6 +618,7 @@ class EplbAsyncState:
             raise RuntimeError("log2phy_map is None")
         return phy2log, log2phy
 
+
 class EplbState:
     """
     EplbState of each expert parallel model. Key is the model config hash.
@@ -607,7 +628,6 @@ class EplbState:
         self.parallel_config = parallel_config
         self.device = device
         self.model_states: dict[str, EplbModelState] = {}
-        self.async_states: EplbAsyncState
         """
         Current step in the sliding window.
 
@@ -635,6 +655,12 @@ class EplbState:
         This is a constant and is taken from the config.
         """
         self.expert_rearrangement_step_interval: int = 0
+
+        self.async_states: EplbAsyncState | None = None
+        """
+        A gate to trigger asynchronous expert load rebalancing and weight transfer.
+        """
+        self.enable_async: bool = False
 
     @staticmethod
     def build_initial_global_physical_to_logical_map(
@@ -860,19 +886,19 @@ class EplbState:
             model,
         )
 
-        expert_mapper_args = ExpertMapperArgs(
-            model.num_moe_layers,
-            self.parallel_config.eplb_config.expert_mapper_policy,
-            None,
-        )
-        self.async_states = EplbAsyncState(
-            num_wait_worker_iterations=(
-                self.parallel_config.eplb_config.num_wait_worker_iterations
-            ),
-            enable_async=self.parallel_config.eplb_config.enable_async,
-            expert_mapper_args=expert_mapper_args,
-        )
-
+        self.enable_async = self.parallel_config.eplb_config.enable_async
+        if self.enable_async:
+            expert_mapper_args = ExpertMapperArgs(
+                model.num_moe_layers,
+                self.parallel_config.eplb_config.expert_mapper_policy,
+                None,
+            )
+            self.async_states = EplbAsyncState(
+                num_wait_worker_iterations=(
+                    self.parallel_config.eplb_config.num_wait_worker_iterations
+                ),
+                expert_mapper_args=expert_mapper_args,
+            )
 
     def step(
         self,
@@ -962,7 +988,7 @@ class EplbState:
             if self.expert_load_window_step >= self.expert_load_window_size:
                 self.expert_load_window_step = 0
 
-        if not self.async_states.enable_async:
+        if not self.enable_async:
             # Step the expert rearrangement step
             # Note that even if this is a dummy step, we still increment the
             # rearrangement step and perform rearrangement to ensure all ranks are
@@ -976,12 +1002,17 @@ class EplbState:
                 self.rearrange()
         else:
             for eplb_model_state in self.model_states.values():
-                self.expert_rearrangement_step = (
-                    self.async_states.step_after_forward(
-                        eplb_model_state,
-                        self.expert_rearrangement_step,
-                        self.expert_rearrangement_step_interval,
+                assert self.async_states is not None
+                if self.async_states._async_processor is None:
+                    logger.error(
+                        "Async processor is not initialized,"
+                        "cannot process step_after_forward"
                     )
+                    return None
+                self.expert_rearrangement_step = self.async_states.step_after_forward(
+                    eplb_model_state,
+                    self.expert_rearrangement_step,
+                    self.expert_rearrangement_step_interval,
                 )
 
     def rearrange(
@@ -1291,7 +1322,8 @@ class EplbState:
             load_pass_list.append(eplb_model_state.expert_load_pass.clone())
         return self._allreduce_list(load_pass_list)
 
-    def step_before_forward(self, model) -> None:
+    def step_before_forward(self) -> None:
+        assert self.async_states is not None, "async_states is not initialized"
         for eplb_model_state in self.model_states.values():
             model = eplb_model_state.model
             if not self.async_states._async_processor:
@@ -1302,6 +1334,7 @@ class EplbState:
                 self.expert_rearrangement_step,
                 self.expert_rearrangement_step_interval,
             )
+
 
 def _node_count_with_rank_mapping(
     pg: ProcessGroup | StatelessProcessGroup,
