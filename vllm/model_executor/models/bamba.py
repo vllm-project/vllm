@@ -158,7 +158,7 @@ class BambaAttentionDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -193,7 +193,7 @@ class BambaAttentionDecoderLayer(nn.Module):
             head_size=self.head_dim,
             rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             base=rope_theta,
             is_neox_style=True,
             dtype=torch.get_default_dtype(),  # see impl of get_rope

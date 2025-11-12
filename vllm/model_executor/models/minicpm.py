@@ -231,7 +231,7 @@ class MiniCPMAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -282,7 +282,7 @@ class MiniCPMAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
 
         self.attn = Attention(
@@ -325,7 +325,7 @@ class MiniCPMDecoderLayer(nn.Module):
         self.quant_config = quant_config
         self.hidden_size = config.hidden_size
         self.rope_theta = getattr(config, "rope_theta", 10000)
-        self.rope_scaling = getattr(config, "rope_scaling", None)
+        self.rope_parameters = getattr(config, "rope_parameters", None)
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
         self._init_attn_block()
@@ -340,7 +340,7 @@ class MiniCPMDecoderLayer(nn.Module):
             num_heads=self.config.num_attention_heads,
             num_kv_heads=self.config.num_key_value_heads,
             rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=self.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,

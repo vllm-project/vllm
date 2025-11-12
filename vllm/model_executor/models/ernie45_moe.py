@@ -234,7 +234,7 @@ class Ernie4_5_MoeAttention(nn.Module):
         num_kv_heads: int,
         head_dim: int | None = None,
         rope_theta: float = 500000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
         qkv_bias: bool = False,
@@ -293,7 +293,7 @@ class Ernie4_5_MoeAttention(nn.Module):
             max_position=max_position_embeddings,
             base=rope_theta,
             is_neox_style=False,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -334,7 +334,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 500000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
         self.self_attn = Ernie4_5_MoeAttention(
             hidden_size=self.hidden_size,
@@ -342,7 +342,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             head_dim=getattr(config, "head_dim", None),
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "use_bias", False),

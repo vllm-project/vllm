@@ -109,7 +109,7 @@ class FlashConfig(PretrainedConfig):
         pretraining_tp=1,
         tie_word_embeddings=False,
         rope_theta=1000000.0,
-        rope_scaling=None,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         mla_scale_q_lora=False,
@@ -163,7 +163,7 @@ class FlashConfig(PretrainedConfig):
         self.pretraining_tp = pretraining_tp
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        self.rope_parameters = rope_parameters
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.mla_scale_q_lora = mla_scale_q_lora
@@ -337,12 +337,12 @@ class FlashDecoderLayer(nn.Module):
         self.layer_idx = int(prefix.split(sep=".")[-1])
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        if rope_scaling is not None and getattr(
+        if rope_parameters is not None and getattr(
             config, "original_max_position_embeddings", None
         ):
-            rope_scaling["original_max_position_embeddings"] = (
+            rope_parameters["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings
             )
 
@@ -362,7 +362,7 @@ class FlashDecoderLayer(nn.Module):
                     ),
                     kv_lora_rank=config.kv_lora_rank,
                     rope_theta=rope_theta,
-                    rope_scaling=rope_scaling,
+                    rope_parameters=rope_parameters,
                     max_position_embeddings=max_position_embeddings,
                     cache_config=cache_config,
                     quant_config=None

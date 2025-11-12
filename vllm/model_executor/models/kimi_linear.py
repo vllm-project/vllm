@@ -192,7 +192,7 @@ class KimiMLAAttention(nn.Module):
         kv_lora_rank: int,
         rope_theta: float = 10000,
         use_nope: bool = False,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -214,7 +214,7 @@ class KimiMLAAttention(nn.Module):
         self.use_nope = use_nope
         assert self.use_nope is True
         assert self.q_lora_rank is None
-        assert rope_scaling is None
+        assert rope_parameters is None
         assert num_heads % tp_size == 0
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,

@@ -307,7 +307,7 @@ class PhiMoEAttention(nn.Module):
         rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: dict | None = None,
+        rope_parameters: dict | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -333,7 +333,7 @@ class PhiMoEAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        self.rope_parameters = rope_parameters
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -357,7 +357,7 @@ class PhiMoEAttention(nn.Module):
             max_position=max_position,
             base=int(self.rope_theta),
             is_neox_style=True,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=self.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -405,7 +405,7 @@ class PhiMoEDecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=config.rope_scaling,
+            rope_parameters=config.rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
         self.block_sparse_moe = PhiMoE(

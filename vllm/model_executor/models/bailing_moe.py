@@ -138,7 +138,7 @@ class BailingAttention(nn.Module):
             max_position=config.max_position_embeddings,
             base=config.rope_theta,
             is_neox_style=True,
-            rope_scaling=config.rope_scaling,
+            rope_parameters=config.rope_parameters,
             partial_rotary_factor=self.partial_rotary_factor,
         )
 

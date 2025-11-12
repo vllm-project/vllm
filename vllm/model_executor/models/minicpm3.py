@@ -63,7 +63,7 @@ class MiniCPM3Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -128,7 +128,7 @@ class MiniCPM3Attention(nn.Module):
             rotary_dim=self.qk_rope_head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_local_heads,
@@ -205,7 +205,7 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
             q_lora_rank=self.config.q_lora_rank,
             kv_lora_rank=self.config.kv_lora_rank,
             rope_theta=self.rope_theta,
-            rope_scaling=self.rope_scaling,
+            rope_parameters=self.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,

@@ -143,7 +143,7 @@ class HunYuanAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -205,7 +205,7 @@ class HunYuanAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -255,7 +255,7 @@ class HunYuanCrossAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -315,7 +315,7 @@ class HunYuanCrossAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -495,11 +495,11 @@ class HunYuanDecoderLayer(nn.Module):
             else config.intermediate_size[layer_id]
         )
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if rope_parameters is not None and getattr(
             config, "original_max_position_embeddings", None
         ):
-            rope_scaling["original_max_position_embeddings"] = (
+            rope_parameters["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings
             )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -521,7 +521,7 @@ class HunYuanDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
+                rope_parameters=rope_parameters,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 bias=attention_bias,
@@ -538,7 +538,7 @@ class HunYuanDecoderLayer(nn.Module):
                     config, "num_key_value_heads", config.num_attention_heads
                 ),
                 rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
+                rope_parameters=rope_parameters,
                 max_position_embeddings=max_position_embeddings,
                 quant_config=quant_config,
                 bias=attention_bias,

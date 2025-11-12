@@ -69,14 +69,14 @@ class OAIAttention(nn.Module):
             max_position=config.max_position_embeddings,
             base=config.rope_theta,
             dtype=torch.float32,
-            rope_scaling={
+            rope_parameters={
                 "rope_type": "yarn",
-                "factor": config.rope_scaling["factor"],
-                "original_max_position_embeddings": config.rope_scaling[
+                "factor": config.rope_parameters["factor"],
+                "original_max_position_embeddings": config.rope_parameters[
                     "original_max_position_embeddings"
                 ],
-                "beta_fast": config.rope_scaling["beta_fast"],
-                "beta_slow": config.rope_scaling["beta_slow"],
+                "beta_fast": config.rope_parameters["beta_fast"],
+                "beta_slow": config.rope_parameters["beta_slow"],
             },
             is_neox_style=True,
         )

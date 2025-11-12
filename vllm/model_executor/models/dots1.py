@@ -203,7 +203,7 @@ class Dots1Attention(nn.Module):
         num_kv_heads: int,
         config: Dots1Config,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -256,7 +256,7 @@ class Dots1Attention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -297,7 +297,7 @@ class Dots1DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         layer_idx = int(prefix.split(sep=".")[-1])
         self.layer_idx = layer_idx
@@ -308,7 +308,7 @@ class Dots1DecoderLayer(nn.Module):
             num_kv_heads=config.num_key_value_heads,
             config=config,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,

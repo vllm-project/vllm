@@ -118,7 +118,7 @@ class Qwen2Attention(nn.Module):
         rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: tuple | None = None,
+        rope_parameters: tuple | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         dual_chunk_attention_config: dict[str, Any] | None = None,
@@ -168,7 +168,7 @@ class Qwen2Attention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position,
             base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
         attn_cls = (
@@ -218,7 +218,7 @@ class Qwen2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
         )
@@ -240,7 +240,7 @@ class Qwen2DecoderLayer(nn.Module):
             rope_theta=rope_theta,
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,

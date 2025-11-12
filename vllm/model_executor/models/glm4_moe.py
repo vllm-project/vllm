@@ -234,7 +234,7 @@ class Glm4MoeAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 131072,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-05,
@@ -292,7 +292,7 @@ class Glm4MoeAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             partial_rotary_factor=partial_rotary_factor,
         )
         self.attn = Attention(
@@ -342,7 +342,7 @@ class Glm4MoeDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
@@ -355,7 +355,7 @@ class Glm4MoeDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             max_position_embeddings=max_position_embeddings,
             head_dim=config.head_dim,
             rms_norm_eps=config.rms_norm_eps,

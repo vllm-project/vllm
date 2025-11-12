@@ -112,7 +112,7 @@ class SolarAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -167,7 +167,7 @@ class SolarAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -203,12 +203,12 @@ class SolarDecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
 
-        if rope_scaling is not None and getattr(
+        if rope_parameters is not None and getattr(
             config, "original_max_position_embeddings", None
         ):
-            rope_scaling["original_max_position_embeddings"] = (
+            rope_parameters["original_max_position_embeddings"] = (
                 config.original_max_position_embeddings
             )
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
@@ -225,7 +225,7 @@ class SolarDecoderLayer(nn.Module):
                 config, "num_key_value_heads", config.num_attention_heads
             ),
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,

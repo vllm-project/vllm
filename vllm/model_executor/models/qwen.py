@@ -84,7 +84,7 @@ class QWenAttention(nn.Module):
         num_heads: int,
         max_position_embeddings: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -118,7 +118,7 @@ class QWenAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -154,13 +154,13 @@ class QWenBlock(nn.Module):
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         self.attn = QWenAttention(
             config.hidden_size,
             config.num_attention_heads,
             config.max_position_embeddings,
             rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",

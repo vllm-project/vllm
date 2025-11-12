@@ -60,7 +60,7 @@ class Glm4Attention(nn.Module):
         rope_theta: float = 10000,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_scaling: tuple | None = None,
+        rope_parameters: tuple | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:
@@ -108,7 +108,7 @@ class Glm4Attention(nn.Module):
             rotary_dim=self.rotary_dim,
             max_position=max_position,
             base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             partial_rotary_factor=partial_rotary_factor,
             is_neox_style=False,
         )
@@ -151,7 +151,7 @@ class Glm4DecoderLayer(nn.Module):
 
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 1000000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
 
         self.self_attn = Glm4Attention(
             config=config,
@@ -164,7 +164,7 @@ class Glm4DecoderLayer(nn.Module):
             head_dim=getattr(config, "head_dim", None),
             cache_config=cache_config,
             quant_config=quant_config,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             prefix=f"{prefix}.self_attn",
             attn_type=AttentionType.DECODER,
         )

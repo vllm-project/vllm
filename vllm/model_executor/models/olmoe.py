@@ -124,7 +124,7 @@ class OlmoeAttention(nn.Module):
 
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
 
         num_heads = config.num_attention_heads
@@ -177,7 +177,7 @@ class OlmoeAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(

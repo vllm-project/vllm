@@ -234,7 +234,7 @@ class Zamba2Attention(nn.Module):
                 rotary_dim=self.attention_head_dim,
                 max_position=config.max_position_embeddings,
                 base=self.rope_theta,
-                rope_scaling=None,
+                rope_parameters=None,
                 is_neox_style=True,
             )
 

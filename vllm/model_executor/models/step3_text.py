@@ -146,7 +146,7 @@ class Step3TextAttention(nn.Module):
         norm_eps: float,
         rope_theta: int,
         share_q_dim: int | None = None,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embedding: int = 8192,
         head_dim: int = 256,
         cache_config: CacheConfig | None = None,
@@ -199,7 +199,7 @@ class Step3TextAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=max_position_embedding,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
         )
         scaling = self.head_dim**-0.5
         self.attn = Attention(
@@ -235,7 +235,7 @@ class Step3TextDecoderLayer(nn.Module):
         super().__init__()
         config = config.hf_config
         self.hidden_size = config.hidden_size
-        rope_scaling = getattr(config, "rope_scaling", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
 
         self.self_attn = Step3TextAttention(
             hidden_size=self.hidden_size,
@@ -248,7 +248,7 @@ class Step3TextDecoderLayer(nn.Module):
             head_dim=config.head_dim,
             share_q_dim=config.share_q_dim,
             rope_theta=config.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             prefix=f"{prefix}.self_attn",
         )
 
