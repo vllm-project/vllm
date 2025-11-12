@@ -1339,6 +1339,7 @@ class OpenAIServing:
             content = None  # Clear content since tool is called.
         elif request.tool_choice == "required":
             assert content is not None
+            print(f"------{content}--------")
             tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
             function_calls.extend(
                 [
