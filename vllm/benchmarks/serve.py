@@ -94,6 +94,10 @@ class BenchmarkMetrics:
     # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
+    # TPS per user - average tokens per second per request
+    tps_per_user: float
+    # TPS per GPU - output throughput divided by number of GPUs
+    tps_per_gpu: float
 
 
 @dataclass
@@ -288,6 +292,7 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentiles: list[float],
     goodput_config_dict: dict[str, float],
+    num_gpu: int = 1,
 ) -> tuple[BenchmarkMetrics, list[int]]:
     """Calculate the metrics for the benchmark.
 
@@ -311,6 +316,7 @@ def calculate_metrics(
     all_tpots: list[float] = []
     ttfts: list[float] = []
     e2els: list[float] = []
+    tps_per_user: list[float] = []
     for i in range(len(outputs)):
         if outputs[i].success:
             output_len = outputs[i].output_tokens
@@ -338,6 +344,10 @@ def calculate_metrics(
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
+            
+            # Calculate TPS per request: (input_tokens + output_tokens) / latency
+            tps_per_user.append(output_len / (outputs[i].latency))
+            
             completed += 1
         else:
             actual_output_lens.append(0)
@@ -476,6 +486,8 @@ def calculate_metrics(
         ],
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
+        tps_per_user=np.mean(tps_per_user) if tps_per_user else 0.0,
+        tps_per_gpu=sum(actual_output_lens) / dur_s / num_gpu if num_gpu > 0 else 0.0,
     )
 
     return metrics, actual_output_lens
@@ -508,6 +520,7 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    num_gpu: int = 1,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -739,6 +752,7 @@ async def benchmark(
             tokenizer=tokenizer,
             selected_percentiles=selected_percentiles,
             goodput_config_dict=goodput_config_dict,
+            num_gpu=num_gpu,
         )
     else:
         metrics = calculate_metrics_for_embeddings(
@@ -791,6 +805,11 @@ async def benchmark(
             "Total Token throughput (tok/s):", metrics.total_token_throughput
         )
     )
+    if isinstance(metrics, BenchmarkMetrics):
+        print("{:<40} {:<10.2f}".format("TPS per user (tok/s):",
+                                        metrics.tps_per_user))
+        print("{:<40} {:<10.2f}".format("TPS per GPU (tok/s):",
+                                        metrics.tps_per_gpu))
 
     if isinstance(metrics, BenchmarkMetrics):
         result = {
@@ -811,6 +830,8 @@ async def benchmark(
             "errors": [output.error for output in outputs],
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
+            "tps_per_user": metrics.tps_per_user,
+            "tps_per_gpu": metrics.tps_per_gpu,
         }
     else:
         result = {
@@ -1136,7 +1157,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--percentile-metrics",
         type=str,
-        default=None,
+        default="ttft,tpot,itl,e2el",
         help="Comma-separated list of selected metrics to report percentils. "
         "This argument specifies the metrics to report percentiles. "
         'Allowed metric names are "ttft", "tpot", "itl", "e2el". '
@@ -1282,6 +1303,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum time to wait for the endpoint to become ready "
         "in seconds (default: 600 seconds / 10 minutes). If set to 0, "
         "the ready check will be skipped.",
+    )
+    parser.add_argument(
+        "--num-gpu",
+        type=int,
+        default=1,
+        help="Number of GPUs used for serving. Used to calculate TPS per GPU metric."
     )
 
     parser.add_argument(
@@ -1443,6 +1470,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        num_gpu=args.num_gpu,
     )
 
     # Save config and results to json
