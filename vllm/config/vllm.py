@@ -57,7 +57,7 @@ else:
 logger = init_logger(__name__)
 
 
-class OptimizationLevel(Enum):
+class OptimizationLevel(IntEnum):
     """Optimization level enum."""
 
     O0 = 0
