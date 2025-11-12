@@ -644,14 +644,14 @@ class VllmBackend:
 
         # Reuses existing cache key
 
-        logger.info(
-            "torch.compile cache factors: env=%s cfg=%s comp=%s dir=%s",
+        logger.debug(
+            "torch.compile cache factors: env=%s cfg=%s comp=%s code=%s dir=%s",
             env_hash,
             config_hash,
             compiler_hash,
+            code_hash,
             local_cache_dir,
         )
-        logger.debug("code hash=%s", code_hash)
 
         # Persist and log only hash-relevant factors together.
         try:
