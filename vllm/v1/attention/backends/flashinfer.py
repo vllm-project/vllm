@@ -229,6 +229,13 @@ class FlashInferBackend(AttentionBackend):
         )
 
     @classmethod
+    def supports_sink(cls) -> bool:
+        """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
+        from vllm.utils.flashinfer import supports_trtllm_attention
+
+        return supports_trtllm_attention()
+
+    @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
         from vllm.platforms import current_platform
 
