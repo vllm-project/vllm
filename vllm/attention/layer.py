@@ -886,7 +886,7 @@ def get_attention_context(
     Returns:
         A tuple containing:
         - attn_metadata: Attention metadata for this specific layer, or None if
-           no metadata available
+            no metadata available
         - attn_layer: The attention layer instance (Attention or MLAAttention)
         - kv_cache: The KV cache tensor for current virtual engine
 
