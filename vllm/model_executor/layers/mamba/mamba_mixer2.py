@@ -426,9 +426,10 @@ class MambaMixer2(MambaBase, CustomOp):
         # `ColumnParallelLinear` and `MergedColumnParallelLinear`,
         # and `set_weight_attrs` doesn't allow to override it
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
-        self.conv_weights = self.conv1d.weight.view(
+        conv_weights = self.conv1d.weight.view(
             self.conv1d.weight.size(0), self.conv1d.weight.size(2)
         )
+        self.register_buffer("conv_weights", conv_weights, persistent=False)
 
         # - these are TPed by heads to reduce the size of the
         #   temporal shape
