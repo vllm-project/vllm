@@ -1531,12 +1531,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # FlatLogprobs.
     "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
     # Enable the fusion of the shared experts of the model with other experts.
-    "VLLM_USE_CUDA_FUSION_SHARED_EXPERTS":
-    lambda: bool(int(os.getenv("VLLM_USE_CUDA_FUSION_SHARED_EXPERTS", "0"))),
-
+    "VLLM_USE_CUDA_FUSION_SHARED_EXPERTS": lambda: bool(
+        int(os.getenv("VLLM_USE_CUDA_FUSION_SHARED_EXPERTS", "0"))
+    ),
     # Use the fused grouped top-k MoE expert selection router
-    "VLLM_USE_FUSED_MOE_ROUTER":
-    lambda: bool(int(os.getenv("VLLM_USE_FUSED_MOE_ROUTER", "0"))),
+    "VLLM_USE_FUSED_MOE_ROUTER": lambda: bool(
+        int(os.getenv("VLLM_USE_FUSED_MOE_ROUTER", "0"))
+    ),
 }
 
 # --8<-- [end:env-vars-definition]

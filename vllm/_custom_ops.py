@@ -1911,6 +1911,7 @@ def moe_lora_align_block_size(
         lora_ids,
     )
 
+
 def moe_fused_gate(
     input_tensor: torch.Tensor,
     bias: torch.Tensor,
@@ -1955,6 +1956,7 @@ if hasattr(torch.ops._moe_C, "moe_fused_gate"):
             dtype=torch.int32,
             device=input_tensor.device,
         )
+
 
 def moe_wna16_gemm(
     input: torch.Tensor,

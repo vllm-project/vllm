@@ -402,7 +402,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
             enable_fused_moe_router=enable_fused_moe_router,
-            )
+        )
 
         return fused_experts(
             x,

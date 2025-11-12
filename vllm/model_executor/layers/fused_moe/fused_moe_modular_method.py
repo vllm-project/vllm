@@ -103,6 +103,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
+        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # Is getattr needed?
         zero_expert_num = getattr(layer, "zero_expert_num", 0)

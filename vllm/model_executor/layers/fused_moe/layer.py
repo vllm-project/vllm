@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from abc import abstractmethod
 from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
@@ -59,8 +58,9 @@ from vllm.utils.torch_utils import (
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 if current_platform.is_cuda_alike():
-    from .fused_moe import eplb_map_to_physical_and_record, fused_experts
     from vllm._custom_ops import moe_fused_gate
+
+    from .fused_moe import eplb_map_to_physical_and_record, fused_experts
 else:
     fused_experts = None  # type: ignore
     FusedMoEPermuteExpertsUnpermute = object  # type: ignore
@@ -418,9 +418,10 @@ class FusedMoE(CustomOp):
             dp_size_=dp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
-        
+
         self.enable_fused_shared_experts = enable_fused_shared_experts
         if self.enable_fused_shared_experts:
+            assert n_shared_experts is not None
             num_experts += n_shared_experts
             top_k += n_shared_experts
 
@@ -464,10 +465,11 @@ class FusedMoE(CustomOp):
 
         self.num_fused_shared_experts = (
             n_shared_experts
-            if (
-                n_shared_experts is not None
-                and self.aiter_fmoe_shared_expert_enabled
-            ) or self.enable_fused_shared_experts
+            if n_shared_experts is not None
+            and (
+                self.aiter_fmoe_shared_expert_enabled
+                or self.enable_fused_shared_experts
+            )
             else 0
         )
         if (
@@ -526,12 +528,15 @@ class FusedMoE(CustomOp):
                 self.global_num_experts,
                 get_compressed_expert_map(self.expert_map),
             )
-            if (self.num_fused_shared_experts > 0):
+            if self.num_fused_shared_experts > 0:
                 logger.warning(
                     "With EP enabled and share expert fusion enabled"
                     ", share expert replica should be same as ep_size"
                     "got share expert replica = %d"
-                    "and ep_size = %d", self.num_fused_shared_experts, self.ep_size)
+                    "and ep_size = %d",
+                    self.num_fused_shared_experts,
+                    self.ep_size,
+                )
         else:
             self.local_num_experts, self.expert_map, self.expert_mask = (
                 self.global_num_experts,
@@ -1514,13 +1519,12 @@ class FusedMoE(CustomOp):
             assert topk_group is not None
             assert num_expert_group is not None
             if hidden_states.shape[0] == 0:
-                topk_ids = torch.full((0, top_k),
-                                      -1,
-                                      dtype=torch.int,
-                                      device=hidden_states.device)
-                topk_weights = torch.empty((0, top_k),
-                                           dtype=torch.float32,
-                                           device=hidden_states.device)
+                topk_ids = torch.full(
+                    (0, top_k), -1, dtype=torch.int, device=hidden_states.device
+                )
+                topk_weights = torch.empty(
+                    (0, top_k), dtype=torch.float32, device=hidden_states.device
+                )
             elif rocm_aiter_ops.is_fused_moe_enabled():
                 if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
                     assert num_fused_shared_experts == 0
@@ -1528,9 +1532,11 @@ class FusedMoE(CustomOp):
             else:
                 grouped_topk_impl = grouped_topk
 
-            if (enable_fused_moe_router
-                  and e_score_correction_bias is not None
-                  and is_power_of_two(e_score_correction_bias.shape[0])):
+            if (
+                enable_fused_moe_router
+                and e_score_correction_bias is not None
+                and is_power_of_two(e_score_correction_bias.shape[0])
+            ):
                 # The fused kernel can only work with 128/256 experts
                 topk_weights, topk_ids = moe_fused_gate(
                     input_tensor=router_logits.to(dtype=torch.float32),
@@ -1540,7 +1546,8 @@ class FusedMoE(CustomOp):
                     topk=top_k,
                     num_fused_shared_experts=num_fused_shared_experts,
                     routed_scaling_factor=routed_scaling_factor
-                    if routed_scaling_factor is not None else 1.0,
+                    if routed_scaling_factor is not None
+                    else 1.0,
                     apply_routed_scaling_factor_on_output=False,
                 )
             else:
@@ -1554,7 +1561,7 @@ class FusedMoE(CustomOp):
                     scoring_func=scoring_func,
                     routed_scaling_factor=routed_scaling_factor,
                     e_score_correction_bias=e_score_correction_bias,
-                    num_fused_shared_experts=num_fused_shared_experts
+                    num_fused_shared_experts=num_fused_shared_experts,
                 )
             if indices_type is not None:
                 topk_ids = topk_ids.to(dtype=indices_type)

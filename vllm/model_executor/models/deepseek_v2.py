@@ -1386,7 +1386,9 @@ class DeepseekV2ForCausalLM(
             self.config.num_hidden_layers - self.config.first_k_dense_replace
         )
         self.set_moe_parameters()
-        self.enable_fused_shared_experts = vllm_config.parallel_config.enable_fused_shared_experts
+        self.enable_fused_shared_experts = (
+            vllm_config.parallel_config.enable_fused_shared_experts
+        )
 
     def set_moe_parameters(self):
         self.expert_weights = []
@@ -1466,8 +1468,10 @@ class DeepseekV2ForCausalLM(
             stacked_params_mapping.extend(mla_params_mapping)
 
         if self.enable_fused_shared_experts:
-            logger.info("Cloning %s replicas of the shared expert into MoE",
-                    self.num_shared_experts)
+            logger.info(
+                "Cloning %s replicas of the shared expert into MoE",
+                self.num_shared_experts,
+            )
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
@@ -1494,12 +1498,8 @@ class DeepseekV2ForCausalLM(
                 continue  # skip spec decode layers for main model
 
             is_fuse_shared_experts_layer = (
-                (
-                    self.enable_fused_shared_experts
-                    or rocm_aiter_moe_shared_expert_enabled
-                )
-                and ("mlp.shared_experts" in name)
-            )
+                self.enable_fused_shared_experts or rocm_aiter_moe_shared_expert_enabled
+            ) and ("mlp.shared_experts" in name)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
