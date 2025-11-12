@@ -5,12 +5,12 @@ import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import reduce
 from itertools import product
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast, Optional, Iterable
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
 import torch
@@ -3178,35 +3178,81 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return None
 
     def reload_weights(
-        self, weights_iterator: Optional[Iterable[tuple[str, torch.Tensor]]] = None,
-        process_weights_after_loading: bool = True) -> None:
-        from vllm.model_executor.model_loader.utils import process_weights_after_loading as _process
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        process_weights_after_loading: bool = True,
+    ) -> None:
         from vllm.model_executor.model_loader.online_quantization import (
             restore_weights_for_loading,
         )
-
-        assert getattr(self, "model", None) is not None, (
-            "Cannot reload weights before model is loaded."
+        from vllm.model_executor.model_loader.utils import (
+            process_weights_after_loading as _process_after_loading,
         )
+
+        # argument validation
+        if weights_iterator is None and not process_weights_after_loading:
+            logger.warning(
+                "Loading from disk means that weights will be in checkpoint format"
+            )
+
+        if getattr(self, "model", None) is not None:
+            raise ValueError("Cannot reload weights before model is loaded.")
+
         model = self.get_model()
-
-        # for select quant configs, regenerate weights for proper weight loading
-        if process_weights_after_loading and hasattr("weight_loading_metadata"):
-            restore_weights_for_loading(model)
-
         logger.info("Reloading weights inplace...")
-        model_loader = get_model_loader(self.load_config)
-        model_loader.load_weights(model, model_config=self.model_config, weights_iterator=weights_iterator)
+        counter_before_loading_weights = time.perf_counter()
+
+        # maybe load weights from disk
+        if weights_iterator is None:
+            model_loader = get_model_loader(self.load_config)
+            weights_iterator = model_loader.get_all_weights(self.model_config, model)
+            weights_iterator = cast(
+                Iterable[tuple[str, torch.Tensor]], weights_iterator
+            )
 
         if process_weights_after_loading:
+            # restore model to checkpoint format
+            if hasattr(model, "weight_loading_metadata"):
+                restore_weights_for_loading(model)
+            else:
+                logger.warning("Quant config is not supported")
+
+            # load weights from checkpoint format
+            weights_to_load = {name for name, _ in model.named_parameters()}
+            loaded_weights = model.load_weights(weights_iterator)
+
+            # process weights into kernel format
             device_config = self.vllm_config.device_config
             load_config = self.vllm_config.load_config
             load_device = (
-                device_config.device if load_config.device is None else load_config.device
+                device_config.device
+                if load_config.device is None
+                else load_config.device
             )
-            _process(model, self.model_config, load_device)
+            _process_after_loading(model, self.model_config, load_device)
 
-        # TODO: logging total reload time
+        else:
+            # load weights from kernel format
+            for name, weight in weights_iterator:
+                param = model.get_parameter(name)
+                param.weight_loader(param, weight)
+
+        # logging
+        counter_after_loading_weights = time.perf_counter()
+        diff_seconds = counter_after_loading_weights - counter_before_loading_weights
+        logger.info_once(
+            "Loading weights took %.2f seconds", diff_seconds, scope="local"
+        )
+
+        # We only enable strict check for non-quantized models
+        # that have loaded weights tracking currently.
+        if self.model_config.quantization is None and loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError(
+                    "Following weights were not initialized from "
+                    f"checkpoint: {weights_not_loaded}"
+                )
 
     def save_tensorized_model(
         self,

@@ -1,20 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import types
+
+from copy import deepcopy
 
 import torch
 from torch import nn
-from copy import deepcopy
 
 from vllm.config import ModelConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.default_loader import DefaultModelLoader
-from vllm.model_executor.model_loader.utils import process_weights_after_loading
 
 logger = init_logger(__name__)
 
-SUPPORTED_QUANT_CONFIGS = {
+ONLINE_RELOAD_QUANT_CONFIGS = {
     "torchao",
     "fp8",
 }
@@ -70,25 +68,25 @@ SUPPORTED_QUANT_CONFIGS = {
 def maybe_save_metadata_and_attributes_for_weight_reloading(
     model: nn.Module, model_config: ModelConfig
 ):
-    # assume this is called right after weight loading and before/ at the start of process_weights_after_loading
+    # this function should be called at the start of `process_weights_after_loading`
     from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
     quant_config = get_quant_config(model_config, None)
-    if quant_config.get_name() not in SUPPORTED_QUANT_CONFIGS:
+    if quant_config.get_name() not in ONLINE_RELOAD_QUANT_CONFIGS:
         return
-    
+
     if not hasattr(model, "weight_loading_metadata"):
-        setattr(model, "weight_loading_metadata", {
+        model.weight_loading_metadata = {
             name: _copy_to_meta_tensor(param)
             for name, param in model.named_parameters()
-        })
+        }
 
-    return getattr(model, "weight_loading_metadata")
+    return model.weight_loading_metadata
 
 
 def restore_weights_for_loading(model: nn.Module):
     assert hasattr(model, "weight_loading_metadata")
-    metadata: dict[str, torch.Tensor] = getattr(model, "weight_loading_metadata")
+    metadata: dict[str, torch.Tensor] = model.weight_loading_metadata
     model_param_names = dict(model.named_parameters(remove_duplicate=False)).keys()
 
     # remove parameters which were not present at load time
@@ -109,7 +107,7 @@ def restore_weights_for_loading(model: nn.Module):
             continue
 
         param = _materialize_meta_tensor(meta_tensor)
-        setattr(module, param)
+        setattr(module, param_name, param)
 
 
 def _copy_to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -123,15 +121,14 @@ def _copy_to_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
 def _tensors_alike(tensor: torch.Tensor | None, meta: torch.Tensor) -> bool:
     if tensor is None:
         return False
-    
+
     return (
         tensor.device == meta._original_device
         and tensor.dtype == meta.dtype
         and tensor.shape == meta.shape
         and tensor.__dict__ == meta.__dict__
     )
-    
-       
+
 
 def _materialize_meta_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return torch.empty_strided(

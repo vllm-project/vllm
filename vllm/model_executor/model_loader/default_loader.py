@@ -5,7 +5,7 @@ import glob
 import os
 import time
 from collections.abc import Generator, Iterable
-from typing import cast, Optional
+from typing import cast
 
 import torch
 from torch import nn
@@ -272,18 +272,15 @@ class DefaultModelLoader(BaseModelLoader):
             allow_patterns_overrides=None,
         )
 
-    def load_weights(self, model: nn.Module, model_config: ModelConfig, weights_iterator: Optional[Iterable[tuple[str, torch.Tensor]]] = None) -> None:
+    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao" and torchao_version_at_least(
             "0.14.0"
         ):
             self.load_config.safetensors_load_strategy = "torchao"
-            
-        # use provided weights or load from disk
-        if weights_iterator is None:
-            weights_iterator = self.get_all_weights(model_config, model)
 
         # load weights into model
         weights_to_load = {name for name, _ in model.named_parameters()}
+        weights_iterator = self.get_all_weights(model_config, model)
         loaded_weights = model.load_weights(weights_iterator)
 
         # logging and validation
