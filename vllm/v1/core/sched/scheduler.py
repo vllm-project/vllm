@@ -57,7 +57,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsReader
+
 logger = init_logger(__name__)
 
 
