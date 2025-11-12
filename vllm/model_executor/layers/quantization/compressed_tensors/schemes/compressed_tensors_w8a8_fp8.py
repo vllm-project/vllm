@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
-    maybe_create_device_identity,
 )
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -108,8 +107,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         weight_loader: Callable,
         **kwargs,
     ):
-        maybe_create_device_identity()
-
         output_size_per_partition = sum(output_partition_sizes)
         layer.logical_widths = output_partition_sizes
         layer.weight_block_size = None

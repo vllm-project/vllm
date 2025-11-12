@@ -31,7 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTokenSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    maybe_create_device_identity,
     normalize_e4m3fn_to_e4m3fnuz,
 )
 from vllm.model_executor.parameter import (
@@ -112,7 +111,6 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
-        maybe_create_device_identity()
         weight_loader = extra_weight_attrs.get("weight_loader")
         del input_size, output_size
         output_size_per_partition = sum(output_partition_sizes)

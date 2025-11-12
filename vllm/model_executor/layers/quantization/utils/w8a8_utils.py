@@ -3,24 +3,9 @@
 
 
 import torch
-from packaging import version
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-
-# Input scaling factors are no longer optional in _scaled_mm starting
-# from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
-TORCH_DEVICE_IDENTITY = None
-
-# The condition to determine if it is on a platform that supports
-# torch._scaled_mm rowwise feature.
-# The condition is determined once as the operations
-# are time-consuming.
-USE_ROWWISE_TORCH_SCALED_MM = (
-    current_platform.is_rocm()
-    and version.parse(torch.__version__) >= version.parse("2.7")
-    and current_platform.has_device_capability(94)
-)
 
 
 def sparse_cutlass_supported() -> bool:
@@ -127,13 +112,6 @@ def requantize_with_max_scale(
             start = end
 
     return max_w_scale, weight
-
-
-def maybe_create_device_identity():
-    # Allocate dummy ones tensor for torch._scaled_mm
-    global TORCH_DEVICE_IDENTITY
-    if TORCH_DEVICE_IDENTITY is None:
-        TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
 
 
 def normalize_e4m3fn_to_e4m3fnuz(
