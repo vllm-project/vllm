@@ -48,9 +48,7 @@ DEFAULT_DTYPE = torch.get_default_dtype()
 @pytest.mark.parametrize("device", DEVICES)
 def test_from_lora_tensors(sql_lora_files, device):
     tensors = load_file(os.path.join(sql_lora_files, "adapter_model.safetensors"))
-    new_embeddings = load_file(
-        os.path.join(sql_lora_files, "new_embeddings.safetensors")
-    )
+    new_embeddings = load_file(os.path.join(sql_lora_files, ""))
 
     peft_helper = PEFTHelper.from_local_dir(
         sql_lora_files, max_position_embeddings=4096

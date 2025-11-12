@@ -4,7 +4,6 @@
 import random
 from copy import deepcopy
 from dataclasses import dataclass
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -344,154 +343,11 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             id_to_index,
             max_loras,
             vocab_size,
-            lora_config.lora_extra_vocab_size,
+            0,
         )
 
         lora_result = lora_embedding(torch.cat(inputs))
         expected_result = embedding(torch.cat(inputs))
-
-        rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
-
-
-@torch.inference_mode()
-# @pytest.mark.skip(
-#     reason="Fails when loras are in any slot other than the first.")
-@pytest.mark.parametrize("num_loras", [1, 2, 4])
-@pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
-@pytest.mark.parametrize("stage", STAGES)
-def test_embeddings_with_new_embeddings(
-    dist_init, num_loras, device, vocab_size, stage
-) -> None:
-    if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
-
-    torch.set_default_device(device)
-    max_loras = 8
-    punica_wrapper = get_punica_wrapper(8192, 256, device, max_loras=max_loras)
-    assert check_punica_wrapper(punica_wrapper)
-    lora_config = LoRAConfig(
-        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
-    )
-
-    def create_random_embedding_layer():
-        embedding = VocabParallelEmbedding(vocab_size, 256)
-        embedding_data = torch.rand_like(embedding.weight.data)
-        embedding.weight.data = embedding_data
-        embedding.weight.data[vocab_size:, :] = 0
-        expanded_embedding = VocabParallelEmbedding(
-            vocab_size + lora_config.lora_extra_vocab_size * max_loras,
-            256,
-            org_num_embeddings=vocab_size,
-        )
-        expanded_embedding.weight.data[:vocab_size, :] = embedding_data
-        # We need to deepcopy the embedding as it will be modified
-        # in place
-        lora_embedding = VocabParallelEmbeddingWithLoRA(deepcopy(expanded_embedding))
-        lora_embedding.create_lora_weights(max_loras, lora_config)
-
-        return expanded_embedding, lora_embedding
-
-    for i in range(NUM_RANDOM_SEEDS):
-        set_random_seed(i)
-
-        id_to_index = get_random_id_to_index(num_loras, max_loras)
-        expanded_embedding, lora_embedding = create_random_embedding_layer()
-        lora_dict, _ = populate_loras(
-            id_to_index,
-            layer=lora_embedding,
-            layer_weights=torch.zeros(
-                (256, vocab_size + lora_config.lora_extra_vocab_size)
-            ),
-            generate_embeddings_tensor=256,
-        )
-
-        lora_embedding.set_mapping(punica_wrapper)
-        # All embeddings tensors have the same shape.
-        embeddings_tensors = [
-            lora_dict[id].embeddings_tensor for id in sorted(lora_dict.keys())
-        ]
-        embeddings_tensor_len = embeddings_tensors[0].shape[0]
-
-        # Add empty embeddings_tensors for unoccupied lora slots.
-        for _ in range(max_loras - len(embeddings_tensors)):
-            embeddings_tensors.append(torch.zeros(embeddings_tensors[0].shape))
-
-        inputs, index_mapping, prompt_mapping = create_random_inputs(
-            active_lora_ids=list(lora_dict.keys()),
-            num_inputs=num_loras * 3,
-            input_size=(200,),
-            input_range=(1, vocab_size),
-            device=device,
-        )
-        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-            lora_config.lora_extra_vocab_size,
-        )
-        original_inputs = deepcopy(inputs)
-
-        # Force some of the inputs to be in the extended embeddings range
-        # to guarantee that their behavior is tested.
-        for input_, original_input_, lora_id in zip(
-            inputs, original_inputs, prompt_mapping
-        ):
-            embedding_id = lora_id - 1
-            input_[-1] = vocab_size + (embedding_id * embeddings_tensor_len)
-            original_input_[-1] = vocab_size
-            input_[-2] = vocab_size + ((embedding_id + 1) * embeddings_tensor_len - 1)
-            original_input_[-2] = vocab_size + embeddings_tensor_len - 1
-
-        expanded_embedding.weight[
-            vocab_size : vocab_size + (embeddings_tensor_len * max_loras)
-        ] = torch.cat(embeddings_tensors)
-
-        lora_result = lora_embedding(torch.cat(original_inputs))
-
-        expected_results: list[torch.Tensor] = []
-        for input_, original_input_, lora_id in zip(
-            inputs, original_inputs, prompt_mapping
-        ):
-            lora = lora_dict[lora_id]
-            result = expanded_embedding(input_)
-            after_a = F.embedding(
-                original_input_,
-                lora.lora_a.T,
-            )
-            result += after_a @ lora.lora_b.T
-            expected_results.append(result)
-        expected_result = torch.cat(expected_results)
-
-        rtol, atol = TOLERANCES[lora_result.dtype]
-        torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
-
-        # Check that resetting the lora weights succeeds
-
-        for slot_idx in range(max_loras):
-            lora_embedding.reset_lora(slot_idx)
-
-        inputs, index_mapping, prompt_mapping = create_random_inputs(
-            active_lora_ids=[0],
-            num_inputs=num_loras * 3,
-            input_size=(200,),
-            input_range=(1, vocab_size),
-            device=device,
-        )
-        original_inputs = deepcopy(inputs)
-        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
-        punica_wrapper.update_metadata(
-            lora_mapping,
-            id_to_index,
-            max_loras,
-            vocab_size,
-            lora_config.lora_extra_vocab_size,
-        )
-        lora_result = lora_embedding(torch.cat(original_inputs))
-        expected_result = expanded_embedding(torch.cat(inputs))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
@@ -518,9 +374,9 @@ def test_lm_head_logits_processor(
 
     def _pretest():
         linear = ParallelLMHead(
-            vocab_size + lora_config.lora_extra_vocab_size,
-            1024,
-            vocab_size,
+            num_embeddings=vocab_size + lora_config.lora_extra_vocab_size,
+            embedding_dim=1024,
+            org_num_embeddings=vocab_size,
             params_dtype=torch.float16,
         )
         linear.weight.data = torch.rand_like(linear.weight.data)
@@ -1008,109 +864,6 @@ def test_column_parallel_packed(
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
-
-
-@pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-@pytest.mark.parametrize(
-    "seed", list(range(VOCAB_PARALLEL_EMBEDDING_TEST_NUM_RANDOM_SEEDS))
-)
-def test_vocab_parallel_embedding_indices(tp_size, seed):
-    random.seed(seed)
-    vocab_size = random.randint(4000, 64000)
-    added_vocab_size = random.randint(0, 1024)
-    org_vocab_size = vocab_size - added_vocab_size
-    last_org_vocab_end_index = 0
-    last_added_vocab_end_index = org_vocab_size
-    computed_vocab_size = 0
-    computed_org_vocab_size = 0
-    computed_added_vocab_size = 0
-    vocab_size_padded = -1
-
-    all_org_tokens: list[int] = []
-    all_added_tokens: list[int] = []
-    token_ids: list[int] = []
-
-    for tp_rank in range(tp_size):
-        with (
-            patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_rank",
-                return_value=tp_rank,
-            ),
-            patch(
-                "vllm.model_executor.layers.vocab_parallel_embedding.get_tensor_model_parallel_world_size",
-                return_value=tp_size,
-            ),
-        ):
-            vocab_embedding = VocabParallelEmbedding(
-                vocab_size, 1, org_num_embeddings=org_vocab_size
-            )
-        vocab_size_padded = vocab_embedding.num_embeddings_padded
-        shard_indices = vocab_embedding.shard_indices
-        # Assert that the ranges are contiguous
-        assert shard_indices.org_vocab_start_index == last_org_vocab_end_index
-        assert shard_indices.added_vocab_start_index == last_added_vocab_end_index
-
-        # Ensure that we are not exceeding the vocab size
-        computed_vocab_size += shard_indices.num_elements_padded
-        computed_org_vocab_size += shard_indices.num_org_elements
-        computed_added_vocab_size += shard_indices.num_added_elements
-
-        # Ensure that the ranges are not overlapping
-        all_org_tokens.extend(
-            range(
-                shard_indices.org_vocab_start_index, shard_indices.org_vocab_end_index
-            )
-        )
-        all_added_tokens.extend(
-            range(
-                shard_indices.added_vocab_start_index,
-                shard_indices.added_vocab_end_index,
-            )
-        )
-
-        token_ids.extend(
-            range(
-                shard_indices.org_vocab_start_index, shard_indices.org_vocab_end_index
-            )
-        )
-        token_ids.extend(
-            [-1]
-            * (shard_indices.num_org_elements_padded - shard_indices.num_org_elements)
-        )
-        token_ids.extend(
-            range(
-                shard_indices.added_vocab_start_index,
-                shard_indices.added_vocab_end_index,
-            )
-        )
-        token_ids.extend(
-            [-1]
-            * (
-                shard_indices.num_added_elements_padded
-                - shard_indices.num_added_elements
-            )
-        )
-
-        last_org_vocab_end_index = shard_indices.org_vocab_end_index
-        last_added_vocab_end_index = shard_indices.added_vocab_end_index
-
-    assert computed_vocab_size == vocab_size_padded
-    assert computed_org_vocab_size == org_vocab_size
-    assert computed_added_vocab_size == added_vocab_size
-
-    # Ensure that the ranges are not overlapping
-    assert len(all_org_tokens) == len(set(all_org_tokens))
-    assert len(all_added_tokens) == len(set(all_added_tokens))
-    assert not set(all_org_tokens).intersection(set(all_added_tokens))
-
-    token_ids_tensor = torch.tensor(token_ids, dtype=torch.long)
-    reindex_mapping = vocab_embedding.get_sharded_to_full_mapping()
-    assert reindex_mapping is not None or tp_size == 1
-    if reindex_mapping is not None:
-        reindexed_token_ids = token_ids_tensor[reindex_mapping]
-        expected = torch.tensor(list(range(0, vocab_size)))
-        assert reindexed_token_ids[:vocab_size].equal(expected)
-        assert torch.all(reindexed_token_ids[vocab_size:] == -1)
 
 
 def test_get_masked_input_and_mask():
