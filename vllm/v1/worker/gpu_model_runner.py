@@ -35,6 +35,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     update_config,
 )
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -54,6 +55,10 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    RoutedExpertsCapturer
+)
+from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
@@ -165,9 +170,6 @@ from .utils import (
     sanity_check_mm_encoder_outputs,
     scatter_mm_placeholders,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsCapturer)
-from vllm.distributed import get_tensor_model_parallel_rank
 
 if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
@@ -3138,22 +3140,22 @@ class GPUModelRunner(
                 and get_tensor_model_parallel_rank() == 0
             ):
                 RoutedExpertsCapturer.get_instance().save_captured_experts(
-                indices=self.slot_mapping
-            )
+                    indices=self.slot_mapping
+                )
 
             output = ModelRunnerOutput(
-                    req_ids=req_ids_output_copy,
-                    req_id_to_index=req_id_to_index_output_copy,
-                    sampled_token_ids=valid_sampled_token_ids,
-                    logprobs=logprobs_lists,
-                    prompt_logprobs_dict=prompt_logprobs_dict,
-                    pooler_output=[],
-                    kv_connector_output=kv_connector_output,
-                    ec_connector_output=ec_connector_output
-                    if self.supports_mm_inputs
-                    else None,
-                    num_nans_in_logits=num_nans_in_logits,
-                )
+                req_ids=req_ids_output_copy,
+                req_id_to_index=req_id_to_index_output_copy,
+                sampled_token_ids=valid_sampled_token_ids,
+                logprobs=logprobs_lists,
+                prompt_logprobs_dict=prompt_logprobs_dict,
+                pooler_output=[],
+                kv_connector_output=kv_connector_output,
+                ec_connector_output=ec_connector_output
+                if self.supports_mm_inputs
+                else None,
+                num_nans_in_logits=num_nans_in_logits,
+            )
 
         if not self.use_async_scheduling:
             return output
