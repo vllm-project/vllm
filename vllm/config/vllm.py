@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .ec_transfer import ECTransferConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -103,6 +104,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    ec_transfer_config: ECTransferConfig | None = None
+    """The configurations for distributed EC cache transfer."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -181,6 +184,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.ec_transfer_config:
+            vllm_factors.append(self.ec_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -422,16 +429,13 @@ class VllmConfig:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
             else:
                 self.compilation_config.mode = CompilationMode.NONE
-        else:
-            assert self.compilation_config.mode >= CompilationMode.NONE
-            assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
 
         # If user does not set custom ops via none or all set it here based on
         # compilation mode and backend.
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
-                and self.compilation_config.mode > CompilationMode.NONE
+                and self.compilation_config.mode != CompilationMode.NONE
             ):
                 self.compilation_config.custom_ops.append("none")
             else:
@@ -607,6 +611,25 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # If DCP, ensure the block size is right.
+        if self.parallel_config.decode_context_parallel_size > 1:
+            assert (
+                self.parallel_config.dcp_kv_cache_interleave_size
+                <= self.cache_config.block_size
+                and self.cache_config.block_size
+                % self.parallel_config.dcp_kv_cache_interleave_size
+                == 0
+            ), (
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by dcp_kv_cache_interleave_size "
+                f"({self.parallel_config.dcp_kv_cache_interleave_size})."
+            )
+
+        assert (
+            self.parallel_config.dcp_kv_cache_interleave_size == 1
+            or self.speculative_config is None
+        ), "MTP with dcp_kv_cache_interleave_size > 1 is not supported now."
 
         # Do this after all the updates to compilation_config.mode
         if self.compilation_config.mode == CompilationMode.VLLM_COMPILE:
