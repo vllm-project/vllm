@@ -3,7 +3,10 @@
 
 from typing import Literal, get_args
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+
+logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
@@ -70,8 +73,11 @@ def register_quantization_config(quantization: str):
 
     def _wrapper(quant_config_cls):
         if quantization in QUANTIZATION_METHODS:
-            raise ValueError(
-                f"The quantization method `{quantization}` is already exists."
+            logger.warning(
+                "The quantization method `%s` is already exists."
+                " and will be overwritten by the quantization config %s.",
+                quantization,
+                quant_config_cls,
             )
         if not issubclass(quant_config_cls, QuantizationConfig):
             raise ValueError(
