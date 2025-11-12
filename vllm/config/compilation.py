@@ -549,6 +549,7 @@ class CompilationConfig:
             "traced_files",
             "compilation_time",
             "static_forward_context",
+            "pass_config", # handled separately below
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
