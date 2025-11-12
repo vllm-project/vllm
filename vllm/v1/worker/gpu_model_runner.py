@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from functools import reduce
 from itertools import product
-from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast, Optional, Iterable
 
 import numpy as np
 import torch
@@ -3177,13 +3177,36 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         return None
 
-    def reload_weights(self) -> None:
+    def reload_weights(
+        self, weights_iterator: Optional[Iterable[tuple[str, torch.Tensor]]] = None,
+        process_weights_after_loading: bool = True) -> None:
+        from vllm.model_executor.model_loader.utils import process_weights_after_loading as _process
+        from vllm.model_executor.model_loader.online_quantization import (
+            restore_weights_for_loading,
+        )
+
         assert getattr(self, "model", None) is not None, (
             "Cannot reload weights before model is loaded."
         )
-        model_loader = get_model_loader(self.load_config)
+        model = self.get_model()
+
+        # for select quant configs, regenerate weights for proper weight loading
+        if process_weights_after_loading and hasattr("weight_loading_metadata"):
+            restore_weights_for_loading(model)
+
         logger.info("Reloading weights inplace...")
-        model_loader.load_weights(self.get_model(), model_config=self.model_config)
+        model_loader = get_model_loader(self.load_config)
+        model_loader.load_weights(model, model_config=self.model_config, weights_iterator=weights_iterator)
+
+        if process_weights_after_loading:
+            device_config = self.vllm_config.device_config
+            load_config = self.vllm_config.load_config
+            load_device = (
+                device_config.device if load_config.device is None else load_config.device
+            )
+            _process(model, self.model_config, load_device)
+
+        # TODO: logging total reload time
 
     def save_tensorized_model(
         self,
