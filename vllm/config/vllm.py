@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .ec_transfer import ECTransferConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -103,6 +104,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    ec_transfer_config: ECTransferConfig | None = None
+    """The configurations for distributed EC cache transfer."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -181,6 +184,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.ec_transfer_config:
+            vllm_factors.append(self.ec_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
