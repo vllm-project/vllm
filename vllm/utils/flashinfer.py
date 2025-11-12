@@ -34,12 +34,13 @@ FLASHINFER_CUBINS_REPOSITORY = os.environ.get(
     "https://edge.urm.nvidia.com/artifactory/sw-kernelinferencelibrary-public-generic-local/",  # noqa: E501
 )
 
+
 @functools.cache
 def has_flashinfer_cubin() -> bool:
     """Return `True` if flashinfer-cubin package is available."""
     if envs.VLLM_HAS_FLASHINFER_CUBIN:
         return True
-    if importlib.util.find_spec("flashinfer-cubin") is not None:
+    if importlib.util.find_spec("flashinfer_cubin") is not None:
         return True
     logger.debug_once("flashinfer-cubin package was not found")
     return False
