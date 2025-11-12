@@ -25,6 +25,7 @@ from huggingface_hub.utils import (
     RevisionNotFoundError,
 )
 from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
@@ -34,6 +35,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
+from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
@@ -389,32 +391,29 @@ def file_or_path_exists(
     )
 
 
-def patch_rope_scaling(config: PretrainedConfig) -> None:
+def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    text_config = getattr(config, "text_config", None)
-    if text_config is not None:
-        patch_rope_scaling(text_config)
+    text_config = config.get_text_config()
+    # (Transformers v5, Transformers v4)
+    rope_parameters_keys = ("rope_parameters", "rope_scaling")
+    rope_parameters = getattr_iter(text_config, rope_parameters_keys, None)
 
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is not None:
-        patch_rope_scaling_dict(rope_scaling)
+    if rope_parameters is not None:
+        # Forward compatibility for Transformers v5
+        # (can be removed once Transformers v4 is no longer supported)
+        cls_attr = getattr(type(text_config), "rope_scaling", None)
+        if not isinstance(cls_attr, property):
+            text_config.rope_parameters = rope_parameters
+            delattr(text_config, "rope_scaling")
+        # Handle nested rope_parameters in interleaved sliding attention models
+        if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+            for rope_parameters_layer_type in rope_parameters.values():
+                patch_rope_parameters_dict(rope_parameters_layer_type)
+        else:
+            patch_rope_parameters_dict(rope_parameters)
 
 
-def patch_rope_scaling_dict(rope_scaling: dict[str, Any]) -> None:
-    if "rope_type" in rope_scaling and "type" in rope_scaling:
-        rope_type = rope_scaling["rope_type"]
-        rope_type_legacy = rope_scaling["type"]
-        if rope_type != rope_type_legacy:
-            raise ValueError(
-                f"Found conflicts between 'rope_type={rope_type}' (modern "
-                f"field) and 'type={rope_type_legacy}' (legacy field). "
-                "You should only specify one of them."
-            )
-
-    if "rope_type" not in rope_scaling and "type" in rope_scaling:
-        rope_scaling["rope_type"] = rope_scaling["type"]
-        logger.info("Replacing legacy 'type' key with 'rope_type'")
-
+def patch_rope_parameters_dict(rope_scaling: dict[str, Any]) -> None:
     if "rope_type" not in rope_scaling:
         raise ValueError("rope_scaling should have a 'rope_type' key")
 
@@ -679,7 +678,7 @@ def get_config(
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)
 
-    patch_rope_scaling(config)
+    patch_rope_parameters(config)
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()
