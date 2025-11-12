@@ -1056,6 +1056,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
         max_num_scheduled_tokens: int,
+        num_tokens_padded: int,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
@@ -1176,7 +1177,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
         num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        num_tokens_padded = self._get_num_input_tokens(num_tokens_unpadded)
         uniform_decode = (
             max_num_scheduled_tokens == self.uniform_decode_query_len
         ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
@@ -1473,6 +1473,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _compute_cascade_attn_prefix_lens(
         self,
         num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         num_common_prefix_blocks: list[int],
     ) -> list[list[int]] | None:
         """
@@ -1495,6 +1496,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # 0 if cascade attention should not be used
                     cascade_attn_prefix_len = self._compute_cascade_attn_prefix_len(
                         num_scheduled_tokens,
+                        num_computed_tokens,
                         num_common_prefix_blocks[kv_cache_gid],
                         attn_group.kv_cache_spec,
                         attn_group.get_metadata_builder(),
@@ -1507,6 +1509,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def _compute_cascade_attn_prefix_len(
         self,
         num_scheduled_tokens: np.ndarray,
+        num_computed_tokens: np.ndarray,
         num_common_prefix_blocks: int,
         kv_cache_spec: KVCacheSpec,
         attn_metadata_builder: AttentionMetadataBuilder,
@@ -1573,10 +1576,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # and the second kernel will get an empty input. While this is not
         # a fundamental problem, our current implementation does not support
         # this case.
-        num_reqs = len(num_scheduled_tokens)
-        common_prefix_len = min(
-            common_prefix_len, self.input_batch.num_computed_tokens_cpu[:num_reqs].min()
-        )
+        common_prefix_len = min(common_prefix_len, num_computed_tokens.min())
         # common_prefix_len should be a multiple of the block size.
         common_prefix_len = (
             common_prefix_len // kv_cache_spec.block_size * kv_cache_spec.block_size
@@ -2158,18 +2158,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             pooler_output=pooler_output,
         )
 
-    def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        if (
-            self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            and hasattr(self, "cudagraph_batch_sizes")
-            and self.cudagraph_batch_sizes
-            and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]
-        ):
-            # Use CUDA graphs.
-            # Add padding to the batch size.
-            return self.vllm_config.pad_for_cudagraph(num_scheduled_tokens)
-
-        # Eager mode.
+    def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
@@ -2527,6 +2516,37 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+                num_tokens_padded = self._pad_for_sequence_parallelism(
+                    scheduler_output.total_num_scheduled_tokens
+                )
+
+                cascade_attn_prefix_lens = None
+                # Disable cascade attention when using microbatching (DBO)
+                if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
+                    # Pre-compute cascade attention prefix lengths
+                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                        scheduler_output.num_common_prefix_blocks,
+                    )
+
+                # Will return an unpadded batch descriptor if cudagraph is not NONE.
+                cudagraph_runtime_mode, batch_descriptor = (
+                    self.cudagraph_dispatcher.dispatch(
+                        num_tokens=num_tokens_padded,
+                        num_reqs=num_reqs,
+                        max_num_scheduled_tokens=max_num_scheduled_tokens,
+                        has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                        use_cascade_attn=cascade_attn_prefix_lens is not None,
+                    )
+                )
+
+                padded_num_tokens = batch_descriptor.num_tokens
+                padded_num_reqs = (
+                    batch_descriptor.num_reqs
+                    if batch_descriptor.num_reqs is not None
+                    else num_reqs
+                )
 
                 (
                     logits_indices,
@@ -2534,29 +2554,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     ubatch_slices,
                     num_tokens_across_dp,
                 ) = self._prepare_inputs(
-                    scheduler_output, num_scheduled_tokens_np, max_num_scheduled_tokens
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                    max_num_scheduled_tokens,
+                    num_tokens_padded,
                 )
 
-                cascade_attn_prefix_lens = None
-                # Disable cascade attention when using microbatching (DBO)
-                if self.cascade_attn_enabled and ubatch_slices is None:
-                    # Pre-compute cascade attention prefix lengths
-                    # NOTE: Must be AFTER _prepare_inputs uses self.input_batch state
-                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                        num_scheduled_tokens_np,
-                        scheduler_output.num_common_prefix_blocks,
-                    )
-
-                # TODO(lucas): move cudagraph dispatching here:
-                #   https://github.com/vllm-project/vllm/issues/23789
-
-                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
-                        total_num_scheduled_tokens=total_num_scheduled_tokens,
+                        total_num_scheduled_tokens=padded_num_tokens,
                         max_num_scheduled_tokens=max_num_scheduled_tokens,
-                        num_reqs=num_reqs,
+                        num_reqs=padded_num_reqs,
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
@@ -2585,21 +2594,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 model_kwargs,
             ) = self._preprocess(
                 scheduler_output, num_input_tokens, intermediate_tensors
-            )
-
-            uniform_decode = (
-                max_num_scheduled_tokens == self.uniform_decode_query_len
-            ) and (num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-            batch_descriptor = BatchDescriptor(
-                num_tokens=num_input_tokens,
-                uniform_decode=uniform_decode,
-                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-            )
-            cudagraph_runtime_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    batch_descriptor,
-                    use_cascade_attn=cascade_attn_prefix_lens is not None,
-                )
             )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
@@ -3565,17 +3559,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
 
             # filter out the valid batch descriptor
+            has_lora = activate_lora and self.lora_config is not None
             _cg_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
-                    BatchDescriptor(
-                        num_tokens=num_tokens_after_padding,
-                        uniform_decode=uniform_decode,
-                        has_lora=activate_lora and self.lora_config is not None,
-                    )
+                    num_tokens=num_tokens_after_padding,
+                    num_reqs=num_reqs,
+                    max_num_scheduled_tokens=max_query_len,
+                    has_lora=has_lora,
+                    use_cascade_attn=False,
+                    force_uniform_flag=uniform_decode,
                 )
                 if not is_profile
-                else (CUDAGraphMode.NONE, None)
+                else (
+                    CUDAGraphMode.NONE,
+                    BatchDescriptor(
+                        num_tokens=num_tokens_after_padding,
+                        num_reqs=num_reqs,
+                        uniform_decode=uniform_decode,
+                        has_lora=has_lora,
+                    ),
+                )
             )
+
+            num_tokens_after_padding = batch_descriptor.num_tokens
+
             if cudagraph_runtime_mode is not None:
                 # we allow forcing NONE when the dispatcher disagrees to support
                 # warm ups for cudagraph capture

@@ -40,19 +40,15 @@ class BatchDescriptor(NamedTuple):
     False can also be used for an uniform decode batch to dispatch to the 
     cudagraph supporting non-uniform batches.
     """
+    num_reqs: int | None = None
+    """
+    Number of requests in the batch. Can be None for PIECEWISE cudagraphs where
+    we don't need to know the number of requests.
+    """
     has_lora: bool = False
     """
     Whether this batch has active LoRA adapters.
     """
-
-    @property
-    def non_uniform(self) -> "BatchDescriptor":
-        """
-        Return a non-uniform version of current batch descriptor.
-        """
-        return BatchDescriptor(
-            self.num_tokens, uniform_decode=False, has_lora=self.has_lora
-        )
 
 
 def _compute_sp_num_tokens(
