@@ -48,6 +48,7 @@ def eagle_prepare_inputs_padded_kernel(
 
     valid_count = tl.load(valid_sampled_tokens_count_ptr + req_idx)
     num_rejected_tokens = num_draft_tokens + 1 - valid_count
+    num_rejected_tokens = tl.where(num_draft_tokens > 0, num_rejected_tokens, 0)
 
     # query_start_loc[req_idx + 1] is the start position of the next request,
     # which is one past the last token of this request.
