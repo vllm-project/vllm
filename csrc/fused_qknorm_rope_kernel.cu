@@ -35,10 +35,12 @@
   CHECK_TH_CUDA(x);    \
   CHECK_CONTIGUOUS(x)
 
-#define FINAL_MASK 0xffffffff
+#ifdef USE_ROCM
+  #define FINAL_MASK 0xffffffffffffffffULL
+#else
+  #define FINAL_MASK 0xffffffff
+#endif
 
-// TODO: suport for AMD ROCM platform
-#ifndef USE_ROCM
 namespace tensorrt_llm::common {
 template <typename T, int num>
 struct packed_as;
@@ -60,7 +62,7 @@ struct packed_as<uint, 4> {
 
 template <typename T>
 __inline__ __device__ T warpReduceSum(T val) {
-  #pragma unroll
+#pragma unroll
   for (int mask = 16; mask > 0; mask >>= 1)
     val += __shfl_xor_sync(FINAL_MASK, val, mask, 32);
   return val;
@@ -97,12 +99,12 @@ __global__ void fusedQKNormRopeKernel(
     int64_t const* position_ids,     // Position IDs for RoPE
     int const num_tokens             // Number of tokens
 ) {
-  #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   if constexpr ((std::is_same_v<scalar_t_in, c10::BFloat16>) ||
                 std::is_same_v<scalar_t_cache, c10::BFloat16>) {
     return;
   } else {
-  #endif
+#endif
 
     using Converter = vllm::_typeConvert<scalar_t_in>;
     static_assert(Converter::exists,
@@ -179,7 +181,7 @@ __global__ void fusedQKNormRopeKernel(
     {
       vec_T vec = *reinterpret_cast<vec_T const*>(&qkv[offsetThread]);
       constexpr int num_packed_elems = elemSizeBytes / sizeof(T2_in);
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < num_packed_elems; i++) {
         // Interpret the generic vector chunk as the specific packed type
         T2_in packed_val = *(reinterpret_cast<T2_in*>(&vec) + i);
@@ -200,7 +202,7 @@ __global__ void fusedQKNormRopeKernel(
     float rms_rcp = rsqrtf(sumOfSquares / static_cast<float>(head_dim) + eps);
 
     // Normalize elements
-  #pragma unroll
+#pragma unroll
     for (int i = 0; i < numElemsPerThread; i++) {
       int dim = laneId * numElemsPerThread + i;
       float weight = isQ ? Converter::convert(q_weight[dim])
@@ -222,7 +224,7 @@ __global__ void fusedQKNormRopeKernel(
 
     if constexpr (interleave) {
       // Perform interleaving. Use pre-computed cos/sin values.
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < numElemsPerThread / 2; ++i) {
         int const idx0 = 2 * i;
         int const idx1 = 2 * i + 1;
@@ -245,9 +247,9 @@ __global__ void fusedQKNormRopeKernel(
       __syncwarp();
       // Get the data from the other half of the warp. Use pre-computed cos/sin
       // values.
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < numElemsPerThread; i++) {
-        elements2[i] = __shfl_xor_sync(0xffffffff, elements[i], 16);
+        elements2[i] = __shfl_xor_sync(FINAL_MASK, elements[i], 16);
         if (laneId < 16) {
           elements2[i] = -elements2[i];
         }
@@ -269,7 +271,7 @@ __global__ void fusedQKNormRopeKernel(
     {
       vec_T vec;
       constexpr int num_packed_elems = elemSizeBytes / sizeof(T2_in);
-  #pragma unroll
+#pragma unroll
       for (int i = 0; i < num_packed_elems; i++) {
         // Convert from float2 back to the specific packed type
         T2_in packed_val = Converter::convert(
@@ -280,21 +282,21 @@ __global__ void fusedQKNormRopeKernel(
       *reinterpret_cast<vec_T*>(&qkv[offsetThread]) = vec;
     }
 
-  #if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800
+#if (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ < 800) && !defined(USE_ROCM)
   }
-  #endif
+#endif
 }
 
-  // Borrowed from
-  // https://github.com/flashinfer-ai/flashinfer/blob/8125d079a43e9a0ba463a4ed1b639cefd084cec9/include/flashinfer/pos_enc.cuh#L568
-  #define DISPATCH_INTERLEAVE(interleave, INTERLEAVE, ...) \
-    if (interleave) {                                      \
-      const bool INTERLEAVE = true;                        \
-      __VA_ARGS__                                          \
-    } else {                                               \
-      const bool INTERLEAVE = false;                       \
-      __VA_ARGS__                                          \
-    }
+// Borrowed from
+// https://github.com/flashinfer-ai/flashinfer/blob/8125d079a43e9a0ba463a4ed1b639cefd084cec9/include/flashinfer/pos_enc.cuh#L568
+#define DISPATCH_INTERLEAVE(interleave, INTERLEAVE, ...) \
+  if (interleave) {                                      \
+    const bool INTERLEAVE = true;                        \
+    __VA_ARGS__                                          \
+  } else {                                               \
+    const bool INTERLEAVE = false;                       \
+    __VA_ARGS__                                          \
+  }
 
 template <typename scalar_t_in, typename scalar_t_cache>
 void launchFusedQKNormRope(void* qkv, int const num_tokens,
@@ -414,5 +416,3 @@ void fused_qk_norm_rope(
         });
   });
 }
-
-#endif  // not USE_ROCM
