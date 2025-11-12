@@ -38,7 +38,7 @@ class BatchDescriptor(NamedTuple):
     num_reqs: int | None = None
     """
     Number of requests in the batch. Can be None for PIECEWISE cudagraphs where
-    were the cudagraphs can handle any number of requests.
+    the cudagraphs can handle any number of requests.
     """
     uniform: bool = False
     """
