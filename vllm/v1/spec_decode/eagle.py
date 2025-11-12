@@ -24,6 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
@@ -47,104 +48,75 @@ logger = init_logger(__name__)
 PADDING_SLOT_ID = -1
 
 
-import torch
-import triton
-import triton.language as tl
-import numpy as np # Keep numpy for the non-fused part
-
 @triton.jit
-def _prepare_inputs_kernel(
-    # --- Input Tensors ---
-    cu_num_draft_tokens_ptr,      # [num_reqs] (Shape is [num_reqs], NOT [num_reqs+1])
-    valid_sampled_tokens_count_ptr, # [num_reqs]
-    query_start_loc_gpu_ptr,      # [num_reqs + 1] (This one *does* have [0] prefix)
-
-    # --- Output Tensor ---
-    token_indices_to_sample_ptr,  # [num_reqs] (OUTPUT)
-
-    # --- Scalar Arguments ---
-    num_reqs # : tl.int32
+def _eagle_prepare_inputs_padded_kernel(
+    cu_num_draft_tokens_ptr,  # [num_reqs]
+    valid_sampled_tokens_count_ptr,  # [num_reqs]
+    query_start_loc_gpu_ptr,  # [num_reqs + 1]
+    token_indices_to_sample_ptr,  # [num_reqs] (output)
+    num_reqs,  # tl.int32
 ):
     """
-    Fused Triton kernel. Each program processes one request.
-    It combines three operations into one, correctly implementing the
-    original torch.cat logic.
+    Fused kernel for Eagle prepare_input_padded. This kernel computes the
+    token index to sample for each request, taking into account the number
+    of draft tokens and the number of valid sampled tokens (which is one more than
+    the number of accepted tokens).
     """
-    # 1. Get the request index for this program
     req_idx = tl.program_id(axis=0)
     if req_idx >= num_reqs:
         return
 
-    # 2. Fused Logic: Step 1 (Calculate num_draft_tokens)
-    # This block implements the logic from:
-    # torch.cat(
-    #     [ cu_num_draft_tokens[0:1],
-    #       cu_num_draft_tokens[1:] - cu_num_draft_tokens[:-1] ]
-    # )
-    
-    # Load the cumulative sum value for the *current* request
+    # Calculate num_draft_tokens from cu_num_draft_tokens, which is an inclusive
+    # cumulative sum (first entry is the first value, not zero).
     cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
-    
+
     num_draft_tokens = 0
     if req_idx == 0:
-        # For the first request, we just take the first value
         num_draft_tokens = cu_draft_curr
     else:
-        # For all other requests, we take the diff
         cu_draft_prev = tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
         num_draft_tokens = cu_draft_curr - cu_draft_prev
 
-    # 3. Load other inputs for this request
     valid_count = tl.load(valid_sampled_tokens_count_ptr + req_idx)
-    
-    # query_start_loc *is* [num_reqs + 1], so we load [req_idx + 1]
-    # to get the end position for the current request.
-    q_start_loc_end = tl.load(query_start_loc_gpu_ptr + req_idx + 1)
+    num_rejected_tokens = num_draft_tokens + 1 - valid_count
 
-    # 4. Fused Logic: Step 2 (Calculate num_rejected_tokens)
-    calc_rejected = num_draft_tokens + 1 - valid_count
-    num_rejected_tokens = tl.where(num_draft_tokens > 0, calc_rejected, 0)
+    # query_start_loc[req_idx + 1] is the start position of the next request,
+    # which is one past the last token of this request.
+    q_last_tok_idx = tl.load(query_start_loc_gpu_ptr + req_idx + 1) - 1
 
-    # 5. Fused Logic: Step 3 (Calculate token_indices_to_sample)
-    index_to_sample = q_start_loc_end - 1 - num_rejected_tokens
-
-    # 6. Store the final result
+    index_to_sample = q_last_tok_idx - num_rejected_tokens
     tl.store(token_indices_to_sample_ptr + req_idx, index_to_sample)
 
-# --- Triton Kernel ---
 
 @triton.jit
-def _prepare_next_token_kernel(
-    # --- Input/Output Tensors ---
-    sampled_token_ids_ptr,         # [num_reqs, num_tokens]
-    discard_request_indices_ptr,   # [num_discarded_requests]
-    backup_next_token_ids_ptr,     # [num_reqs]
-    next_token_ids_ptr,            # [num_reqs] (OUTPUT)
-    valid_sampled_tokens_count_ptr, # [num_reqs] (OUTPUT)
-
-    # --- Scalar Arguments ---
-    vocab_size, # : tl.int32,
-    num_discarded_requests, # : tl.int32,
-    num_tokens, # : tl.int32,          # num_spec_tokens + 1
-    num_reqs, # : tl.int32,
-
-    # --- Strides ---
-    stride_sampled_tokens_req, # : tl.int32, # Stride for dim 0
-
-    # --- Compile-Time Constants ---
-    BLOCK_SIZE_TOKENS: tl.constexpr, # Power-of-2 >= num_tokens
-    BLOCK_SIZE_DISCARD: tl.constexpr # Block size for checking discard list
+def _eagle_prepare_next_token_padded_kernel(
+    sampled_token_ids_ptr,  # [num_reqs, num_sampled_tokens_per_req]
+    discard_request_indices_ptr,  # [num_discarded_requests]
+    backup_next_token_ids_ptr,  # [num_reqs]
+    next_token_ids_ptr,  # [num_reqs] (output)
+    valid_sampled_tokens_count_ptr,  # [num_reqs] (output)
+    vocab_size,  # tl.int32
+    num_discarded_requests,  # tl.int32
+    num_sampled_tokens_per_req,  # tl.int32 (num_spec_tokens + 1)
+    num_reqs,  # tl.int32
+    stride_sampled_token_ids,  # tl.int32 (stride for dim 0)
+    BLOCK_SIZE_TOKENS: tl.constexpr,  # Power-of-2 >= num_sampled_tokens_per_req
+    BLOCK_SIZE_DISCARD: tl.constexpr,  # Block size for checking for discarded requests
 ):
     """
-    Fused Triton kernel. Each program processes one request (one row).
+    Fused kernel for Eagle prepare_next_token_ids_padded. This kernel computes the
+    number of valid (1 + accepted) tokens for each request, and the corresponding
+    "next" token id to sample from during speculative decoding. This is the
+    "last accepted token" from the sampled tokens, or the backup token if no
+    tokens were accepted or if the request is in the discard list.
     """
-    # 1. Get the request index for this program
     req_idx = tl.program_id(axis=0)
     if req_idx >= num_reqs:
         return
 
-    # 2. Check if this request is in the discard list
-    # We must do this in blocks since num_discarded_requests is a runtime var
+    # Check if this request is discarded.
+    # Since there are few discarded requests, we can do a simple search here,
+    # and should almost always finish in a single block-iteration.
     is_discarded = False
     req_idx_64 = req_idx.to(tl.int64)
     discard_offs = tl.arange(0, BLOCK_SIZE_DISCARD)
@@ -153,51 +125,47 @@ def _prepare_next_token_kernel(
         discarded_idx_block = tl.load(
             discard_request_indices_ptr + discard_offs + i * BLOCK_SIZE_DISCARD,
             mask=mask,
-            other=-1
+            other=-1,
         )
         # Check if req_idx is in this block
         if tl.sum(tl.where(discarded_idx_block == req_idx_64, 1, 0)) > 0:
             is_discarded = True
-    
-    
+
     if is_discarded:
-        # 3. If discarded, write 0 count and backup token
         backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
         valid_count = tl.full((), 0, dtype=tl.uint32)
         tl.store(next_token_ids_ptr + req_idx, backup_token)
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
     else:
-        # 4. If not discarded, process the row to find the last valid token
+        # Count the number of valid tokens among the sampled tokens.
         token_offs = tl.arange(0, BLOCK_SIZE_TOKENS)
-        token_mask = token_offs < num_tokens
-        
-        # Load the full row of tokens
-        row_ptr = sampled_token_ids_ptr + req_idx * stride_sampled_tokens_req
+        token_mask = token_offs < num_sampled_tokens_per_req
+
+        row_ptr = sampled_token_ids_ptr + req_idx * stride_sampled_token_ids
         token_ids = tl.load(row_ptr + token_offs, mask=token_mask, other=-1)
-        
-        # Create a validity mask for tokens
+
+        # Rejected tokens are -1, valid tokens are in [0, vocab_size)
         is_valid_mask = (token_ids != -1) & (token_ids < vocab_size) & token_mask
-        
         valid_count = tl.sum(is_valid_mask)
-        
+
         if valid_count > 0:
-            # Find the *index* of the last valid token
-            # This is the equivalent of `valid_mask.sum(dim=1) - 1` and `gather`
+            # Guaranteed to be well-defined since
+            # valid_count > 0 implies is_valid_mask is not empty
             last_valid_index = tl.max(tl.where(is_valid_mask, token_offs, -1))
-            
-            # Select the token at that index
-            # (We can't index `token_ids[last_valid_index]` directly)
+
+            # Select the token at that index, using a sum trick since
+            # we don't want to load again to access token_ids[last_valid_index].
             last_valid_token = tl.sum(
                 tl.where(token_offs == last_valid_index, token_ids, 0)
             )
             tl.store(next_token_ids_ptr + req_idx, last_valid_token)
         else:
-            # No valid tokens found, use backup
+            # No valid tokens found, use backup token
             backup_token = tl.load(backup_next_token_ids_ptr + req_idx)
             tl.store(next_token_ids_ptr + req_idx, backup_token)
-            
-        # Store the valid count
+
         tl.store(valid_sampled_tokens_count_ptr + req_idx, valid_count)
+
 
 class EagleProposer:
     def __init__(
@@ -551,7 +519,7 @@ class EagleProposer:
                 positions += 1
                 exceeds_max_model_len = positions >= self.max_model_len
                 clamped_positions = torch.where(exceeds_max_model_len, 0, positions)
-            
+
             if exceeds_max_model_len.any().item():
                 raise RuntimeError(
                     "Some requests have exceeded the max model length during "
@@ -691,17 +659,9 @@ class EagleProposer:
         This function is used to prepare the inputs for speculative decoding.
         It calculates the next token ids and the number of valid sampled tokens
         for each request, considering the "discarded" requests whose next token
-        is not sampled and comes from `request.get_token_id()` instead.
-        It also accounts for the rejected tokens in `sampled_token_ids`.
-        
-        This version uses a fused Triton kernel.
+        is not sampled and comes from `request.get_token_id()` instead. This is denoted
+        the "backup" token id. It also counts rejected tokens via `sampled_token_ids`.
         """
-
-        torch.cuda.nvtx.mark("fused triton impl")
-
-        # --- Part 1: CPU-side Backup Token Prep (CANNOT be fused) ---
-        # This logic remains identical, as it requires CPU-side data
-        # and Python dictionary lookups.
         num_reqs = gpu_input_batch.num_reqs
         self.backup_next_token_ids.np[:num_reqs] = np.array(
             [
@@ -710,29 +670,22 @@ class EagleProposer:
                 )
                 for i in range(num_reqs)
             ],
-            dtype=np.int32
+            dtype=np.int32,
         )
         self.backup_next_token_ids.copy_to_gpu(num_reqs)
         backup_tokens_gpu = self.backup_next_token_ids.gpu
 
-        # --- Part 2: Fused Kernel Execution ---
-        
         batch_size, num_tokens = sampled_token_ids.shape
         device = sampled_token_ids.device
 
-        # Ensure inputs are the correct type for the kernel
-        # The kernel expects int64 for discard indices based on the test
-        if discard_request_indices.dtype != torch.int64:
-            raise TypeError("discard_request_indices must be torch.int64")
-        
-        # Ensure backup tokens are int32
-        if backup_tokens_gpu.dtype != torch.int32:
-            backup_tokens_gpu = backup_tokens_gpu.to(torch.int32)
-
-        # Allocate output tensors
-        next_token_ids = torch.empty(
-            (batch_size,), dtype=torch.int32, device=device
+        assert discard_request_indices.dtype == torch.int64, (
+            "discard_request_indices must be torch.int64"
         )
+        assert backup_tokens_gpu.dtype == torch.int32, (
+            "backup_tokens_gpu must be torch.int32"
+        )
+
+        next_token_ids = torch.empty((batch_size,), dtype=torch.int32, device=device)
         valid_sampled_tokens_count = torch.empty(
             (batch_size,), dtype=torch.int32, device=device
         )
@@ -742,10 +695,9 @@ class EagleProposer:
 
         # Find the next power of 2 for block sizes
         BLOCK_SIZE_TOKENS = triton.next_power_of_2(num_tokens)
-        BLOCK_SIZE_DISCARD = 128 # A reasonable default block size
+        BLOCK_SIZE_DISCARD = 32  # A small-ish block size for vectorized discard search
 
-        # Launch the kernel
-        _prepare_next_token_kernel[grid](
+        _eagle_prepare_next_token_padded_kernel[grid](
             sampled_token_ids,
             discard_request_indices,
             backup_tokens_gpu,
@@ -754,182 +706,49 @@ class EagleProposer:
             gpu_input_batch.vocab_size,
             num_discarded_requests,
             num_tokens,
-            batch_size, # num_reqs
+            batch_size,
             sampled_token_ids.stride(0),
             BLOCK_SIZE_TOKENS=BLOCK_SIZE_TOKENS,
-            BLOCK_SIZE_DISCARD=BLOCK_SIZE_DISCARD
+            BLOCK_SIZE_DISCARD=BLOCK_SIZE_DISCARD,
         )
 
         return next_token_ids, valid_sampled_tokens_count
-    
-    # def prepare_next_token_ids_padded(
-    #     self,
-    #     common_attn_metadata: CommonAttentionMetadata,
-    #     sampled_token_ids: torch.Tensor,
-    #     requests: dict[str, CachedRequestState],
-    #     gpu_input_batch: InputBatch,
-    #     discard_request_indices: torch.Tensor,
-    #     num_discarded_requests: int,
-    # ) -> tuple[torch.Tensor, torch.Tensor]:
-    #     """
-    #     This function is used to prepare the inputs for speculative decoding.
-    #     It calculates the next token ids and the number of valid sampled tokens
-    #     for each request, considering the "discarded" requests whose next token
-    #     is not sampled and comes from `request.get_token_id()` instead.
-    #     It also accounts for the rejected tokens in `sampled_token_ids`.
-    #     This function must use device functions to operate on the inputs, and
-    #     should not introduce any blocking CPU-GPU synchronization.
-    #     """
-    #     # TODO(Ben): Combine this into a custom fused kernel
-    #     torch.cuda.nvtx.mark("reference impl")
-
-    #     # Precompute get_token_id for when there is no valid next token
-    #     num_reqs = gpu_input_batch.num_reqs
-    #     self.backup_next_token_ids.np[:num_reqs] = np.array(
-    #         [
-    #             requests[gpu_input_batch.req_ids[i]].get_token_id(
-    #                 common_attn_metadata.seq_lens_cpu[i].item()
-    #             )
-    #             for i in range(num_reqs)
-    #         ]
-    #     )
-    #     self.backup_next_token_ids.copy_to_gpu(num_reqs)
-
-    #     # Mask out the sampled tokens indices that should not be sampled.
-    #     discard_sampled_tokens_req_indices = discard_request_indices[
-    #         :num_discarded_requests
-    #     ]
-
-    #     valid_sampled_token_ids_gpu = sampled_token_ids.clone()
-    #     valid_sampled_token_ids_gpu.index_fill_(
-    #         0, discard_sampled_tokens_req_indices, -1
-    #     )
-
-    #     # Generate a mask for all valid tokens within those requests
-    #     valid_mask = (valid_sampled_token_ids_gpu != -1) & (
-    #         valid_sampled_token_ids_gpu < gpu_input_batch.vocab_size
-    #     )
-
-    #     # Count the number of valid tokens in each request
-    #     valid_sampled_tokens_count = valid_mask.sum(dim=1)
-
-    #     # Get the rightmost valid index per row
-    #     last_valid_indices = valid_sampled_tokens_count - 1
-    #     last_valid_indices_safe = torch.clamp(last_valid_indices, min=0)
-
-    #     # Get last valid token from each row
-    #     # (assume undefined state where there is no valid token)
-    #     selected_tokens = torch.gather(
-    #         valid_sampled_token_ids_gpu, 1, last_valid_indices_safe.unsqueeze(1)
-    #     ).squeeze(1)
-
-    #     # Use last token if valid, pre-computed backup if not
-    #     batch_size = valid_sampled_token_ids_gpu.shape[0]
-    #     next_token_ids = torch.where(
-    #         last_valid_indices != -1,
-    #         selected_tokens,
-    #         self.backup_next_token_ids.gpu[:batch_size],
-    #     )
-
-    #     return next_token_ids, valid_sampled_tokens_count
-
-    # def prepare_inputs_padded(
-    #     self,
-    #     common_attn_metadata: CommonAttentionMetadata,
-    #     spec_decode_metadata: SpecDecodeMetadata,
-    #     valid_sampled_tokens_count: torch.Tensor,
-    # ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
-    #     """
-    #     This function is used to prepare the inputs for speculative decoding
-    #     It updates the common_attn_metadata for speculative decoding,
-    #     but does not consider the rejected tokens. Instead, all tokens
-    #     are included as inputs to the speculator, with the rejected tokens
-    #     used as padding and filtered out later by `token_indices_to_sample`.
-    #     No blocking CPU operations should be introduced in this function.
-    #     """
-    #     num_draft_tokens_gpu = torch.cat(
-    #         [
-    #             spec_decode_metadata.cu_num_draft_tokens[0:1],
-    #             spec_decode_metadata.cu_num_draft_tokens[1:]
-    #             - spec_decode_metadata.cu_num_draft_tokens[:-1],
-    #         ]
-    #     )
-
-    #     num_rejected_tokens_gpu = torch.where(
-    #         num_draft_tokens_gpu > 0,
-    #         num_draft_tokens_gpu + 1 - valid_sampled_tokens_count,
-    #         torch.zeros_like(num_draft_tokens_gpu),
-    #     )
-
-    #     query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-
-    #     new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-
-    #     total_num_tokens = query_start_loc_cpu[-1].item()
-
-    #     spec_common_attn_metadata = CommonAttentionMetadata(
-    #         query_start_loc=common_attn_metadata.query_start_loc,
-    #         seq_lens=common_attn_metadata.seq_lens,
-    #         query_start_loc_cpu=query_start_loc_cpu,
-    #         seq_lens_cpu=common_attn_metadata.seq_lens_cpu,
-    #         num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
-    #         num_reqs=common_attn_metadata.num_reqs,
-    #         num_actual_tokens=total_num_tokens,
-    #         max_query_len=new_query_len_per_req.max().item(),
-    #         max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
-    #         block_table_tensor=common_attn_metadata.block_table_tensor,
-    #         slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
-    #         causal=True,
-    #         dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
-    #     )
-
-    #     token_indices_to_sample = (
-    #         common_attn_metadata.query_start_loc[1:] - 1 - num_rejected_tokens_gpu
-    #     )
-
-    #     return spec_common_attn_metadata, token_indices_to_sample
 
     def prepare_inputs_padded(
         self,
         common_attn_metadata: CommonAttentionMetadata,
         spec_decode_metadata: SpecDecodeMetadata,
         valid_sampled_tokens_count: torch.Tensor,
-    ) -> tuple[CommonAttentionMetadata, torch.Tensor, torch.Tensor]:
+    ) -> tuple[CommonAttentionMetadata, torch.Tensor]:
         """
-        This function is used to prepare the inputs for speculative decoding.
-        
-        This version uses a fused Triton kernel to compute 
-        `token_indices_to_sample`.
+        This function is used to prepare the inputs for speculative decoding
+        It updates the common_attn_metadata for speculative decoding,
+        but does not consider the rejected tokens. Instead, all tokens
+        are included as inputs to the speculator, with the rejected tokens
+        used as padding and filtered out later by `token_indices_to_sample`.
         """
-        torch.cuda.nvtx.mark("fused triton impl")
         num_reqs = common_attn_metadata.num_reqs
         device = valid_sampled_tokens_count.device
 
-        with torch.cuda.nvtx.range("triton kernel"):
+        token_indices_to_sample = torch.empty(
+            (num_reqs,), dtype=torch.int32, device=device
+        )
 
-            # --- Fused Kernel Launch ---
-            # Allocate the output tensor for the kernel
-            token_indices_to_sample = torch.empty(
-                (num_reqs,), dtype=torch.int32, device=device
-            )
+        # Kernel grid: one program per request (row)
+        grid = (num_reqs,)
+        _eagle_prepare_inputs_padded_kernel[grid](
+            spec_decode_metadata.cu_num_draft_tokens,
+            valid_sampled_tokens_count,
+            common_attn_metadata.query_start_loc,
+            token_indices_to_sample,
+            num_reqs,
+        )
 
-            # Grid is 1D, one program per request
-            grid = (num_reqs,)
-            
-            _prepare_inputs_kernel[grid](
-                spec_decode_metadata.cu_num_draft_tokens,
-                valid_sampled_tokens_count,
-                common_attn_metadata.query_start_loc, # The GPU tensor
-                token_indices_to_sample,
-                num_reqs
-            )
-                
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
         new_query_len_per_req = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
 
-        total_num_tokens = query_start_loc_cpu[-1].item() 
+        total_num_tokens = query_start_loc_cpu[-1].item()
 
-        # Python object creation, with more .item() syncs
         spec_common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=common_attn_metadata.query_start_loc,
             seq_lens=common_attn_metadata.seq_lens,
@@ -938,10 +757,10 @@ class EagleProposer:
             num_computed_tokens_cpu=common_attn_metadata.num_computed_tokens_cpu,
             num_reqs=common_attn_metadata.num_reqs,
             num_actual_tokens=total_num_tokens,
-            max_query_len=new_query_len_per_req.max().item(), # .item() sync
-            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(), # .item() sync
+            max_query_len=new_query_len_per_req.max().item(),
+            max_seq_len=common_attn_metadata.seq_lens_cpu.max().item(),
             block_table_tensor=common_attn_metadata.block_table_tensor,
-            slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens], # fast slice
+            slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )

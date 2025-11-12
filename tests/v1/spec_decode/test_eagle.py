@@ -71,6 +71,7 @@ def _create_proposer(
 
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
 
+
 @pytest.mark.repeat(5)
 def test_prepare_next_token_ids():
     """
@@ -142,7 +143,6 @@ def test_prepare_next_token_ids():
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
     )
-
 
     torch.cuda._sleep(1_000_000_000)
     with torch.cuda.nvtx.range("prepare_next_token_ids_padded"):
@@ -250,6 +250,7 @@ def test_prepare_inputs():
     assert token_indices.shape[0] == expected_cu_num_tokens[-1].item()
     assert torch.equal(token_indices, expected_token_indices)
 
+
 @pytest.mark.repeat(3)
 def test_prepare_inputs_padded():
     """
@@ -259,11 +260,6 @@ def test_prepare_inputs_padded():
     - Request 3: query_len = 3, rejected = 2
 
     Expected outputs:
-    token_indices: [0, 1, 2,
-                    3, 4, 5,
-                    6, 7, 8]
-    Reason: Deferred computation should not disturb the original indices.
-
     token_indices_to_sample: [1, 5, 6]
     Reason: After accounting for rejections, these are the valid token positions
             from the original indices to sample from.
@@ -271,9 +267,6 @@ def test_prepare_inputs_padded():
 
     device = torch.device(current_platform.device_type)
 
-    expected_token_indices = torch.tensor(
-        [0, 1, 2, 3, 4, 5, 6, 7, 8], dtype=torch.int32, device=device
-    )
     expected_token_indices_to_sample = torch.tensor(
         [1, 5, 6], dtype=torch.int32, device=device
     )
@@ -310,15 +303,12 @@ def test_prepare_inputs_padded():
 
     torch.cuda._sleep(1_000_000_000)
     with torch.cuda.nvtx.range("prepare_inputs_padded"):
-        output_metadata, token_indices, token_indices_to_sample = (
-            proposer.prepare_inputs_padded(
-                common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
-            )
+        output_metadata, token_indices_to_sample = proposer.prepare_inputs_padded(
+            common_attn_metadata, spec_decode_metadata, valid_sampled_tokens_count
         )
 
     assert output_metadata.max_query_len == 3
     assert torch.equal(output_metadata.query_start_loc, expected_query_start_loc)
-    assert torch.equal(token_indices, expected_token_indices)
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
 
