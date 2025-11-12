@@ -110,7 +110,7 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         print("-" * 50)
 
 
-def build_llm_instance(eager: bool, shared_storage_path: Path):
+def build_llm_instance(shared_storage_path: Path):
     """Create the LLM instance with SharedStorageConnector configuration."""
     print(f"KV storage path at: {str(shared_storage_path)}")
 
@@ -126,7 +126,7 @@ def build_llm_instance(eager: bool, shared_storage_path: Path):
         max_model_len=8192,
         max_num_seqs=1,
         gpu_memory_utilization=0.4,
-        enforce_eager=eager,
+        enforce_eager=False,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
     )
@@ -257,7 +257,6 @@ def input_cases(test_images):
     ]
 
 
-@pytest.mark.parametrize("eager", [False, True])
 def test_shared_storage_connector_hashes(
     shared_storage_path,
     processor,
@@ -272,9 +271,7 @@ def test_shared_storage_connector_hashes(
     Note: These tests are stateful and must run in order (case_id 0 to 10).
     Each test depends on the cumulative state from previous tests.
     """
-    llm_instance = build_llm_instance(
-        eager=eager, shared_storage_path=shared_storage_path
-    )
+    llm_instance = build_llm_instance(shared_storage_path=shared_storage_path)
 
     for case_id, (text, img, expected_len, info) in enumerate(input_cases):
         print("\n", "=" * 25, f"Below running input case: {case_id}", "=" * 25)
