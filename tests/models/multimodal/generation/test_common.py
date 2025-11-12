@@ -851,6 +851,11 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 4},
             )
         ],
+        marks=[
+            pytest.mark.skip(
+                "Broken in Transformers v4.57.1, should be fixed in v4.57.2"
+            )
+        ],
     ),
     # regression test for https://github.com/vllm-project/vllm/issues/15122
     "qwen2_5_vl-windows-attention": VLMTestInfo(
