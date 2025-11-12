@@ -108,6 +108,11 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         zero_expert_num = getattr(layer, "zero_expert_num", 0)
         zero_expert_type = getattr(layer, "zero_expert_type", None)
 
+        prepare_finalize = self.fused_experts.prepare_finalize
+        hidden_states, router_logits = prepare_finalize.preprocess_inputs(
+            x, router_logits, layer
+        )
+
         if enable_eplb:
             if self.supports_eplb:
                 assert expert_load_view is not None
@@ -120,7 +125,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
                 )
 
         topk_weights, topk_ids, zero_expert_result = layer.select_experts(
-            hidden_states=x,
+            hidden_states=hidden_states,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
             top_k=top_k,
@@ -143,7 +148,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         )
 
         result = self.fused_experts(
-            hidden_states=x,
+            hidden_states=hidden_states,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
             topk_weights=topk_weights,
@@ -154,6 +159,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else expert_map,
         )
+
+        result = prepare_finalize.postprocess_output(result, layer)
 
         if zero_expert_num != 0 and zero_expert_type is not None:
             assert not isinstance(result, tuple), (

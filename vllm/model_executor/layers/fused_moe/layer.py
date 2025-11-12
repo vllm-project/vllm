@@ -17,7 +17,6 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
     get_dp_group,
-    get_ep_group,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
@@ -1701,10 +1700,6 @@ class FusedMoE(CustomOp):
                 hidden_states, router_logits, has_separate_shared_experts
             )
 
-        do_naive_dispatch_combine: bool = self.dp_size > 1 and not isinstance(
-            self.quant_method, FusedMoEModularMethod
-        )
-
         # If there are shared experts but we are not using a modular kernel, the
         # shared experts must be called here
         if has_separate_shared_experts:
@@ -1740,11 +1735,6 @@ class FusedMoE(CustomOp):
         )
 
         with sp_ctx:
-            if do_naive_dispatch_combine:
-                hidden_states, router_logits = get_ep_group().dispatch(
-                    hidden_states, router_logits, self.is_sequence_parallel
-                )
-
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
@@ -1787,21 +1777,26 @@ class FusedMoE(CustomOp):
                 assert isinstance(final_hidden_states, tuple)
                 final_hidden_states, zero_expert_result = final_hidden_states
 
-            def combine_output(states: torch.Tensor) -> torch.Tensor:
-                if do_naive_dispatch_combine:
-                    states = get_ep_group().combine(states, self.is_sequence_parallel)
+            def reduce_output(states: torch.Tensor) -> torch.Tensor:
+                if (
+                    not self.is_sequence_parallel
+                    and self.reduce_results
+                    and (self.tp_size > 1 or self.ep_size > 1)
+                ):
+                    states = self.maybe_all_reduce_tensor_model_parallel(states)
+
                 return states
 
             if self.shared_experts is not None:
                 return (
-                    final_hidden_states[0],
-                    combine_output(final_hidden_states[1]),
+                    reduce_output(final_hidden_states[0]),
+                    reduce_output(final_hidden_states[1]),
                 )
             elif self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, torch.Tensor)
-                return (combine_output(final_hidden_states), zero_expert_result)
+                return (reduce_output(final_hidden_states), zero_expert_result)
             else:
-                return combine_output(final_hidden_states)
+                return reduce_output(final_hidden_states)
 
     @classmethod
     def make_expert_params_mapping(

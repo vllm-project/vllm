@@ -53,7 +53,15 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def maybe_make_prepare_finalize(self) -> FusedMoEPrepareAndFinalize | None:
         from .all2all_utils import maybe_make_prepare_finalize
 
-        return maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+        prepare_finalize = maybe_make_prepare_finalize(self.moe, self.moe_quant_config)
+
+        if prepare_finalize is None and self.moe.dp_size > 1 and self.moe.use_ep:
+            # EP+DP without a specialized all2all backend: use naive dispatch/combine
+            from .naive_prepare_finalize import FusedMoENaivePrepareAndFinalize
+
+            return FusedMoENaivePrepareAndFinalize()
+
+        return prepare_finalize
 
     def select_gemm_impl(
         self,
