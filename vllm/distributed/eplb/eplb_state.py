@@ -66,7 +66,7 @@ class RebalanceTaskArgs:
 class ExpertMapperArgs:
     num_moe_layers: int
     policy_type: ExpertMapperPolicy
-    phyhsical_to_logical_map: torch.Tensor
+    physical_to_logical_map: torch.Tensor
 
 
 @dataclass
