@@ -64,8 +64,6 @@ class XPUPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
-        if not use_v1:
-            raise ValueError("XPU backend only supports V1.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()

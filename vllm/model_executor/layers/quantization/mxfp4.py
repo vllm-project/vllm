@@ -1145,7 +1145,7 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
     ) -> torch.Tensor:
         assert activation == "swigluoai", (
             "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"
-        )  # noqa:
+        )
         hidden_size_pad = round_up(self.original_hidden_size, 128)
         x_pad = torch.nn.functional.pad(x, (0, hidden_size_pad - x.size(-1)))
         hidden_states = layer.ipex_fusion(
