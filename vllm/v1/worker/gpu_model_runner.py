@@ -1271,9 +1271,11 @@ class GPUModelRunner(
 
     def _build_attention_metadata(
         self,
-        total_num_scheduled_tokens: int,
-        max_num_scheduled_tokens: int,
+        num_tokens: int,
+        num_tokens_padded: int,
         num_reqs: int,
+        num_reqs_padded: int,
+        max_query_len: int,
         ubatch_slices: UBatchSlices | None = None,
         logits_indices: torch.Tensor | None = None,
         use_spec_decode: bool = False,
@@ -1301,24 +1303,12 @@ class GPUModelRunner(
                 self.dcp_rank,
                 self.parallel_config.dcp_kv_cache_interleave_size,
             )
-            self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
+            self.dcp_local_seq_lens.cpu[num_reqs:].fill_(0)
+            self.dcp_local_seq_lens.copy_to_gpu(num_reqs_padded)
 
         attn_metadata: PerLayerAttnMetadata = {}
         if ubatch_slices is not None:
             attn_metadata = [dict() for _ in range(len(ubatch_slices))]
-
-        # Used in the below loop
-        query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
-        query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs + 1]
-        seq_lens = self.seq_lens.gpu[:num_reqs]
-        seq_lens_cpu = self.seq_lens.cpu[:num_reqs]
-        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
-            :num_reqs
-        ]
-        dcp_local_seq_lens = (
-            self.dcp_local_seq_lens.gpu[:num_reqs] if self.dcp_world_size > 1 else None
-        )
-        spec_decode_common_attn_metadata = None
 
         if for_cudagraph_capture:
             # For some attention backends (e.g. FA) with sliding window models we need
@@ -1335,6 +1325,21 @@ class GPUModelRunner(
             self.num_accepted_tokens.np[num_reqs:].fill(1)
             self.num_accepted_tokens.copy_to_gpu()
 
+        # Used in the below loop, uses padded shapes
+        query_start_loc = self.query_start_loc.gpu[: num_reqs_padded + 1]
+        query_start_loc_cpu = self.query_start_loc.cpu[: num_reqs_padded + 1]
+        seq_lens = self.seq_lens.gpu[:num_reqs_padded]
+        seq_lens_cpu = self.seq_lens.cpu[:num_reqs_padded]
+        num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
+            :num_reqs_padded
+        ]
+        dcp_local_seq_lens = (
+            self.dcp_local_seq_lens.gpu[:num_reqs_padded]
+            if self.dcp_world_size > 1
+            else None
+        )
+        spec_decode_common_attn_metadata = None
+
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
         for kv_cache_gid, kv_cache_group in enumerate(
@@ -1343,30 +1348,30 @@ class GPUModelRunner(
             encoder_seq_lens = self._get_encoder_seq_lens(
                 scheduled_encoder_inputs or {},
                 kv_cache_group.kv_cache_spec,
-                num_reqs,
+                num_reqs_padded,
             )
 
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 # Encoder-only layers do not have KV cache, so we need to
                 # create a dummy block table and slot mapping for them.
                 blk_table_tensor = torch.zeros(
-                    (num_reqs, 1),
+                    (num_tokens_padded, 1),
                     dtype=torch.int32,
                     device=self.device,
                 )
                 slot_mapping = torch.zeros(
-                    (total_num_scheduled_tokens,),
+                    (num_tokens_padded,),
                     dtype=torch.int64,
                     device=self.device,
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
-                blk_table_tensor = blk_table.get_device_tensor(num_reqs)
-                slot_mapping = blk_table.slot_mapping.gpu[:total_num_scheduled_tokens]
+                blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
+                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
 
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
-                blk_table.slot_mapping.gpu[total_num_scheduled_tokens:].fill_(-1)
+                blk_table.slot_mapping.gpu[num_tokens:].fill_(-1)
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
@@ -1374,9 +1379,9 @@ class GPUModelRunner(
                 seq_lens=seq_lens,
                 seq_lens_cpu=seq_lens_cpu,
                 num_computed_tokens_cpu=num_computed_tokens_cpu,
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
+                num_actual_tokens=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+                max_query_len=max_query_len,
                 max_seq_len=max_seq_len,
                 block_table_tensor=blk_table_tensor,
                 slot_mapping=slot_mapping,
@@ -1405,9 +1410,11 @@ class GPUModelRunner(
                 extra_attn_metadata_args = {}
                 if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
                     extra_attn_metadata_args = dict(
-                        num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs],
+                        num_accepted_tokens=self.num_accepted_tokens.gpu[
+                            :num_reqs_padded
+                        ],
                         num_decode_draft_tokens_cpu=self.num_decode_draft_tokens.cpu[
-                            :num_reqs
+                            :num_reqs_padded
                         ],
                     )
 
@@ -2582,9 +2589,11 @@ class GPUModelRunner(
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
-                        total_num_scheduled_tokens=num_reqs_padded,
-                        max_num_scheduled_tokens=max_num_scheduled_tokens,
+                        num_tokens=num_tokens_unpadded,
+                        num_tokens_padded=num_tokens_padded,
                         num_reqs=num_reqs_padded,
+                        num_reqs_padded=num_reqs_padded,
+                        max_query_len=max_num_scheduled_tokens,
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
@@ -3503,6 +3512,36 @@ class GPUModelRunner(
             dp_rank = self.parallel_config.data_parallel_rank
             num_tokens_padded = int(num_tokens_across_dp[dp_rank])
 
+        _cg_mode, batch_descriptor = (
+            self.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                has_lora=activate_lora and self.lora_config is not None,
+            )
+            if not is_profile
+            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
+        )
+
+        num_tokens_padded = batch_descriptor.num_tokens
+        num_reqs_padded = (
+            batch_descriptor.num_reqs
+            if batch_descriptor.num_reqs is not None
+            else num_reqs
+        )
+
+        if cudagraph_runtime_mode is not None:
+            # we allow forcing NONE when the dispatcher disagrees to support
+            # warm ups for cudagraph capture
+            assert (
+                cudagraph_runtime_mode == CUDAGraphMode.NONE
+                or cudagraph_runtime_mode == _cg_mode
+            ), (
+                f"Cudagraph runtime mode mismatch at dummy_run. "
+                f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
+            )
+        else:
+            cudagraph_runtime_mode = _cg_mode
+
         attn_metadata: PerLayerAttnMetadata | None = None
 
         # If force_attention is True, we always capture attention. Otherwise,
@@ -3524,9 +3563,11 @@ class GPUModelRunner(
             self.query_start_loc.copy_to_gpu()
 
             attn_metadata, _ = self._build_attention_metadata(
-                total_num_scheduled_tokens=num_tokens,
-                max_num_scheduled_tokens=max_query_len,
-                num_reqs=num_reqs,
+                num_tokens=num_tokens_unpadded,
+                num_tokens_padded=num_tokens_padded,
+                num_reqs=num_reqs_padded,
+                num_reqs_padded=num_reqs_padded,
+                max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices,
                 for_cudagraph_capture=True,
             )
@@ -3576,31 +3617,6 @@ class GPUModelRunner(
                 intermediate_tensors = self.sync_and_slice_intermediate_tensors(
                     num_tokens_padded, None, False
                 )
-
-            _cg_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
-                    num_tokens=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    has_lora=activate_lora and self.lora_config is not None,
-                )
-                if not is_profile
-                else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
-            )
-
-            num_tokens_padded = batch_descriptor.num_tokens
-
-            if cudagraph_runtime_mode is not None:
-                # we allow forcing NONE when the dispatcher disagrees to support
-                # warm ups for cudagraph capture
-                assert (
-                    cudagraph_runtime_mode == CUDAGraphMode.NONE
-                    or cudagraph_runtime_mode == _cg_mode
-                ), (
-                    f"Cudagraph runtime mode mismatch at dummy_run. "
-                    f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
-                )
-            else:
-                cudagraph_runtime_mode = _cg_mode
 
             if ubatch_slices is not None:
                 # Adjust values to reflect a single ubatch.

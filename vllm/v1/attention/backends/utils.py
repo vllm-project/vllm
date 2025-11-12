@@ -72,6 +72,7 @@ class CommonAttentionMetadata:
 
     num_reqs: int
     """Number of requests"""
+    # TODO(lucas): rename to num_tokens since it may be padded and this is misleading
     num_actual_tokens: int
     """Total number of tokens in batch"""
     max_query_len: int
