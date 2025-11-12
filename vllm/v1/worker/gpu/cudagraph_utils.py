@@ -34,6 +34,7 @@ class CudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.cudagraph_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
         self.padded_sizes = self._init_padded_sizes()
 
@@ -42,10 +43,10 @@ class CudaGraphManager:
         self.hidden_states: torch.Tensor | None = None
 
     def _init_padded_sizes(self) -> dict[int, int]:
-        if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
+        if self.cudagraph_mode == CUDAGraphMode.NONE:
             # CUDA graphs are disabled.
             return {}
-        if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
+        if self.cudagraph_mode.requires_piecewise_compilation():
             raise NotImplementedError("Piecewise CUDA graphs are not supported")
 
         padded_sizes: dict[int, int] = {}
@@ -65,9 +66,15 @@ class CudaGraphManager:
         scheduler_output: SchedulerOutput,
         num_tokens_after_padding: int,
     ) -> int | None:
-        if max(scheduler_output.num_scheduled_tokens.values()) > 1:
-            # Prefill is included.
+        if self.cudagraph_mode == CUDAGraphMode.NONE:
             return None
+        if self.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
+            if any(x > 1 for x in scheduler_output.num_scheduled_tokens.values()):
+                # Prefill is included.
+                # TODO(woosuk): Support uniform decode (for spec decoding).
+                return None
+        else:
+            assert self.cudagraph_mode == CUDAGraphMode.FULL
         return self.padded_sizes.get(num_tokens_after_padding)
 
     def capture_graph(
