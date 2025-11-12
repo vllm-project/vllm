@@ -262,6 +262,17 @@ class InputPreprocessor:
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
+        if not mm_data:
+            prompt_token_ids = (
+                self._tokenize_prompt(
+                    prompt,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
+                if isinstance(prompt, str)
+                else prompt
+            )
+            return token_inputs(prompt_token_ids)
+
         mm_processor = self._get_mm_processor()
 
         if mm_processor_kwargs is None:
