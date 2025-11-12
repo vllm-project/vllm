@@ -227,6 +227,17 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
+    dcp_kv_cache_interleave_size: int = 1
+    """Interleave size of kv_cache storage while using dcp or cp > 1,
+    store interleave_size tokens on (d)cp i,
+    then store next interleave_size tokens on (d)cp i+1.
+    Interleave_size=1: token-level align, token i is stored on rank i % (d)cp_size.
+    Interleave_size=block_size: block-level align, first fill the block on first rank,
+    token is stored on rank i+1 block j after rank i block j is full.
+    Block_size should be greater than or equal to dcp_kv_cache_interleave_size.
+    Block_size should be divisible by dcp_kv_cache_interleave_size.
+    """
+
     _api_process_count: int = Field(default=1, gt=0)
     """
     The number of API processes initialized.

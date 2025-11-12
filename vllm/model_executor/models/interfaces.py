@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Mapping, MutableSequence
+from collections.abc import Callable, Iterable, Mapping, MutableSequence, Set
 from typing import (
     TYPE_CHECKING,
     ClassVar,
@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
-from transformers import PretrainedConfig
 from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
@@ -32,10 +31,12 @@ from .interfaces_base import VllmModel, is_pooling_model
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.models.utils import WeightsMapper
+    from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.sequence import IntermediateTensors
 else:
     VllmConfig = object
     WeightsMapper = object
+    MultiModalFeatureSpec = object
     IntermediateTensors = object
 
 logger = init_logger(__name__)
@@ -79,6 +80,11 @@ class SupportsMultiModal(Protocol):
     """
     A flag that indicates which implementation of
     `vllm.multimodal.utils.group_mm_kwargs_by_modality` to use.
+    """
+
+    multimodal_cpu_fields: ClassVar[Set[str]] = frozenset()
+    """
+    A set indicating CPU-only multimodal fields.
     """
 
     @classmethod
@@ -986,14 +992,7 @@ class SupportsMRoPE(Protocol):
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
-        hf_config: PretrainedConfig,
-        image_grid_thw: list[list[int]] | torch.Tensor | None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None,
-        second_per_grid_ts: list[float] | None = None,
-        context_len: int = 0,
-        seq_len: int | None = None,
-        audio_feature_lengths: torch.Tensor | None = None,
-        use_audio_in_video: bool = False,
+        mm_features: list["MultiModalFeatureSpec"],
     ) -> tuple[torch.Tensor, int]:
         """
         Get M-RoPE input positions and delta value for this specific model.
@@ -1003,19 +1002,11 @@ class SupportsMRoPE(Protocol):
 
         Args:
             input_tokens: List of input token IDs
-            hf_config: HuggingFace model configuration
-            image_grid_thw: Image grid dimensions (t, h, w)
-            video_grid_thw: Video grid dimensions (t, h, w)
-            second_per_grid_ts: Seconds per grid timestep for videos
-            context_len: Context length
-            seq_len: Sequence length
-            audio_feature_lengths: Audio feature lengths for multimodal models
-            use_audio_in_video: Whether to use audio in video for interleaving
+            mm_features: Information about each multi-modal data item
 
         Returns:
-            Tuple of (llm_positions, mrope_position_delta)
-            - llm_positions: Tensor of shape [3, num_tokens]
-                with T/H/W positions
+            Tuple of `(llm_positions, mrope_position_delta)`
+            - llm_positions: Tensor of shape `[3, num_tokens]` with T/H/W positions
             - mrope_position_delta: Delta for position calculations
         """
         ...
