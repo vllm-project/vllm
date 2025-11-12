@@ -265,7 +265,7 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
 
     def _init_reorder_batch_threshold(
         self,
-        reorder_batch_threshold: int = 1,
+        reorder_batch_threshold: int | None = 1,
         supports_spec_as_decode: bool = False,
         supports_dcp_with_varlen: bool = False,
     ) -> None:

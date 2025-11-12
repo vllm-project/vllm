@@ -49,7 +49,7 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
     ROCM_AITER_FA = (
         "vllm.v1.attention.backends.rocm_aiter_fa.AiterFlashAttentionBackend"
     )
-    TORCH_SDPA = "vllm.v1.attention.backends.cpu_attn.TorchSDPABackend"
+    TORCH_SDPA = ""  # this tag is only used for ViT
     FLASHINFER = "vllm.v1.attention.backends.flashinfer.FlashInferBackend"
     FLASHINFER_MLA = (
         "vllm.v1.attention.backends.mla.flashinfer_mla.FlashInferMLABackend"
@@ -70,6 +70,7 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"
     )
+    CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     CUSTOM = ""
 

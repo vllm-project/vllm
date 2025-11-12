@@ -192,7 +192,7 @@ class SHMManager {
                       const int group_size)
       : _rank(rank),
         _group_size(group_size),
-        _thread_num(torch::get_num_threads()),
+        _thread_num(omp_get_max_threads()),
         _shm_names({""}),
         _shared_mem_ptrs({nullptr}),
         _shm_ctx(nullptr) {
