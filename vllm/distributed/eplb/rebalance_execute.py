@@ -18,10 +18,6 @@ from torch.distributed import (
     get_global_rank,
 )
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 def _allocate_peer_group_buffers(
     first_layer_weights: Sequence[torch.Tensor],
