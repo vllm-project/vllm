@@ -1657,7 +1657,6 @@ class NixlConnectorWorker:
         sample_cache = list(self.device_kv_caches.values())[0][0]
         for block_size_ratio, block_ids_list in block_ids_per_ratio.items():
             assert block_size_ratio > 1, "Only nP < nD supported currently."
-            fn = _process_local_gt_remote
             block_ids_list = [[item for sublist in block_ids_list for item in sublist]]
 
             for block_ids in block_ids_list:
@@ -1671,7 +1670,7 @@ class NixlConnectorWorker:
                         # virtual shape while stride can be either HND / NHD at
                         # initialization.
                         # we need to firstly get physical view of the tensor
-                        permuted_blocks = fn(
+                        permuted_blocks = _process_local_gt_remote(
                             blocks_to_update.permute(0, 2, 1, 3), block_size_ratio
                         ).permute(0, 2, 1, 3)
                         cache.index_copy_(0, indices, permuted_blocks)
@@ -1715,7 +1714,7 @@ class NixlConnectorWorker:
             )
             if (
                 not self.use_mla
-                and block_size_ratio != 1
+                and block_size_ratio > 1
                 and self.kv_cache_layout == "HND"
             ):
                 block_ids_for_blocksize_post_process[block_size_ratio].append(
@@ -1896,6 +1895,17 @@ class NixlConnectorWorker:
                 np.asarray(local_block_ids), block_size_ratio
             )
             if len(local_block_ids) > len(remote_block_ids):
+                # NOTE:
+                # get_mapped_blocks will always expand block_ids for n times.
+                # ex:
+                # prefill block_ids with block_size as 4:
+                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+                # Local decode block_ids with block_size as 16: [1, 2, 3]
+                # expland ecode block_ids with get_mapped_blocks from [1, 2, 3] to
+                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+                # Then we clip local to align with prefill
+                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12] to
+                # [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
                 local_block_ids = local_block_ids[: len(remote_block_ids)]
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
@@ -1939,12 +1949,8 @@ class NixlConnectorWorker:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         # Get side handles.
-        block_size = (
-            self.block_size
-            if block_size_ratio <= 1
-            else int(self.block_size // block_size_ratio)
-        )
-        local_xfer_side_handle = self.src_xfer_side_handles[block_size]
+        remote_block_size = self.kv_topo.remote_block_size[dst_engine_id]
+        local_xfer_side_handle = self.src_xfer_side_handles[remote_block_size]
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
