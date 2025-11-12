@@ -4804,7 +4804,7 @@ class GPUModelRunner(
                     f"The backend {layer.impl.__class__.__name__} does not "
                     "provide the softmax LSE for decode; ensure your attention "
                     "backend supports DCP or disable DCP. Please refer to "
-                    "the VLLM_ATTENTION_BACKEND" 
+                    "the VLLM_ATTENTION_BACKEND"
                 )
 
     def may_add_encoder_only_layers_to_kv_cache_config(self) -> None:
