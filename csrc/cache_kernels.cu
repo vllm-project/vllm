@@ -1016,6 +1016,7 @@ void gather_and_maybe_dequant_cache(
 
   int32_t block_size = src_cache.size(1);
   int32_t entry_size = src_cache.flatten(2, -1).size(2);
+  int32_t head_dim = dst.size(-1);
 
   TORCH_CHECK(block_table.dtype() == torch::kInt32,
               "block_table must be int32");
@@ -1025,6 +1026,9 @@ void gather_and_maybe_dequant_cache(
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
   }
+  TORCH_CHECK(head_dim == 576,
+              "gather_and_maybe_dequant_cache only support the head_dim to 576 "
+              "for better performance")
 
   TORCH_CHECK(src_cache.device() == dst.device(),
               "src_cache and dst must be on the same device");
