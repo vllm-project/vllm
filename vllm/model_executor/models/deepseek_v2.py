@@ -1214,7 +1214,7 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
