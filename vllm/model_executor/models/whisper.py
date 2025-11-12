@@ -54,7 +54,12 @@ from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from vllm.utils.torch_utils import set_default_torch_dtype
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsTranscription,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -783,9 +788,12 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
     dummy_inputs=WhisperDummyInputsBuilder,
 )
 class WhisperForConditionalGeneration(
-    nn.Module, SupportsTranscription, SupportsMultiModal
+    nn.Module, SupportsLoRA, SupportsTranscription, SupportsMultiModal
 ):
     merge_by_field_config = True
+
+    # LoRA support attributes
+    supports_lora = True
     packed_modules_mapping = {
         "self_attn.qkv_proj": [
             "self_attn.q_proj",
@@ -794,6 +802,11 @@ class WhisperForConditionalGeneration(
         ],
         "encoder_attn.kv_proj": ["encoder_attn.k_proj", "encoder_attn.v_proj"],
     }
+    embedding_modules = {
+        "model.decoder.embed_tokens": "input_embeddings",
+        "proj_out": "output_embeddings",
+    }
+    embedding_padding_modules = ["proj_out"]
 
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."}
