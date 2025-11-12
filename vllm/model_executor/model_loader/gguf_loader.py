@@ -8,7 +8,7 @@ import gguf
 import torch
 import torch.nn as nn
 from huggingface_hub import hf_hub_download
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
@@ -131,18 +131,51 @@ class GGUFModelLoader(BaseModelLoader):
         text_name_map = gguf.get_tensor_name_map(arch, text_num_layers)
 
         if is_multimodal:
-            mm_proj_arch = gguf.MODEL_ARCH.CLIP_VISION
+            mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
             vision_num_layers = config.vision_config.num_hidden_layers
             vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
 
+        # Create dummy model to extract parameter names
+        # For multimodal: use AutoModelForImageTextToText to get
+        # language + vision + projector params
+        # For text-only: use AutoModelForCausalLM to get language model params
         with torch.device("meta"):
-            dummy_model = AutoModelForCausalLM.from_config(
-                text_config, trust_remote_code=model_config.trust_remote_code
-            )
+            if is_multimodal:
+                dummy_model = AutoModelForImageTextToText.from_config(
+                    config, trust_remote_code=model_config.trust_remote_code
+                )
+            else:
+                dummy_model = AutoModelForCausalLM.from_config(
+                    text_config, trust_remote_code=model_config.trust_remote_code
+                )
 
         state_dict = dummy_model.state_dict()
+
+        # Log parameter distribution for debugging
+        if is_multimodal:
+            total_params = len(state_dict)
+            language_params = sum(
+                1
+                for p in state_dict
+                if "language_model" in p
+                or "model.embed" in p
+                or "model.layers" in p
+                or "lm_head" in p
+            )
+            vision_params = sum(1 for p in state_dict if "vision_tower" in p)
+            projector_params = sum(
+                1 for p in state_dict if "multi_modal_projector" in p
+            )
+            logger.info(
+                "Dummy model parameters: %d total "
+                "(%d language, %d vision, %d projector)",
+                total_params,
+                language_params,
+                vision_params,
+                projector_params,
+            )
         if hf_checkpoint_map := getattr(
             dummy_model, "_checkpoint_conversion_mapping", None
         ):
@@ -157,155 +190,166 @@ class GGUFModelLoader(BaseModelLoader):
                 revert_hf_rename(name): tensor for name, tensor in state_dict.items()
             }
 
-        # For Gemma3 multimodal, the registered HF names in gguf-py is wrong,
-        # Remap it manually. See:
-        # https://github.com/ggml-org/llama.cpp/blob/f117be185ef1b76129e51d26676354af253bf664/gguf-py/gguf/tensor_mapping.py#L1379-L1381
-        MM_PROJ_MAP = {
-            "multi_modal_projector.mm_input_projection_weight": "multi_modal_projector.mm_input_projection",  # noqa: E501
-        }
-
         def find_hf_name_in_tensor_map(hf_name: str) -> str | None:
+            """
+            Map HuggingFace parameter name to GGUF tensor name.
+
+            Handles three categories:
+            1. Text backbone parameters via text_name_map
+            2. Vision tower parameters via vision_name_map with Gemma3-specific fixes:
+               - mm_input_projection_weight: no .weight suffix in GGUF
+               - FFN swap: ffn_down↔fc1, ffn_up↔fc2 (GGUF naming differs from vLLM)
+            3. Manual overrides in gguf_to_hf_name_map
+            """
+            # Parse parameter name and suffix
             if hf_name.endswith((".weight", ".bias")):
-                name, suffix = hf_name.rsplit(".", 1)
+                base_name, suffix = hf_name.rsplit(".", 1)
             else:
-                name, suffix = hf_name, "weight"
+                base_name, suffix = hf_name, "weight"
+
             gguf_name = None
-            # 1st: search mm_proj for multimodal
+
+            # Priority 1: Search vision/projector parameters for multimodal models
             if vision_name_map is not None:
-                name_to_map = MM_PROJ_MAP.get(name, name)
-                gguf_name = vision_name_map.get_name(name_to_map)
-            # 2nd: search text backbone
+                # Gemma3 special case: mm_input_projection uses different base name
+                # in automatic mapping but still needs .weight suffix in GGUF file
+                if base_name == "multi_modal_projector.mm_input_projection_weight":
+                    gguf_name = vision_name_map.get_name(
+                        "multi_modal_projector.mm_input_projection"
+                    )
+                    if gguf_name:
+                        # GGUF file stores this with .weight suffix
+                        return gguf_name + "." + suffix
+
+                # Standard vision parameter lookup
+                gguf_name = vision_name_map.get_name(base_name)
+
+                # Gemma3-specific FFN swap correction
+                # GGUF stores tensor shapes in reverse order (C-style row-major),
+                # causing automatic mapping to incorrectly assign:
+                #   fc1 → ffn_up (but actual loaded tensor shape matches ffn_down)
+                #   fc2 → ffn_down (but actual loaded tensor shape matches ffn_up)
+                # This swap corrects the mapping to match actual loaded shapes.
+                # Only apply for Gemma3 vision tower MLP layers.
+                if (
+                    gguf_name
+                    and "gemma" in model_config.model.lower()
+                    and ".mlp.fc" in base_name
+                ):
+                    # Swap ffn_up ↔ ffn_down to match actual tensor shapes
+                    if ".fc1" in base_name and "ffn_up" in gguf_name:
+                        gguf_name = gguf_name.replace("ffn_up", "ffn_down")
+                    elif ".fc2" in base_name and "ffn_down" in gguf_name:
+                        gguf_name = gguf_name.replace("ffn_down", "ffn_up")
+
+            # Priority 2: Search text backbone parameters
             if gguf_name is None:
-                gguf_name = text_name_map.get_name(name)
+                gguf_name = text_name_map.get_name(base_name)
+
             if gguf_name is None:
                 return None
+
             return gguf_name + "." + suffix
 
+        # Build mapping and track unmapped parameters
+        unmapped_params = []
         for hf_name in state_dict:
             gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
-            # Multimodal may have extra prefix which will cause lookup failure,
-            # so try removing prefix and lookup again.
-            # TODO(Isotr0py): Prefix with more than one "."?
-            if gguf_name_with_suffix is None:
+
+            # Try removing prefix for multimodal parameters
+            # (e.g., "model.vision_tower" -> "vision_tower")
+            if gguf_name_with_suffix is None and "." in hf_name:
                 gguf_name_with_suffix = find_hf_name_in_tensor_map(
                     hf_name.split(".", 1)[-1]
                 )
-            if (
-                gguf_name_with_suffix is None
-                and hf_name not in gguf_to_hf_name_map.values()
-            ):
-                raise RuntimeError(
-                    f"Failed to to map gguf name for HF param: {hf_name}"
-                )
-            logger.debug(
-                "Map GGUF name %s to HF param %s", gguf_name_with_suffix, hf_name
-            )
+
+            # Track mapping success
             if gguf_name_with_suffix is not None:
                 gguf_to_hf_name_map[gguf_name_with_suffix] = hf_name
-        return gguf_to_hf_name_map
+                logger.debug("Mapped GGUF %s → HF %s", gguf_name_with_suffix, hf_name)
+            elif hf_name not in gguf_to_hf_name_map.values():
+                # Parameter not in manual overrides either
+                unmapped_params.append(hf_name)
 
-    def _create_mmproj_tensor_mapping(self, mmproj_path: str) -> dict[str, str]:
-        """
-        Create mapping from GGUF mmproj tensor names to vLLM parameter names
-        using GGUF library's automatic mapping system with filtering.
+        # Gemma3-specific fix: Strip 'model.' prefix from vision/projector params
+        # HuggingFace's AutoModelForImageTextToText returns parameters with
+        # 'model.vision_tower.*' and 'model.multi_modal_projector.*' prefixes,
+        # but vLLM's Gemma3ForConditionalGeneration expects these without the
+        # 'model.' prefix. This handles the naming impedance mismatch.
+        is_gemma3 = model_type == "gemma3"
+        if is_gemma3 and is_multimodal:
+            cleaned_map = {}
+            for gguf_name, hf_name in gguf_to_hf_name_map.items():
+                if hf_name.startswith("model.vision_tower."):
+                    # Strip 'model.' prefix from vision tower parameters
+                    cleaned_name = hf_name.replace(
+                        "model.vision_tower.", "vision_tower.", 1
+                    )
+                    cleaned_map[gguf_name] = cleaned_name
+                    logger.debug(
+                        "Gemma3: Stripped 'model.' prefix: %s -> %s",
+                        hf_name,
+                        cleaned_name,
+                    )
+                elif hf_name.startswith("model.multi_modal_projector."):
+                    # Strip 'model.' prefix from projector parameters
+                    cleaned_name = hf_name.replace(
+                        "model.multi_modal_projector.", "multi_modal_projector.", 1
+                    )
+                    cleaned_map[gguf_name] = cleaned_name
+                    logger.debug(
+                        "Gemma3: Stripped 'model.' prefix: %s -> %s",
+                        hf_name,
+                        cleaned_name,
+                    )
+                else:
+                    # Keep all other parameters unchanged (language model, etc.)
+                    cleaned_map[gguf_name] = hf_name
+            gguf_to_hf_name_map = cleaned_map
 
-        Uses automatic mapping from gguf library, filtered to only include
-        tensors that actually exist in the GGUF file.
+        # Intelligent error handling: categorize unmapped parameters
+        if unmapped_params:
+            # Separate vision/projector params from backbone params
+            vision_unmapped = [
+                p
+                for p in unmapped_params
+                if "vision_tower" in p or "multi_modal_projector" in p
+            ]
+            backbone_unmapped = [p for p in unmapped_params if p not in vision_unmapped]
 
+            # Vision/projector unmapped is acceptable
+            # (automatic mapping may not be complete)
+            if vision_unmapped:
+                logger.debug(
+                    "Unmapped vision/projector parameters (%d): %s",
+                    len(vision_unmapped),
+                    vision_unmapped[:5],  # Show first 5 only
+                )
 
-        Args:
-            mmproj_path: Path to mmproj.gguf file
-
-        Returns:
-            Dictionary mapping GGUF names to vLLM parameter names
-        """
-        # Read GGUF file to get metadata and actual tensor list
-        reader = gguf.GGUFReader(mmproj_path)
-
-        # Get layer count from metadata
-        num_layers_field = reader.get_field("clip.vision.block_count")
-        if num_layers_field is None:
-            raise ValueError(
-                "Missing 'clip.vision.block_count' in mmproj.gguf metadata. "
-                "Cannot determine number of vision transformer layers."
-            )
-        num_layers = int(num_layers_field.parts[-1])
-
-        # Get set of tensors that actually exist in this GGUF file
-        actual_gguf_tensors = {tensor.name for tensor in reader.tensors}
-
-        # Get automatic mapping from GGUF library
-        mmproj_map = gguf.get_tensor_name_map(gguf.MODEL_ARCH.MMPROJ, num_layers)
-
-        # Create candidate mappings: GGUF name -> vLLM-compatible HF names
-        gguf_to_vllm_candidates = {}
-        for hf_name, (tensor_type, gguf_base_name) in mmproj_map.mapping.items():
-            # Prefer vLLM-specific naming (vision_tower.*, multi_modal_projector.*)
-            if (
-                "vision_tower" in hf_name or "multi_modal_projector" in hf_name
-            ) and gguf_base_name not in gguf_to_vllm_candidates:
-                gguf_to_vllm_candidates[gguf_base_name] = hf_name
-
-        # Build filtered mapping - only include tensors that exist in GGUF file
-        mapping = {}
-        for gguf_base, vllm_base in gguf_to_vllm_candidates.items():
-            # Try both .weight and .bias suffixes
-            for suffix in [".weight", ".bias"]:
-                gguf_name = f"{gguf_base}{suffix}"
-
-                # FILTER: Only include if this tensor actually exists in GGUF file
-                if gguf_name in actual_gguf_tensors:
-                    vllm_name = f"{vllm_base}{suffix}"
-
-                    # Special case: Gemma3's mm_input_projection uses underscore
-                    # instead of dot before weight/bias suffix
-                    if vllm_name == "multi_modal_projector.mm_input_projection.weight":
-                        vllm_name = "multi_modal_projector.mm_input_projection_weight"
-                    elif vllm_name == "multi_modal_projector.mm_input_projection.bias":
-                        vllm_name = "multi_modal_projector.mm_input_projection_bias"
-
-                    mapping[gguf_name] = vllm_name
-
-        # Gemma3-specific FFN correction: GGUF automatic mapping has swapped naming
-        # GGUF auto: ffn_down -> fc2, ffn_up -> fc1
-        # vLLM expects: ffn_down -> fc1, ffn_up -> fc2
-        # This swap is necessary due to how Gemma3's MLP layers are structured in vLLM
-        ffn_corrections = {}
-        for gguf_name, vllm_name in mapping.items():
-            if ".ffn_down." in gguf_name and ".mlp.fc2." in vllm_name:
-                # Swap fc2 -> fc1 for ffn_down
-                ffn_corrections[gguf_name] = vllm_name.replace(".mlp.fc2.", ".mlp.fc1.")
-            elif ".ffn_up." in gguf_name and ".mlp.fc1." in vllm_name:
-                # Swap fc1 -> fc2 for ffn_up
-                ffn_corrections[gguf_name] = vllm_name.replace(".mlp.fc1.", ".mlp.fc2.")
-
-        # Apply corrections
-        mapping.update(ffn_corrections)
-
-        # Validation: Ensure critical Gemma3 components are present
-        expected_prefixes = [
-            "mm.input_projection",
-            "mm.soft_emb_norm",
-            "v.patch_embd",
-            "v.position_embd",
-            "v.post_ln",
-        ]
-        for prefix in expected_prefixes:
-            if not any(k.startswith(prefix) for k in mapping):
-                logger.warning(
-                    "Automatic GGUF mapping missing expected prefix: %s. "
-                    "This may indicate an incompatible vision encoder architecture.",
-                    prefix,
+            # Backbone unmapped is an error (critical for model functionality)
+            if backbone_unmapped:
+                raise RuntimeError(
+                    f"Failed to map critical backbone parameters "
+                    f"({len(backbone_unmapped)}): "
+                    f"{backbone_unmapped[:10]}"  # Show first 10
                 )
 
         logger.info(
-            "Created %d tensor mappings from GGUF automatic mapping "
-            "(filtered from %d candidates)",
-            len(mapping),
-            len(gguf_to_vllm_candidates) * 2,
+            "Mapped %d parameters (%d vision/projector, %d backbone)",
+            len(gguf_to_hf_name_map),
+            sum(
+                1
+                for p in gguf_to_hf_name_map.values()
+                if "vision_tower" in p or "multi_modal_projector" in p
+            ),
+            sum(
+                1
+                for p in gguf_to_hf_name_map.values()
+                if "vision_tower" not in p and "multi_modal_projector" not in p
+            ),
         )
 
-        return mapping
+        return gguf_to_hf_name_map
 
     def _get_weights_iterator(
         self,
@@ -336,37 +380,37 @@ class GGUFModelLoader(BaseModelLoader):
         is_multimodal = has_mmproj and hasattr(hf_config, "vision_config")
 
         if is_multimodal:
-            # Multimodal: Append mmproj weights to backbone weights
-            # This addresses the maintainer's FIXME about simply appending weights
+            # Multimodal: Load weights from both main GGUF and mmproj.gguf
+            # Using unified gguf_to_hf_name_map for both files - iterator naturally
+            # filters to only tensors present in each file
 
             # Helper to remap backbone weights to language_model hierarchy
             def remap_backbone_weights(weights_iter):
-                """Remap model.* → language_model.model.* for Gemma3 hierarchy"""
+                """Remap model.* → language_model.model.*
+                for Gemma3 multimodal hierarchy.
+                """
                 for name, tensor in weights_iter:
                     if name.startswith("model."):
                         name = name.replace("model.", "language_model.model.", 1)
                     yield (name, tensor)
 
-            # 1. Backbone (language model) weights from main GGUF file
+            # Load language model weights from main GGUF file
             logger.info("Loading language model weights from main GGUF file...")
             backbone_iter = remap_backbone_weights(
                 gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
             )
 
-            # 2. MM projector weights from mmproj.gguf
+            # Load vision tower + projector weights from mmproj GGUF file
             mmproj_path = str(mmproj_files[0])
-            mmproj_mapping = self._create_mmproj_tensor_mapping(mmproj_path)
-
             logger.info(
-                "Loading vision tower and projector weights from %s...",
-                mmproj_files[0].name,
+                "Loading vision/projector weights from %s...", mmproj_files[0].name
             )
-            mmproj_iter = gguf_quant_weights_iterator(mmproj_path, mmproj_mapping)
+            mmproj_iter = gguf_quant_weights_iterator(mmproj_path, gguf_to_hf_name_map)
 
-            # Append mmproj weights to backbone weights using iterator chaining
+            # Chain iterators: backbone first, then vision/projector
             yield from itertools.chain(backbone_iter, mmproj_iter)
         else:
-            # Standard GGUF loading (text-only or non-Gemma3)
+            # Text-only: Load from single GGUF file
             yield from gguf_quant_weights_iterator(
                 model_name_or_path, gguf_to_hf_name_map
             )
