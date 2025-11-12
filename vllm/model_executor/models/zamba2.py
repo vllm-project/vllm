@@ -38,14 +38,13 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import HasInnerState, IsHybrid
+from .interfaces import HasInnerState, IsHybrid, SupportsMambaPrefixCaching
 from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 
@@ -75,7 +74,12 @@ class Zamba2LoRA(nn.Module):
         super().__init__()
 
         self.A = ColumnParallelLinear(
-            input_dim, rank, bias=False, quant_config=quant_config, gather_output=True
+            input_dim,
+            rank,
+            bias=False,
+            quant_config=quant_config,
+            gather_output=True,
+            prefix=f"{prefix}.A",
         )
 
         if isinstance(output_dim, list):
@@ -150,12 +154,14 @@ class Zamba2Attention(nn.Module):
             self.total_num_attention_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.attention_hidden_size,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         # Even though in Zamba2 weights are shared between attention layers, KV
@@ -197,18 +203,21 @@ class Zamba2Attention(nn.Module):
                         config.adapter_rank,
                         self.attention_hidden_size,
                         quant_config=quant_config,
+                        prefix=f"{prefix}.linear_q_adapter",
                     )
                     linear_k_adapter = Zamba2LoRA(
                         self.attention_hidden_size,
                         config.adapter_rank,
                         self.attention_hidden_size,
                         quant_config=quant_config,
+                        prefix=f"{prefix}.linear_k_adapter",
                     )
                     linear_v_adapter = Zamba2LoRA(
                         self.attention_hidden_size,
                         config.adapter_rank,
                         self.attention_hidden_size,
                         quant_config=quant_config,
+                        prefix=f"{prefix}.linear_v_adapter",
                     )
                 else:
                     linear_q_adapter = nn.Identity()
@@ -312,6 +321,7 @@ class Zamba2MLP(nn.Module):
             2 * [self.intermediate_size],  # 2x for gate and input projections
             bias=self.config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
         )
 
         self.down_proj = RowParallelLinear(
@@ -319,6 +329,7 @@ class Zamba2MLP(nn.Module):
             self.hidden_size,
             bias=self.config.add_bias_linear,
             quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
         )
 
         # Only allow GELU activations
@@ -418,6 +429,7 @@ class Zamba2AttentionDecoderLayer(nn.Module):
             bare_block_idx=bare_block_idx,
             num_hybrid_layers=num_hybrid_layers,
             quant_config=quant_config,
+            prefix=f"{prefix}.feed_forward",
         )
 
         # Initialize layer normalizations
@@ -599,6 +611,7 @@ class Zamba2HybridLayer(nn.Module):
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.linear",
         )
         self.mamba_decoder = Zamba2MambaDecoderLayer(
             config,
@@ -678,19 +691,13 @@ class Zamba2Model(nn.Module):
         assert not is_lora_enabled
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
 
         # Initialize token embeddings
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         # Map hybrid layer indices to block indices
@@ -824,7 +831,7 @@ class Zamba2Model(nn.Module):
         return loaded_params
 
 
-class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
+class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsMambaPrefixCaching):
     """Zamba2 model with causal language modeling head.
 
     This class wraps the core Zamba2 model and adds:
@@ -897,7 +904,7 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 (not supported by Mamba)
         """
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
 
         super().__init__()
@@ -905,9 +912,6 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         self.vllm_config = vllm_config
         self.scheduler_config = scheduler_config
         self.model_config = vllm_config.model_config
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
 
         # Initialize core model
         self.model = Zamba2Model(
@@ -916,23 +920,15 @@ class Zamba2ForCausalLM(nn.Module, HasInnerState, IsHybrid):
 
         # Initialize language modeling head
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         # Tie weights with input embeddings if using same dimensions
         self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
 
         # Initialize logits processing and sampling
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings.
