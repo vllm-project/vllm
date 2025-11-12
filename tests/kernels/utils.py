@@ -15,7 +15,7 @@ from torch._prims_common import TensorLikeType
 
 from tests.kernels.quant_utils import native_w8a8_block_matmul
 from vllm.attention import AttentionType
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils import (
     STR_BACKEND_ENV_VAR,
@@ -903,6 +903,7 @@ def torch_experts(
     w2: torch.Tensor,
     topk_weight: torch.Tensor,
     topk_ids: torch.Tensor,
+    activation: str,
     global_num_experts: int = -1,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
@@ -947,6 +948,10 @@ def torch_experts(
 
     f32 = torch.float32
 
+    def apply_moe_activation(act_str, act_input):
+        act_fn = get_act_and_mul_fn(act_str)
+        return act_fn(act_input)
+
     for i in range(num_experts):
         mask = topk_ids == i
         if mask.sum():
@@ -954,7 +959,8 @@ def torch_experts(
                 tmp1 = a[mask] @ w1[i].transpose(0, 1)
                 if w1_bias is not None:
                     tmp1 = tmp1 + w1_bias[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = SiluAndMul()(tmp1)
+
+                tmp2 = apply_moe_activation(activation, tmp1)
                 out[mask] = tmp2 @ w2[i].transpose(0, 1)
                 if w2_bias is not None:
                     out[mask] = out[mask] + w2_bias[i].view(1, -1).to(tmp1.dtype)
@@ -970,7 +976,9 @@ def torch_experts(
                 )
                 if w1_bias is not None:
                     tmp1 = tmp1 + w1_bias[i].view(1, -1).to(tmp1.dtype)
-                tmp2 = SiluAndMul()(tmp1)
+
+                tmp2 = apply_moe_activation(activation, tmp1)
+
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape
                 )
@@ -994,7 +1002,7 @@ def torch_experts(
                 if w1_bias is not None:
                     tmp1 = tmp1 + w1_bias[i].view(1, -1).to(out.dtype)
 
-                tmp2 = SiluAndMul()(tmp1).to(out.dtype)
+                tmp2 = apply_moe_activation(activation, tmp1)
 
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape
