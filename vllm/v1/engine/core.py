@@ -331,10 +331,10 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
-            # logger.info('core.py step no requests for scheduler')
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
@@ -427,7 +427,6 @@ class EngineCore:
                     return None, True
 
         elif not batch_queue:
-            # logger.info(f'core.py step_with_batch_queue no requests and no batch_queue')
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
@@ -455,17 +454,6 @@ class EngineCore:
             batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
-
-    def print_scheduler_output(self, d):
-        for key, value in d.items():
-            logger.info(f"scheduler output {key}:{value}")
-
-    def print_model_output(self, model_output):
-        for req_id in model_output.req_ids:
-            index = model_output.req_id_to_index[req_id]
-            logger.info(
-                f"model output {req_id}:{model_output.sampled_token_ids[index]}"
-            )
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
