@@ -20,9 +20,6 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.model_executor.layers.quantization import get_default_quantization_hf_config
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
@@ -464,10 +461,6 @@ class ModelConfig:
         if isinstance(self.hf_config_path, str):
             self.hf_config_path = maybe_model_redirect(self.hf_config_path)
 
-        quant_config_override = get_default_quantization_hf_config(
-            self.quantization, self.quantization_schema
-        )
-
         if callable(self.hf_overrides):
             hf_overrides_kw = {}
             hf_overrides_fn = self.hf_overrides
@@ -477,8 +470,12 @@ class ModelConfig:
             # We'll determine how to apply dict overrides after loading the config
             hf_overrides_kw = {}
             dict_overrides = {}
-            if quant_config_override:
-                dict_overrides["quantization_config"] = quant_config_override
+            if self.quantization_schema:
+                quant_config_override = get_default_quantization_hf_config(
+                    self.quantization, self.quantization_schema
+                )
+                if quant_config_override:
+                    dict_overrides["quantization_config"] = quant_config_override
             for key, value in self.hf_overrides.items():
                 if isinstance(value, dict):
                     if dict_overrides.get(key):
