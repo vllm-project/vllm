@@ -13,6 +13,7 @@ import torch
 from pydantic import ConfigDict, SkipValidation, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
+from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 
 import vllm.envs as envs
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultiModalConfig
@@ -2060,30 +2061,33 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
-    rope_scaling = getattr(hf_config, "rope_scaling", None)
+    rope_parameters = getattr(hf_config, "rope_parameters", None)
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
-    if rope_scaling is not None and "gemma3" not in hf_config.model_type:
-        # No need to consider "type" key because of patch_rope_scaling when
-        # loading HF config
-        rope_type = rope_scaling["rope_type"]
+    if rope_parameters is not None and "gemma3" not in hf_config.model_type:
+        # In Transformers v5 this could be RopeParameters or dict[str, RopeParameters]
+        # To simplify, we convert any RopeParameters to dict[str, RopeParameters]
+        if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+            rope_parameters = {"": rope_parameters}
+        for rp in rope_parameters.values():
+            rope_type = rp["rope_type"]
 
-        if rope_type not in ("su", "longrope", "llama3"):
-            if disable_sliding_window:
-                # TODO(robertgshaw): Find a model that supports rope_scaling
-                # with sliding window to see if this case should be allowed.
-                raise NotImplementedError(
-                    "Disabling sliding window is not supported for models "
-                    "with rope_scaling. Please raise an issue so we can "
-                    "investigate."
-                )
+            if rope_type not in ("su", "longrope", "llama3"):
+                if disable_sliding_window:
+                    # TODO(robertgshaw): Find a model that supports rope_parameters
+                    # with sliding window to see if this case should be allowed.
+                    raise NotImplementedError(
+                        "Disabling sliding window is not supported for models with "
+                        "rope_parameters. Please raise an issue so we can investigate."
+                    )
 
-            # NOTE: rope_type == "default" does not define factor
-            # https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
-            scaling_factor = rope_scaling.get("factor", 1.0)
+                # NOTE: rope_type == "default" does not define factor
+                # https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
+                scaling_factor = rp.get("factor", 1.0)
 
-            if rope_type == "yarn":
-                derived_max_model_len = rope_scaling["original_max_position_embeddings"]
+                if rope_type == "yarn":
+                    derived_max_model_len = rp["original_max_position_embeddings"]
+            # Do this outside loop since all layers should have the same scaling
             derived_max_model_len *= scaling_factor
 
     if encoder_config and "max_seq_length" in encoder_config:
@@ -2094,7 +2098,9 @@ def _get_and_verify_max_len(
     if max_model_len is None:
         # For LongRoPE, default to original_max_position_embeddings to avoid
         # performance degradation for shorter sequences
-        if rope_scaling is not None and rope_scaling["rope_type"] == "longrope":
+        if rope_parameters is not None and any(
+            rp["rope_type"] == "longrope" for rp in rope_parameters.values()
+        ):
             max_model_len = int(
                 getattr(
                     hf_config, "original_max_position_embeddings", derived_max_model_len
