@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+import numpy as np
+import json
+import os
+
 import itertools
 import time
 from collections import defaultdict
@@ -53,7 +58,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
-
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import RoutedExpertsReader
 logger = init_logger(__name__)
 
 
@@ -223,6 +228,10 @@ class Scheduler(SchedulerInterface):
         self.perf_metrics: ModelMetrics | None = None
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
+
+        self.max_num_kv_tokens = ((kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups)) + 1)* self.block_size
+        self.routed_experts_reader = RoutedExpertsReader.create(enable=self.vllm_config.model_config.enable_return_routed_experts)
+        self.routed_experts_reader.attach_buffer(max_num_kv_tokens=self.max_num_kv_tokens, model_config=self.vllm_config.model_config)
 
     def schedule(self) -> SchedulerOutput:
         # NOTE(woosuk) on the scheduling algorithm:
@@ -1162,7 +1171,30 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
+            routed_experts = None
             if stopped:
+                if self.vllm_config.model_config.enable_return_routed_experts:
+                    assert len(self.kv_cache_config.kv_cache_groups) == 1
+
+                    kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)  
+                    block_ids = kv_blocks.get_block_ids()[0] 
+                    num_tokens = request.num_tokens-1
+
+                    # 计算slot mapping  
+                    block_ids_array = np.array(block_ids, dtype=np.int32)  
+                    num_blocks = len(block_ids)  
+                    block_size = self.block_size  
+
+                    # 生成block内偏移  
+                    block_offsets = np.arange(0, block_size)  
+
+                    # 计算slot mapping: slot = block_id * block_size + offset  
+                    slot_mapping = (  
+                        block_offsets.reshape((1, block_size))  
+                        + block_ids_array.reshape((num_blocks, 1)) * block_size  
+                    ).flatten()[:num_tokens]  
+
+                    routed_experts = self.routed_experts_reader.get_routed_experts(slot_mapping)
                 kv_transfer_params = self._free_request(request)
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
@@ -1209,6 +1241,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

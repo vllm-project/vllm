@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Generic
 
 import torch
+import numpy as np
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
@@ -40,6 +41,7 @@ class CompletionOutput:
     index: int
     text: str
     token_ids: GenericSequence[int]
+    routed_experts: np.ndarray | None # [seq_len,layer_num,topk]
     cumulative_logprob: float | None
     logprobs: SampleLogprobs | None
     finish_reason: str | None = None
@@ -54,6 +56,7 @@ class CompletionOutput:
             f"CompletionOutput(index={self.index}, "
             f"text={self.text!r}, "
             f"token_ids={self.token_ids}, "
+            f"routed_experts={self.routed_experts}, "
             f"cumulative_logprob={self.cumulative_logprob}, "
             f"logprobs={self.logprobs}, "
             f"finish_reason={self.finish_reason}, "
