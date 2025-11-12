@@ -78,17 +78,13 @@ HF_MOUNT="/root/.cache/huggingface"
 commands=$@
 echo "Commands:$commands"
 
-if [[ $commands == *"pytest -v -s basic_correctness/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s basic_correctness/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s basic_correctness/test_basic_correctness.py"/"pytest -v -s basic_correctness/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s models/test_registry.py"* ]]; then
   commands=${commands//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
 fi
 
-if [[ $commands == *"pytest -v -s compile/test_basic_correctness.py"* ]]; then
-  commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"VLLM_USE_TRITON_FLASH_ATTN=0 pytest -v -s compile/test_basic_correctness.py"}
-fi
+commands=${commands//"pytest -v -s compile/test_basic_correctness.py"/"pytest -v -s compile/test_basic_correctness.py"}
 
 if [[ $commands == *"pytest -v -s lora"* ]]; then
   commands=${commands//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
