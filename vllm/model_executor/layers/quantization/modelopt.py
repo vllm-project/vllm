@@ -565,9 +565,9 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend is not None:
             if self.moe.is_act_and_mul:
                 layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-            register_moe_scaling_factors(layer)
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
+        register_moe_scaling_factors(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
