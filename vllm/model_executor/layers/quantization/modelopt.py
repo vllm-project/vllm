@@ -364,6 +364,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
                     "Non-gated MoE is not supported for min-latency mode,"
                     "falling back to high-throughput mode"
                 )
+                self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
@@ -575,21 +577,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
-            g1_alphas=layer.output1_scales_gate_scalar.squeeze()
-            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            else None,
+            g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
             w2_scale=layer.w2_weight_scale,
-            g2_alphas=layer.output2_scales_scalar.squeeze()
-            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            else None,
+            g2_alphas=layer.output2_scales_scalar.squeeze(),
             a1_scale=layer.w13_input_scale,
-            a1_gscale=layer.w13_input_scale
-            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            else None,
+            a1_gscale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
-            a2_gscale=layer.w2_input_scale_inv
-            if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
-            else None,
+            a2_gscale=layer.w2_input_scale_inv,
             per_act_token_quant=False,
         )
 
