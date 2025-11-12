@@ -60,10 +60,6 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
-"""
-MultiprocExecutor: the manager process, manages the workers.
-"""
-
 
 class FutureWrapper(Future):
     def __init__(
@@ -233,8 +229,6 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        # self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
-
         self.output_rank = self._get_output_rank()
 
     def start_worker_monitor(self, inline=False) -> None:
@@ -298,7 +292,6 @@ class MultiprocExecutor(Executor):
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
             kv_output_aggregator=self.kv_output_aggregator,
         )
-        # logger.info(f'[debug] [multiproc executor] execute_model {len(outputs)=}, {type(outputs[0])=}')
 
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
@@ -565,7 +558,6 @@ class WorkerProc:
             "is_driver_worker": is_driver_worker,
             "shared_worker_lock": shared_worker_lock,
         }
-
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
@@ -605,9 +597,8 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
     ) -> UnreadyWorkerProcHandle:
-        context = get_mp_context()  # get a multiprocessing context
+        context = get_mp_context()
         # (reader, writer)
-        # this is the master proc of workerproc, it creates a two end pipe.
         reader, writer = context.Pipe(duplex=False)
 
         # Create death pipe to detect parent process exit
@@ -632,8 +623,6 @@ class WorkerProc:
         )
 
         proc.start()
-        # the goal is to receive a "ready" signal from the proc
-        # (this is a child process), so we close writer end (not needed).
         writer.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
@@ -675,7 +664,6 @@ class WorkerProc:
             unready_proc_handles
         )
         while pipes:
-            # this is also a master call waiting for any of the pipes to be ready.
             ready = multiprocessing.connection.wait(pipes.keys())
             for pipe in ready:
                 assert isinstance(pipe, Connection)
@@ -706,19 +694,6 @@ class WorkerProc:
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
-
-    """
-    How does worker_main finish
-    1. when multiprocExecutor shutdown()
-        The main process calls executor.shutdown().
-        Inside shutdown(), it closes a special communication channel called a "pipe": w.death_writer.close().
-        Each worker process has a background thread (monitor_parent_death) that is constantly listening on the other end of this pipe (death_pipe.recv()).
-        When the pipe is closed by the parent, recv() in the child raises an EOFError.
-        The monitor_parent_death thread catches this error and calls os.kill(os.getpid(), signal.SIGTERM), sending a termination signal to its own process.
-    2. os signal
-        signal handler set up in worker_main
-    3. daemon=true, so if the main process (multi proc executor) crashes or exists, worker proc will terminate.
-    """
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -756,7 +731,6 @@ class WorkerProc:
                     # Parent process has exited, terminate this worker
                     logger.info_once("Parent process exited, terminating worker")
                     # Send signal to self to trigger clean shutdown
-                    # time.sleep(60)
                     shutdown_event.set()
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
@@ -767,8 +741,6 @@ class WorkerProc:
             death_monitor.start()
 
         try:
-            # for this pipe, it doesn't need to read,
-            # only need to write the response. so close the reader.
             reader.close()
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
