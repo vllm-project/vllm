@@ -1233,7 +1233,6 @@ def init_distributed_environment(
             )
             backend = "gloo"
         # this backend is used for WORLD
-        # the worker is blocked until all world_size workers joins this call.
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
