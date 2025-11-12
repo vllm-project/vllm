@@ -1529,16 +1529,6 @@ def is_set(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def set_vllm_use_v1(use_v1: bool):
-    if is_set("VLLM_USE_V1"):
-        raise ValueError(
-            "Should not call set_vllm_use_v1() if VLLM_USE_V1 is set "
-            "explicitly by the user. Please raise this as a Github "
-            "Issue and explicitly set VLLM_USE_V1=0 or 1."
-        )
-    os.environ["VLLM_USE_V1"] = "1" if use_v1 else "0"
-
-
 def compile_factors() -> dict[str, object]:
     """
     Return environment variables used to compute the compile cache key.

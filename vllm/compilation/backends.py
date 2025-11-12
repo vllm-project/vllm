@@ -655,12 +655,11 @@ class VllmBackend:
 
         # Persist and log only hash-relevant factors together.
         try:
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "Compile env factors (raw):\n%s\nVllm config hash: %s",
-                    lazy(partial(pprint.pformat, env_factors, width=120)),
-                    config_hash,
-                )
+            logger.debug(
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                lazy(partial(pprint.pformat, env_factors, width=120)),
+                config_hash,
+            )
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
             if not os.path.exists(meta_path):
                 with open(meta_path, "w") as f:
