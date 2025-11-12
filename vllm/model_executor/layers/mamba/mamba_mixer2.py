@@ -529,7 +529,9 @@ class MambaMixer2(MambaBase, CustomOp):
             self.prefix,
         )
 
-        # 4. gated MLP (extract gate after the custom op to avoid graph break)
+        # 4. gated MLP
+        # (extract gate after the custom op to ensure `projected_states`
+        #  is not treated as an intermediate tensor by torch compile)
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
