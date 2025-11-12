@@ -332,7 +332,7 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
-        no_weak_ref_output = getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
+        self.no_weak_ref_output = getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
 
         compilation_counter.num_models_seen += 1
         self.compiled = False
@@ -523,7 +523,10 @@ def _support_torch_compile(
 
 
 @contextlib.contextmanager
-def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
+def maybe_use_cudagraph_partition_wrapper(
+    vllm_config: VllmConfig,
+    no_weak_ref_output: bool,
+):
     """
     Context manager to set/unset customized cudagraph partition wrappers.
 
@@ -553,6 +556,13 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
         def customized_cudagraph_wrapper(f, metadata: CUDAGraphWrapperMetadata):
             partition_id = metadata.partition_index
             num_partitions = metadata.num_partitions
+
+            # If no_weak_ref_output passed to compile decorator
+            # do not convert last partition's output to a weakref
+            weak_ref_output = (
+                partition_id == num_partitions - 1 and not no_weak_ref_output
+            )
+
             return static_graph_wrapper_class(
                 runnable=f,
                 vllm_config=vllm_config,
@@ -560,7 +570,7 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
                 cudagraph_options=CUDAGraphOptions(
                     debug_log_enable=partition_id == 0,
                     gc_disable=partition_id != 0,
-                    weak_ref_output=partition_id == num_partitions - 1,
+                    weak_ref_output=weak_ref_output,
                 ),
             )
 
