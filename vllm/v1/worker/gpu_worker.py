@@ -121,6 +121,8 @@ class Worker(WorkerBase):
         else:
             self.profiler = None
 
+        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+
     def sleep(self, level: int = 1) -> None:
         from vllm.device_allocator.cumem import CuMemAllocator
 
@@ -249,15 +251,14 @@ class Worker(WorkerBase):
             raise RuntimeError(f"Not support device type: {self.device_config.device}")
 
         # Construct the model runner
-        if envs.VLLM_USE_V2_MODEL_RUNNER:
+        if self.use_v2_model_runner:
             from vllm.v1.worker.gpu.model_runner import (
                 GPUModelRunner as GPUModelRunnerV2,
             )
 
-            model_runner_cls = GPUModelRunnerV2
+            self.model_runner = GPUModelRunnerV2(self.vllm_config, self.device)
         else:
-            model_runner_cls = GPUModelRunner
-        self.model_runner = model_runner_cls(self.vllm_config, self.device)
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
@@ -610,7 +611,12 @@ class Worker(WorkerBase):
                 )
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner.execute_model(SchedulerOutput.make_empty(), dummy_run=True)
+        if self.use_v2_model_runner:
+            self.model_runner.execute_model(
+                SchedulerOutput.make_empty(), dummy_run=True
+            )
+        else:
+            self.model_runner._dummy_run(num_tokens=1, skip_eplb=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
