@@ -45,7 +45,7 @@ def _apply_qk_norm_rope(
 
 @pytest.mark.skipif(
     not current_platform.is_cuda_alike(),
-    reason="fused_qk_norm_rope custom op requires cuda platform",
+    reason="fused_qk_norm_rope custom op requires cuda and rocm platform",
 )
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("dtype", DTYPES)
