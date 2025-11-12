@@ -738,8 +738,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
-            assert isinstance(layer, Llama4DecoderLayer)
-            if isinstance(layer.feed_forward, Llama4MoE):
+            if isinstance(layer, Llama4DecoderLayer) and isinstance(
+                layer.feed_forward, Llama4MoE
+            ):
                 # Pick last one layer since the first ones may be dense layers.
                 example_moe = layer.feed_forward
                 self.moe_layers.append(layer.feed_forward.experts)
