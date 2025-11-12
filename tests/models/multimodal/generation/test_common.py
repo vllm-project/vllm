@@ -9,11 +9,13 @@ from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
+from packaging.version import Version
 from transformers import (
     AutoModel,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils.func_utils import identity
@@ -849,6 +851,12 @@ VLM_TEST_SETTINGS = {
                     formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
                 ),
                 limit_mm_per_prompt={"image": 4},
+            )
+        ],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.1"),
+                reason="This model is broken in Transformers v4.57.1",
             )
         ],
     ),
