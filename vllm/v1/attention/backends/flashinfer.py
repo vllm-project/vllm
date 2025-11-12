@@ -15,6 +15,7 @@ from flashinfer import (
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
+from typing_extensions import override
 
 from vllm import envs
 from vllm.attention.backends.abstract import (
@@ -274,10 +275,6 @@ class FlashInferMetadata:
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
-
     reorder_batch_threshold: int = 1
 
     def __init__(
@@ -355,6 +352,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         else:
             self.q_data_type = self.model_config.dtype
 
+        # Prefer TRTLLM attention for decoding in all cases.
+        # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
+        self.use_trtllm_decode_attention = can_use_trtllm
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
@@ -411,6 +411,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "block_size 16 head size 256 support. Please avoid this combination by "
                 "passing --block-size 32 or --block-size 64."
             )
+
+    @classmethod
+    @override
+    def get_cudagraph_support(
+        cls: type["FlashInferMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        has_trtllm_support = can_use_trtllm_attention(
+            num_qo_heads=vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            ),
+            num_kv_heads=kv_cache_spec.num_kv_heads,
+        )
+        if has_trtllm_support:
+            return AttentionCGSupport.UNIFORM_BATCH
+        else:
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -573,17 +591,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        decode_use_trtllm = use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_decode_tokens,
-            max_seq_len,
-            self.cache_dtype,
-            self.q_data_type,
-            is_prefill=False,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
-        )
+        decode_use_trtllm = self.use_trtllm_decode_attention
 
         if not (prefill_use_trtllm and decode_use_trtllm):
             if self.has_sinks:
