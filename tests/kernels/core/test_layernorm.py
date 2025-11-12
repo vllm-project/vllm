@@ -13,6 +13,7 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
 HIDDEN_SIZES = [8, 768, 769, 5120, 5125, 8192]  # Arbitrary values for testing
 ADD_RESIDUAL = [False, True]
+STORAGE_OFFSETS = [0, 1, 3]
 SEEDS = [0]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
@@ -24,6 +25,9 @@ CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 e
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
+@pytest.mark.parametrize(
+    "storage_offset", STORAGE_OFFSETS, ids=[f"so{offset}" for offset in STORAGE_OFFSETS]
+)
 @torch.inference_mode()
 def test_rms_norm(
     num_tokens: int,
@@ -33,16 +37,22 @@ def test_rms_norm(
     seed: int,
     device: str,
     strided_input: bool,
+    storage_offset: int,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
     layer = RMSNorm(hidden_size).to(dtype=dtype)
     layer.weight.data.normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
-    last_dim = 2 * hidden_size if strided_input else hidden_size
-    x = torch.randn(num_tokens, last_dim, dtype=dtype)
-    x = x[..., :hidden_size]
-    assert x.is_contiguous() != strided_input
+    step = 2 if strided_input else 1
+    total_cols = storage_offset + hidden_size
+    x_base = torch.randn(num_tokens * step, total_cols, dtype=dtype)
+    x = x_base.as_strided(
+        size=(num_tokens, hidden_size),
+        stride=(x_base.stride(0) * step, x_base.stride(1)),
+        storage_offset=storage_offset,
+    )
+    assert x.stride(-1) == 1
     x *= scale
     residual = torch.randn_like(x) * scale if add_residual else None
 
@@ -78,6 +88,9 @@ def test_rms_norm(
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @pytest.mark.parametrize("strided_input", [False, True])
+@pytest.mark.parametrize(
+    "storage_offset", STORAGE_OFFSETS, ids=[f"so{offset}" for offset in STORAGE_OFFSETS]
+)
 def test_fused_rms_norm_quant(
     num_tokens: int,
     hidden_size: int,
@@ -87,16 +100,22 @@ def test_fused_rms_norm_quant(
     seed: int,
     device: str,
     strided_input: bool,
+    storage_offset: int,
 ) -> None:
     current_platform.seed_everything(seed)
     torch.set_default_device(device)
 
     weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
     scale = 1 / (2 * hidden_size)
-    last_dim = 2 * hidden_size if strided_input else hidden_size
-    x_base = torch.randn(num_tokens, last_dim, dtype=dtype)
-    x = x_base[..., :hidden_size]
-    assert x.is_contiguous() != strided_input
+    step = 2 if strided_input else 1
+    total_cols = storage_offset + hidden_size
+    x_base = torch.randn(num_tokens * step, total_cols, dtype=dtype)
+    x = x_base.as_strided(
+        size=(num_tokens, hidden_size),
+        stride=(x_base.stride(0) * step, x_base.stride(1)),
+        storage_offset=storage_offset,
+    )
+    assert x.stride(-1) == 1
 
     x *= scale
     if add_residual:
@@ -119,8 +138,12 @@ def test_fused_rms_norm_quant(
         # Unfused kernel is in-place so it goes second
         # Also use a separate clone of x to avoid modifying the input
         x_unfused_base = x_base.clone()
-        x_unfused = x_unfused_base[..., :hidden_size]
-        assert x_unfused.is_contiguous() != strided_input
+        x_unfused = x_unfused_base.as_strided(
+            size=(num_tokens, hidden_size),
+            stride=(x_unfused_base.stride(0) * step, x_unfused_base.stride(1)),
+            storage_offset=storage_offset,
+        )
+        assert x_unfused.stride(-1) == 1
         torch.ops._C.fused_add_rms_norm(x_unfused, residual, weight, 1e-6)
         torch.ops._C.static_scaled_fp8_quant(
             out_quant, x_unfused.contiguous(), quant_scale_t
