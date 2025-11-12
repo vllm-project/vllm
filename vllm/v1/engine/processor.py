@@ -338,17 +338,20 @@ class Processor:
                 # Hash each item for embedding inputs.
                 if data.ndim == 3:
                     unbinded_data = data.unbind(dim=0)
-                    mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(len(unbinded_data))]
+                    mm_uuids[modality] = [
+                        f"{request_id}-{modality}-{i}"
+                        for i in range(len(unbinded_data))
+                    ]
                 else:
-                    mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(len(data))]
+                    mm_uuids[modality] = [
+                        f"{request_id}-{modality}-{i}" for i in range(len(data))
+                    ]
             else:
                 n = len(data) if isinstance(data, list) else 1
                 mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
-    def _is_embeddings(
-        self, data: object
-    ) -> bool:
+    def _is_embeddings(self, data: object) -> bool:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
         if is_list_of(data, torch.Tensor):
