@@ -20,7 +20,11 @@ from tqdm import tqdm
 
 import vllm.envs as envs
 from vllm.attention import Attention, AttentionType
-from vllm.attention.backends.abstract import AttentionBackend, MultipleOf
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionMetadata,
+    MultipleOf,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
@@ -82,7 +86,6 @@ from vllm.utils.torch_utils import (
     kv_cache_dtype_str_to_dtype,
     supports_dynamo,
 )
-from vllm.v1.attention.backends.flash_attn import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
@@ -276,6 +279,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # This will be overridden in load_model()
         self.is_multimodal_pruning_enabled = False
         self.max_model_len = model_config.max_model_len
+
+        # Always set to false after the first forward pass
+        self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
@@ -886,38 +892,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
     def _init_mrope_positions(self, req_state: CachedRequestState):
-        image_grid_thw = []
-        video_grid_thw = []
-        second_per_grid_ts = []
-        audio_feature_lengths = []
-        use_audio_in_video = False
-        for mm_feature in req_state.mm_features:
-            mm_item = mm_feature.data
-            if mm_item is None:
-                continue
-            mm_input = mm_item.get_data()
-            if (t := mm_input.get("image_grid_thw")) is not None:
-                image_grid_thw.append(t.tolist())
-            if (t := mm_input.get("video_grid_thw")) is not None:
-                video_grid_thw.append(t.tolist())
-            if (t := mm_input.get("second_per_grid_ts")) is not None:
-                second_per_grid_ts.append(t)
-            if (t := mm_input.get("audio_feature_lengths")) is not None:
-                audio_feature_lengths.append(t)
-            if mm_input.get("use_audio_in_video") is True:
-                use_audio_in_video = True
-
-        assert supports_mrope(self.get_model()), "M-RoPE support is not implemented."
+        model = self.get_model()
+        assert supports_mrope(model), "M-RoPE support is not implemented."
 
         req_state.mrope_positions, req_state.mrope_position_delta = (
-            self.model.get_mrope_input_positions(
+            model.get_mrope_input_positions(
                 req_state.prompt_token_ids,
-                hf_config=self.model_config.hf_config,
-                image_grid_thw=image_grid_thw,
-                video_grid_thw=video_grid_thw,
-                second_per_grid_ts=second_per_grid_ts,
-                audio_feature_lengths=audio_feature_lengths,
-                use_audio_in_video=use_audio_in_video,
+                req_state.mm_features,
             )
         )
 
@@ -2511,7 +2492,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "after execute_model() returns None."
             )
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        with record_function_or_nullcontext("Preprocess"):
+        with record_function_or_nullcontext("gpu_model_runner: preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
@@ -2542,7 +2523,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Disable cascade attention when using microbatching (DBO)
                 if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
                     # Pre-compute cascade attention prefix lengths
-                    # NOTE: Must be AFTER _prepare_inputs uses self.input_batch state
                     cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
                         num_scheduled_tokens_np,
                         self.input_batch.num_computed_tokens_cpu[:num_reqs],
@@ -2601,7 +2581,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif num_tokens_across_dp is not None:
                 num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
             else:
-                num_input_tokens = self._get_num_input_tokens(
+                num_input_tokens = self._pad_for_sequence_parallelism(
                     scheduler_output.total_num_scheduled_tokens
                 )
 
@@ -2616,16 +2596,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
-        if attn_metadata is not None:
-            metadata_list = (
-                attn_metadata.values()
-                if isinstance(attn_metadata, dict)
-                else [attn_metadata]
-            )
-            if any(
-                getattr(m, "enable_kv_scales_calculation", False) for m in metadata_list
-            ):
-                cudagraph_runtime_mode = CUDAGraphMode.NONE
+        # KV scales calculation involves dynamic operations that are incompatible
+        # with CUDA graph capture.
+        if self.calculate_kv_scales:
+            cudagraph_runtime_mode = CUDAGraphMode.NONE
+            # Mark KV scales as calculated after the first forward pass
+            self.calculate_kv_scales = False
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
@@ -2639,7 +2615,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
             ),
-            record_function_or_nullcontext("Forward"),
+            record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
         ):
             model_output = self._model_forward(
@@ -2650,7 +2626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 **model_kwargs,
             )
 
-        with record_function_or_nullcontext("Postprocess"):
+        with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
                 # True when EAGLE 3 is used.
                 hidden_states, aux_hidden_states = model_output
@@ -2747,12 +2723,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 scheduler_output, grammar_output, self.input_batch, logits
             )
 
-        with record_function_or_nullcontext("Sample"):
+        with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
-            with record_function_or_nullcontext("Draft"):
+            with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
                     sampled_token_ids,
@@ -2790,7 +2766,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
 
-        with record_function_or_nullcontext("Bookkeep"):
+        with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
             (
                 num_nans_in_logits,
                 logprobs_lists,
@@ -2817,37 +2793,41 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
 
-        with record_function_or_nullcontext("EPLB"):
+        with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
-
-        output = ModelRunnerOutput(
-            req_ids=req_ids_output_copy,
-            req_id_to_index=req_id_to_index_output_copy,
-            sampled_token_ids=valid_sampled_token_ids,
-            logprobs=logprobs_lists,
-            prompt_logprobs_dict=prompt_logprobs_dict,
-            pooler_output=[],
-            kv_connector_output=kv_connector_output,
-            num_nans_in_logits=num_nans_in_logits,
-        )
+        with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            output = ModelRunnerOutput(
+                req_ids=req_ids_output_copy,
+                req_id_to_index=req_id_to_index_output_copy,
+                sampled_token_ids=valid_sampled_token_ids,
+                logprobs=logprobs_lists,
+                prompt_logprobs_dict=prompt_logprobs_dict,
+                pooler_output=[],
+                kv_connector_output=kv_connector_output,
+                num_nans_in_logits=num_nans_in_logits,
+            )
 
         if not self.use_async_scheduling:
             return output
-
-        async_output = AsyncGPUModelRunnerOutput(
-            model_runner_output=output,
-            sampled_token_ids=sampler_output.sampled_token_ids,
-            logprobs_tensors=sampler_output.logprobs_tensors,
-            invalid_req_indices=invalid_req_indices,
-            async_output_copy_stream=self.async_output_copy_stream,
-        )
-
-        # Save ref of sampled_token_ids CPU tensor if the batch contains
-        # any requests with sampling params that that require output ids.
-        self.input_batch.set_async_sampled_token_ids(
-            async_output.sampled_token_ids_cpu,
-            async_output.async_copy_ready_event,
-        )
+        with record_function_or_nullcontext(
+            "gpu_model_runner: AsyncGPUModelRunnerOutput"
+        ):
+            async_output = AsyncGPUModelRunnerOutput(
+                model_runner_output=output,
+                sampled_token_ids=sampler_output.sampled_token_ids,
+                logprobs_tensors=sampler_output.logprobs_tensors,
+                invalid_req_indices=invalid_req_indices,
+                async_output_copy_stream=self.async_output_copy_stream,
+            )
+        with record_function_or_nullcontext(
+            "gpu_model_runner: set_async_sampled_token_ids"
+        ):
+            # Save ref of sampled_token_ids CPU tensor if the batch contains
+            # any requests with sampling params that that require output ids.
+            self.input_batch.set_async_sampled_token_ids(
+                async_output.sampled_token_ids_cpu,
+                async_output.async_copy_ready_event,
+            )
 
         return async_output
 
@@ -4372,7 +4352,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             """
             for backend in backends:
                 is_supported = False
-                for supported_size in backend.get_supported_kernel_block_size():
+                for supported_size in backend.supported_kernel_block_sizes:
                     if isinstance(supported_size, int):
                         if block_size == supported_size:
                             is_supported = True
@@ -4403,7 +4383,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         all_int_supported_sizes = set(
             supported_size
             for backend in backends
-            for supported_size in backend.get_supported_kernel_block_size()
+            for supported_size in backend.supported_kernel_block_sizes
             if isinstance(supported_size, int)
         )
 
