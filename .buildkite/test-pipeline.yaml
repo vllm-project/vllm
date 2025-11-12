@@ -443,6 +443,7 @@ steps:
     - vllm/
     - tests/compile
   commands:
+    - pytest -v -s compile/test_config.py
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
     - pytest -v -s compile/test_fusion_attn.py
