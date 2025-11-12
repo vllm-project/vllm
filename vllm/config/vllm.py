@@ -138,7 +138,7 @@ optimization_level_03 = {
     "use_inductor_graph_partition": False,
 }
 
-optimzation_level_to_config = {
+optimization_level_to_config = {
     OptimizationLevel.O0: optimization_level_00,
     OptimizationLevel.O1: optimization_level_01,
     OptimizationLevel.O2: optimization_level_02,
@@ -607,7 +607,7 @@ class VllmConfig:
             else:
                 self.compilation_config.custom_ops.append("all")
 
-        default_config = optimzation_level_to_config[self.optimization_level]
+        default_config = optimization_level_to_config[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
         assert self.compilation_config.mode >= CompilationMode.NONE
         assert self.compilation_config.mode <= CompilationMode.VLLM_COMPILE
