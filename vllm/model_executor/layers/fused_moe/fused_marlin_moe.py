@@ -506,7 +506,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
         w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = False,
+        is_k_full: bool = True,
     ):
         # TODO (varun) : Enable activation quantization
         assert quant_config.use_mxfp4_w4a16 or quant_config.use_int4_w4a16, (
@@ -563,7 +563,7 @@ class MarlinExperts(MarlinExpertsBase):
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
         w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = False,
+        is_k_full: bool = True,
     ):
         super().__init__(
             quant_config,
@@ -670,6 +670,7 @@ class MarlinExperts(MarlinExpertsBase):
             g_idx2=self.w2_g_idx,
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
+            is_k_full=self.is_k_full,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
@@ -696,7 +697,7 @@ class BatchedMarlinExperts(MarlinExpertsBase):
         w2_g_idx: torch.Tensor | None = None,
         w13_g_idx_sort_indices: torch.Tensor | None = None,
         w2_g_idx_sort_indices: torch.Tensor | None = None,
-        is_k_full: bool = False,
+        is_k_full: bool = True,
     ):
         super().__init__(
             quant_config,
