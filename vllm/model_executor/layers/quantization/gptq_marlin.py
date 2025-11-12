@@ -490,6 +490,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         }
 
         self._initialize_quant_metadata()
+        self.use_marlin = True
 
     def _initialize_quant_metadata(self) -> None:
         """Resolve the effective quantization metadata for this MoE layer."""
