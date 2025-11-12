@@ -5,7 +5,6 @@ image, embedding, and video support for different VLMs in vLLM.
 """
 
 import math
-import os
 from collections import defaultdict
 from pathlib import PosixPath
 
@@ -37,13 +36,6 @@ from .vlm_utils.types import (
     VLMTestInfo,
     VLMTestType,
 )
-
-# This hack is needed for phi3v & paligemma models
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
-# FIXME (mattwong, gshtrasb, hongxiayan)
-if current_platform.is_rocm():
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
