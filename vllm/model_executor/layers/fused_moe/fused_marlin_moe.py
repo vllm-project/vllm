@@ -731,6 +731,7 @@ class BatchedMarlinExperts(MarlinExpertsBase):
                 if self.quant_config.use_int4_w4a16
                 else scalar_types.float4_e2m1f.id
             ),  # works only for w4a16
+            apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             activation=activation,
             expert_map=expert_map,
