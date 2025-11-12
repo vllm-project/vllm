@@ -1019,9 +1019,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
-            raise NotImplementedError(
-                "EPLB not supported for `CompressedTensorsW8A8Fp8MoEMethod` yet."
-            )
+            assert expert_load_view is not None
+            assert logical_to_physical_map is not None
+            assert logical_replica_count is not None
+            assert isinstance(layer, FusedMoE)
 
         topk_weights, topk_ids, _ = FusedMoE.select_experts(
             hidden_states=x,
@@ -1037,6 +1038,11 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
+            enable_eplb=enable_eplb,
+            expert_map=expert_map,
+            expert_load_view=expert_load_view,
+            logical_to_physical_map=logical_to_physical_map,
+            logical_replica_count=logical_replica_count,
         )
 
         per_act_token = self.input_quant.strategy == QuantizationStrategy.TOKEN
@@ -1144,6 +1150,10 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 expert_map=expert_map,
                 quant_config=self.moe_quant_config,
             )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return True
 
 
 class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
