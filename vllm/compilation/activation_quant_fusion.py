@@ -79,7 +79,7 @@ class ActivationQuantPattern(ABC):
 
 
 if rocm_aiter_ops.is_enaled():
-    AITER_BLOCK_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_block_fp8_quant.default
+    AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
     FUSED_SILU_MUL_QUANT_OP = (
         torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
     )
@@ -94,7 +94,7 @@ if rocm_aiter_ops.is_enaled():
                 use_triton: bool,
             ):
                 at1 = self.silu_and_mul_matcher.forward_custom(input)
-                at2 = AITER_BLOCK_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
                 return at2[0], at2[1]
 
             def replacement(

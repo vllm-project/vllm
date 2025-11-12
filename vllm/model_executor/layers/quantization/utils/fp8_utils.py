@@ -325,7 +325,7 @@ class W8A8BlockFp8LinearOp:
         if input_scale is not None:
             q_input = input_2d
         else:
-            q_input, input_scale = rocm_aiter_ops.block_fp8_quant(
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
                 input_2d, self.act_quant_group_shape.col, use_triton
             )
 

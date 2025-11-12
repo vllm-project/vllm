@@ -99,7 +99,7 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
     AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
     AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
 
-    AITER_BLOCK_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_block_fp8_quant.default
+    AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
 
 
 class RMSNormQuantPattern:
@@ -349,7 +349,7 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
                     x=input, weight=weight, variance_epsilon=self.epsilon
                 )
 
-                at2 = AITER_BLOCK_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
 
                 return at2[0], at2[1]
 
@@ -394,7 +394,7 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
                     variance_epsilon=self.epsilon,
                 )
 
-                at2 = AITER_BLOCK_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
 
                 # result, scale, residual
                 return at2[0], at2[1], at1[1]

@@ -469,7 +469,6 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
 
 def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     x: torch.Tensor,
-    residual: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
     group_size: int,
@@ -484,7 +483,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     )
 
 
-def _rocm_aiter_block_fp8_quant_impl(
+def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
     use_triton: bool,
@@ -504,7 +503,7 @@ def _rocm_aiter_block_fp8_quant_impl(
         return aiter_per1x128_quant(x.contiguous(), quant_dtype=dtypes.fp8)
 
 
-def _rocm_aiter_block_fp8_quant_fake(
+def _rocm_aiter_group_fp8_quant_fake(
     x: torch.Tensor,
     group_size: int,
     use_triton: bool,
@@ -762,9 +761,9 @@ class rocm_aiter_ops:
 
             direct_register_custom_op(
                 op_name="rocm_aiter_block_fp8_quant",
-                op_func=_rocm_aiter_block_fp8_quant_impl,
+                op_func=_rocm_aiter_group_fp8_quant_impl,
                 mutates_args=[],
-                fake_impl=_rocm_aiter_block_fp8_quant_fake,
+                fake_impl=_rocm_aiter_group_fp8_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -1070,12 +1069,12 @@ class rocm_aiter_ops:
         return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
     @staticmethod
-    def block_fp8_quant(
+    def group_fp8_quant(
         input_2d: torch.Tensor,
         group_size: int,
         use_triton: bool,
     ) -> tuple[torch.Tensor, ...]:
-        return torch.ops.vllm.rocm_aiter_block_fp8_quant(
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant(
             input_2d, group_size, use_triton
         )
 
