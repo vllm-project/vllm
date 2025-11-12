@@ -1184,10 +1184,10 @@ if hasattr(torch.ops._C, "gptq_marlin_repack"):
         size_n: torch.SymInt,
         num_bits: int,
     ) -> torch.Tensor:
-        pack_factor = 32 / num_bits
+        pack_factor = 32 // num_bits
         marlin_tile_size = 16
         return torch.empty(
-            (size_k / marlin_tile_size, size_n * marlin_tile_size / pack_factor),
+            (size_k // marlin_tile_size, size_n * marlin_tile_size // pack_factor),
             dtype=b_q_weight.dtype,
             device=b_q_weight.device,
         )
@@ -1209,10 +1209,10 @@ if hasattr(torch.ops._C, "awq_marlin_repack"):
         size_n: torch.SymInt,
         num_bits: int,
     ) -> torch.Tensor:
-        pack_factor = 32 / num_bits
+        pack_factor = 32 // num_bits
         marlin_tile_size = 16
         return torch.empty(
-            (size_k / marlin_tile_size, size_n * marlin_tile_size / pack_factor),
+            (size_k // marlin_tile_size, size_n * marlin_tile_size // pack_factor),
             dtype=b_q_weight.dtype,
             device=b_q_weight.device,
         )
