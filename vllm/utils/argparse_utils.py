@@ -257,7 +257,6 @@ class FlexibleArgumentParser(ArgumentParser):
                 # -O.<...> handled later
                 # also handle -O=<optimization_level> here
                 optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
-                optimization_level = arg[2]
                 processed_args += ["--optimization-level", optimization_level]
             elif (
                 arg == "-O"
@@ -303,8 +302,22 @@ class FlexibleArgumentParser(ArgumentParser):
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
         duplicates = set[str]()
+        # Track regular arguments (non-dict args) for duplicate detection
+        regular_args_seen = set[str]()
         for i, processed_arg in enumerate(processed_args):
             if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("--") and "." not in processed_arg:
+                if "=" in processed_arg:
+                    arg_name = processed_arg.split("=", 1)[0]
+                else:
+                    arg_name = processed_arg
+
+                if arg_name in regular_args_seen:
+                    duplicates.add(arg_name)
+                else:
+                    regular_args_seen.add(arg_name)
                 continue
 
             if processed_arg.startswith("-") and "." in processed_arg:

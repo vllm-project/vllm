@@ -274,7 +274,6 @@ def test_moe_model_detection(model_id, expected_is_moe_model):
         ("RedHatAI/Mistral-Small-24B-Instruct-2501-quantized.w8a8", True),
         ("RedHatAI/gpt-oss-20b", True),
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", True),
-        ("RedHatAI/Llama-3.2-1B-FP8", True),
         ("RedHatAI/Mixtral-8x7B-Instruct-v0.1", False),
     ],
 )

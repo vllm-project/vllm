@@ -258,19 +258,32 @@ class LLM:
         if hf_overrides is None:
             hf_overrides = {}
 
+        def _filter_none_from_dict(d: dict[str, Any]) -> dict[str, Any]:
+            """Recursively filter out None values from a dictionary."""
+            result = {}
+            for k, v in d.items():
+                if v is not None:
+                    if isinstance(v, dict):
+                        filtered = _filter_none_from_dict(v)
+                        if filtered:  # Only include non-empty dicts
+                            result[k] = filtered
+                    else:
+                        result[k] = v
+            return result
+
         if compilation_config is not None:
             if isinstance(compilation_config, int):
                 compilation_config_instance = CompilationConfig(
                     mode=CompilationMode(compilation_config)
                 )
             elif isinstance(compilation_config, dict):
-                compilation_config_instance = CompilationConfig(
-                    **{
-                        k: v
-                        for k, v in compilation_config.items()
-                        if is_init_field(CompilationConfig, k)
-                    }
-                )
+                filtered_dict = {
+                    k: v
+                    for k, v in compilation_config.items()
+                    if is_init_field(CompilationConfig, k)
+                }
+                filtered_dict = _filter_none_from_dict(filtered_dict)
+                compilation_config_instance = CompilationConfig(**filtered_dict)
             else:
                 compilation_config_instance = compilation_config
         else:
@@ -278,13 +291,13 @@ class LLM:
 
         if structured_outputs_config is not None:
             if isinstance(structured_outputs_config, dict):
-                structured_outputs_instance = StructuredOutputsConfig(
-                    **{
-                        k: v
-                        for k, v in structured_outputs_config.items()
-                        if is_init_field(StructuredOutputsConfig, k)
-                    }
-                )
+                filtered_dict = {
+                    k: v
+                    for k, v in structured_outputs_config.items()
+                    if is_init_field(StructuredOutputsConfig, k)
+                }
+                filtered_dict = _filter_none_from_dict(filtered_dict)
+                structured_outputs_instance = StructuredOutputsConfig(**filtered_dict)
             else:
                 structured_outputs_instance = structured_outputs_config
         else:
