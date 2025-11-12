@@ -1620,9 +1620,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_uuids = mm_uuids or {}
 
         for modality, items in mm_items.items():
-            # EmbeddingItems has one uuid only on the input batched tensor,
-            # which doesn't map to actual item counts, so recalculate item hashes.
-            if not isinstance(items, EmbeddingItems) and modality in mm_uuids:
+            if modality in mm_uuids:
                 mm_uuids_per_modality = mm_uuids[modality]
                 if isinstance(mm_uuids_per_modality, str):
                     mm_uuids_per_modality = [mm_uuids_per_modality]

@@ -334,9 +334,27 @@ class Processor:
 
         mm_uuids: dict[str, list[str | None] | str] = {}
         for modality, data in mm_data.items():
-            n = len(data) if isinstance(data, list) else 1
-            mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
+            if self._is_embeddings(data):
+                # Hash each item for embedding inputs.
+                if data.ndim == 3:
+                    unbinded_data = data.unbind(dim=0)
+                    mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(len(unbinded_data))]
+                else:
+                    mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(len(data))]
+            else:
+                n = len(data) if isinstance(data, list) else 1
+                mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
+
+    def _is_embeddings(
+        self, data: object
+    ) -> bool:
+        if isinstance(data, torch.Tensor):
+            return data.ndim == 3
+        if is_list_of(data, torch.Tensor):
+            return data[0].ndim == 2  # type: ignore[index]
+
+        return False
 
     def process_inputs(
         self,
