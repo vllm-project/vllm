@@ -137,7 +137,6 @@ class RequestState:
 
         # Stream Interval
         self.stream_interval = stream_interval
-        self.total_num_output_tokens = 0  # Track total num of output tokens
         self.sent_tokens_offset = 0  # Offset of sent tokens
 
     @classmethod
@@ -216,36 +215,32 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        # Stream Interval buffering: only apply for DELTA mode and stream_interval > 1
-        is_delta_streaming = self.output_kind == RequestOutputKind.DELTA
-        if is_delta_streaming and self.stream_interval > 1:
-            # Track total tokens generated
-            self.total_num_output_tokens += len(new_token_ids)
+        assert self.detokenizer is not None
 
-            # should send output when it is the first token or reach the stream interval
-            should_send_output = (
-                self.sent_tokens_offset == 0
-                or self.total_num_output_tokens - self.sent_tokens_offset
-                >= self.stream_interval
-            )
+        # Send output request only when
+        # 1. It has finished, or
+        # 2. It is the first token, or
+        # 3. It has reached the stream interval number of tokens
+        if not (
+            finished
+            or self.sent_tokens_offset == 0
+            or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
+            >= self.stream_interval
+        ):
+            return None
 
-            # Do NOT send output if not finished and should not send output
-            if not finished and not should_send_output:
-                return None
-
-            # Send tokens from the offset
-            assert self.detokenizer is not None
+        if self.output_kind == RequestOutputKind.DELTA:
+            # Send tokens from the offset in DELTA mode
             tokens_to_send = self.detokenizer.output_token_ids[
                 self.sent_tokens_offset :
             ]
             self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
         else:
-            if self.stream_interval > 1:
+            if self.stream_interval > 1 and final_only:
                 logger.warning_once(
-                    "stream_interval > 1 is only supported for DELTA mode. "
+                    "stream_interval > 1 is not supported for FINAL_ONLY mode. "
                     "Ignoring the stream_interval setting."
                 )
-            # Send all the new tokens
             tokens_to_send = new_token_ids
 
         request_id = self.request_id
