@@ -262,21 +262,21 @@ def test_optimization_level_space_separated(args, expected):
 
 
 @pytest.mark.parametrize(
-    ("arg", "expected"),
+    ("args", "expected"),
     [
-        ("-O.mode=0", 0),
-        ("-O.mode=1", 1),
-        ("-O.mode=2", 2),
-        ("-O.mode=3", 3),
+        (["-O.mode=0"], 0),
+        (["-O.mode=1"], 1),
+        (["-O.mode=2"], 2),
+        (["-O.mode=3"], 3),
     ],
 )
-def test_mode_parser(arg, expected):
+def test_mode_parser(args, expected):
     """
     Test compilation config modes (-O.mode=int) map to compilation_config.
     """
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args([arg])
-    assert args.compilation_config.mode == expected
+    parsed_args = parser.parse_args(args)
+    assert parsed_args.compilation_config.mode == expected
 
 
 def test_compilation_config():
