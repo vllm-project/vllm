@@ -243,7 +243,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "FalconH1ForCausalLM": _HfExamplesInfo("tiiuae/Falcon-H1-0.5B-Base"),
     "FlexOlmoForCausalLM": _HfExamplesInfo("allenai/Flex-reddit-2x7B-1T"),
     "GemmaForCausalLM": _HfExamplesInfo("google/gemma-1.1-2b-it"),
-    "Gemma2ForCausalLM": _HfExamplesInfo("google/gemma-2-9b"),
+    "Gemma2ForCausalLM": _HfExamplesInfo(
+        "google/gemma-2-9b", extras={"tiny": "google/gemma-2-2b-it"}
+    ),
     "Gemma3ForCausalLM": _HfExamplesInfo("google/gemma-3-1b-it"),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
