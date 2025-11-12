@@ -402,6 +402,88 @@ def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
     return torch.empty_like(x), torch.empty_like(residual)
 
 
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=group_size,
+        dtype_quant=dtypes.fp8,
+        res1=residual,
+    )
+    return (x_quant, x_quant_scales, res)
+
+
+def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=dtypes.fp8, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+        torch.empty_like(residual, device=residual.device),
+    )
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
+        x,
+        weight,
+        variance_epsilon,
+        None,
+        None,
+        None,
+        group_size=group_size,
+        dtype_quant=dtypes.fp8,
+        res1=None,
+    )
+    return (x_quant, x_quant_scales)
+
+
+def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    variance_epsilon: float,
+    group_size: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import dtypes
+
+    M, N = x.shape
+    scale_shape = (M, (N + group_size - 1) // group_size)
+    return (
+        torch.empty_like(x, dtype=dtypes.fp8, device=x.device),
+        torch.empty(scale_shape, dtype=torch.float32, device=x.device),
+    )
+
+
 def _rocm_aiter_block_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
@@ -659,6 +741,22 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fp8_group_quant",
+                op_func=_rocm_aiter_rmsnorm_fp8_group_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_rmsnorm_fp8_group_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_with_add_fp8_group_quant",
+                op_func=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 

@@ -101,7 +101,7 @@ if rocm_aiter_ops.is_enaled():
                 input: torch.Tensor,
                 use_triton: bool,
             ):
-                at = FUSED_SILU_MUL_QUANT_OP(x=input)
+                at = FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
                 return at[0], at[1]
 
             inputs = [

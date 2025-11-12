@@ -9,9 +9,9 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.layernorm import is_rocm_aiter_rmsnorm_enabled
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -90,20 +90,16 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
 }
 
 
-if is_rocm_aiter_rmsnorm_enabled():
+if rocm_aiter_ops.is_rmsnorm_enabled():
     AITER_RMS_GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
     AITER_RMS_ADD_GROUP_QUANT_OP = (
         torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
     )
 
-    AITER_BLOCK_GEMM_OP = torch.ops.vllm.rocm_aiter_gemm_w8a8_blockscale.default
     AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
     AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
 
-    import aiter as rocm_aiter
-
-    rocm_aiter_fp8_dtype = rocm_aiter.dtypes.fp8
-    rocm_aiter_fp8_quant_group_size = 128
+    AITER_BLOCK_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_block_fp8_quant.default
 
 
 class RMSNormQuantPattern:
@@ -336,7 +332,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
         )
 
 
-if is_rocm_aiter_rmsnorm_enabled():
+if rocm_aiter_ops.is_rmsnorm_enabled():
 
     class AiterRMSGroupQuantFP8Pattern:
         def __init__(self, epsilon: float, quant_dtype: torch.dtype):
@@ -347,50 +343,34 @@ if is_rocm_aiter_rmsnorm_enabled():
             def pattern(
                 input: torch.Tensor,
                 weight: torch.Tensor,
-                gemm_weight: torch.Tensor,
-                gemm_weight_scale: torch.Tensor,
+                use_triton: bool,
             ):
                 at1 = AITER_RMS_OP(
                     x=input, weight=weight, variance_epsilon=self.epsilon
                 )
 
-                at2 = AITER_BLOCK_GEMM_OP(
-                    input_2d=at1,
-                    weight=gemm_weight,
-                    input_scale=None,
-                    weight_scale=gemm_weight_scale,
-                    group_size=128,
-                    output_dtype=input.dtype,
-                )
+                at2 = AITER_BLOCK_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
 
-                return at2
+                return at2[0], at2[1]
 
             def replacement(
                 input: torch.Tensor,
                 weight: torch.Tensor,
-                gemm_weight: torch.Tensor,
-                gemm_weight_scale: torch.Tensor,
+                use_triton: bool,
             ):
-                at1 = AITER_RMS_GROUP_QUANT_OP(
-                    x=input, weight=weight, variance_epsilon=self.epsilon
-                )
-
-                at2 = AITER_BLOCK_GEMM_OP(
-                    input_2d=at1[0],
-                    weight=gemm_weight,
-                    input_scale=at1[1],
-                    weight_scale=gemm_weight_scale,
+                at = AITER_RMS_GROUP_QUANT_OP(
+                    x=input,
+                    weight=weight,
+                    variance_epsilon=self.epsilon,
                     group_size=128,
-                    output_dtype=input.dtype,
                 )
 
-                return at2
+                return at[0], at[1]
 
             inputs = [
                 empty_bf16(5, 4),  # input
                 empty_bf16(1, 5),  # weight
-                torch.empty(4, 5, dtype=FP8_DTYPE),  # gemm_weight
-                empty_fp32(1, 1),  # gemm_weight_scale
+                False,  # use_triton
             ]
 
             pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
@@ -405,8 +385,7 @@ if is_rocm_aiter_rmsnorm_enabled():
                 input: torch.Tensor,
                 residual: torch.Tensor,
                 weight: torch.Tensor,
-                gemm_weight: torch.Tensor,
-                gemm_weight_scale: torch.Tensor,
+                use_triton: bool,
             ):
                 at1 = AITER_RMS_ADD_OP(
                     x=input,
@@ -415,50 +394,33 @@ if is_rocm_aiter_rmsnorm_enabled():
                     variance_epsilon=self.epsilon,
                 )
 
-                at2 = AITER_BLOCK_GEMM_OP(
-                    input_2d=at1[0],
-                    weight=gemm_weight,
-                    input_scale=None,
-                    weight_scale=gemm_weight_scale,
-                    group_size=128,
-                    output_dtype=input.dtype,
-                )
+                at2 = AITER_BLOCK_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
 
-                # result, residual
-                return at2, at1[1]
+                # result, scale, residual
+                return at2[0], at2[1], at1[1]
 
             def replacement(
                 input: torch.Tensor,
                 residual: torch.Tensor,
                 weight: torch.Tensor,
-                gemm_weight: torch.Tensor,
-                gemm_weight_scale: torch.Tensor,
+                use_triton: bool,
             ):
-                at1 = AITER_RMS_ADD_GROUP_QUANT_OP(
+                at = AITER_RMS_ADD_GROUP_QUANT_OP(
                     x=input,
                     residual=residual,
                     weight=weight,
                     variance_epsilon=self.epsilon,
-                )
-
-                at2 = AITER_BLOCK_GEMM_OP(
-                    input_2d=at1[0],
-                    weight=gemm_weight,
-                    input_scale=at1[1],
-                    weight_scale=gemm_weight_scale,
                     group_size=128,
-                    output_dtype=input.dtype,
                 )
 
-                # result, residual
-                return at2, at1[2]
+                # result, scale, residual
+                return at[0], at[1], at[2]
 
             inputs = [
                 empty_bf16(5, 4),  # input
                 empty_bf16(5, 4),  # residual
                 empty_bf16(1, 5),  # weight
-                torch.empty(4, 5, dtype=FP8_DTYPE),  # gemm_weight
-                empty_fp32(1, 1),  # gemm_weight_scale
+                False,  # use_triton
             ]
 
             pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
@@ -494,7 +456,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
                 self.patterns
             )
 
-            if is_rocm_aiter_rmsnorm_enabled():
+            if rocm_aiter_ops.is_rmsnorm_enabled():
                 # Fuse rms_norm + dynamic group fp8 quant
                 AiterRMSGroupQuantFP8Pattern(epsilon, FP8_DTYPE).register(self.patterns)
 
@@ -520,7 +482,7 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
         ]
-        if is_rocm_aiter_rmsnorm_enabled():
+        if rocm_aiter_ops.is_rmsnorm_enabled():
             fusion_patterns.extend(
                 [AiterRMSGroupQuantFP8Pattern, AiterFusedAddRMSGroupQuantPattern]
             )
