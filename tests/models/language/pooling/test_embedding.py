@@ -23,8 +23,7 @@ from ...utils import check_embeddings_close
         ),
         pytest.param(
             "intfloat/e5-mistral-7b-instruct",
-            # CPU v1 doesn't support sliding window
-            marks=[pytest.mark.core_model],
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
             "ssmits/Qwen2-7B-Instruct-embed-base", marks=[pytest.mark.cpu_model]

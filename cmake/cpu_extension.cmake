@@ -15,6 +15,7 @@ endif()
 #
 set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
 set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
+set(ENABLE_AMXBF16 $ENV{VLLM_CPU_AMXBF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -139,6 +140,22 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     else()
         set(ENABLE_AVX512VNNI OFF)
         message(WARNING "Disable AVX512-VNNI ISA support, no avx512_vnni found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AVX512VNNI=1.")
+    endif()
+
+    find_isa(${CPUINFO} "amx_bf16" AMXBF16_FOUND)
+    if (AMXBF16_FOUND OR ENABLE_AMXBF16)
+        if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND
+            CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 12.3)
+            list(APPEND CXX_COMPILE_FLAGS "-mamx-bf16" "-mamx-tile")
+            set(ENABLE_AMXBF16 ON)
+            add_compile_definitions(-DCPU_CAPABILITY_AMXBF16)
+        else()
+            set(ENABLE_AMXBF16 OFF)
+            message(WARNING "Disable AMX_BF16 ISA support, requires gcc/g++ >= 12.3")
+        endif()
+    else()
+        set(ENABLE_AMXBF16 OFF)
+        message(WARNING "Disable AMX_BF16 ISA support, no amx_bf16 found in local CPU flags." " If cross-compilation is required, please set env VLLM_CPU_AMXBF16=1.")
     endif()
     
 elseif (AVX2_FOUND)
@@ -275,7 +292,10 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
     set(ONEDNN_VERBOSE "OFF")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
+    set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
+    set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
     FetchContent_MakeAvailable(oneDNN)
+    set(CMAKE_BUILD_TYPE ${VLLM_BUILD_TYPE})
     add_library(dnnl_ext OBJECT "csrc/cpu/dnnl_helper.cpp")
     target_include_directories(
         dnnl_ext
@@ -305,14 +325,14 @@ endif()
 #
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
-    "csrc/cpu/attention.cpp"
-    "csrc/cpu/cache.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
-    "csrc/cpu/torch_bindings.cpp"
-    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp")
+    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp"
+    "csrc/cpu/cpu_attn.cpp"
+    "csrc/cpu/scratchpad_manager.cpp"
+    "csrc/cpu/torch_bindings.cpp")
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     set(VLLM_EXT_SRC
