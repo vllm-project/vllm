@@ -1995,6 +1995,11 @@ class NixlConnectorWorker:
         """
         Calculates the new set of block IDs by mapping every element
         in the (potentially sparse) input array.
+        Example: block_ids=[0, 2], block_size_ratio=2
+      get_mapped_blocks    0     1     [2     3]     4     5
+            # remote is |h0-b0|h1-b0||h0-b1|h1-b1||h0-b1|h1-b1||
+            # local is  |h0-b0......||h1-b0......||h2-b0........
+      local_block_ids         0           [1]           2        
         """
         if block_ids.size == 0:
             return np.array([], dtype=np.int64)
