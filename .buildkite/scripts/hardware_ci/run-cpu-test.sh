@@ -76,7 +76,7 @@ function cpu_tests() {
   # Run AWQ test
   # docker exec cpu-test-"$NUMA_NODE" bash -c "
   #   set -e
-  #   VLLM_USE_V1=0 pytest -x -s -v \
+  #   pytest -x -s -v \
   #   tests/quantization/test_ipex_quant.py"
 
   # Run multi-lora tests
