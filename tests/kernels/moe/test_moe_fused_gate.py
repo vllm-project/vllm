@@ -10,14 +10,12 @@ from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 
 @pytest.mark.parametrize(
     "seq_length",
-    list(range(1, 10)) +
-    [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536],
+    list(range(1, 10))
+    + [16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536],
 )
 @pytest.mark.parametrize(
     "dtype",
-    [
-        torch.float32
-    ]  #  torch.float16, torch.bfloat16 - aren't working correctly yet
+    [torch.float32],  #  torch.float16, torch.bfloat16 - aren't working correctly yet
 )
 @pytest.mark.parametrize(
     "params",
@@ -36,7 +34,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import grouped_topk
 )
 def test_moe_fused_gate_combined(
     seq_length, dtype, params, num_fused_shared_experts, monkeypatch
-    ):
+):
     num_experts, num_expert_group, topk_group, topk = params
     topk += 1 if num_fused_shared_experts > 0 else 0
 
@@ -82,16 +80,19 @@ def test_moe_fused_gate_combined(
         shared_indices = original_indices[:, -1]
         shared_ref_indices = original_ref_indices[:, -1]
         if shared_indices is not None:
-            assert torch.all((shared_indices >= valid_min) & (
-                shared_indices < valid_max)), (
-                    "Shared expert indices out of range: ",
-                    f"found values outside [{valid_min}, {valid_max})")
+            assert torch.all(
+                (shared_indices >= valid_min) & (shared_indices < valid_max)
+            ), (
+                "Shared expert indices out of range: ",
+                f"found values outside [{valid_min}, {valid_max})",
+            )
         if shared_ref_indices is not None:
             assert torch.all(
-                (shared_ref_indices >= valid_min)
-                & (shared_ref_indices < valid_max)), (
-                    "Shared expert reference indices out of range: ",
-                    f"found values outside [{valid_min}, {valid_max})")
+                (shared_ref_indices >= valid_min) & (shared_ref_indices < valid_max)
+            ), (
+                "Shared expert reference indices out of range: ",
+                f"found values outside [{valid_min}, {valid_max})",
+            )
 
     vllm_idx_check = torch.allclose(
         ref_vllm_indices.sort()[0].to(torch.int32),

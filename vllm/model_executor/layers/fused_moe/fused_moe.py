@@ -1173,7 +1173,7 @@ def grouped_topk(
         logger.info(
             "Fused MoE grouped topk is enabled with fused shared experts.",
             "Only one of these options can be used at a time",
-            "Fused MoE grouped topk is disabled."
+            "Fused MoE grouped topk is disabled.",
         )
         use_fused_moe_grouped_topk = False
 
@@ -1239,21 +1239,20 @@ def grouped_topk(
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(tmp_scores,
-                                            k=topk,
-                                            dim=-1,
-                                            sorted=use_sorted)
+        topk_weights, topk_ids = torch.topk(
+            tmp_scores, k=topk, dim=-1, sorted=use_sorted
+        )
 
     if num_fused_shared_experts > 0:
-        assert routed_scaling_factor is not None, \
-        "With num_fused_shared_experts>0"
+        assert routed_scaling_factor is not None, "With num_fused_shared_experts>0"
         ", routed_scaling_factor need to be provided"
-        topk_ids[:, -1] = torch.randint(low=num_experts,
-                                        high=num_experts +
-                                        num_fused_shared_experts,
-                                        size=(topk_ids.size(0), ),
-                                        dtype=topk_ids.dtype,
-                                        device=topk_ids.device)
+        topk_ids[:, -1] = torch.randint(
+            low=num_experts,
+            high=num_experts + num_fused_shared_experts,
+            size=(topk_ids.size(0),),
+            dtype=topk_ids.dtype,
+            device=topk_ids.device,
+        )
         topk_weights[:, -1] = topk_weights[:, :-1].sum(dim=-1) / routed_scaling_factor
 
     if renormalize:
@@ -1263,9 +1262,8 @@ def grouped_topk(
             topk_weights_sum = topk_weights[:, :-1].sum(dim=-1, keepdim=True)
         topk_weights = topk_weights / topk_weights_sum
 
-    if num_fused_shared_experts == 0:
-        if routed_scaling_factor != 1.0:
-            topk_weights = topk_weights * routed_scaling_factor
+    if num_fused_shared_experts == 0 and routed_scaling_factor != 1.0:
+        topk_weights = topk_weights * routed_scaling_factor
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 

@@ -287,19 +287,18 @@ struct KernelParams {
 
 template <typename T, int VPT, int NUM_EXPERTS, int THREADS_PER_ROW,
           int ROWS_PER_WARP, int ROWS_PER_CTA, int WARPS_PER_CTA>
-__global__ void moe_fused_gate_kernel(void* input, void* bias,
-                                      float* output_ptr, int32_t* indices_ptr,
-                                      int64_t num_rows, int64_t topk_group,
-                                      int64_t topk,
-                                      int64_t num_fused_shared_experts,
-                                      double routed_scaling_factor,
-                                      bool apply_routed_scaling_factor_on_output) {
+__global__ void moe_fused_gate_kernel(
+    void* input, void* bias, float* output_ptr, int32_t* indices_ptr,
+    int64_t num_rows, int64_t topk_group, int64_t topk,
+    int64_t num_fused_shared_experts, double routed_scaling_factor,
+    bool apply_routed_scaling_factor_on_output) {
   KernelParams<VPT, NUM_EXPERTS, THREADS_PER_ROW, ROWS_PER_WARP, ROWS_PER_CTA,
                WARPS_PER_CTA>
       params;
   moe_fused_gate_impl<T>(input, bias, output_ptr, indices_ptr, num_rows,
                          topk_group, topk, num_fused_shared_experts,
-                         routed_scaling_factor, apply_routed_scaling_factor_on_output, params);
+                         routed_scaling_factor,
+                         apply_routed_scaling_factor_on_output, params);
 }
 
 // Macro to compute compile-time constants and launch the kernel.
@@ -352,18 +351,17 @@ __global__ void moe_fused_gate_kernel_dynamic(
 
   moe_fused_gate_impl<T>(input, bias, output_ptr, indices_ptr, num_rows,
                          topk_group, topk, num_fused_shared_experts,
-                         routed_scaling_factor, apply_routed_scaling_factor_on_output, params);
+                         routed_scaling_factor,
+                         apply_routed_scaling_factor_on_output, params);
 }
 
 //------------------------------------------------------------------------------
 // Host Launcher Function
 //------------------------------------------------------------------------------
-std::vector<at::Tensor> moe_fused_gate(at::Tensor& input, at::Tensor& bias,
-                                       int64_t num_expert_group,
-                                       int64_t topk_group, int64_t topk,
-                                       int64_t num_fused_shared_experts,
-                                       double routed_scaling_factor,
-                                       bool apply_routed_scaling_factor_on_output) {
+std::vector<at::Tensor> moe_fused_gate(
+    at::Tensor& input, at::Tensor& bias, int64_t num_expert_group,
+    int64_t topk_group, int64_t topk, int64_t num_fused_shared_experts,
+    double routed_scaling_factor, bool apply_routed_scaling_factor_on_output) {
   int64_t num_rows = input.size(0);
   int32_t num_experts = input.size(1);
   auto options =
