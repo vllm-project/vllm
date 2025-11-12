@@ -1027,8 +1027,8 @@ def reorg_kvcache(
             # local_chunk_len in dcp1: |-----|-----|--|
             # so we need update the last chunk length in dcp1.
             local_chunk_len = min(
-                local_context_len - chunk_idx * chunk_size,
-                padded_local_chunk_seq_len
+                max(0, local_context_len - chunk_idx * chunk_size),
+                padded_local_chunk_seq_len,
             )
             if local_chunk_len != 0:
                 kv_c_segment = allgatered_kv_c_normed[
