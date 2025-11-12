@@ -17,6 +17,7 @@ def test_getitem_moved_to_producer_subgraph():
 
     class TupleOutputModule(torch.nn.Module):
         """Tuple producer."""
+
         def forward(
             self, x: torch.Tensor, y: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -82,6 +83,7 @@ def test_no_tuple_inputs_with_multiple_consumers():
 
     class TupleOutputModule(torch.nn.Module):
         """Tuple producer."""
+
         def forward(
             self, x: torch.Tensor, y: torch.Tensor
         ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -91,6 +93,7 @@ def test_no_tuple_inputs_with_multiple_consumers():
 
     class MultiConsumerModel(torch.nn.Module):
         """Tuple (multi-)consumer."""
+
         def __init__(self):
             super().__init__()
             self.submod = TupleOutputModule()
