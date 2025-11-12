@@ -184,10 +184,10 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
                 )
-        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda():
+        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "QK Norm + RoPE fusion enabled but the current platform is not "
-                "CUDA. The fusion will be disabled."
+                "CUDA or ROCm. The fusion will be disabled."
             )
             self.enable_qk_norm_rope_fusion = False
 
