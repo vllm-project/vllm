@@ -1047,8 +1047,7 @@ void gather_and_maybe_dequant_cache(
   int64_t dst_entry_stride = dst.stride(0);
 
   constexpr int32_t thread_block_size = 64;
-  int32_t gridx = std::min(65536, num_tokens);
-  dim3 grid(gridx);
+  dim3 grid(num_tokens);
   dim3 block(thread_block_size);
 
   const int32_t* seq_starts_ptr =
