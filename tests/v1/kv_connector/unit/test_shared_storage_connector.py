@@ -257,10 +257,12 @@ def input_cases(test_images):
     ]
 
 
+@pytest.mark.parametrize("eager", [False, True])
 def test_shared_storage_connector_hashes(
     shared_storage_path,
     processor,
     input_cases,
+    eager,
 ):
     """
     Tests that SharedStorageConnector saves KV to the storage locations
@@ -271,29 +273,7 @@ def test_shared_storage_connector_hashes(
     Each test depends on the cumulative state from previous tests.
     """
     llm_instance = build_llm_instance(
-        eager=False, shared_storage_path=shared_storage_path
-    )
-
-    for case_id, (text, img, expected_len, info) in enumerate(input_cases):
-        print("\n", "=" * 25, f"Below running input case: {case_id}", "=" * 25)
-        run_test(
-            shared_storage_path,
-            processor,
-            llm_instance,
-            text,
-            img,
-            expected_len,
-            info,
-        )
-
-
-def test_shared_storage_connector_hashes_eager(
-    shared_storage_path,
-    processor,
-    input_cases,
-):
-    llm_instance = build_llm_instance(
-        eager=True, shared_storage_path=shared_storage_path
+        eager=eager, shared_storage_path=shared_storage_path
     )
 
     for case_id, (text, img, expected_len, info) in enumerate(input_cases):
