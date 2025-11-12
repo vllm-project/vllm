@@ -1374,7 +1374,7 @@ def _parse_chat_message_content(
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
-
+    reasoning = message.get("reasoning") or message.get("reasoning_content")
     if content is None:
         content = []
     elif isinstance(content, str):
@@ -1396,6 +1396,10 @@ def _parse_chat_message_content(
             # follow the OpenAI spec.
             if "tool_calls" in parsed_msg and parsed_msg["tool_calls"] is not None:
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
+            # Include reasoning if present for interleaved thinking.
+            if reasoning is not None:
+                result_msg["reasoning"] = reasoning
+                result_msg["reasoning_content"] = reasoning  # keep compatibility
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
@@ -1597,7 +1601,7 @@ def apply_hf_chat_template(
         chat_template=hf_chat_template,
         chat_template_kwargs=kwargs,
     )
-
+    print(f"-------{conversation=}-------")
     try:
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
