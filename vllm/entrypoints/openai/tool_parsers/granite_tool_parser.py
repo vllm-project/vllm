@@ -59,6 +59,11 @@ class GraniteToolParser(ToolParser):
             .lstrip()
         )
         if not stripped or stripped[0] != "[":
+            logger.warning(
+                "Granite tool parser emitted no tool calls. raw_output=%r stripped=%r",
+                model_output[:512],
+                stripped[:512],
+            )
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
@@ -92,6 +97,11 @@ class GraniteToolParser(ToolParser):
 
         except Exception as e:
             logger.error("Error in extracting tool call from response %s", e)
+            logger.warning(
+                "Granite tool parser failed to parse tool calls. raw_output=%r stripped=%r",
+                model_output[:512],
+                stripped[:512],
+            )
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
