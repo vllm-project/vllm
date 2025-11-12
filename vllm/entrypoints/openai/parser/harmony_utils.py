@@ -232,17 +232,104 @@ def parse_response_input(
     return msg
 
 
-def parse_input_to_harmony_message(chat_msg) -> list[Message]:
+def parse_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
+    msgs: list[Message] = []
+    tool_id_names: dict[str, str] = {}
+
+    # Collect tool id to name mappings for tool response recipient values
+    for chat_msg in chat_msgs:
+        # Convert from Pydantic ValidatorIterators to a real list
+        tool_calls = list(chat_msg.get("tool_calls") or [])
+        chat_msg["tool_calls"] = tool_calls
+        for tool_call in chat_msg.get("tool_calls"):
+            tool_id_names[tool_call.get("id")] = tool_call.get("function", {}).get(
+                "name"
+            )
+
+    for chat_msg in chat_msgs:
+        msgs.extend(parse_input_to_harmony_message(chat_msg, tool_id_names))
+
+    msgs = auto_drop_analysis_messages(msgs)
+    return msgs
+
+
+def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
+    """
+    Harmony models expect the analysis messages (representing raw chain of thought) to
+    be dropped after an assistant message to the final channel is produced from the
+    reasoning of those messages.
+
+    The openai-harmony library does this if the very last assistant message is to the
+    final channel, but it does not handle the case where we're in longer multi-turn
+    conversations and the client gave us reasoning content from previous turns of
+    the conversation with multiple assistant messages to the final channel in the
+    conversation.
+
+    So, we find the index of the last assistant message to the final channel and drop
+    all analysis messages that precede it, leaving only the analysis messages that
+    are relevant to the current part of the conversation.
+    """
+    last_assistant_final_index = -1
+    for i in range(len(msgs) - 1, -1, -1):
+        msg = msgs[i]
+        if msg.author.role == "assistant" and msg.channel == "final":
+            last_assistant_final_index = i
+            break
+
+    cleaned_msgs: list[Message] = []
+    for i, msg in enumerate(msgs):
+        if (
+            i < last_assistant_final_index
+            and msg.author.role == "assistant"
+            and msg.channel == "analysis"
+        ):
+            continue
+        cleaned_msgs.append(msg)
+
+    return cleaned_msgs
+
+
+def parse_input_to_harmony_message(
+    chat_msg, tool_id_names: dict[str, str] | None = None
+) -> list[Message]:
+    tool_id_names = tool_id_names or {}
+
     if not isinstance(chat_msg, dict):
         # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)
 
     role = chat_msg.get("role")
+    msgs: list[Message] = []
 
     # Assistant message with tool calls
-    tool_calls = chat_msg.get("tool_calls")
+    tool_calls = chat_msg.get("tool_calls") or []
+    # Convert from Pydantic ValidatorIterator to a real list
+    if tool_calls and not isinstance(tool_calls, list):
+        tool_calls = list(tool_calls)
+
     if role == "assistant" and tool_calls:
-        msgs: list[Message] = []
+        content = chat_msg.get("content")
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+        if content:
+            commentary_msg = Message.from_role_and_content(Role.ASSISTANT, content)
+            commentary_msg = commentary_msg.with_channel("commentary")
+            msgs.append(commentary_msg)
+
+        reasoning_content = chat_msg.get("reasoning") or chat_msg.get(
+            "reasoning_content"
+        )
+        if reasoning_content:
+            analysis_msg = Message.from_role_and_content(
+                Role.ASSISTANT, reasoning_content
+            )
+            analysis_msg = analysis_msg.with_channel("analysis")
+            msgs.append(analysis_msg)
+
         for call in tool_calls:
             func = call.get("function", {})
             name = func.get("name", "")
@@ -256,7 +343,8 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
 
     # Tool role message (tool output)
     if role == "tool":
-        name = chat_msg.get("name", "")
+        tool_call_id = chat_msg.get("tool_call_id", "")
+        name = tool_id_names.get(tool_call_id, "")
         content = chat_msg.get("content", "") or ""
         if isinstance(content, list):
             # Handle array format for tool message content
@@ -267,20 +355,40 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
                 if isinstance(item, dict) and item.get("type") == "text"
             )
 
-        msg = Message.from_author_and_content(
-            Author.new(Role.TOOL, f"functions.{name}"), content
-        ).with_channel("commentary")
+        msg = (
+            Message.from_author_and_content(
+                Author.new(Role.TOOL, f"functions.{name}"), content
+            )
+            .with_channel("commentary")
+            .with_recipient("assistant")
+        )
         return [msg]
 
+    # Non-tool reasoning content
+    reasoning_content = chat_msg.get("reasoning") or chat_msg.get("reasoning_content")
+    if role == "assistant" and reasoning_content:
+        analysis_msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_content)
+        analysis_msg = analysis_msg.with_channel("analysis")
+        msgs.append(analysis_msg)
+
     # Default: user/assistant/system messages with content
-    content = chat_msg.get("content", "")
+    content = chat_msg.get("content") or []
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
         # TODO: Support refusal.
         contents = [TextContent(text=c.get("text", "")) for c in content]
-    msg = Message.from_role_and_contents(role, contents)
-    return [msg]
+    if contents:
+        msg = Message.from_role_and_contents(role, contents)
+
+        # Send non-tool assistant messages to the final channel if they don't have a
+        # channel already.
+        if role == "assistant" and not msg.channel:
+            msg = msg.with_channel("final")
+
+        msgs.append(msg)
+
+    return msgs
 
 
 def construct_harmony_previous_input_messages(

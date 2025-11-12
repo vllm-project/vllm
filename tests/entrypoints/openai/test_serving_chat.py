@@ -11,7 +11,12 @@ import pytest_asyncio
 from openai import OpenAI
 
 from vllm.config.multimodal import MultiModalConfig
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.parser.harmony_utils import get_encoding
+from vllm.entrypoints.openai.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    RequestResponseMetadata,
+)
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.tokenizers import get_tokenizer
@@ -728,3 +733,434 @@ async def test_serving_chat_data_parallel_rank_extraction():
     # Verify that data_parallel_rank defaults to None
     assert "data_parallel_rank" in mock_engine.generate.call_args.kwargs
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
+
+
+class TestServingChatMakeRequestWithHarmony:
+    """
+    These tests ensure Chat Completion requests are being properly converted into
+    Harmony messages. These tests are not exhaustive, but each one was created to
+    cover a specific case that we got wrong but is now fixed.
+
+    Any changes to the tests and their expectations may result in changes to the
+    accuracy of model prompting and responses generated. It is suggested to run
+    an evaluation or benchmarking suite (such as bfcl multi_turn) to understand
+    any impact of changes in how we prompt Harmony models.
+    """
+
+    @pytest.fixture()
+    def mock_engine(self) -> AsyncLLM:
+        mock_engine = MagicMock(spec=AsyncLLM)
+        mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+        mock_engine.errored = False
+        mock_engine.model_config = MockModelConfig()
+        mock_engine.input_processor = MagicMock()
+        mock_engine.io_processor = MagicMock()
+        return mock_engine
+
+    @pytest.fixture()
+    def serving_chat(self, mock_engine) -> OpenAIServingChat:
+        return _build_serving_chat(mock_engine)
+
+    @pytest.mark.asyncio
+    async def test_simple_chat(self, serving_chat):
+        messages = [{"role": "user", "content": "what is 1+1?"}]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+        assert len(output_messages) == 3
+        assert output_messages[0].author.role == "system"
+        assert output_messages[1].author.role == "developer"
+        assert output_messages[2].author.role == "user"
+        assert output_messages[2].content[0].text == messages[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_tool_call_response_with_content(self, serving_chat):
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                        },
+                        "required": ["location"],
+                    },
+                },
+            },
+        ]
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's the weather like in Paris today?",
+            },
+            {
+                "role": "assistant",
+                "content": "We'll call get_weather.",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "Paris"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "20 degrees Celsius",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+
+        assert len(output_messages) == 6
+
+        assert output_messages[0].author.role == "system"
+
+        developer_msg = output_messages[1]
+        assert developer_msg.author.role == "developer"
+        developer_tools = developer_msg.content[0].tools
+        assert developer_tools["functions"].tools[0].name == "get_weather"
+
+        user_msg = output_messages[2]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[0]["content"]
+
+        analysis_msg = output_messages[3]
+        assert analysis_msg.author.role == "assistant"
+        assert analysis_msg.channel == "commentary"
+        assert analysis_msg.content[0].text == messages[1]["content"]
+
+        assistant_msg = output_messages[4]
+        assert assistant_msg.author.role == "assistant"
+        assert assistant_msg.channel == "commentary"
+        assert assistant_msg.recipient == "functions.get_weather"
+        assert (
+            assistant_msg.content[0].text
+            == messages[1]["tool_calls"][0]["function"]["arguments"]
+        )
+
+        tool_msg = output_messages[5]
+        assert tool_msg.author.role == "tool"
+        assert tool_msg.author.name == "functions.get_weather"
+        assert tool_msg.channel == "commentary"
+        assert tool_msg.recipient == "assistant"
+        assert tool_msg.content[0].text == messages[2]["content"]
+
+    @pytest.mark.asyncio
+    async def test_tools_and_reasoning(self, serving_chat):
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                        },
+                        "required": ["location"],
+                    },
+                },
+            },
+        ]
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's the weather like in Paris today?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "We'll call get_weather.",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "Paris"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "20 degrees Celsius",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+
+        assert len(output_messages) == 6
+
+        assert output_messages[0].author.role == "system"
+
+        developer_msg = output_messages[1]
+        assert developer_msg.author.role == "developer"
+        developer_tools = developer_msg.content[0].tools
+        assert developer_tools["functions"].tools[0].name == "get_weather"
+
+        user_msg = output_messages[2]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[0]["content"]
+
+        analysis_msg = output_messages[3]
+        assert analysis_msg.author.role == "assistant"
+        assert analysis_msg.channel == "analysis"
+        assert analysis_msg.content[0].text == messages[1]["reasoning"]
+
+        assistant_msg = output_messages[4]
+        assert assistant_msg.author.role == "assistant"
+        assert assistant_msg.channel == "commentary"
+        assert assistant_msg.recipient == "functions.get_weather"
+        assert (
+            assistant_msg.content[0].text
+            == messages[1]["tool_calls"][0]["function"]["arguments"]
+        )
+
+        tool_msg = output_messages[5]
+        assert tool_msg.author.role == "tool"
+        assert tool_msg.author.name == "functions.get_weather"
+        assert tool_msg.channel == "commentary"
+        assert tool_msg.recipient == "assistant"
+        assert tool_msg.content[0].text == messages[2]["content"]
+
+    @pytest.mark.asyncio
+    async def test_multi_turn_tools_and_reasoning(self, serving_chat):
+        tools: list[dict[str, Any]] = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get the weather in a given location",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "location": {"type": "string"},
+                        },
+                        "required": ["location"],
+                    },
+                },
+            },
+        ]
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's the weather like in Paris today?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "We'll call get_weather.",
+                "tool_calls": [
+                    {
+                        "id": "call_123",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "Paris"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "20 degrees Celsius",
+            },
+            {
+                "role": "assistant",
+                "content": "The weather in Paris today is 20 degrees Celsius.",
+            },
+            {
+                "role": "user",
+                "content": "What's the weather like in Boston today?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "We'll call get_weather.",
+                "tool_calls": [
+                    {
+                        "id": "call_234",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": '{"location": "Boston"}',
+                        },
+                    },
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_234",
+                "content": "10 degrees Celsius",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages, tools=tools)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+
+        assert len(output_messages) == 10
+
+        assert output_messages[0].author.role == "system"
+
+        developer_msg = output_messages[1]
+        assert developer_msg.author.role == "developer"
+        developer_tools = developer_msg.content[0].tools
+        assert developer_tools["functions"].tools[0].name == "get_weather"
+
+        user_msg = output_messages[2]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[0]["content"]
+
+        # The analysis messages from the first tool call should be dropped
+        # since we're now working on the second tool call.
+        assistant_msg = output_messages[3]
+        assert assistant_msg.author.role == "assistant"
+        assert assistant_msg.channel == "commentary"
+        assert assistant_msg.recipient == "functions.get_weather"
+        assert (
+            assistant_msg.content[0].text
+            == messages[1]["tool_calls"][0]["function"]["arguments"]
+        )
+
+        tool_msg = output_messages[4]
+        assert tool_msg.author.role == "tool"
+        assert tool_msg.author.name == "functions.get_weather"
+        assert tool_msg.channel == "commentary"
+        assert tool_msg.recipient == "assistant"
+        assert tool_msg.content[0].text == messages[2]["content"]
+
+        assistant_msg = output_messages[5]
+        assert assistant_msg.author.role == "assistant"
+        assert assistant_msg.channel == "final"
+        assert assistant_msg.content[0].text == messages[3]["content"]
+
+        user_msg = output_messages[6]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[4]["content"]
+
+        analysis_msg = output_messages[7]
+        assert analysis_msg.author.role == "assistant"
+        assert analysis_msg.channel == "analysis"
+        assert analysis_msg.content[0].text == messages[5]["reasoning"]
+
+        assistant_msg = output_messages[8]
+        assert assistant_msg.author.role == "assistant"
+        assert assistant_msg.channel == "commentary"
+        assert assistant_msg.recipient == "functions.get_weather"
+        assert (
+            assistant_msg.content[0].text
+            == messages[5]["tool_calls"][0]["function"]["arguments"]
+        )
+
+        tool_msg = output_messages[9]
+        assert tool_msg.author.role == "tool"
+        assert tool_msg.author.name == "functions.get_weather"
+        assert tool_msg.channel == "commentary"
+        assert tool_msg.recipient == "assistant"
+        assert tool_msg.content[0].text == messages[6]["content"]
+
+    @pytest.mark.asyncio
+    async def test_non_tool_reasoning(self, serving_chat):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's 2+2?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "Adding 2 and 2 is easy. The result is 4.",
+                "content": "4",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+
+        assert len(output_messages) == 4
+
+        assert output_messages[0].author.role == "system"
+
+        developer_msg = output_messages[1]
+        assert developer_msg.author.role == "developer"
+
+        user_msg = output_messages[2]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[0]["content"]
+
+        # The reasoning that would have resulted in an analysis message is dropped
+        # because there was a subsequent assistant message to the final channel.
+
+        assistant_msg = output_messages[3]
+        assert assistant_msg.author.role == "assistant"
+        assert assistant_msg.channel == "final"
+        assert assistant_msg.content[0].text == messages[1]["content"]
+
+    @pytest.mark.asyncio
+    async def test_non_tool_reasoning_empty_content(self, serving_chat):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's 2+2?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "Adding 2 and 2 is easy. The result is 4.",
+                "content": "",
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+
+        assert len(output_messages) == 4
+
+        assert output_messages[0].author.role == "system"
+
+        developer_msg = output_messages[1]
+        assert developer_msg.author.role == "developer"
+
+        user_msg = output_messages[2]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[0]["content"]
+
+        analysis_msg = output_messages[3]
+        assert analysis_msg.author.role == "assistant"
+        assert analysis_msg.channel == "analysis"
+        assert analysis_msg.content[0].text == messages[1]["reasoning"]
+
+    @pytest.mark.asyncio
+    async def test_non_tool_reasoning_empty_content_list(self, serving_chat):
+        messages: list[dict[str, Any]] = [
+            {
+                "role": "user",
+                "content": "What's 2+2?",
+            },
+            {
+                "role": "assistant",
+                "reasoning": "Adding 2 and 2 is easy. The result is 4.",
+                "content": [],
+            },
+        ]
+        req = ChatCompletionRequest(model=MODEL_NAME, messages=messages)
+        output_messages, _, _ = serving_chat._make_request_with_harmony(req)
+
+        assert len(output_messages) == 4
+
+        assert output_messages[0].author.role == "system"
+
+        developer_msg = output_messages[1]
+        assert developer_msg.author.role == "developer"
+
+        user_msg = output_messages[2]
+        assert user_msg.author.role == "user"
+        assert user_msg.content[0].text == messages[0]["content"]
+
+        analysis_msg = output_messages[3]
+        assert analysis_msg.author.role == "assistant"
+        assert analysis_msg.channel == "analysis"
+        assert analysis_msg.content[0].text == messages[1]["reasoning"]
