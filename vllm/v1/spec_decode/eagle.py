@@ -1009,19 +1009,21 @@ class EagleProposer:
 
             if not self.model.has_own_embed_tokens:
                 logger.info(
-                    "Draft model embed_tokens are not initialized from the checkpoint weights. "
-                    "Assuming draft model should share the embedding weights with the target model to save memory."
+                    "Draft model embed_tokens are not initialized from the checkpoint "
+                    "weights. Assuming draft model should share the embedding weights "
+                    "with the target model to save memory."
                 )
                 del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
             else:
                 logger.info(
-                    "Draft model embed_tokens are initialized from the checkpoint weights. "
+                    "Draft model embed_tokens are initialized from the checkpoint "
+                    "weights. Keeping separate embedding weights from the target model."
                     "Keeping separate embedding weights from the target model."
                 )
         else:
             logger.info(
-                "The EAGLE head's vocab embedding will be loaded separately"
+                "The draft model's vocab embedding will be loaded separately"
                 " from the target model."
             )
 
@@ -1039,8 +1041,9 @@ class EagleProposer:
                 and not self.model.has_own_lm_head
             ):
                 logger.info(
-                    "Draft model lm_head is not initialized from the checkpoint weights. "
-                    "Assuming draft model should share the lm_head weights with the target model to save memory."
+                    "Draft model lm_head is not initialized from the checkpoint weights"
+                    ". Assuming draft model should share the lm_head weights with the "
+                    "target model to save memory."
                 )
                 del self.model.lm_head
                 self.model.lm_head = target_language_model.lm_head
