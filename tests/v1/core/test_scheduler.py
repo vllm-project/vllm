@@ -31,7 +31,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -888,7 +888,49 @@ def _step_until_done(
         all_finished = all_done
 
 
-def test_kv_connector_basic():
+def _step_until_kv_transfer_finished(scheduler: Scheduler, req_ids: list[str]):
+    """Cycle requests through a KV transfer cyle."""
+
+    # Requests should first transition to WAITING_FOR_REMOTE_KVS
+    output = scheduler.schedule()
+    assert len(scheduler.waiting) == len(req_ids)
+    assert len(scheduler.running) == 0
+    assert len(output.scheduled_new_reqs) == 0
+    for req in scheduler.requests.values():
+        assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # No model execution yet
+    EMPTY_OUTPUT = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, EMPTY_OUTPUT)
+
+    # Simulate KV transfer completion using KVConnectorOutput.finished_recving
+    output = scheduler.schedule()
+    assert len(scheduler.waiting) == len(req_ids)
+    assert len(scheduler.running) == 0
+
+    MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+        kv_connector_output=KVConnectorOutput(finished_recving=req_ids),
+    )
+    scheduler.update_from_output(output, MODEL_RUNNER_OUTPUT)
+    for req_id in req_ids:
+        assert req_id in scheduler.finished_recving_kv_req_ids
+
+
+@pytest.mark.parametrize("is_async", [False, True])
+def test_kv_connector_basic(is_async: bool):
     """
     Test whether Scheduler with KVConnector schedules tokens, allocates
     memory, and cleans up requests as expected under normal operation.
@@ -899,7 +941,9 @@ def test_kv_connector_basic():
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler = create_scheduler(
         enable_prefix_caching=True,
-        use_kv_connector=mock_kv(matched_tokens=NUM_MATCHED_NEW_TOKENS, is_async=False),
+        use_kv_connector=mock_kv(
+            matched_tokens=NUM_MATCHED_NEW_TOKENS, is_async=is_async
+        ),
         block_size=BLOCK_SIZE,
     )
     NUM_TOTAL_BLOCKS = scheduler.kv_cache_manager.block_pool.get_num_free_blocks()
@@ -921,6 +965,9 @@ def test_kv_connector_basic():
         scheduler.add_request(request)
         req_ids.append(request.request_id)
         req_to_index[request.request_id] = i
+
+    if is_async:
+        _step_until_kv_transfer_finished(scheduler, req_ids)
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
@@ -971,6 +1018,9 @@ def test_kv_connector_basic():
         scheduler.add_request(request)
         req_ids.append(request.request_id)
         req_to_index[request.request_id] = i
+
+    if is_async:
+        _step_until_kv_transfer_finished(scheduler, req_ids)
 
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
