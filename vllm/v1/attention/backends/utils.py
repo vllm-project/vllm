@@ -1019,11 +1019,6 @@ def create_fast_prefill_custom_backend(
                     for _field in fields(metadata.__class__):
                         setattr(self, _field.name, getattr(metadata, _field.name))
 
-                    # Set additional fields that will be used in model code
-                    assert (
-                        common_attn_metadata.logits_indices_padded is not None
-                        and common_attn_metadata.num_logits_indices is not None
-                    )
                     self.logits_indices_padded = (
                         common_attn_metadata.logits_indices_padded
                     )
