@@ -13,7 +13,7 @@ from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Optional
 
 import msgspec
 import numpy as np
@@ -21,7 +21,8 @@ import torch
 import zmq
 
 from vllm import envs
-from vllm.attention.backends.registry import _Backend, backend_name_to_enum
+from vllm.attention import AttentionBackend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -52,6 +53,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
 
 Transfer = tuple[int, float]  # (xfer_handle, start_time)
@@ -89,6 +91,7 @@ _NIXL_SUPPORTED_DEVICE = {
     ),
     "tpu": ("cpu",),
     "xpu": ("cpu",),
+    "cpu": ("cpu",),
 }
 # support for oot platform by providing mapping in current_platform
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
@@ -150,7 +153,14 @@ class NixlConnectorMetadata(KVConnectorMetadata):
 
 
 class NixlConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        role: KVConnectorRole,
+        kv_cache_config: Optional["KVCacheConfig"] = None,
+    ):
+        super().__init__(vllm_config, role, kv_cache_config)
+
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
@@ -339,7 +349,13 @@ class NixlConnectorScheduler:
             + vllm_config.parallel_config.data_parallel_rank
         )
         assert vllm_config.kv_transfer_config is not None
-        self.use_host_buffer = vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
+        if current_platform.device_type == "cpu":
+            self.use_host_buffer = False
+        else:
+            self.use_host_buffer = (
+                vllm_config.kv_transfer_config.kv_buffer_device == "cpu"
+            )
+
         logger.info("Initializing NIXL Scheduler %s", engine_id)
 
         # Background thread for handling new handshake requests.
@@ -661,6 +677,33 @@ class NixlConnectorWorker:
         remote_tp_size: dict[EngineId, int]
         is_mla: bool
         total_num_kv_heads: int
+        attn_backend: type[AttentionBackend]
+
+        def __post_init__(self):
+            # Figure out whether the first dimension of the cache is K/V
+            # or num_blocks. This is used to register the memory regions correctly.
+            kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+                num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+            )
+            # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
+            # we just mock num_blocks to 1 for the dimension check below.
+            self._is_kv_layout_blocks_first = (
+                len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+            )
+
+            attn_backend = AttentionBackendEnum[self.attn_backend.get_name()]
+            self._use_pallas = attn_backend == AttentionBackendEnum.PALLAS
+
+        @property
+        def is_kv_layout_blocks_first(self) -> bool:
+            return self._is_kv_layout_blocks_first
+
+        @property
+        def split_k_and_v(self) -> bool:
+            # Whether to register regions for K and V separately (when present).
+            return not (
+                self.is_mla or self._use_pallas or self.is_kv_layout_blocks_first
+            )
 
         def tp_ratio(
             self,
@@ -784,7 +827,11 @@ class NixlConnectorWorker:
         # cpu kv buffer for xfer
         # used when device memory can not be registered under nixl
         self.host_xfer_buffers: dict[str, torch.Tensor] = {}
-        self.use_host_buffer = self.kv_buffer_device == "cpu"
+        if self.device_type == "cpu":
+            self.use_host_buffer = False
+        else:
+            self.use_host_buffer = self.kv_buffer_device == "cpu"
+
         # support for oot platform which can't register nixl memory
         # type based on kv_buffer_device
         nixl_memory_type = current_platform.get_nixl_memory_type()
@@ -868,9 +915,6 @@ class NixlConnectorWorker:
             use_mla=self.use_mla,
         )
         self.backend_name = backend.get_name()
-        attn_backend = backend_name_to_enum(self.backend_name)
-        self._use_flashinfer = attn_backend == _Backend.FLASHINFER
-        self._use_pallas = attn_backend == _Backend.PALLAS
         self.kv_cache_layout = get_kv_cache_layout()
         self.host_buffer_kv_cache_layout = self.kv_cache_layout
         logger.debug("Detected attention backend %s", self.backend_name)
@@ -888,7 +932,9 @@ class NixlConnectorWorker:
             remote_tp_size=self._tp_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+            attn_backend=backend,
         )
+        self._use_pallas = self.kv_topo._use_pallas
 
     def _nixl_handshake(
         self,
@@ -986,6 +1032,9 @@ class NixlConnectorWorker:
         # Set a no-op if the host buffer is not cpu.
         if self.kv_buffer_device != "cpu":
             return
+        # Set a no-op if self.device_type is 'cpu'.
+        if self.device_type == "cpu":
+            return
         assert self.use_host_buffer
         self.copy_blocks = copy_operation
 
@@ -1068,7 +1117,7 @@ class NixlConnectorWorker:
         # (roughly 8KB vs 5KB).
         # Conversely for FlashInfer, K and V are registered in the same region
         # to better exploit the memory layout (ie num_blocks is the first dim).
-        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
+        split_k_and_v = self.kv_topo.split_k_and_v
         tensor_size_bytes = None
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
@@ -1133,7 +1182,7 @@ class NixlConnectorWorker:
 
         self.device_kv_caches = kv_caches
         self.dst_num_blocks[self.engine_id] = self.num_blocks
-        if self._use_flashinfer:
+        if self.kv_topo.is_kv_layout_blocks_first:
             for i in range(len(self.slot_size_per_layer)):
                 assert self.slot_size_per_layer[i] % 2 == 0
                 self.slot_size_per_layer[i] //= 2
@@ -1161,7 +1210,7 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((addr, kv_block_len, self.device_id))
 
-            if self._use_flashinfer:
+            if self.kv_topo.is_kv_layout_blocks_first:
                 # Separate and interleave K/V regions to maintain the same
                 # descs ordering. This is needed for selecting contiguous heads
                 # when split across TP ranks.
@@ -1323,7 +1372,7 @@ class NixlConnectorWorker:
                 # (addr, len, device id)
                 blocks_data.append((addr, kv_block_len, nixl_agent_meta.device_id))
 
-            if self._use_flashinfer:
+            if self.kv_topo.is_kv_layout_blocks_first:
                 # With FlashInfer index V separately to allow head splitting.
                 for block_id in range(nixl_agent_meta.num_blocks):
                     block_offset = block_id * nixl_agent_meta.block_lens[i]
@@ -1406,7 +1455,7 @@ class NixlConnectorWorker:
             remote_block_size = remote_block_len // (
                 self.slot_size_per_layer[0] * tp_ratio
             )
-            if self._use_flashinfer:
+            if self.kv_topo.is_kv_layout_blocks_first:
                 # With flashinfer, KV are sent in the same message.
                 remote_block_size //= 2
 
@@ -1486,7 +1535,7 @@ class NixlConnectorWorker:
         - cache.index_copy_(0, indices, permuted_blocks) # copy permuted kv back
 
         """
-        split_k_and_v = not (self.use_mla or self._use_pallas or self._use_flashinfer)
+        split_k_and_v = self.kv_topo.split_k_and_v
         inv_order = [0, 2, 1, 3]
         sample_cache = list(self.device_kv_caches.values())[0][0]
         target_shape = list(sample_cache.shape)
@@ -1866,7 +1915,7 @@ class NixlConnectorWorker:
         For FlashInfer, this is half the length of the whole block, as K and V
         share the same region.
         """
-        if self._use_flashinfer:
+        if self.kv_topo.is_kv_layout_blocks_first:
             # For indexing only half (either just the K or V part).
             block_len = self.block_len_per_layer[layer_idx] // 2
         else:
