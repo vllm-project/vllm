@@ -20,6 +20,9 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ..utils import flat_product, multi_gpu_test
 
+is_blackwell = lambda: current_platform.is_device_capability(100)
+"""Are we running on Blackwell, a lot of tests depend on it"""
+
 
 class Matches(NamedTuple):
     attention_fusion: int = 0
@@ -56,7 +59,11 @@ if current_platform.is_cuda():
         ModelBackendTestCase(
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
-            backend=AttentionBackendEnum.FLASHINFER,
+            # TODO FlashInfer attn broken on Hopper for llama4:
+            # https://github.com/vllm-project/vllm/issues/28568
+            backend=AttentionBackendEnum.FLASHINFER
+            if is_blackwell()
+            else AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=48,
                 allreduce_fusion=96,
@@ -150,7 +157,7 @@ def test_attn_quant(
     monkeypatch,
 ):
     if backend == AttentionBackendEnum.FLASHINFER and (
-        not current_platform.is_device_capability((10, 0)) or not has_flashinfer()
+        not is_blackwell() or not has_flashinfer()
     ):
         pytest.skip("FlashInfer attn fusion requires Blackwell and flashinfer")
     if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
@@ -241,6 +248,13 @@ def test_tp2_attn_quant_allreduce_rmsnorm(
     if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition requires torch>=2.9")
 
+    if "fp4" in model_name.lower() and not is_blackwell():
+        pytest.skip("NVFP4 quant requires Blackwell")
+
+    if backend == AttentionBackendEnum.FLASHINFER and not is_blackwell():
+        # FlashInfer attn fusion requires Blackwell
+        matches = matches._replace(attention_fusion=0)
+
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
     if inductor_graph_partition:
@@ -326,11 +340,22 @@ def test_tp2_attn_quant_async_tp(
     caplog_mp_spawn,
     monkeypatch,
 ):
-    if current_platform.is_device_capability((10, 0)):
+    if is_blackwell():
         # TODO: https://github.com/vllm-project/vllm/issues/27893
         pytest.skip("Blackwell is not supported for AsyncTP pass")
+
     if inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("Inductor graph partition requires torch>=2.9")
+
+    if "fp4" in model_name.lower() and not is_blackwell():
+        pytest.skip("NVFP4 quant requires Blackwell")
+
+    if backend == AttentionBackendEnum.FLASHINFER:
+        if not has_flashinfer():
+            pytest.skip("FlashInfer backend requires flashinfer installed")
+        if not is_blackwell():
+            # FlashInfer attn fusion requires Blackwell
+            matches = matches._replace(attention_fusion=0)
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
