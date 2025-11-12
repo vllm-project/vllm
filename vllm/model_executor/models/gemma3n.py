@@ -1114,8 +1114,7 @@ class Gemma3nForCausalLM(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        del lora_config  # Unused.
+
         super().__init__()
         self.config = config
         self.cache_config = vllm_config.cache_config

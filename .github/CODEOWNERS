@@ -61,6 +61,16 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/model_executor/models/transformers @hmellor
 /tests/models/test_transformers.py @hmellor
 
+# Observability
+/vllm/config/observability.py @markmc
+/vllm/v1/metrics @markmc
+/tests/v1/metrics @markmc
+/vllm/tracing.py @markmc
+/tests/v1/tracing/test_tracing.py @markmc
+/vllm/config/kv_events.py @markmc
+/vllm/distributed/kv_events.py @markmc
+/tests/distributed/test_events.py @markmc
+
 # Docs
 /docs/mkdocs @hmellor
 /docs/**/*.yml @hmellor

@@ -25,7 +25,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     modular_triton_fused_moe,
     try_get_optimal_moe_config,
 )
-from vllm.model_executor.layers.fused_moe.layer import FusedMoEModularMethod
+from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
+    FusedMoEModularMethod,
+)
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):

@@ -45,7 +45,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -305,18 +304,13 @@ class Grok1Model(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         self.embedding_multiplier_scale = getattr(
             config, "embedding_multiplier_scale", DEFAULT_EMBEDDING_MULTIPLIER_SCALE
         )
@@ -324,7 +318,6 @@ class Grok1Model(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
             quant_config=quant_config,
         )
 
@@ -499,25 +492,18 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
+
         self.quant_config = quant_config
 
         self.model = Grok1Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
@@ -529,7 +515,7 @@ class Grok1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             config, "output_multiplier_scale", DEFAULT_OUTPUT_MULTIPLIER_SCALE
         )
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, self.output_multiplier_scale
+            config.vocab_size, scale=self.output_multiplier_scale
         )
 
         self.make_empty_intermediate_tensors = (

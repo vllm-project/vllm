@@ -88,13 +88,21 @@ class SymmMemCommunicator:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
                 self.world_size
             ]
-
-        self.buffer = torch_symm_mem.empty(
-            self.max_size // self.dtype.itemsize,
-            device=self.device,
-            dtype=self.dtype,
-        )
-        handle = torch_symm_mem.rendezvous(self.buffer, self.group.group_name)
+        try:
+            self.buffer = torch_symm_mem.empty(
+                self.max_size // self.dtype.itemsize,
+                device=self.device,
+                dtype=self.dtype,
+            )
+            handle = torch_symm_mem.rendezvous(self.buffer, self.group.group_name)
+        except RuntimeError as e:
+            logger.warning_once(
+                "SymmMemCommunicator: symmetric memory initialization failed: %s "
+                "Communicator is not available. To suppress this warning set "
+                "VLLM_ALLREDUCE_USE_SYMM_MEM=0",
+                str(e),
+            )
+            return
         if handle.multicast_ptr == 0:
             logger.warning(
                 "SymmMemCommunicator: symmetric memory "

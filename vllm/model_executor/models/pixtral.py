@@ -1109,7 +1109,7 @@ class PixtralHFAttention(nn.Module):
             )
             out = out.transpose(1, 2)
 
-        out = out.view(batch, patches, self.n_heads * self.head_dim)
+        out = out.reshape(batch, patches, self.n_heads * self.head_dim)
         attn_output, _ = self.o_proj(out)
 
         return attn_output, None

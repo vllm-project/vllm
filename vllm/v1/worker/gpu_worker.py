@@ -20,6 +20,7 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -887,3 +888,7 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
+
+    # Init ec connector here before KV caches caches init
+    # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
+    ensure_ec_transfer_initialized(vllm_config)

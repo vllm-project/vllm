@@ -323,11 +323,10 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
         # lm_head use bias, cannot share word embeddings
         assert not config.tie_word_embeddings
-        self.lora_config = lora_config
 
         self.quant_config = quant_config
 

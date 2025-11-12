@@ -55,17 +55,13 @@ def cutlass_scaled_mm(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
-    is_hopper: bool | None = None,
 ) -> torch.Tensor:
-    if is_hopper is None:
-        is_hopper = current_platform.is_device_capability(90)
     return ops.cutlass_scaled_mm(
         A,
         B.T,
         out_dtype=output_dtype,
         scale_a=As,
-        # SM90 block FP8 requires row-major scale_b, which we do ahead of time
-        scale_b=Bs if block_size is not None and is_hopper else Bs.T,
+        scale_b=Bs.T,
     )
 
 
@@ -119,20 +115,27 @@ def _padded_cutlass(
         dim if dim % pad_multiple == 0 else dim + pad_multiple - (dim % pad_multiple)
     )
 
-    padded_shape = [padded, *qx.shape[1:]]
-    padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
-    padded_qx[0 : qx.shape[0], ...].copy_(qx)
+    has_pad = padded > dim
 
-    padded_x_scale_shape = [*x_scale.shape[1:], padded]
-    padded_x_scale = torch.ones(
-        padded_x_scale_shape, device=x_scale.device, dtype=x_scale.dtype
-    ).permute(-1, -2)
-    padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
+    if has_pad:
+        padded_shape = [padded, *qx.shape[1:]]
+        padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
+        padded_qx[0 : qx.shape[0], ...].copy_(qx)
 
-    output = cutlass_scaled_mm(
-        padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype, True
-    )
-    return output[0 : qx.shape[0], ...]
+        padded_x_scale_shape = [*x_scale.shape[1:], padded]
+        padded_x_scale = torch.ones(
+            padded_x_scale_shape, device=x_scale.device, dtype=x_scale.dtype
+        ).permute(-1, -2)
+        padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
+
+        output = cutlass_scaled_mm(
+            padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype
+        )
+        return output[0 : qx.shape[0], ...]
+    else:
+        return cutlass_scaled_mm(
+            qx, weight, x_scale, weight_scale, block_size, output_dtype
+        )
 
 
 def _padded_cutlass_fake(
@@ -303,7 +306,6 @@ class W8A8BlockFp8LinearOp:
                 weight_scale,
                 list(self.weight_group_shape),
                 input_2d.dtype,
-                False,
             )
 
     def _run_aiter(
@@ -1125,9 +1127,7 @@ def process_fp8_weight_block_strategy(
     return weight, weight_scale
 
 
-def maybe_post_process_fp8_weight_block(
-    layer: torch.nn.Module, cutlass_block_fp8_supported: bool
-):
+def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     assert layer.weight_block_size is not None
 
     from vllm.utils.deep_gemm import (
@@ -1145,15 +1145,6 @@ def maybe_post_process_fp8_weight_block(
         block_sz = tuple(layer.weight_block_size)
         requant_weight_ue8m0_inplace(
             layer.weight.data, layer.weight_scale.data, block_sz
-        )
-    # SM90 Block FP8 CUTLASS requires row-major weight scales
-    elif (
-        current_platform.is_device_capability(90)
-        and cutlass_block_fp8_supported
-        and not should_use_deepgemm
-    ):
-        layer.weight_scale = torch.nn.Parameter(
-            layer.weight_scale.data.T.contiguous(), requires_grad=False
         )
 
 
