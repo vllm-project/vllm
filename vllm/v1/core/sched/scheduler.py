@@ -300,6 +300,14 @@ class Scheduler(SchedulerInterface):
                             ]
                             req_to_new_blocks.pop(preempted_req.request_id)
                             num_scheduled_tokens.pop(preempted_req.request_id)
+                            scheduled_spec_decode_tokens.pop(
+                                preempted_req.request_id, None
+                            )
+                            scheduled_encoder_inputs.pop(preempted_req.request_id, None)
+                            # TODO: To be optimal we should reset the
+                            # encoder_compute_budget here too.
+                            # (it should be very rare to preempt a prefilling
+                            # request though)
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
