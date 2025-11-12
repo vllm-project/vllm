@@ -65,7 +65,6 @@ class XPUPlatform(Platform):
 
         if use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
-        use_v1 = envs.VLLM_USE_V1
         if not use_v1:
             raise ValueError("XPU backend only supports V1.")
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
@@ -115,7 +114,9 @@ class XPUPlatform(Platform):
     @classmethod
     def get_vit_attn_backend(
         cls, head_size: int, dtype: torch.dtype
-    ) -> AttentionBackendEnum:
+    ) -> "AttentionBackendEnum":
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         return AttentionBackendEnum.FLASH_ATTN
 
     @classmethod
