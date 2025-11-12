@@ -679,6 +679,10 @@ class FusedMoE(CustomOp):
         )
 
     @property
+    def use_marlin_kernels(self):
+        return getattr(self.quant_method, "use_marlin", False)
+
+    @property
     def use_dp_chunking(self) -> bool:
         return (
             self.moe_parallel_config.use_pplx_kernels
@@ -1214,7 +1218,11 @@ class FusedMoE(CustomOp):
 
     def get_expert_weights(self) -> Iterable[torch.Tensor]:
         weights = list(self.named_parameters())
-        assert all(weight.is_contiguous() for _, weight in weights)
+        assert all(
+            weight.is_contiguous()
+            for name, weight in weights
+            if not name.startswith("_shared_experts.")
+        )
 
         # Filter out the non-expert weights.
         # `e_score_correction_bias` is a bias for each logical expert,
