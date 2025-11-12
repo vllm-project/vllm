@@ -13,7 +13,6 @@ from transformers import (
     BatchFeature,
     WhisperConfig,
     WhisperFeatureExtractor,
-    WhisperProcessor,
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
@@ -659,16 +658,6 @@ class WhisperModel(nn.Module):
 class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
-
-    def get_hf_processor(self, **kwargs: object) -> WhisperProcessor:
-        # HACK: Transformers 4.53.2 has issue with whisper tokenizer to
-        # initialize processor. We use a monkeypatch to fix it here.
-        # See: https://github.com/vllm-project/vllm/issues/20224
-        processor_class = WhisperProcessor
-        tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
-        if processor_class.tokenizer_class != tokenizer_class:
-            processor_class.tokenizer_class = tokenizer_class
-        return self.ctx.get_hf_processor(processor_class, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
