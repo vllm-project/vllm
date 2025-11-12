@@ -419,7 +419,6 @@ def rearrange_expert_weights_inplace(
     # If you figure out the reason, please let me know -- thank you!
     torch.cuda.synchronize()
 
-
     for layer in range(num_moe_layers):
         is_unchanged, is_received_locally, experts_recv_loc = move_to_buffer(
             num_local_experts=num_local_physical_experts,
