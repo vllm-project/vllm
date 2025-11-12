@@ -256,11 +256,18 @@ class Glm4MoeMTP(nn.Module, SupportsPP, Glm4MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        spec_layer = self.model.mtp_start_layer_idx
         for name, loaded_weight in weights:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
-            if spec_layer is None:
-                continue
-            name = self._rewrite_spec_layer_name(spec_layer, name)
+            if name == "lm_head.weight":
+                name = f"model.layers.{spec_layer}.shard_head.head.weight"
+            elif name == "model.embed_tokens.weight":
+                # This name is same with local model, rewriting is not needed.
+                pass
+            else:
+                spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+                if spec_layer is None:
+                    continue
+                name = self._rewrite_spec_layer_name(spec_layer, name)
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
