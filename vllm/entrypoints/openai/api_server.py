@@ -1235,7 +1235,7 @@ INVOCATION_TYPES: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = [
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def send_fault_tolerance_instruction(raw_request: Request):
+async def process_fault_tolerance_instruction(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
@@ -1250,39 +1250,40 @@ async def send_fault_tolerance_instruction(raw_request: Request):
     if fault_tolerance_instruction is None or fault_tolerance_timeout is None:
         raise HTTPException(
             status_code=400,
-            detail="fault_tolerance_instruction and"
-            " fault_tolerance_timeout is required",
+            detail="Both 'fault_tolerance_instruction' and "
+            "'fault_tolerance_timeout' are required.",
         )
 
     if not isinstance(fault_tolerance_instruction, str):
         raise HTTPException(
-            status_code=400, detail="fault_tolerance_instruction must be a str"
+            status_code=400, detail="'fault_tolerance_instruction' must be a string."
         )
-    # Currently, only two types of instructions are supported: [pause, retry].
-    # Additional descaling instructions will be supported in future updates.
+    # Supported instructions: ["pause", "retry"].
+    # More instruction types may be added in future updates.
     elif fault_tolerance_instruction not in ["pause", "retry"]:
         raise HTTPException(
-            status_code=400, detail="not a valid fault_tolerance_instruction"
+            status_code=400, detail="Invalid 'fault_tolerance_instruction' value."
         )
 
     if not isinstance(fault_tolerance_timeout, int) or fault_tolerance_timeout <= 0:
         raise HTTPException(
-            status_code=400, detail="fault_tolerance_timeout must be a positive integer"
+            status_code=400,
+            detail="'fault_tolerance_timeout' must be a positive integer.",
         )
     try:
-        execute_result = await client.handle_fault(
+        success = await client.handle_fault(
             fault_tolerance_instruction,
             fault_tolerance_timeout,
             **dynamic_fault_tolerance_params,
         )
-        if execute_result:
+        if success:
             return JSONResponse(
                 {
-                    "message": "instruction has been executed successfully",
+                    "message": "Instruction executed successfully.",
                 }
             )
         else:
-            logger.error("Fault tolerance failed, shutdown the app.")
+            logger.error("Fault tolerance failed. Shutting down the application.")
             client.shutdown()
             raise HTTPException(
                 status_code=400,
@@ -1290,10 +1291,10 @@ async def send_fault_tolerance_instruction(raw_request: Request):
             )
 
     except Exception as e:
-        logger.error("Handle fault failed: %s", e)
+        logger.error("Failed to handle fault: %s", e)
         raise HTTPException(
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
-            detail="Handle fault failed",
+            detail="Failed to handle fault.",
         ) from e
 
 
