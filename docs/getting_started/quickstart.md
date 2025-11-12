@@ -63,6 +63,17 @@ This guide will help you quickly get started with vLLM to perform:
         rocm/vllm-dev:nightly
         ```
 
+=== "Google TPU"
+
+    To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
+    
+    ```bash
+    uv pip install vllm-tpu
+    ```
+
+    !!! note
+        For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+
 !!! note
     For more detail and non-CUDA platforms, please refer [here](installation/README.md) for specific instructions on how to install vLLM.
 
