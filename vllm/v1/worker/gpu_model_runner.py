@@ -376,6 +376,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
             self.rejection_sampler = RejectionSampler(self.sampler)
 
+        self.num_spec_tokens = 0
+        if self.speculative_config:
+            self.num_spec_tokens = self.speculative_config.num_speculative_tokens
+
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
         self.comm_stream = torch.cuda.Stream()
@@ -512,11 +516,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.max_num_tokens, dtype=torch.int32, device=self.device
             )
 
-        self.uniform_decode_query_len = (
-            1
-            if not self.speculative_config
-            else 1 + self.speculative_config.num_speculative_tokens
-        )
+        self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
@@ -540,14 +540,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Cached outputs.
         self._draft_token_ids: list[list[int]] | torch.Tensor | None = None
-        self.num_spec_tokens = 0
-        if self.speculative_config:
-            self.num_spec_tokens = self.speculative_config.num_speculative_tokens  # noqa
-        self.valid_sampled_token_count_event: torch.cuda.Event | None = None
-        self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
-        if self.use_async_scheduling and self.num_spec_tokens:
-            self.valid_sampled_token_count_event = torch.cuda.Event()
-            self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
         self.transfer_event = torch.cuda.Event()
         self.sampled_token_ids_pinned_cpu = torch.empty(
             (self.max_num_reqs, 1),
@@ -555,6 +547,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device="cpu",
             pin_memory=self.pin_memory,
         )
+
+        # Pre-allocated tensor for copying valid sampled token counts to CPU,
+        # with dedicated stream for overlapping and event for coordination.
+        self.valid_sampled_token_count_event: torch.cuda.Event | None = None
+        self.valid_sampled_token_count_copy_stream: torch.cuda.Stream | None = None
+        if self.use_async_scheduling and self.num_spec_tokens:
+            self.valid_sampled_token_count_event = torch.cuda.Event()
+            self.valid_sampled_token_count_copy_stream = torch.cuda.Stream()
         self.valid_sampled_token_count_cpu = torch.empty(
             self.max_num_reqs,
             dtype=torch.int64,
@@ -2922,8 +2922,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 self.speculative_config.draft_model_config.max_model_len
             )
         input_fits_in_drafter = spec_decode_common_attn_metadata and (
-            spec_decode_common_attn_metadata.max_seq_len
-            + self.speculative_config.num_speculative_tokens
+            spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
             <= effective_drafter_max_model_len
         )
         if use_padded_batch_for_eagle:
@@ -3710,7 +3709,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # TODO(luka) better system for describing dummy batches
                 seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
             else:
-                seq_lens = max_query_len
+                seq_lens = max_query_len  # type: ignore[assignment]
             self.seq_lens.np[:num_reqs] = seq_lens
             self.seq_lens.np[num_reqs:] = 0
             self.seq_lens.copy_to_gpu()
@@ -4636,11 +4635,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
-                num_speculative_tokens=(
-                    self.vllm_config.speculative_config.num_speculative_tokens
-                    if self.vllm_config.speculative_config
-                    else 0
-                ),
+                num_speculative_tokens=self.num_spec_tokens,
             )
 
     def _allocate_kv_cache_tensors(
