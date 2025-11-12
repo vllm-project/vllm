@@ -74,24 +74,34 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+torch::Tensor get_scheduler_metadata(
+    const int64_t num_req, const int64_t num_heads_q,
+    const int64_t num_heads_kv, const int64_t head_dim,
+    const torch::Tensor& seq_lens, at::ScalarType dtype,
+    const torch::Tensor& query_start_loc, const bool casual,
+    const int64_t window_size, const std::string& isa_hint,
+    const bool enable_kv_split);
+
+void cpu_attn_reshape_and_cache(const torch::Tensor& key,
+                                const torch::Tensor& value,
+                                torch::Tensor& key_cache,
+                                torch::Tensor& value_cache,
+                                const torch::Tensor& slot_mapping,
+                                const std::string& isa);
+
+void cpu_attention_with_kv_cache(
+    const torch::Tensor& query, const torch::Tensor& key_cache,
+    const torch::Tensor& value_cache, torch::Tensor& output,
+    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
+    const double scale, const bool causal,
+    const std::optional<torch::Tensor>& alibi_slopes,
+    const int64_t sliding_window_left, const int64_t sliding_window_right,
+    const torch::Tensor& block_table, const double softcap,
+    const torch::Tensor& scheduler_metadata,
+    const std::optional<torch::Tensor>& s_aux);
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
-
-  // Attention ops
-  // Compute the attention between an input query and the cached keys/values
-  // using PagedAttention.
-  ops.def(
-      "paged_attention_v1("
-      "    Tensor! out, Tensor query, Tensor key_cache,"
-      "    Tensor value_cache, int num_kv_heads, float scale,"
-      "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
-      "    int tp_rank, int blocksparse_local_blocks,"
-      "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
-
-  ops.impl("paged_attention_v1", torch::kCPU, &paged_attention_v1);
 
   ops.def(
       "dynamic_4bit_int_moe("
@@ -101,20 +111,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       ") -> Tensor");
 
   ops.impl("dynamic_4bit_int_moe", torch::kCPU, &dynamic_4bit_int_moe_cpu);
-
-  // PagedAttention V2.
-  ops.def(
-      "paged_attention_v2("
-      "    Tensor! out, Tensor! exp_sums, Tensor! max_logits,"
-      "    Tensor! tmp_out, Tensor query, Tensor key_cache,"
-      "    Tensor value_cache, int num_kv_heads, float scale,"
-      "    Tensor block_tables, Tensor seq_lens, int block_size,"
-      "    int max_seq_len, Tensor? alibi_slopes,"
-      "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
-      "    int tp_rank, int blocksparse_local_blocks,"
-      "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
-  ops.impl("paged_attention_v2", torch::kCPU, &paged_attention_v2);
 
   // Activation ops
 
@@ -259,37 +255,26 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
 #endif
-}
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
-  // Cache ops
-  // Swap in (out) the cache blocks from src to dst.
-  cache_ops.def(
-      "swap_blocks(Tensor src, Tensor! dst, Tensor block_mapping) -> ()");
-  cache_ops.impl("swap_blocks", torch::kCPU, &swap_blocks);
-
-  // Copy the cache blocks from src to dst.
-  cache_ops.def(
-      "copy_blocks(Tensor(a!)[] key_caches, Tensor[](b!) value_caches, "
-      "Tensor block_mapping) -> ()");
-  cache_ops.impl("copy_blocks", torch::kCPU, &copy_blocks);
-
-  // Reshape the key and value tensors and cache them.
-  cache_ops.def(
-      "reshape_and_cache(Tensor key, Tensor value,"
-      "                  Tensor! key_cache, Tensor! value_cache,"
-      "                  Tensor slot_mapping,"
-      "                  str kv_cache_dtype,"
-      "                  Tensor k_scale, Tensor v_scale) -> ()");
-  cache_ops.impl("reshape_and_cache", torch::kCPU, &reshape_and_cache);
-
-  cache_ops.def(
-      "concat_and_cache_mla(Tensor kv_c, Tensor k_pe,"
-      "                     Tensor! kv_cache,"
-      "                     Tensor slot_mapping,"
-      "                     str kv_cache_dtype,"
-      "                     Tensor scale) -> ()");
-  cache_ops.impl("concat_and_cache_mla", torch::kCPU, &concat_and_cache_mla);
+  // CPU attention kernels
+  ops.def(
+      "get_scheduler_metadata(int num_req, int num_heads_q, int num_heads_kv, "
+      "int head_dim, Tensor seq_lens, ScalarType dtype, Tensor "
+      "query_start_loc, bool casual, int window_size, str isa_hint, bool "
+      "enable_kv_split) -> Tensor",
+      &get_scheduler_metadata);
+  ops.def(
+      "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
+      "isa) -> ()",
+      &cpu_attn_reshape_and_cache);
+  ops.def(
+      "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
+      "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
+      "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
+      "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
+      "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
+      &cpu_attention_with_kv_cache);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
