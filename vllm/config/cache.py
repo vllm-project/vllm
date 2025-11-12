@@ -168,7 +168,6 @@ class CacheConfig:
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             "cpu_offload_gb",
-            "calculate_kv_scales",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
             # Post-init/derived counters
