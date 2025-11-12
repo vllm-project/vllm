@@ -171,7 +171,7 @@ def decorate_logs(process_name: str | None = None) -> None:
     if process_name is None:
         process_name = get_mp_context().current_process().name
 
-    if envs.VLLM_PREFIX_LOGS:
+    if envs.VLLM_ENABLE_PREFIX_PROX_LOGS:
         pid = os.getpid()
         _add_prefix(sys.stdout, process_name, pid)
         _add_prefix(sys.stderr, process_name, pid)
