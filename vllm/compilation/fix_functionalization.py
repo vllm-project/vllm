@@ -133,7 +133,10 @@ class FixFunctionalizationPass(VllmInductorPass):
                     ),
                 )
             # Defunctionalize fused_qk_norm_rope to remove higher-order wrapper.
-            elif at_target == torch.ops._C.fused_qk_norm_rope.default:
+            elif (
+                current_platform.is_cuda()
+                and at_target == torch.ops._C.fused_qk_norm_rope.default
+            ):
                 mutated_args = {1: "qkv"}
                 args = (
                     "qkv",
