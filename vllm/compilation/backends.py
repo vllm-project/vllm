@@ -308,8 +308,8 @@ def split_graph(
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
-    node_to_subgraph_id = {}
-    split_op_graphs = []
+    node_to_subgraph_id: dict[fx.Node, int] = {}
+    split_op_graphs: list[int] = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
