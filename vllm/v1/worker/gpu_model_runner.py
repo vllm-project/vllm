@@ -237,6 +237,8 @@ class ExecuteModelState(NamedTuple):
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     kv_connector_output: KVConnectorOutput | None
+    should_run_drafter: bool
+    use_padded_batch_for_eagle: bool
 
 
 class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
@@ -1056,16 +1058,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
         max_num_scheduled_tokens: int,
+        should_attempt_drafter: bool = False,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
         UBatchSlices | None,
         torch.Tensor | None,
+        bool,
     ]:
         """
         :return: tuple[
             logits_indices, spec_decode_metadata,
             ubatch_slices, num_tokens_across_dp,
+            should_run_drafter
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1187,14 +1192,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # decoder.
         allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
 
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_tokens_unpadded=num_tokens_unpadded,
-            parallel_config=self.parallel_config,
-            allow_microbatching=True,
-            allow_dp_padding=allow_dp_padding,
-            num_tokens_padded=num_tokens_padded,
-            uniform_decode=uniform_decode,
-            num_scheduled_tokens_per_request=num_scheduled_tokens,
+        ubatch_slices, num_tokens_across_dp, should_run_drafter = (
+            coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens_unpadded,
+                parallel_config=self.parallel_config,
+                allow_microbatching=True,
+                allow_dp_padding=allow_dp_padding,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                num_scheduled_tokens_per_request=num_scheduled_tokens,
+                should_attempt_drafter=should_attempt_drafter,
+            )
         )
 
         self.seq_lens.np[:num_reqs] = (
@@ -1289,6 +1297,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             spec_decode_metadata,
             ubatch_slices,
             num_tokens_across_dp,
+            should_run_drafter,
         )
 
     def _build_attention_metadata(
@@ -2491,6 +2500,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             **model_kwargs,
         )
 
+    def _should_attempt_drafter(
+        self,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+    ) -> bool:
+        """Determine if the speculative drafter should attempt to run.
+
+        Returns False if no speculative config or if sequences would exceed
+        the drafter's max model length.
+        """
+        if self.speculative_config is None:
+            return False
+
+        seq_lens_np = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            + num_scheduled_tokens_np
+        )
+        max_seq_len = seq_lens_np.max()
+
+        # Determine effective max model length for drafter
+        effective_drafter_max_model_len = self.max_model_len
+        if effective_drafter_max_model_len is None:
+            effective_drafter_max_model_len = self.model_config.max_model_len
+        if (
+            self.speculative_config.draft_model_config is not None
+            and self.speculative_config.draft_model_config.max_model_len is not None
+        ):
+            effective_drafter_max_model_len = (
+                self.speculative_config.draft_model_config.max_model_len
+            )
+
+        return bool(
+            max_seq_len + self.speculative_config.num_speculative_tokens
+            <= effective_drafter_max_model_len
+        )
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2502,13 +2547,25 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 "State error: sample_tokens() must be called "
                 "after execute_model() returns None."
             )
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         with record_function_or_nullcontext("gpu_model_runner: preprocess"):
             with self.synchronize_input_prep():
                 # Update persistent batch states.
                 self._update_states(scheduler_output)
 
-                if not num_scheduled_tokens:
+                if not total_num_scheduled_tokens:
+                    # In DP mode, participate in coordinate_batch_across_dp
+                    # to maintain synchronization across ranks
+                    if self.parallel_config.data_parallel_size > 1:
+                        coordinate_batch_across_dp(
+                            num_tokens_unpadded=0,
+                            parallel_config=self.parallel_config,
+                            allow_microbatching=False,
+                            allow_dp_padding=False,
+                            should_attempt_drafter=False,
+                        )
+
+                    # Return early for 0-token case
                     if not has_kv_transfer_group():
                         # Return empty ModelRunnerOutput if no work to do.
                         return EMPTY_MODEL_RUNNER_OUTPUT
@@ -2528,13 +2585,28 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
 
+                should_attempt_drafter = self._should_attempt_drafter(
+                    num_reqs, num_scheduled_tokens_np
+                )
+
+                if self.cache_config.kv_sharing_fast_prefill:
+                    assert not self.input_batch.num_prompt_logprobs, (
+                        "--kv-sharing-fast-prefill produces incorrect "
+                        "logprobs for prompt tokens, tokens, please disable "
+                        "it when the requests need prompt logprobs"
+                    )
+
                 (
                     logits_indices,
                     spec_decode_metadata,
                     ubatch_slices,
                     num_tokens_across_dp,
+                    should_run_drafter,
                 ) = self._prepare_inputs(
-                    scheduler_output, num_scheduled_tokens_np, max_num_scheduled_tokens
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                    max_num_scheduled_tokens,
+                    should_attempt_drafter,
                 )
 
                 cascade_attn_prefix_lens = None
@@ -2550,7 +2622,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # TODO(lucas): move cudagraph dispatching here:
                 #   https://github.com/vllm-project/vllm/issues/23789
 
-                total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
@@ -2574,7 +2645,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
             else:
                 num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens
+                    total_num_scheduled_tokens
                 )
 
             (
@@ -2589,7 +2660,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len
-            ) and (num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
+            ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
             batch_descriptor = BatchDescriptor(
                 num_tokens=num_input_tokens,
                 uniform_decode=uniform_decode,
@@ -2600,6 +2671,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     batch_descriptor,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
+            )
+
+            use_padded_batch_for_eagle = (
+                self.speculative_config is not None
+                and self.speculative_config.use_eagle()
+                and not self.speculative_config.disable_padded_drafter_batch
             )
 
         # Set cudagraph mode to none if calc_kv_scales is true.
@@ -2653,7 +2730,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 if self.is_pooling_model:
                     # Return the pooling output.
                     output = self._pool(
-                        hidden_states, num_scheduled_tokens, num_scheduled_tokens_np
+                        hidden_states,
+                        total_num_scheduled_tokens,
+                        num_scheduled_tokens_np,
                     )
                     output.kv_connector_output = kv_connector_output
                     return output
@@ -2699,6 +2778,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sample_hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            should_run_drafter,
+            use_padded_batch_for_eagle,
         )
         return None
 
@@ -2720,6 +2801,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             sample_hidden_states,
             aux_hidden_states,
             kv_connector_output,
+            should_run_drafter,
+            use_padded_batch_for_eagle,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -2747,28 +2830,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                 )
 
-        use_padded_batch_for_eagle = (
-            self.speculative_config
-            and self.speculative_config.use_eagle()
-            and not self.speculative_config.disable_padded_drafter_batch
-        )
-        effective_drafter_max_model_len = self.max_model_len
-        if effective_drafter_max_model_len is None:
-            effective_drafter_max_model_len = self.model_config.max_model_len
-        if (
-            self.speculative_config
-            and self.speculative_config.draft_model_config is not None
-            and self.speculative_config.draft_model_config.max_model_len is not None
-        ):
-            effective_drafter_max_model_len = (
-                self.speculative_config.draft_model_config.max_model_len
-            )
-        input_fits_in_drafter = spec_decode_common_attn_metadata and (
-            spec_decode_common_attn_metadata.max_seq_len
-            + self.speculative_config.num_speculative_tokens
-            <= effective_drafter_max_model_len
-        )
-        if use_padded_batch_for_eagle and input_fits_in_drafter:
+        if should_run_drafter and use_padded_batch_for_eagle:
             # EAGLE speculative decoding can use the GPU sampled tokens
             # as inputs, and does not need to wait for bookkeeping to finish.
             propose_draft_token_ids(sampler_output.sampled_token_ids)
@@ -2791,11 +2853,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_metadata,
             )
 
-        if (
-            self.speculative_config
-            and not use_padded_batch_for_eagle
-            and input_fits_in_drafter
-        ):
+        if should_run_drafter and not use_padded_batch_for_eagle:
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
@@ -3476,7 +3534,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # We currently only microbatch if the number of tokens is
         # over a certain threshold.
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+        ubatch_slices, num_tokens_across_dp, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=total_num_scheduled_tokens,
             parallel_config=self.vllm_config.parallel_config,
             allow_microbatching=allow_microbatching,
