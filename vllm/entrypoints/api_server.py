@@ -15,7 +15,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import vllm.envs as envs
@@ -57,22 +57,37 @@ async def generate(request: Request) -> Response:
 
 
 @app.post("/fault_tolerance/apply")
-async def send_fault_tolerance_instruction(request: Request) -> Response:
-    """Generate completion for the request.
+async def process_fault_tolerance_instruction(request: Request) -> Response:
+    """Apply fault tolerance instructions to the engine.
+
+    This endpoint handles fault recovery operations such as retrying operations.
 
     The request should be a JSON object with the following fields:
-    - prompt: the prompt to use for the generation.
-    - stream: whether to stream the results or not.
-    - other fields: the sampling parameters (See `SamplingParams` for details).
+    - fault_tolerance_instruction: The name of fault tolerance method.
+    - fault_tolerance_timeout: Timeout in seconds for the operation to complete.
+    - fault_tolerance_params: dict, optional. Additional dynamic parameters for
+    the fault tolerance operation.
     """
     request_dict = await request.json()
 
     fault_tolerance_instruction = request_dict.get("fault_tolerance_instruction")
     fault_tolerance_timeout = request_dict.get("fault_tolerance_timeout")
-    kwargs = request_dict.get("kwargs", {})
+    kwargs = request_dict.get("fault_tolerance_params", {})
     assert engine is not None
-    return await engine.handle_fault(
+    success = await engine.handle_fault(
         fault_tolerance_instruction, fault_tolerance_timeout, **kwargs
+    )
+    if success:
+        return JSONResponse(
+            status_code=200,
+            content={"message": "Instruction executed successfully."},
+        )
+
+    logger.error("Fault tolerance operation failed. Shutting down the engine.")
+    engine.shutdown()
+    raise HTTPException(
+        status_code=400,
+        detail="Instruction execution failed.",
     )
 
 

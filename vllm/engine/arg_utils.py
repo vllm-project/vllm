@@ -1845,10 +1845,8 @@ class EngineArgs:
         fault_tolerance_config = FaultToleranceConfig(
             enable_fault_tolerance=self.enable_fault_tolerance,
             engine_recovery_timeout=self.engine_recovery_timeout,
-            internal_fault_report_port=self.internal_fault_report_port
-            or FaultToleranceConfig.internal_fault_report_port,
-            external_fault_notify_port=self.external_fault_notify_port
-            or FaultToleranceConfig.external_fault_notify_port,
+            internal_fault_report_port=self.internal_fault_report_port,
+            external_fault_notify_port=self.external_fault_notify_port,
             gloo_comm_timeout=self.gloo_comm_timeout,
         )
 

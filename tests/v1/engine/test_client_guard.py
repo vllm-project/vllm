@@ -23,8 +23,7 @@ FAULT_PUB_TOPIC = "vllm_fault"
 def create_test_thread_safe_dict(initial_data=None):
     if initial_data is None:
         initial_data = {1: "Healthy"}
-    if initial_data is None:
-        initial_data = {1: "Healthy"}
+
     tsd = ThreadSafeDict()
     if initial_data:
         for k, v in initial_data.items():
@@ -219,4 +218,5 @@ async def test_handle_fault_async():
     assert result is True
     assert engine_status_dict[0] == "Healthy"
 
+    cmd_socket.close()
     guard.shutdown_guard()
