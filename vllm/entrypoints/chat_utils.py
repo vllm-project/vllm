@@ -1601,7 +1601,7 @@ def apply_hf_chat_template(
         chat_template=hf_chat_template,
         chat_template_kwargs=kwargs,
     )
-    print(f"-------{conversation=}-------")
+
     try:
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
