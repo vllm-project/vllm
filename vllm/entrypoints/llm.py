@@ -23,6 +23,7 @@ from vllm.config import (
     StructuredOutputsConfig,
     is_init_field,
 )
+from vllm.config.compilation import CompilationMode
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -259,7 +260,9 @@ class LLM:
 
         if compilation_config is not None:
             if isinstance(compilation_config, int):
-                compilation_config_instance = CompilationConfig(mode=compilation_config)
+                compilation_config_instance = CompilationConfig(
+                    mode=CompilationMode(compilation_config)
+                )
             elif isinstance(compilation_config, dict):
                 compilation_config_instance = CompilationConfig(
                     **{

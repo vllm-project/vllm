@@ -28,7 +28,7 @@ else:
 logger = init_logger(__name__)
 
 
-class CompilationMode:
+class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
     model."""
 
@@ -115,7 +115,7 @@ class PassConfig:
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
     float in MB.
-    Unspecified will fallback to default values 
+    Unspecified will fallback to default values
     which are compute capability and world size dependent.
         FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
             90: {
@@ -244,7 +244,7 @@ class CompilationConfig:
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: int | None = None
+    mode: CompilationMode | None = None
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -377,23 +377,23 @@ class CompilationConfig:
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
     Generally for performance FULL_AND_PIECEWISE is better.
-    
+
     FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
     Mixed prefill-decode batches are run without cudagraphs. Can be good for
     decode instances in a P/D setup where prefill is not as important so we
     can save some memory.
-    
+
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
     This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
-    Note that the cudagraph logic is generally orthogonal to the 
-    compilation logic. While piecewise cudagraphs require piecewise 
+    Note that the cudagraph logic is generally orthogonal to the
+    compilation logic. While piecewise cudagraphs require piecewise
     compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
-    
-    Warning: This flag is new and subject to change in addition 
+
+    Warning: This flag is new and subject to change in addition
     more modes may be added.
     """
     use_cudagraph: bool = True
@@ -422,7 +422,7 @@ class CompilationConfig:
     cudagraph. If the caller can guarantee that the same input buffers
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False. 
+    internally managed buffer. Default is False.
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
     """
     full_cuda_graph: bool | None = False
@@ -451,7 +451,7 @@ class CompilationConfig:
     outside the partition functions. For a graph with N cudagraph-unsafe ops
     (e.g., Attention), there would be N+1 partitions. To mark an op as
     cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
-    register the custom op. 
+    register the custom op.
 
     This config supports both full cudagraph and piecewise cudagraph without
     compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
@@ -468,8 +468,8 @@ class CompilationConfig:
 
     max_cudagraph_capture_size: int | None = field(default=None)
     """The maximum cudagraph capture size.
-    
-    If cudagraph_capture_sizes is specified, this will be set to the largest 
+
+    If cudagraph_capture_sizes is specified, this will be set to the largest
     size in that list (or checked for consistency if specified). If
     cudagraph_capture_sizes is not specified, the list of sizes is generated
     automatically following the pattern:
@@ -478,7 +478,7 @@ class CompilationConfig:
         range(256, max_cudagraph_capture_size + 1, 16))
 
     If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small 
+    512) by default. This voids OOM in tight memory scenarios with small
     max_num_seqs, and prevents capture of many large graphs (>512) that would
     greatly increase startup time with limited performance benefit.
     """
@@ -578,6 +578,27 @@ class CompilationConfig:
         return str(config)
 
     __str__ = __repr__
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def validate_mode_before(cls, value: Any) -> Any:
+        """
+        Enable parsing the `mode` field from string mode names.
+        Accepts both integers (0-3) and string names, like NONE, STOCK_TORCH_COMPILE,
+        DYNAMO_TRACE_ONCE, VLLM_COMPILE.
+        """
+        if isinstance(value, str):
+            # Convert string mode name to integer value
+            mode_name = value.upper()
+
+            if mode_name not in CompilationMode.__members__:
+                raise ValueError(
+                    f"Invalid compilation mode: {value}. "
+                    f"Valid modes are: {', '.join(CompilationMode.__members__.keys())}"
+                )
+
+            return CompilationMode[mode_name]
+        return value
 
     @field_validator("cudagraph_mode", mode="before")
     @classmethod
@@ -904,7 +925,7 @@ class CompilationConfig:
             return self.mode == CompilationMode.VLLM_COMPILE
 
         # Inductor partition case
-        return self.backend == "inductor" and self.mode > CompilationMode.NONE
+        return self.backend == "inductor" and self.mode != CompilationMode.NONE
 
     def custom_op_log_check(self):
         """
