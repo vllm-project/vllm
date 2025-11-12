@@ -2582,7 +2582,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             elif num_tokens_across_dp is not None:
                 num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
             else:
-                num_input_tokens = self._get_num_input_tokens(
+                num_input_tokens = self._pad_for_sequence_parallelism(
                     scheduler_output.total_num_scheduled_tokens
                 )
 
