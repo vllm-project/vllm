@@ -100,7 +100,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # We don't have enough information to determine if we should dispatch
         # activation scales in a packed ue8m0 format during object construction
         # time. This setting is handled by post_init_setup.
-        self.use_ue8m0 = False
+        self.use_ue8m0_dispatch = False
 
     def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
         if not fused_experts.supports_packed_ue8m0_act_scales():
@@ -111,7 +111,7 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             logger.debug_once(
                 "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch."
             )
-            self.use_ue8m0 = True
+            self.use_ue8m0_dispatch = True
         else:
             logger.warning_once(
                 "DeepEPLLPrepareAndFinalize is setup to dispatch raw/unquantized "
@@ -233,8 +233,8 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             num_experts,
             use_fp8=self.use_fp8_dispatch,
             # round_scale needs to be set to dispatch in ue8m0
-            round_scale=self.use_ue8m0,
-            use_ue8m0=self.use_ue8m0,
+            round_scale=self.use_ue8m0_dispatch,
+            use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
             return_recv_hook=True,
         )
