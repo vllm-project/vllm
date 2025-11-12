@@ -632,6 +632,7 @@ class EplbState:
                         eplb_model_state.rebalanced = False
                         eplb_model_state.layer_to_transfer = 0
                         eplb_model_state.pending_global_ready_check = False
+                        logger.info("finish async transfer")
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if any(
@@ -842,13 +843,22 @@ class EplbState:
                         time_end - time_start,
                     )
             else:
-                eplb_model_state.new_physical_to_logical_map = (
-                    new_physical_to_logical_map
+                device = eplb_model_state.physical_to_logical_map.device
+                new_physical = new_physical_to_logical_map.to(device)
+                max_slots = eplb_model_state.logical_to_physical_map.shape[-1]
+                padded_logical = torch.nn.functional.pad(
+                    new_logical_to_physical_map,
+                    (0, max(0, max_slots - new_logical_to_physical_map.shape[-1])),
+                    value=-1,
+                ).to(eplb_model_state.logical_to_physical_map.device)
+                new_replica = new_logical_replica_count.to(
+                    eplb_model_state.logical_replica_count.device
                 )
-                eplb_model_state.new_logical_to_physical_map = (
-                    new_logical_to_physical_map
-                )
-                eplb_model_state.new_logical_replica_count = new_logical_replica_count
+
+                eplb_model_state.new_physical_to_logical_map = new_physical
+                eplb_model_state.new_logical_to_physical_map = padded_logical
+                eplb_model_state.new_logical_replica_count = new_replica
+
                 eplb_model_state.rebalanced = True
                 eplb_model_state.layer_to_transfer = 0
                 eplb_model_state.pending_global_ready_check = True

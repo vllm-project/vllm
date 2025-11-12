@@ -98,6 +98,7 @@ async def transfer_run_periodically(
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
                         )
+                        logger.info("async transfer_layer layer: %d", model_state.layer_to_transfer)
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
                         model_state.buffer_ready_event = event
