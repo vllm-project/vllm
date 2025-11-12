@@ -201,7 +201,7 @@ if TYPE_CHECKING:
     VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: bool = False
-    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = False
+    VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -1389,7 +1389,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Whether to use pytorch symmetric memory for allreduce
     "VLLM_ALLREDUCE_USE_SYMM_MEM": lambda: bool(
-        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "0"))
+        int(os.getenv("VLLM_ALLREDUCE_USE_SYMM_MEM", "1"))
     ),
     # Allows vllm to find tuned config under customized folder
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
