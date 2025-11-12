@@ -272,7 +272,7 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
         FetchContent_Declare(
             oneDNN
             GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-            GIT_TAG v3.9
+            GIT_TAG v3.10
             GIT_PROGRESS TRUE
             GIT_SHALLOW TRUE
         )
