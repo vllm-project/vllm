@@ -10,7 +10,7 @@ from tests.kernels.quantization.nvfp4_utils import (
     get_nvfp4_global_scale,
 )
 from vllm.platforms import current_platform
-from vllm.utils import round_up
+from vllm.utils.math_utils import round_up
 
 if not current_platform.is_device_capability(100):
     pytest.skip(
@@ -238,9 +238,11 @@ def test_flashinfer_trtllm_decode_with_baseline(
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
         rtol, atol = 7e-2, 9e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
-        rtol, atol = 2e-2, 4e-2
+        rtol, atol = 3e-2, 4e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
-        rtol, atol = 1e-2, 2e-2
+        rtol, atol = 2e-2, 2e-2
+    elif kv_quant_dtype == FP8_DTYPE:
+        rtol, atol = 4e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 

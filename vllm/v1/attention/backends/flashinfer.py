@@ -16,6 +16,7 @@ from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
 from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
 
+from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
@@ -23,6 +24,7 @@ from vllm.attention.backends.abstract import (
     MultipleOf,
 )
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -33,17 +35,20 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Quant,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
-from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
     use_trtllm_attention,
 )
+from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    KVCacheLayoutType,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
@@ -51,7 +56,6 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
-FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -66,7 +70,7 @@ def _get_trtllm_gen_workspace_buffer():
     global trtllm_gen_workspace_buffer
     if trtllm_gen_workspace_buffer is None:
         trtllm_gen_workspace_buffer = torch.zeros(
-            FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
     return trtllm_gen_workspace_buffer
 
@@ -157,34 +161,17 @@ def trtllm_prefill_attn_kvfp8_dequant(
 
 class FlashInferBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        return [64, 128, 256]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        # Note: Not sure for all platforms,
-        # but on Blackwell, only support a page size of
-        # 16, 32, 64
-        return [16, 32, 64]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    # Note: Not sure for all platforms,
+    # but on Blackwell, only support a page size of
+    # 16, 32, 64
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -193,10 +180,6 @@ class FlashInferBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["FlashInferMetadata"]:
-        return FlashInferMetadata
 
     @staticmethod
     def get_builder_cls() -> type["FlashInferMetadataBuilder"]:
@@ -233,6 +216,26 @@ class FlashInferBackend(AttentionBackend):
             return torch.float8_e5m2
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
+        return [64, 128, 256]
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
+            12, 1
+        )
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
+        from vllm.platforms import current_platform
+
+        capability = current_platform.get_device_capability()
+        if capability is not None and capability.major == 10:
+            return "HND"
+        return None
 
 
 @dataclass
@@ -323,7 +326,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             ] = {}
             self._decode_cudagraph_max_bs = min(
                 (1 + num_spec_tokens) * max_num_reqs,
-                self.compilation_config.max_capture_size,
+                self.compilation_config.max_cudagraph_capture_size,
             )
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
@@ -331,7 +334,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
-        FlashInferBackend.validate_head_size(self.head_dim)
         self.page_size = self.kv_cache_spec.block_size
 
         self.cache_dtype = self.cache_config.cache_dtype
@@ -401,9 +403,18 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )
         self.paged_kv_last_page_len_np = self.paged_kv_last_page_len_cpu.numpy()
 
+        if self.head_dim == 256 and current_platform.is_device_capability(100):
+            # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that
+            # head size 256 and block size 16 is not supported on blackwell.
+            assert kv_cache_spec.block_size != 16, (
+                "There is a bug in FlashInfer "
+                "block_size 16 head size 256 support. Please avoid this combination by "
+                "passing --block-size 32 or --block-size 64."
+            )
+
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
-            buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE
+            buffer_size = envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE
             if vllm_is_batch_invariant():
                 buffer_size = FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT
             self._workspace_buffer = torch.zeros(
