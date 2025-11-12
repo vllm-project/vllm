@@ -1777,26 +1777,16 @@ class FusedMoE(CustomOp):
                 assert isinstance(final_hidden_states, tuple)
                 final_hidden_states, zero_expert_result = final_hidden_states
 
-            def reduce_output(states: torch.Tensor) -> torch.Tensor:
-                if (
-                    not self.is_sequence_parallel
-                    and self.reduce_results
-                    and (self.tp_size > 1 or self.ep_size > 1)
-                ):
-                    states = self.maybe_all_reduce_tensor_model_parallel(states)
-
-                return states
-
             if self.shared_experts is not None:
                 return (
-                    reduce_output(final_hidden_states[0]),
-                    reduce_output(final_hidden_states[1]),
+                    final_hidden_states[0],
+                    final_hidden_states[1],
                 )
             elif self.zero_expert_num is not None and self.zero_expert_num > 0:
                 assert isinstance(final_hidden_states, torch.Tensor)
-                return (reduce_output(final_hidden_states), zero_expert_result)
+                return (final_hidden_states, zero_expert_result)
             else:
-                return reduce_output(final_hidden_states)
+                return final_hidden_states
 
     @classmethod
     def make_expert_params_mapping(
