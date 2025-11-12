@@ -39,6 +39,13 @@ set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13")
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
 
+# ROCm installation prefix. Default to /opt/rocm but allow override via
+# -DROCM_PATH=/your/rocm/path when invoking cmake.
+if(NOT DEFINED ROCM_PATH)
+  set(ROCM_PATH "/opt/rocm" CACHE PATH "ROCm installation prefix")
+else()
+  set(ROCM_PATH ${ROCM_PATH} CACHE PATH "ROCm installation prefix" FORCE)
+endif()
 #
 # Supported/expected torch versions for CUDA/ROCm.
 #
@@ -237,10 +244,27 @@ set_gencode_flags_for_srcs(
   SRCS "${VLLM_CUMEM_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling cumem allocator extension.")
-  # link against cuda driver library
-  list(APPEND CUMEM_LIBS CUDA::cuda_driver)
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # link against cuda driver library
+    list(APPEND CUMEM_LIBS CUDA::cuda_driver)
+  else()
+    # link against rocm driver library. Prefer an absolute path to
+    # libamdhip64.so inside ${ROCM_PATH}/lib if available, otherwise fall
+    # back to linking by name "amdhip64".
+    find_library(AMDHIP64_LIB
+      NAMES amdhip64 libamdhip64.so
+      PATHS ${ROCM_PATH}/lib
+      NO_DEFAULT_PATH)
+    if(AMDHIP64_LIB)
+      message(STATUS "Found libamdhip64 at ${AMDHIP64_LIB}")
+      list(APPEND CUMEM_LIBS ${AMDHIP64_LIB})
+    else()
+      message(WARNING "libamdhip64 not found in ${ROCM_PATH}/lib; falling back to linking 'amdhip64' by name")
+      list(APPEND CUMEM_LIBS amdhip64)
+    endif()
+  endif()
   define_extension_target(
     cumem_allocator
     DESTINATION vllm
