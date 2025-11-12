@@ -286,11 +286,6 @@ def _support_torch_compile(
     """
     A decorator to add support for compiling the forward method of a class.
     """
-    setattr(cls, IGNORE_COMPILE_KEY, False)
-
-    # setting as attribute on cls ensures child class will override parent class
-    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
-
     if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
         # support decorating multiple times
         return cls
