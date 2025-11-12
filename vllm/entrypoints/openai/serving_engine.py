@@ -1319,6 +1319,7 @@ class OpenAIServing:
         enable_auto_tools: bool,
         tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
         content: str | None = None,
+        token_ids: Sequence[int] | None = None,
     ) -> tuple[list[FunctionCall] | None, str | None]:
         function_calls = list[FunctionCall]()
         if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
@@ -1364,6 +1365,7 @@ class OpenAIServing:
             tool_call_info = tool_parser.extract_tool_calls(
                 content if content is not None else "",
                 request=request,  # type: ignore
+                token_ids=token_ids,
             )
             if tool_call_info is not None and tool_call_info.tools_called:
                 # extract_tool_calls() returns a list of tool calls.

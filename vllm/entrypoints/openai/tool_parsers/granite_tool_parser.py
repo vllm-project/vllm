@@ -50,31 +50,89 @@ class GraniteToolParser(ToolParser):
         self.bot_string = "<tool_call>"
 
     def extract_tool_calls(
-        self, model_output: str, request: ChatCompletionRequest
+        self,
+        model_output: str,
+        request: ChatCompletionRequest,
+        token_ids: Sequence[int] | None = None,
     ) -> ExtractedToolCallInformation:
+        logger.info(
+            "Granite tool parser input - raw_output length=%d, first 1024 chars=%r",
+            len(model_output),
+            model_output[:1024],
+        )
+
+        if token_ids is not None:
+            logger.info(
+                "Granite tool parser - output token_ids length=%d, token_ids=%s",
+                len(token_ids),
+                token_ids,
+            )
+            try:
+                decoded_tokens = [
+                    self.model_tokenizer.decode([tid]) for tid in token_ids
+                ]
+                logger.info(
+                    "Granite tool parser - decoded individual tokens=%s",
+                    decoded_tokens,
+                )
+            except Exception as e:
+                logger.warning("Failed to decode tokens: %s", e)
+        else:
+            logger.info("Granite tool parser - no token_ids provided")
+
+        has_bot_token = self.bot_token in model_output
+        has_bot_string = self.bot_string in model_output
+        logger.info(
+            "Granite tool parser - bot_token (%r) present=%s, bot_string (%r) present=%s",
+            self.bot_token,
+            has_bot_token,
+            self.bot_string,
+            has_bot_string,
+        )
+
         stripped = (
             model_output.strip()
             .removeprefix(self.bot_token)
             .removeprefix(self.bot_string)
             .lstrip()
         )
+
+        logger.info(
+            "Granite tool parser - after stripping length=%d, first char=%r, first 1024 chars=%r",
+            len(stripped),
+            stripped[0] if stripped else None,
+            stripped[:1024],
+        )
+
         if not stripped or stripped[0] != "[":
             logger.warning(
-                "Granite tool parser emitted no tool calls. raw_output=%r stripped=%r",
-                model_output[:512],
-                stripped[:512],
+                "Granite tool parser emitted no tool calls. "
+                "raw_output_len=%d raw_output=%r "
+                "stripped_len=%d stripped=%r "
+                'expected_format=\'<|tool_call|>[{"name": "...", "arguments": {...}}]\'',
+                len(model_output),
+                model_output,
+                len(stripped),
+                stripped,
             )
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
         try:
+            logger.info(
+                "Granite tool parser - attempting to parse JSON from stripped output"
+            )
             raw_function_calls = json.loads(stripped)
             if not isinstance(raw_function_calls, list):
                 raise Exception(
                     f"Expected dict or list, got {type(raw_function_calls)}"
                 )
 
-            logger.debug("Extracted %d tool calls", len(raw_function_calls))
+            logger.info(
+                "Granite tool parser - successfully extracted %d tool calls: %s",
+                len(raw_function_calls),
+                raw_function_calls,
+            )
             tool_calls = [
                 ToolCall(
                     type="function",
@@ -96,11 +154,19 @@ class GraniteToolParser(ToolParser):
             )
 
         except Exception as e:
-            logger.error("Error in extracting tool call from response %s", e)
+            logger.error(
+                "Granite tool parser - JSON parsing failed with error: %s (type=%s)",
+                str(e),
+                type(e).__name__,
+            )
             logger.warning(
-                "Granite tool parser failed to parse tool calls. raw_output=%r stripped=%r",
-                model_output[:512],
-                stripped[:512],
+                "Granite tool parser failed to parse tool calls. "
+                "raw_output_len=%d raw_output=%r "
+                "stripped_len=%d stripped=%r",
+                len(model_output),
+                model_output,
+                len(stripped),
+                stripped,
             )
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output

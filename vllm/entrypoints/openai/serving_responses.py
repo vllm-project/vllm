@@ -821,6 +821,7 @@ class OpenAIServingResponses(OpenAIServing):
             content=content,
             enable_auto_tools=self.enable_auto_tools,
             tool_parser_cls=self.tool_parser,
+            token_ids=final_output.token_ids,
         )
         if content:
             output_text = ResponseOutputText(
