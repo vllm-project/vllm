@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from fractions import Fraction
 from functools import cache, partial
-from typing import Any, Optional
+from typing import Any
 
 import torch
 import torch.nn.functional as F
@@ -49,11 +49,12 @@ def is_rocm_aiter_fp4_asm_gemm_enabled() -> bool:
 
 try:
     from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
     from aiter.ops.triton.activation import act_mul_and_mxfp4_quant
     from aiter.ops.triton.fused_mxfp4_quant import _fused_rms_mxfp4_quant_kernel
+    from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+    from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
+    from vllm.triton_utils import triton
     from vllm.utils.torch_utils import direct_register_custom_op
 
     if is_rocm_aiter_fp4_asm_gemm_enabled():
@@ -110,7 +111,7 @@ try:
     direct_register_custom_op(
         op_name="gemm_with_dynamic_quant",
         op_func=gemm_with_dynamic_quant,
-        mutates_args=['result'],
+        mutates_args=["result"],
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
@@ -121,10 +122,18 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16
+        out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> None:
-        x_fp4, blockscale_e8m0 = act_mul_and_mxfp4_quant(x, 'silu')
-        gemm_with_dynamic_quant(result, x_fp4, weight, weight_scale, blockscale_e8m0, rocm_use_aiter_fp4_asm_gemm, out_dtype)
+        x_fp4, blockscale_e8m0 = act_mul_and_mxfp4_quant(x, "silu")
+        gemm_with_dynamic_quant(
+            result,
+            x_fp4,
+            weight,
+            weight_scale,
+            blockscale_e8m0,
+            rocm_use_aiter_fp4_asm_gemm,
+            out_dtype,
+        )
 
     def silu_and_mul_mxfp4_gemm_fake(
         result: torch.Tensor,
@@ -132,24 +141,29 @@ try:
         weight: torch.Tensor,
         weight_scale: torch.Tensor,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16
+        out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> None:
         return
 
     direct_register_custom_op(
         op_name="silu_and_mul_mxfp4_gemm",
         op_func=silu_and_mul_mxfp4_gemm,
-        mutates_args=['result'],
+        mutates_args=["result"],
         fake_impl=silu_and_mul_mxfp4_gemm_fake,
         dispatch_key=current_platform.dispatch_key,
     )
 
     def add_rmsnorm_mxfp4_gemm(
-        result: torch.Tensor, input: torch.Tensor, residual_out: torch.Tensor,
-        residual: torch.Tensor, weight_rms: torch.Tensor, 
-        weight_gemm: torch.Tensor, scale: torch.Tensor, epsilon: float,
+        result: torch.Tensor,
+        input: torch.Tensor,
+        residual_out: torch.Tensor,
+        residual: torch.Tensor,
+        weight_rms: torch.Tensor,
+        weight_gemm: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16
+        out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> None:
         MXFP4_QUANT_BLOCK_SIZE = 32
         M, N1 = input.shape
@@ -190,27 +204,42 @@ try:
             SKIP_SECOND_INPUT=True,
             FIRST_INPUT_RES=True,
         )
-        gemm_with_dynamic_quant(result, rms_out_fp4, weight_gemm, scale, rms_out_bs, rocm_use_aiter_fp4_asm_gemm, out_dtype)
+        gemm_with_dynamic_quant(
+            result,
+            rms_out_fp4,
+            weight_gemm,
+            scale,
+            rms_out_bs,
+            rocm_use_aiter_fp4_asm_gemm,
+            out_dtype,
+        )
 
     def add_rmsnorm_mxfp4_gemm_fake(
-        result: torch.Tensor, input: torch.Tensor, residual_out: torch.Tensor,
-        residual: torch.Tensor, weight_rms: torch.Tensor, 
-        weight_gemm: torch.Tensor, scale: torch.Tensor, epsilon: float,
+        result: torch.Tensor,
+        input: torch.Tensor,
+        residual_out: torch.Tensor,
+        residual: torch.Tensor,
+        weight_rms: torch.Tensor,
+        weight_gemm: torch.Tensor,
+        scale: torch.Tensor,
+        epsilon: float,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
-        out_dtype: Optional[torch.dtype] = torch.bfloat16
+        out_dtype: torch.dtype | None = torch.bfloat16,
     ) -> None:
         return
 
     direct_register_custom_op(
         op_name="add_rmsnorm_mxfp4_gemm",
         op_func=add_rmsnorm_mxfp4_gemm,
-        mutates_args=['result', 'residual_out'],
+        mutates_args=["result", "residual_out"],
         fake_impl=add_rmsnorm_mxfp4_gemm_fake,
         dispatch_key=current_platform.dispatch_key,
     )
 
 except (ImportError, AttributeError):
-    dynamic_mxfp4_quant = gemm_afp4wfp4 = act_mul_and_mxfp4_quant = _fused_rms_mxfp4_quant_kernel = None
+    dynamic_mxfp4_quant = gemm_afp4wfp4 = act_mul_and_mxfp4_quant = (
+        _fused_rms_mxfp4_quant_kernel
+    ) = None
 
 
 class QuarkOCP_MX(QuarkScheme):
@@ -390,7 +419,11 @@ class QuarkOCP_MX(QuarkScheme):
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
         else:
-            result = torch.empty((*x.shape[:-1], layer.weight.shape[0]), dtype=self.out_dtype, device=x.device)
+            result = torch.empty(
+                (*x.shape[:-1], layer.weight.shape[0]),
+                dtype=self.out_dtype,
+                device=x.device,
+            )
             torch.ops.vllm.gemm_with_dynamic_quant(
                 result,
                 x,
