@@ -1404,8 +1404,10 @@ def _parse_chat_message_content(
                 result_msg["tool_calls"] = list(parsed_msg["tool_calls"])
             # Include reasoning if present for interleaved thinking.
             if reasoning is not None:
-                result_msg["reasoning"] = reasoning
-                result_msg["reasoning_content"] = reasoning  # keep compatibility
+                result_msg["reasoning"] = cast(str, reasoning)
+                result_msg["reasoning_content"] = cast(
+                    str, reasoning
+                )  # keep compatibility
         elif role == "tool":
             parsed_msg = _ToolParser(message)
             if "tool_call_id" in parsed_msg:
