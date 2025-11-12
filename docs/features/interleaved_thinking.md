@@ -39,83 +39,84 @@ To use interleaved thinking with tool calls, specify a model that supports this 
       --enable-auto-tool-choice
     """
     import json
+    
     from openai import OpenAI
-
-    client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
-
-      
-    def get_current_weather(city: str, state: str, unit: "str"):
-       return (
-          "The weather in Dallas, Texas is 85 degrees fahrenheit. It is "
-          "partly cloudly, with highs in the 90's."
-       )
-
-
+    
+    client = OpenAI(base_url="http://localhost:8000/v1",     api_key="dummy")
+    
+    
+    def get_current_weather(location: str, unit: "str"):
+        return (
+            "The weather in Dallas, Texas is 85 degrees fahrenheit.     It is "
+            "partly cloudly, with highs in the 90's."
+        )
+    
+    
     tools = [
-       {
-          "type": "function",
-          "function": {
+        {
+            "type": "function",
+            "function": {
                 "name": "get_weather",
-                "description": "Get the current weather in a given location",
+                "description": "Get the current weather in a given     location",
                 "parameters": {
-                   "type": "object",
-                   "properties": {
-                      "location": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
                             "type": "string",
-                            "description": "City and state, e.g., 'San Francisco, CA'",
-                      },
-                      "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
-                   },
-                   "required": ["location", "unit"],
+                            "description": "City and state, e.g.,     'San Francisco, CA'",
+                        },
+                        "unit": {"type": "string", "enum":     ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location", "unit"],
                 },
-          },
-       }
+            },
+        }
     ]
-    messages = [{"role": "user", "content": "What's the weather like in San Francisco?"}]
+    messages = [{"role": "user", "content": "What's the weather     like in San Francisco?"}]
     response = client.chat.completions.create(
-       model=client.models.list().data[0].id,
-       messages=messages,
-       tools=tools,
-       tool_choice="auto",
+        model=client.models.list().data[0].id,
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
     )
-
+    
     print(response)
     tool_call = response.choices[0].message.tool_calls[0].function
-
+    
     print(f"reasoning: {response.choices[0].message.reasoning}")
     print(f"Function called: {tool_call.name}")
     print(f"Arguments: {tool_call.arguments}")
-
+    
     messages.append(
-       {
-          "role": "assistant",
-          "tool_calls": response.choices[0].message.tool_calls,
-          "reasoning": response.choices[0].message.reasoning,
-       }
+        {
+            "role": "assistant",
+            "tool_calls": response.choices[0].message.tool_calls,
+            "reasoning": response.choices[0].message.reasoning,
+        }
     )
-
+    
     # Simulate tool execution
     available_tools = {"get_weather": get_current_weather}
-
+    
     completion_tool_calls = response.choices[0].message.tool_calls
     for call in completion_tool_calls:
-       tool_to_call = available_tools[call.function.name]
-       args = json.loads(call.function.arguments)
-       result = tool_to_call(**args)
-       print("tool_to_call result: ", result)
-       messages.append(
-          {
+        tool_to_call = available_tools[call.function.name]
+        args = json.loads(call.function.arguments)
+        result = tool_to_call(**args)
+        print("tool_to_call result: ", result)
+        messages.append(
+            {
                 "role": "tool",
                 "content": result,
                 "tool_call_id": call.id,
                 "name": call.function.name,
-          }
-       )
+            }
+        )
     response_2 = client.chat.completions.create(
-       model=client.models.list().data[0].id,
-       messages=messages,
-       tools=tools,
-       tool_choice="auto",
+        model=client.models.list().data[0].id,
+        messages=messages,
+        tools=tools,
+        tool_choice="auto",
     )
     print("Final response after tool call:")
     print(response_2.choices[0].message.content)
