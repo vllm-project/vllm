@@ -10,7 +10,7 @@ from tests.utils import large_gpu_mark
 
 def get_model_args(
     model_name: str,
-    spec_model_name: str,
+    spec_model_name: str | None,
     spec_method: str,
     tp_size: int,
     model_max_len: int,
