@@ -20,5 +20,10 @@ class PolicyFactory:
         policy: dict[EPLBPolicy, type[EplbPolicy]] = {
             "default": DefaultEplb,
         }
+        if policy_type not in policy:
+            raise ValueError(
+                f"Invalid EPLB policy type: '{policy_type}'. "
+                f"Available policies are: {list(policy.keys())}"
+            )
         selected_policy = policy.get(policy_type, DefaultEplb)
         return selected_policy()
