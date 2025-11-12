@@ -29,8 +29,8 @@ _pass_context = None
 
 
 class PassContext:
-    def __init__(self, compile_range: Range | None):
-        self.compile_range: Range | None = compile_range
+    def __init__(self, compile_range: Range):
+        self.compile_range: Range = compile_range
 
 
 def get_pass_context() -> PassContext:
@@ -40,7 +40,7 @@ def get_pass_context() -> PassContext:
 
 
 @contextmanager
-def pass_context(compile_range: Range | None):
+def pass_context(compile_range: Range):
     """A context manager that stores the current pass context,
     usually it is a list of sizes to specialize.
     """
@@ -97,7 +97,7 @@ class InductorPass(CustomGraphPass):
         encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
 
-    def is_applicable_for_range(self, compile_range: Range | None):
+    def is_applicable_for_range(self, compile_range: Range):
         return True
 
 

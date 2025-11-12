@@ -432,7 +432,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
-    def is_applicable_for_range(self, compile_range: Range | None) -> bool:
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
         # This pass is applied on top of the sequence parallelism pass.
         # It inherits the same applicability condition as `SequenceParallelismPass`.
         # See `SequenceParallelismPass.is_applicable` for more details.
@@ -442,9 +442,7 @@ class AsyncTPPass(VllmPatternMatcherPass):
         ):
             return True
         tp_size = get_tensor_model_parallel_world_size()
-        return compile_range is not None and (
-            compile_range.is_single_size() and compile_range.end % tp_size == 0
-        )
+        return compile_range.is_single_size() and compile_range.end % tp_size == 0
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
@@ -1189,9 +1187,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
         self.disabled = False
 
-    def is_applicable_for_range(self, compile_range: Range | None) -> bool:
-        if compile_range is None:
-            return False
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
         return compile_range.end - 1 <= self.max_token_num
 
     @VllmInductorPass.time_and_log

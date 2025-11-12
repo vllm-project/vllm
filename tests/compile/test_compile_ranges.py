@@ -42,9 +42,9 @@ class TestModel(nn.Module):
 @torch.inference_mode
 def run_model(vllm_config: VllmConfig, model: nn.Module, batch_sizes: list[int]):
     with set_forward_context({}, vllm_config=vllm_config):
-        model(torch.randn(BATCH_SIZE, MLP_SIZE).cuda())
+        model(torch.randn(BATCH_SIZE, MLP_SIZE))
         for batch_size in batch_sizes:
-            model(torch.randn(batch_size, MLP_SIZE).cuda())
+            model(torch.randn(batch_size, MLP_SIZE))
 
 
 class PostGradPassManagerCheckRanges(InductorPass):
@@ -70,11 +70,14 @@ class PostGradPassManagerCheckRanges(InductorPass):
 def test_compile_ranges():
     post_grad_pass_manager = PostGradPassManagerCheckRanges(
         [
-            Range(start=1, end=8),
-            Range(start=8, end=32),
-            Range(start=32, end=8193),
+            Range(start=1, end=9),
+            Range(start=16, end=16),
+            Range(start=9, end=33),
+            Range(start=64, end=64),
+            Range(start=33, end=8193),
         ]
     )
+    torch.set_default_device("cuda")
     vllm_config = VllmConfig(
         scheduler_config=SchedulerConfig(
             max_num_batched_tokens=8192,
@@ -82,6 +85,7 @@ def test_compile_ranges():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             compile_ranges_split_points=[8, 32],
+            compile_sizes=[16, 64, 128],
             inductor_compile_config={
                 "post_grad_custom_post_pass": post_grad_pass_manager,
                 # Disable inductor cache to get the number of passes correctly
@@ -91,14 +95,31 @@ def test_compile_ranges():
     )
 
     with set_current_vllm_config(vllm_config):
-        model = TestModel(vllm_config=vllm_config, prefix="").eval().cuda()
-        batch_sizes = [1, 4, 16, 24, 48, 64]
+        model = TestModel(vllm_config=vllm_config, prefix="").eval()
+        # Number of compilations: 3 for each compile range + 2 compile sizes
+        batch_sizes = [1, 4, 16, 24, 48, 64, 8192]
         # A has support_torch_compile
         with compilation_counter.expect(
             num_graphs_seen=1,
             num_piecewise_graphs_seen=1,
-            num_backend_compilations=3,
-            # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+            num_backend_compilations=5,
         ):
             run_model(vllm_config, model, batch_sizes)
-        assert post_grad_pass_manager.num_calls == 3
+        assert post_grad_pass_manager.num_calls == 5
+
+
+def test_compile_config_get_compile_ranges():
+    compilation_config = CompilationConfig(
+        compile_ranges_split_points=[8, 32],
+    )
+    VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_num_batched_tokens=8192,
+        ),
+        compilation_config=compilation_config,
+    )
+    assert compilation_config.get_compile_ranges() == [
+        Range(start=1, end=9),
+        Range(start=9, end=33),
+        Range(start=33, end=8193),
+    ]

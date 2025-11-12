@@ -84,7 +84,7 @@ class CompilerManager:
     """
 
     def __init__(self, compilation_config: CompilationConfig):
-        self.cache: dict[tuple[Range | None, int, str], Any] = dict()
+        self.cache: dict[tuple[Range, int, str], Any] = dict()
         self.is_cache_updated = False
         self.compilation_config = compilation_config
         self.compiler = make_compiler(compilation_config)
@@ -93,7 +93,7 @@ class CompilerManager:
         return self.compiler.compute_hash(vllm_config)
 
     @contextmanager
-    def compile_context(self, compile_range: Range | None = None):
+    def compile_context(self, compile_range: Range):
         """Provide compilation context for the duration of compilation to set
         any torch global properties we want to scope to a single Inductor
         compilation (e.g. partition rules, pass context)."""
@@ -153,7 +153,7 @@ class CompilerManager:
         graph: fx.GraphModule,
         example_inputs: list[Any],
         graph_index: int,
-        compile_range: Range | None = None,
+        compile_range: Range,
     ) -> Callable | None:
         if (compile_range, graph_index, self.compiler.name) not in self.cache:
             return None
@@ -161,23 +161,13 @@ class CompilerManager:
         compiled_graph = self.compiler.load(
             handle, graph, example_inputs, graph_index, compile_range
         )
-        if compile_range is None:
-            logger.debug(
-                "Directly load the %s-th graph for dynamic compile range"
-                "from %s via handle %s",
-                graph_index,
-                self.compiler.name,
-                handle,
-            )
-        else:
-            logger.debug(
-                "Directly load the %s-th graph for compile range %s"
-                "from %s via handle %s",
-                graph_index,
-                str(compile_range),
-                self.compiler.name,
-                handle,
-            )
+        logger.debug(
+            "Directly load the %s-th graph for compile range %sfrom %s via handle %s",
+            graph_index,
+            str(compile_range),
+            self.compiler.name,
+            handle,
+        )
         return compiled_graph
 
     def compile(
@@ -186,9 +176,9 @@ class CompilerManager:
         example_inputs,
         additional_inductor_config,
         compilation_config: CompilationConfig,
+        compile_range: Range,
         graph_index: int = 0,
         num_graphs: int = 1,
-        compile_range: Range | None = None,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -208,19 +198,12 @@ class CompilerManager:
                 now = time.time()
                 elapsed = now - compilation_start_time
                 compilation_config.compilation_time += elapsed
-                if compile_range is None:
-                    logger.info(
-                        "Directly load the compiled graph(s) for dynamic shape "
-                        "from the cache, took %.3f s",
-                        elapsed,
-                    )
-                else:
-                    logger.info(
-                        "Directly load the compiled graph(s) for compile range %s "
-                        "from the cache, took %.3f s",
-                        str(compile_range),
-                        elapsed,
-                    )
+                logger.info(
+                    "Directly load the compiled graph(s) for compile range %s "
+                    "from the cache, took %.3f s",
+                    str(compile_range),
+                    elapsed,
+                )
             return compiled_graph
 
         # no compiler cached the graph, or the cache is disabled,
@@ -230,10 +213,7 @@ class CompilerManager:
             maybe_key = None
         else:
             maybe_key = "artifact_compile_range_"
-            if compile_range is None:
-                maybe_key += "dynamic_shape"
-            else:
-                maybe_key += f"{compile_range.start}_{compile_range.end}"
+            maybe_key += f"{compile_range.start}_{compile_range.end}"
             maybe_key += f"_subgraph_{graph_index}"
         with self.compile_context(compile_range):
             compiled_graph, handle = self.compiler.compile(
@@ -253,50 +233,29 @@ class CompilerManager:
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
-                if compile_range is None:
-                    logger.info_once(
-                        "Cache the graph for dynamic shape for later use", scope="local"
-                    )
-                else:
-                    logger.info_once(
-                        "Cache the graph of compile range %s for later use",
-                        str(compile_range),
-                    )
-            if compile_range is None:
-                logger.debug(
-                    "Store the %s-th graph for dynamic compile range"
-                    "from %s via handle %s",
-                    graph_index,
-                    self.compiler.name,
-                    handle,
-                )
-            else:
-                logger.debug(
-                    "Store the %s-th graph for compile range%s from %s via handle %s",
-                    graph_index,
+                logger.info_once(
+                    "Cache the graph of compile range %s for later use",
                     str(compile_range),
-                    self.compiler.name,
-                    handle,
                 )
+            logger.debug(
+                "Store the %s-th graph for compile range%s from %s via handle %s",
+                graph_index,
+                str(compile_range),
+                self.compiler.name,
+                handle,
+            )
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             now = time.time()
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
-            if compile_range is None:
-                logger.info_once(
-                    "Compiling a graph for dynamic compile range takes %.2f s",
-                    elapsed,
-                    scope="local",
-                )
-            else:
-                logger.info_once(
-                    "Compiling a graph for compile range %s takes %.2f s",
-                    str(compile_range),
-                    elapsed,
-                    scope="local",
-                )
+            logger.info_once(
+                "Compiling a graph for compile range %s takes %.2f s",
+                str(compile_range),
+                elapsed,
+                scope="local",
+            )
 
         return compiled_graph
 

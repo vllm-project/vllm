@@ -133,9 +133,9 @@ class PiecewiseBackend:
                 args,
                 self.compilation_config.inductor_compile_config,
                 self.compilation_config,
+                compile_range=range_entry.compile_range,
                 graph_index=self.piecewise_compile_index,
                 num_graphs=self.total_piecewise_compiles,
-                compile_range=range_entry.compile_range,
             )
 
             # finished compilations for all required shapes

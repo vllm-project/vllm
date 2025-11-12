@@ -206,7 +206,11 @@ class Range:
         return hash((self.start, self.end))
 
     def __str__(self) -> str:
-        return f"(start={self.start}, end={self.end})"
+        return (
+            f"[{self.start}, {self.end + 1})"
+            if self.is_single_size()
+            else f"[{self.start}, {self.end})"
+        )
 
     def __repr__(self) -> str:
         return self.__str__()

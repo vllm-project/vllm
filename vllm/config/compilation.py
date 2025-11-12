@@ -349,11 +349,11 @@ class CompilationConfig:
     compile_ranges_split_points: list[int] | None = None
     """Split points that represent compile ranges for inductor.
     The compile ranges are 
-    [1, split_points[0]), 
-    [split_points[0], split_points[1]), ..., 
-    [split_points[-1], max_num_batched_tokens + 1).
-    Compile sizes are also used single element ranges:
-    [compile_sizes[i], compile_sizes[i] + 1).
+    [1, split_points[0] + 1), 
+    [split_points[0] + 1, split_points[1] + 1), ..., 
+    [split_points[-1] + 1, max_num_batched_tokens + 1).
+    Compile sizes are also used single element ranges,
+    the range is represented as [compile_sizes[i], compile_sizes[i] + 1).
     """
 
     inductor_compile_config: dict = field(default_factory=dict)

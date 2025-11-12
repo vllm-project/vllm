@@ -965,12 +965,13 @@ class VllmConfig:
             for x in compilation_config.compile_ranges_split_points:
                 assert isinstance(x, int)
                 assert x > 0, f"Invalid compile range split point: {x}"
+                # Split points need to be inclusive of the end so we add 1.
                 if (
                     max_num_batched_tokens is not None
                     and x < max_num_batched_tokens
                     and x > 1
                 ):
-                    computed_compile_ranges_split_points.append(x)
+                    computed_compile_ranges_split_points.append(x + 1)
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
         )  # type: ignore
