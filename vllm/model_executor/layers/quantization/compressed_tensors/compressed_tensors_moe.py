@@ -1606,8 +1606,10 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             prepare_finalize.activation_format
             == mk.FusedMoEActivationFormat.BatchedExperts
         ):
+            max_num_tokens_per_rank = prepare_finalize.max_num_tokens_per_rank()
+            assert max_num_tokens_per_rank is not None
             return BatchedMarlinExperts(
-                max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
+                max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
                 quant_config=self.moe_quant_config,
                 w13_g_idx=layer.w13_weight_g_idx,
