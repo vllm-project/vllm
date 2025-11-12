@@ -139,6 +139,28 @@ def _padded_cutlass(
         )
 
 
+def _padded_cutlass2(
+    qx: torch.Tensor,
+    weight: torch.Tensor,
+    x_scale: torch.Tensor,
+    weight_scale: torch.Tensor,
+    block_size: list[int],
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    pad_multiple = 4
+
+    padding = -qx.shape[0] % pad_multiple
+    # print(f"{padding=}")
+    padded_qx = torch.nn.functional.pad(qx, (0, 0, 0, padding))
+    assert len(x_scale.size()) == 2
+    padded_x_scale = torch.nn.functional.pad(x_scale, (0, 0, 0, padding), value=1.0)
+
+    output = cutlass_scaled_mm(
+        padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype
+    )
+    return output[0 : qx.shape[0], ...]
+
+
 def _padded_cutlass_fake(
     qx: torch.Tensor,
     weight: torch.Tensor,
@@ -154,7 +176,7 @@ def _padded_cutlass_fake(
 
 direct_register_custom_op(
     "padded_cutlass",
-    _padded_cutlass,
+    _padded_cutlass2,
     fake_impl=_padded_cutlass_fake,
 )
 
@@ -291,7 +313,8 @@ class W8A8BlockFp8LinearOp:
         assert self.input_quant_op is not None
         q_input, input_scale = self.input_quant_op(input_2d)
         if self.is_hopper:
-            return torch.ops.vllm.padded_cutlass(
+            return _padded_cutlass2(
+                # return torch.ops.vllm.padded_cutlass(
                 q_input,
                 weight,
                 input_scale,
