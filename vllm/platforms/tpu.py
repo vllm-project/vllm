@@ -58,7 +58,6 @@ class TpuPlatform(Platform):
         dtype: torch.dtype,
         kv_cache_dtype: str | None,
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink,
         use_sparse,
@@ -70,8 +69,6 @@ class TpuPlatform(Platform):
         if selected_backend != AttentionBackendEnum.PALLAS:
             logger.info("Cannot use %s backend on TPU.", selected_backend)
 
-        if not use_v1:
-            raise ValueError("TPU backend only supports V1.")
         logger.info("Using Pallas V1 backend.")
         return AttentionBackendEnum.PALLAS.get_path()
 
