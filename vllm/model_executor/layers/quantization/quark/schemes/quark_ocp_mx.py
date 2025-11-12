@@ -95,7 +95,6 @@ try:
                 x_q = x
                 x_s = x_scales
             gemm_afp4wfp4(x_q, weight, x_s, weight_scale.T, out_dtype, result)
-            return y
 
     def gemm_with_dynamic_quant_fake(
         result: torch.Tensor,
