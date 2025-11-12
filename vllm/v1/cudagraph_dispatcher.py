@@ -71,8 +71,8 @@ class CudagraphDispatcher:
         num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         if uniform_decode:
-            num_reqs = num_tokens // uniform_decode_query_len
-            assert num_tokens % uniform_decode_query_len == 0
+            num_reqs = num_tokens_padded // uniform_decode_query_len
+            assert num_tokens_padded % uniform_decode_query_len == 0
             assert num_reqs <= max_num_seqs
             return BatchDescriptor(
                 num_tokens=num_tokens_padded,
@@ -120,7 +120,9 @@ class CudagraphDispatcher:
             ):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    self._create_padded_batch_descriptor(bs, False, has_lora),
+                    self._create_padded_batch_descriptor(
+                        bs, False, has_lora
+                    ).relax_for_mixed_batch_cudagraphs(),
                 )
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
@@ -160,8 +162,11 @@ class CudagraphDispatcher:
         to a graph that supports a more general batch (uniform to non-uniform).
         """
         # if not initialized, just skip dispatching.
-        if not self.keys_initialized:
-            return CUDAGraphMode.NONE, None
+        if (
+            not self.keys_initialized
+            or num_tokens > self.compilation_config.max_cudagraph_capture_size
+        ):
+            return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
         batch_descriptor = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora
