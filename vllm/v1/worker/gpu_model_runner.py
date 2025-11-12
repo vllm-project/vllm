@@ -1055,18 +1055,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         num_scheduled_tokens: np.ndarray,
-        max_num_scheduled_tokens: int,
-        num_tokens_padded: int,
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
-        UBatchSlices | None,
-        torch.Tensor | None,
     ]:
         """
         :return: tuple[
             logits_indices, spec_decode_metadata,
-            ubatch_slices, num_tokens_across_dp,
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -1176,27 +1171,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self.query_start_loc.copy_to_gpu()
         query_start_loc = self.query_start_loc.gpu[: num_reqs + 1]
 
-        num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-        uniform_decode = (
-            max_num_scheduled_tokens == self.uniform_decode_query_len
-        ) and (total_num_scheduled_tokens == num_reqs * max_num_scheduled_tokens)
-
-        # Disable DP padding when running eager to avoid excessive padding when
-        # running prefills. This lets us set enforce_eager on the prefiller in
-        # a P/D setup and still use CUDA graphs (enabled by this padding) on the
-        # decoder.
-        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_tokens_unpadded=num_tokens_unpadded,
-            parallel_config=self.parallel_config,
-            allow_microbatching=True,
-            allow_dp_padding=allow_dp_padding,
-            num_tokens_padded=num_tokens_padded,
-            uniform_decode=uniform_decode,
-            num_scheduled_tokens_per_request=num_scheduled_tokens,
-        )
-
         self.seq_lens.np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] + num_scheduled_tokens
         )
@@ -1287,8 +1261,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return (
             logits_indices,
             spec_decode_metadata,
-            ubatch_slices,
-            num_tokens_across_dp,
         )
 
     def _build_attention_metadata(
@@ -2516,9 +2488,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+                num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
                 num_tokens_padded = self._pad_for_sequence_parallelism(
-                    scheduler_output.total_num_scheduled_tokens
+                    num_tokens_unpadded
                 )
+                uniform_decode = (
+                    (max_num_scheduled_tokens == self.uniform_decode_query_len)
+                    and (num_reqs == max_num_scheduled_tokens)
+                    and (num_tokens_padded == num_tokens_unpadded)
+                )
+
                 cascade_attn_prefix_lens = None
                 # Disable cascade attention when using microbatching (DBO)
                 if self.cascade_attn_enabled and not self.parallel_config.enable_dbo:
@@ -2528,6 +2507,24 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         self.input_batch.num_computed_tokens_cpu[:num_reqs],
                         scheduler_output.num_common_prefix_blocks,
                     )
+
+                # Disable DP padding when running eager to avoid excessive padding when
+                # running prefills. This lets us set enforce_eager on the prefiller in
+                # a P/D setup and still use CUDA graphs (enabled by this padding) on the
+                # decoder.
+                allow_dp_padding = (
+                    self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+                )
+
+                ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+                    num_tokens_unpadded=num_tokens_unpadded,
+                    parallel_config=self.parallel_config,
+                    allow_microbatching=True,
+                    allow_dp_padding=allow_dp_padding,
+                    num_tokens_padded=num_tokens_padded,
+                    uniform_decode=uniform_decode,
+                    num_scheduled_tokens_per_request=num_scheduled_tokens,
+                )
 
                 # Will return an unpadded batch descriptor if cudagraph is not NONE.
                 cudagraph_runtime_mode, batch_descriptor = (
@@ -2540,8 +2537,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
                 )
 
-                padded_num_tokens = batch_descriptor.num_tokens
-                padded_num_reqs = (
+                num_tokens_padded = batch_descriptor.num_tokens
+                num_reqs_padded = (
                     batch_descriptor.num_reqs
                     if batch_descriptor.num_reqs is not None
                     else num_reqs
@@ -2550,21 +2547,17 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 (
                     logits_indices,
                     spec_decode_metadata,
-                    ubatch_slices,
-                    num_tokens_across_dp,
                 ) = self._prepare_inputs(
                     scheduler_output,
                     num_scheduled_tokens_np,
-                    max_num_scheduled_tokens,
-                    num_tokens_padded,
                 )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
-                        total_num_scheduled_tokens=padded_num_tokens,
+                        total_num_scheduled_tokens=num_reqs_padded,
                         max_num_scheduled_tokens=max_num_scheduled_tokens,
-                        num_reqs=padded_num_reqs,
+                        num_reqs=num_reqs_padded,
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
                         use_spec_decode=use_spec_decode,
@@ -3559,26 +3552,30 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             # filter out the valid batch descriptor
             has_lora = activate_lora and self.lora_config is not None
-            _cg_mode, batch_descriptor = (
-                self.cudagraph_dispatcher.dispatch(
+            if is_profile or cudagraph_runtime_mode is not None:
+                # During profiling or CUDA graph capture, don't call dispatch
+                # Use the explicitly provided mode or NONE for profiling
+                _cg_mode = (
+                    cudagraph_runtime_mode
+                    if cudagraph_runtime_mode is not None
+                    else CUDAGraphMode.NONE
+                )
+                batch_descriptor = BatchDescriptor(
+                    num_tokens=num_tokens_after_padding,
+                    num_reqs=num_reqs,
+                    uniform=uniform_decode,
+                    has_lora=has_lora,
+                )
+            else:
+                # Normal execution: dispatch to find the appropriate CUDA graph
+                _cg_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
                     num_tokens=num_tokens_after_padding,
                     num_reqs=num_reqs,
                     max_num_scheduled_tokens=max_query_len,
                     has_lora=has_lora,
                     use_cascade_attn=False,
-                    force_uniform_flag=uniform_decode,
+                    force_uniform_decode=uniform_decode,
                 )
-                if not is_profile
-                else (
-                    CUDAGraphMode.NONE,
-                    BatchDescriptor(
-                        num_tokens=num_tokens_after_padding,
-                        num_reqs=num_reqs,
-                        uniform_decode=uniform_decode,
-                        has_lora=has_lora,
-                    ),
-                )
-            )
 
             num_tokens_after_padding = batch_descriptor.num_tokens
 

@@ -49,6 +49,15 @@ class BatchDescriptor(NamedTuple):
     Whether this batch has active LoRA adapters.
     """
 
+    def relax_for_mixed_batch_cudagraphs(self) -> "BatchDescriptor":
+        """
+        Return a relaxed version of current batch descriptor that is still compatible
+        with PIECEWISE cudagraphs (or mixed prefill-decode FA cudagraphs).
+        """
+        return BatchDescriptor(
+            self.num_tokens, num_reqs=None, uniform=False, has_lora=self.has_lora
+        )
+
 
 def _compute_sp_num_tokens(
     num_tokens_across_dp_cpu: torch.Tensor, sequence_parallel_size: int

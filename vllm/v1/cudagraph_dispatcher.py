@@ -1,33 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from itertools import product
-from typing import NamedTuple
 
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.forward_context import BatchDescriptor
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-class CUDAGraphKey(NamedTuple):
-    num_tokens: int
-    uniform: bool
-    has_lora: bool
-
-    @staticmethod
-    def from_batch_descriptor(batch_descriptor: BatchDescriptor):
-        return CUDAGraphKey(
-            batch_descriptor.num_tokens,
-            batch_descriptor.uniform,
-            batch_descriptor.has_lora,
-        )
-
-    def non_uniform(self) -> "CUDAGraphKey":
-        """
-        Return a non-uniform version of current CUDAGraphKey.
-        """
-        return CUDAGraphKey(self.num_tokens, uniform=False, has_lora=self.has_lora)
 
 
 class CudagraphDispatcher:
@@ -60,11 +39,9 @@ class CudagraphDispatcher:
         )
 
         # Dict to store valid cudagraph dispatching keys.
-        self.cudagraph_keys: dict[
-            CUDAGraphMode, dict[CUDAGraphKey, BatchDescriptor]
-        ] = {
-            CUDAGraphMode.PIECEWISE: {},
-            CUDAGraphMode.FULL: {},
+        self.cudagraph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
+            CUDAGraphMode.PIECEWISE: set(),
+            CUDAGraphMode.FULL: set(),
         }
 
         not_use_piecewise_compilation = (
@@ -86,26 +63,27 @@ class CudagraphDispatcher:
 
         self.keys_initialized = False
 
-    def _create_batch_descriptor(
+    def _create_padded_batch_descriptor(
         self, num_tokens: int, uniform_decode: bool, has_lora: bool
     ) -> BatchDescriptor:
         max_num_seqs = self.vllm_config.scheduler_config.max_num_seqs
         uniform_decode_query_len = self.uniform_decode_query_len
+        num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         if uniform_decode:
             num_reqs = num_tokens // uniform_decode_query_len
             assert num_tokens % uniform_decode_query_len == 0
             assert num_reqs <= max_num_seqs
             return BatchDescriptor(
-                num_tokens=num_tokens,
+                num_tokens=num_tokens_padded,
                 num_reqs=num_reqs,
                 uniform=uniform_decode,
                 has_lora=has_lora,
             )
-        num_reqs = min(num_tokens, max_num_seqs)
+        num_reqs = min(num_tokens_padded, max_num_seqs)
 
         return BatchDescriptor(
-            num_tokens=num_tokens,
+            num_tokens=num_tokens_padded,
             num_reqs=num_reqs,
             uniform=uniform_decode,
             has_lora=has_lora,
@@ -117,8 +95,7 @@ class CudagraphDispatcher:
         assert runtime_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
             f"Invalid cudagraph runtime mode for keys: {runtime_mode}"
         )
-        key = CUDAGraphKey.from_batch_descriptor(batch_descriptor)
-        self.cudagraph_keys[runtime_mode][key] = batch_descriptor
+        self.cudagraph_keys[runtime_mode].add(batch_descriptor)
 
     def initialize_cudagraph_keys(
         self, cudagraph_mode: CUDAGraphMode, uniform_decode_query_len: int
@@ -143,7 +120,7 @@ class CudagraphDispatcher:
             ):
                 self.add_cudagraph_key(
                     cudagraph_mode.mixed_mode(),
-                    self._create_batch_descriptor(bs, False, has_lora),
+                    self._create_padded_batch_descriptor(bs, False, has_lora),
                 )
 
         # if decode cudagraph mode is FULL, and we don't already have mixed
@@ -164,7 +141,7 @@ class CudagraphDispatcher:
             for bs, has_lora in product(cudagraph_capture_sizes_for_decode, lora_cases):
                 self.add_cudagraph_key(
                     CUDAGraphMode.FULL,
-                    self._create_batch_descriptor(bs, True, has_lora),
+                    self._create_padded_batch_descriptor(bs, True, has_lora),
                 )
 
         self.keys_initialized = True
@@ -182,59 +159,41 @@ class CudagraphDispatcher:
         self,
         num_tokens: int,
         num_reqs: int,
-        max_num_scheduled_tokens: int,
+        uniform_decode: bool,
         has_lora: bool,
         use_cascade_attn: bool = False,
-        force_uniform_flag: bool | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor | None]:
         """
         Given conditions(e.g.,batch descriptor and if using cascade attention),
         dispatch to a cudagraph runtime mode and the valid batch descriptor.
         A new batch descriptor is returned as we might dispatch a uniform batch
         to a graph that supports a more general batch (uniform to non-uniform).
+
+        `num_reqs` reserved for future use; making sure callsites have access to this
+          information.
         """
         # if not initialized, just skip dispatching.
         if not self.keys_initialized:
             return CUDAGraphMode.NONE, None
 
-        if force_uniform_flag is not None:
-            uniform_decode = force_uniform_flag
-        else:
-            uniform_decode = (
-                max_num_scheduled_tokens == self.uniform_decode_query_len
-            ) and (num_reqs == max_num_scheduled_tokens)
-
-        batch_descriptor = self._create_batch_descriptor(
+        batch_descriptor = self._create_padded_batch_descriptor(
             num_tokens, uniform_decode, has_lora
         )
-
-        key = CUDAGraphKey.from_batch_descriptor(batch_descriptor)
-
-        def check_batch_desc(mode: CUDAGraphMode, key: CUDAGraphKey):
-            if key in self.cudagraph_keys[mode]:
-                cg_batch_desc = self.cudagraph_keys[mode][key]
-                assert self._is_compatible(batch_descriptor, cg_batch_desc), (
-                    f"Batch descriptor {batch_descriptor} is not compatible with "
-                    f"cudagraph batch descriptor: {cg_batch_desc} (key {key})"
-                )
-                return cg_batch_desc
-            return None
+        relaxed_batch_descriptor = batch_descriptor.relax_for_mixed_batch_cudagraphs()
 
         if not use_cascade_attn:
             # check if key exists for full cudagraph
-            if cg_batch_desc := check_batch_desc(CUDAGraphMode.FULL, key):
-                return CUDAGraphMode.FULL, cg_batch_desc
+            if batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, batch_descriptor
 
-            # otherwise, check if non-uniform key exists
-            if cg_batch_desc := check_batch_desc(CUDAGraphMode.FULL, key.non_uniform()):
-                return CUDAGraphMode.FULL, cg_batch_desc
+            # otherwise, check if the relaxed key exists
+            if relaxed_batch_descriptor in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, relaxed_batch_descriptor
 
-        # also check if non-uniform key exists for more "general"
+        # also check if the relaxed key exists for more "general"
         # piecewise cudagraph
-        if cg_batch_desc := check_batch_desc(
-            CUDAGraphMode.PIECEWISE, key.non_uniform()
-        ):
-            return CUDAGraphMode.PIECEWISE, cg_batch_desc
+        if relaxed_batch_descriptor in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+            return CUDAGraphMode.PIECEWISE, relaxed_batch_descriptor
 
-        # finally, just return no cudagraphs
-        return CUDAGraphMode.NONE, batch_descriptor
+        # finally, just return no cudagraphs and a trivial batch descriptor
+        return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
