@@ -66,11 +66,12 @@ async def transfer_run_periodically(
 ) -> None:
     while True:
         await asyncio.to_thread(state.rearrange_event.wait)
+        logger.info("async worker woke up for EPLB transfer")
 
         for model_state in state.model_states.values():
             if not model_state.is_async_enabled:
                 continue
-
+            logger.info("async worker model_state.model.num_moe_layers %d", model_state.model.num_moe_layers)
             current_num_layers = model_state.model.num_moe_layers
             while model_state.layer_to_transfer < current_num_layers:
                 if (
@@ -108,4 +109,5 @@ async def transfer_run_periodically(
                 else:
                     await asyncio.sleep(0.001)
 
+        logger.info("async worker completed current EPLB pass, clearing event")
         state.rearrange_event.clear()

@@ -613,26 +613,27 @@ class EplbState:
                     all_ranks_buffer_ready = self._all_ranks_buffer_ready(
                         eplb_model_state
                     )
-
-                if eplb_model_state.ep_buffer_ready and (
-                    not eplb_model_state.pending_global_ready_check
-                    or all_ranks_buffer_ready
-                ):
+                logger.info("ep_buffer_ready: %d", eplb_model_state.ep_buffer_ready)
+                if eplb_model_state.is_async_enabled and eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
                         is_profile=is_profile,
                     )
-
+                    logger.info("eplb_state eplb_model_state.layer_to_transfer: %d, eplb_model_state.model.num_moe_layers: %d", eplb_model_state.layer_to_transfer, eplb_model_state.model.num_moe_layers)
                     if (
                         eplb_model_state.layer_to_transfer
                         >= eplb_model_state.model.num_moe_layers
                     ):
-                        self.post_eplb(eplb_model_state, is_profile)
-                        eplb_model_state.rebalanced = False
-                        eplb_model_state.layer_to_transfer = 0
-                        eplb_model_state.pending_global_ready_check = False
-                        logger.info("finish async transfer")
+                            self.post_eplb(eplb_model_state, is_profile)
+                            eplb_model_state.rebalanced = False
+                            eplb_model_state.layer_to_transfer = 0
+                            eplb_model_state.pending_global_ready_check = False
+                            logger.info(
+                                "finish async transfer for model %s rank %d",
+                                eplb_model_state.model_name,
+                                ep_group.rank(),
+                            )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if any(
@@ -865,6 +866,7 @@ class EplbState:
 
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
+            logger.info("EPLB async rearrange triggered")
             self.rearrange_event.set()
         return None
 
@@ -972,6 +974,7 @@ class EplbState:
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
             model_state.ep_buffer_ready = 0
+            logger.info("successfully move_to_workspace transferred_layer: %d", transferred_layer)
         finally:
             try:
                 model_state.buffer_lock.release()
