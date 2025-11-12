@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from fractions import Fraction
 from functools import cache, partial
-from typing import Any
+from typing import Any, Optional
 
 import torch
 import torch.nn.functional as F
@@ -104,7 +104,7 @@ try:
         x_scales: torch.Tensor = None,
         rocm_use_aiter_fp4_asm_gemm: bool = False,
         out_dtype: torch.dtype | None = torch.bfloat16,
-    ) -> torch.Tensor:
+    ) -> None:
         return
 
     direct_register_custom_op(
@@ -396,7 +396,7 @@ class QuarkOCP_MX(QuarkScheme):
                 x,
                 layer.weight,
                 layer.weight_scale,
-                None
+                None,
                 self.rocm_use_aiter_fp4_asm_gemm,
                 self.out_dtype,
             )
