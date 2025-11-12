@@ -413,25 +413,25 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             patch_rope_parameters_dict(rope_parameters)
 
 
-def patch_rope_parameters_dict(rope_scaling: dict[str, Any]) -> None:
-    if "rope_type" not in rope_scaling:
-        raise ValueError("rope_scaling should have a 'rope_type' key")
+def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
+    if "rope_type" not in rope_parameters:
+        raise ValueError("rope_parameters should have a 'rope_type' key")
 
-    if rope_scaling["rope_type"] == "su":
-        rope_scaling["rope_type"] = "longrope"
+    if rope_parameters["rope_type"] == "su":
+        rope_parameters["rope_type"] = "longrope"
         logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
-    elif rope_scaling["rope_type"] == "mrope":
-        assert "mrope_section" in rope_scaling
-        rope_scaling["rope_type"] = "default"
+    elif rope_parameters["rope_type"] == "mrope":
+        assert "mrope_section" in rope_parameters
+        rope_parameters["rope_type"] = "default"
         logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
 
 
 def _uses_mrope(config: PretrainedConfig) -> bool:
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if rope_scaling is None:
+    rope_parameters = getattr(config, "rope_parameters", None)
+    if rope_parameters is None:
         return False
 
-    return "mrope_section" in rope_scaling
+    return "mrope_section" in rope_parameters
 
 
 def uses_mrope(config: PretrainedConfig) -> bool:
