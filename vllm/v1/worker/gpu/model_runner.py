@@ -559,11 +559,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # NOTE(woosuk): We mask out logprobs for negative tokens.
         prompt_logprobs, prompt_ranks = compute_prompt_logprobs(
-            torch.relu(token_ids),
+            token_ids,
             hidden_states[:n],
             self.model.compute_logits,
         )
-        prompt_logprobs[:, 0].masked_fill_(token_ids < 0, 0)
 
         prompt_token_ids = token_ids.unsqueeze(-1)
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
