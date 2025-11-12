@@ -1207,7 +1207,15 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
-            with set_forward_context(None, self.vllm_config):
+            if self.vllm_config.is_in_compile:
+                with set_forward_context(None, self.vllm_config):
+                    if self.use_data_parallel:
+                        return run_dp_sharded_mrope_vision_model(
+                            self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                        )
+                    else:
+                        image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+            else:
                 if self.use_data_parallel:
                     return run_dp_sharded_mrope_vision_model(
                         self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"

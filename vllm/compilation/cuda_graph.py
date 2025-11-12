@@ -288,6 +288,7 @@ class CUDAGraphWrapper:
             entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_captured += 1
+            logger.info(f"Compilation Counter: {compilation_counter.num_cudagraph_captured}")
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly

@@ -13,6 +13,8 @@ torch_compile_start_time: float = 0.0
 
 
 def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
+    vllm_config.is_in_compile = True
+
     global torch_compile_start_time
     torch_compile_start_time = time.time()
 
@@ -29,6 +31,8 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
 
 
 def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
+    vllm_config.is_in_compile = False
+
     compilation_config: CompilationConfig = vllm_config.compilation_config
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
         logger.info_once(

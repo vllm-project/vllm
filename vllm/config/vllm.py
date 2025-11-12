@@ -257,6 +257,8 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -02 is used by defult. See  OptimizationLevel for full
     description."""
+    is_in_compile: bool = False
+    """For ViT Compile, Compile Status Flag"""
 
     def compute_hash(self) -> str:
         """

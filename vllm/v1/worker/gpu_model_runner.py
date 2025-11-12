@@ -4569,6 +4569,59 @@ class GPUModelRunner(
             yield
             inputs_embeds.fill_(0)
 
+    def _get_dummy_vit_input(self, num_image_tokens: int) -> BatchedTensorInputs:
+        """
+        Generates dummy multimodal inputs for a single image, with a controllable
+        number of resulting image tokens for a Vision Transformer (ViT) like model,
+        ensuring a square-like aspect ratio for the patch grid.
+
+        This is useful for profiling or testing, allowing the creation of inputs
+        that result in a specific number of image tokens after vision encoding.
+
+        Args:
+            num_image_tokens: The desired number of image tokens after encoding.
+
+        Returns:
+            A BatchedTensorInputs dictionary containing `pixel_values` and
+            `image_grid_thw` that can be passed as kwargs to
+            `get_multimodal_embeddings`.
+        """
+        import math
+
+        def find_square_like_factors(n: int):
+            """Finds two factors of n that are closest to its square root."""
+            h = int(math.sqrt(n))
+            while h > 0:
+                if n % h == 0:
+                    return h, n // h
+                h -= 1
+            return 1, n
+
+        h_patches, w_patches = find_square_like_factors(num_image_tokens)
+
+        # The first dimension of pixel_values corresponds to the total number of
+        # tokens (patches).
+        #TODO 修改1176为vit feature dim.
+        # 根据num_image_tokens反推原图片长宽利用原api跑一遍？还是先跑一遍得到结果后取其feature dim再构造
+        pixel_values = torch.zeros(
+            (num_image_tokens, 1176),
+            dtype=self.dtype,
+            device=self.device
+        )
+
+        # image_grid_thw specifies the grid layout for a single image.
+        # Shape: (1, 3) for (t, h, w) patch counts.
+        image_grid_thw = torch.tensor(
+            [[1, h_patches, w_patches]],
+            dtype=torch.long,
+            device=self.device
+        )
+
+        return {
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+        }
+
     def _get_mm_dummy_batch(
         self,
         modality: str,
@@ -4855,6 +4908,13 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
+                if cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE and self.supports_mm_inputs:
+                    # TODO: This will be improved to support different shapes.
+                    dummy_mm_inputs = self._get_dummy_vit_input(1024)
+                    # logger.info("st.!!!!!!!!!!!!!!!!!!!")
+                    # self.model.visual(dummy_mm_inputs["pixel_values"], grid_thw=dummy_mm_inputs["image_grid_thw"])
+                    self.model.get_multimodal_embeddings(**dummy_mm_inputs)
+                    # logger.info("ed!!!!!!!!!!!!!!!!!!!")
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
