@@ -424,10 +424,6 @@ class RocmPlatform(Platform):
         return True
 
     @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
-
-    @classmethod
     def is_navi(cls) -> bool:
         return "gfx1" in torch.cuda.get_device_properties(0).gcnArchName
 
