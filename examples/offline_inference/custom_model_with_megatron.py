@@ -32,13 +32,6 @@ import tempfile
 import torch
 import torch.nn as nn
 
-# Try to import Megatron-LM
-from megatron.core.tensor_parallel import (
-    ColumnParallelLinear,
-    RowParallelLinear,
-)
-from megatron.core.transformer.transformer_config import TransformerConfig
-
 from vllm.model_executor.layers.trainable_attention import (
     TrainableFlashAttention,  # vLLM's training-compatible attention
 )
@@ -218,6 +211,17 @@ def build_megatron_model(vllm_config, parallel_context: ParallelContext):
     2. Get vLLM's tensor parallel process group
     3. Pass the process group to Megatron layers
     """
+    # Import Megatron here to avoid CUDA initialization before fork
+    global ColumnParallelLinear, RowParallelLinear, TransformerConfig
+
+    from megatron.core.tensor_parallel import (
+        ColumnParallelLinear,
+        RowParallelLinear,
+    )
+    from megatron.core.transformer.transformer_config import (
+        TransformerConfig,
+    )
+
     tp_rank = parallel_context.get_tensor_parallel_rank()
     tp_size = parallel_context.get_tensor_parallel_world_size()
 
