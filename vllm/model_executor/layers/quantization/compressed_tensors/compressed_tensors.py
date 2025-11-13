@@ -19,7 +19,9 @@ from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE, UnquantizedFusedMoEMethod
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -158,8 +160,26 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self, layer)
+            # FusedMoE was made by combining multiple Linears so need to make sure quantization config for Linear can target it
+            self._add_fused_moe_to_target_scheme_map() 
+            unfused_names = [[prefix + proj_name] for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]]
+            quant_schemes = [self.get_scheme(layer, name) for name in unfused_names]
+
+            if any(quant_schemes!=quant_schemes[0]): # inconsistent qscheme
+                raise ValueError("All MoE projections need to have same quantization scheme")
+            
+            if quant_schemes[0] is None: # ignored layer
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            # valid qscheme
+            return CompressedTensorsMoEMethod.get_moe_method(self, layer, quant_schemes[0])
         return None
+
+    def _add_fused_moe_to_target_scheme_map(self):
+        if 'Linear' not in self.target_scheme_map:
+            return
+        self.target_scheme_map['FusedMoE'] = self.target_scheme_map['Linear']
+     
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
@@ -508,8 +528,9 @@ class CompressedTensorsConfig(QuantizationConfig):
             and is_tensor_or_channel_or_block_weight
         )
 
+    @staticmethod
     def _is_wNa16_group_channel(
-        self, weight_quant: QuantizationArgs, input_quant: QuantizationArgs
+        weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
         input_quant_none = input_quant is None
         is_channel_group = (

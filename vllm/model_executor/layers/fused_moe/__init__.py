@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoeWeightScaleSupported,
 )
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
     FusedMoEPermuteExpertsUnpermute,
@@ -41,6 +44,7 @@ __all__ = [
     "FusedMoE",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
