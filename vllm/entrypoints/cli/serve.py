@@ -88,9 +88,6 @@ def run_headless(args: argparse.Namespace):
         usage_context=usage_context, headless=True
     )
 
-    if not envs.VLLM_USE_V1:
-        raise ValueError("Headless mode is only supported for V1")
-
     if engine_args.data_parallel_hybrid_lb:
         raise ValueError("data_parallel_hybrid_lb is not applicable in headless mode")
 
@@ -156,15 +153,10 @@ def run_multi_api_server(args: argparse.Namespace):
     usage_context = UsageContext.OPENAI_API_SERVER
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    if num_api_servers > 1:
-        if not envs.VLLM_USE_V1:
-            raise ValueError("api_server_count > 1 is only supported for V1")
-
-        if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-            raise ValueError(
-                "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used "
-                "with api_server_count > 1"
-            )
+    if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        raise ValueError(
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used with api_server_count > 1"
+        )
 
     executor_class = Executor.get_class(vllm_config)
     log_stats = not engine_args.disable_log_stats
