@@ -576,7 +576,7 @@ class Processor:
         ):
             suggestion = (
                 "Make sure that `max_model_len` is no smaller than the "
-                "number of text tokens (prompt + generated tokens)."
+                "number of text tokens (prompt + requested output tokens)."
             )
             raise ValueError(
                 f"The {prompt_type} prompt (length {prompt_len}) plus the number of "
