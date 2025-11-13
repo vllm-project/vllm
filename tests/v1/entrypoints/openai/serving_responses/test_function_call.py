@@ -116,6 +116,7 @@ async def test_function_tool_use(
         input=prompt,
         tools=tools,
         tool_choice=tool_choice,
+        temperature=0.0,
     )
 
     assert len(response.output) >= 1
