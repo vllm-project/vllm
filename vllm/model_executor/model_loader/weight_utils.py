@@ -381,7 +381,7 @@ def _list_local_hf_repo_files(repo_id: str, revision: str | None) -> list[str]:
         revision_file = repo_cache / "refs" / huggingface_hub.constants.DEFAULT_REVISION
         if revision_file.is_file():
             with revision_file.open("r") as file:
-                revision = file.read()
+                revision = file.read().strip()
 
     if revision:
         revision_dir = repo_cache / "snapshots" / revision
