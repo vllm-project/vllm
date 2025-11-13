@@ -213,7 +213,6 @@ class RocmPlatform(Platform):
         dtype,
         kv_cache_dtype,
         block_size,
-        use_v1,
         use_mla,
         has_sink,
         use_sparse,
@@ -225,12 +224,6 @@ class RocmPlatform(Platform):
             raise NotImplementedError("Sparse Attention is not supported on ROCm.")
 
         if use_mla:
-            if not use_v1:
-                raise RuntimeError(
-                    "MLA attention backends require the V1 engine. "
-                    "Set VLLM_USE_V1=1 to enable them."
-                )
-
             # Determine MLA backend
             if selected_backend is None:
                 # When AITER is enabled and block_size is 1, use AITER MLA
@@ -264,12 +257,6 @@ class RocmPlatform(Platform):
             raise ValueError(
                 f"The selected backend, {selected_backend.name}, "
                 f"is not MLA type while requested for MLA backend."
-            )
-
-        if not use_v1:
-            raise RuntimeError(
-                "V0 attention backends have been removed. Set VLLM_USE_V1=1 "
-                "to select a supported backend."
             )
 
         # Handle explicit backend selection first
