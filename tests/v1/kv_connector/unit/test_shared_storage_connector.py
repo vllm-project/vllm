@@ -123,9 +123,9 @@ def build_llm_instance(shared_storage_path: Path):
 
     engine_args = EngineArgs(
         model=MODEL_NAME,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=1,
-        gpu_memory_utilization=0.4,
+        gpu_memory_utilization=0.6,
         enforce_eager=False,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
