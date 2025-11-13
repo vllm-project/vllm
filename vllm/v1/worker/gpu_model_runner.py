@@ -3215,7 +3215,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
 
         # begin loading weights
-        logger.info("Reloading weights inplace...")
+        logger.info_once("Reloading weights inplace...", scope="local")
         if process_weights_after_loading:
             if self.model_config.quantization in RELOADABLE_QUANT_CONFIGS:
                 restore_weights_for_reloading(model)
@@ -3247,7 +3247,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         # logging and validation
         counter_after_reloading = time.perf_counter()
         diff_seconds = counter_after_reloading - counter_before_reloading
-        logger.info("Reloading and processing weights took %.2f seconds", diff_seconds)
+        logger.info_once(
+            "Reloading and processing weights took %.2f seconds",
+            diff_seconds,
+            scope="local",
+        )
         if self.model_config.quantization is None and loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:

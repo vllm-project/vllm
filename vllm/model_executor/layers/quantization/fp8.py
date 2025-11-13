@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import torch
 from torch.nn import Module
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -483,18 +484,6 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 layer.register_parameter("input_scale", None)
 
-        # create per-tensor qparams populated by process_weights_after_loading
-        else:
-            scale = create_fp8_scale_parameter(
-                PerTensorScaleParameter,
-                output_partition_sizes,
-                input_size_per_partition,
-                None,
-                weight_loader,
-            )
-            set_weight_attrs(scale, {"scale_type": "weight_scale"})
-            layer.register_parameter("weight_scale", scale)
-
     def process_weights_after_loading(self, layer: Module) -> None:
         size_k_first = True
         input_scale = None
@@ -506,8 +495,8 @@ class Fp8LinearMethod(LinearMethodBase):
             weight, weight_scale = process_fp8_weight_block_strategy(
                 layer.weight, layer.weight_scale_inv
             )
-            # Rename weight_scale_inv parameter for consistency
-            layer.weight_scale = layer.weight_scale_inv
+            # Delete the weight_scale_inv parameter to avoid confusion
+            # with the weight_scale parameter
             del layer.weight_scale_inv
 
         # If checkpoint not serialized fp8, quantize the weights.
@@ -536,10 +525,13 @@ class Fp8LinearMethod(LinearMethodBase):
             weight = weight.t()
 
         # Update layer with new values.
-        layer.weight.copy_(weight.data)
-        layer.weight_scale.copy_(weight_scale.data)
-        if input_scale is not None:
-            layer.input_scale.copy_(input_scale)
+        layer.weight = Parameter(weight.data, requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
+        layer.input_scale = (
+            Parameter(input_scale, requires_grad=False)
+            if input_scale is not None
+            else None
+        )
 
         if self.use_marlin:
             prepare_fp8_layer_for_marlin(layer, size_k_first)
@@ -767,10 +759,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             if self.block_quant
             else {"quant_method": FusedMoeWeightScaleSupported.TENSOR.value}
         )
-
-        # add weight loaders to support loading (and reloading)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        # If loading fp8 checkpoint, pass the weight loaders.
+        # If loading an fp16 checkpoint, do not (we will quantize in
+        #   process_weights_after_loading()
+        if self.quant_config.is_checkpoint_fp8_serialized:
+            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         # INPUT_SCALES
         if self.quant_config.activation_scheme == "static":
@@ -833,18 +827,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale_inv = layer.w2_weight_scale_inv
 
             # torch.compile() cannot use Parameter subclasses.
-            layer.w13_weight.copy_(w13_weight)
-            layer.w13_weight_scale_inv.copy_(w13_weight_scale_inv)
-            layer.w2_weight.copy_(w2_weight)
-            layer.w2_weight_scale_inv.copy_(w2_weight_scale_inv)
+            layer.w13_weight = Parameter(w13_weight, requires_grad=False)
+            layer.w13_weight_scale_inv = Parameter(
+                w13_weight_scale_inv, requires_grad=False
+            )
+            layer.w2_weight = Parameter(w2_weight, requires_grad=False)
+            layer.w2_weight_scale_inv = Parameter(
+                w2_weight_scale_inv, requires_grad=False
+            )
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight.data, layer.w2_weight.data
                 )
 
-                layer.w13_weight.copy_(shuffled_w13)
-                layer.w2_weight.copy_(shuffled_w2)
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
             # DeepGemm scales need to be transposed and aligned. We try to do
             # it ahead of time for performance reasons.
@@ -866,7 +864,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
             # Re-initialize w13_scale because we directly quantize
             # merged w13 weights and generate a single scaling factor.
-            layer.w13_weight_scale.copy_(
+            layer.w13_weight_scale = torch.nn.Parameter(
                 torch.ones(
                     layer.local_num_experts,
                     dtype=torch.float32,
@@ -881,16 +879,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 w2_weight[expert, :, :], layer.w2_weight_scale[expert] = (
                     ops.scaled_fp8_quant(layer.w2_weight.data[expert, :, :])
                 )
-            layer.w13_weight.copy_(w13_weight)
-            layer.w2_weight.copy_(w2_weight)
+            layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
             if self.rocm_aiter_moe_enabled:
                 # reshaping weights is required for aiter moe kernel.
                 shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                     layer.w13_weight, layer.w2_weight
                 )
 
-                layer.w13_weight.copy_(shuffled_w13)
-                layer.w2_weight.copy_(shuffled_w2)
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
         # If checkpoint is fp8, we need to handle that the
         # MoE kernels require single activation scale and single weight
         # scale for w13 per expert.
@@ -911,8 +909,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                         "fp8 MoE layer. Using the maximum across experts "
                         "for each layer."
                     )
-                layer.w13_input_scale.copy_(layer.w13_input_scale.max())
-                layer.w2_input_scale.copy_(layer.w2_input_scale.max())
+                layer.w13_input_scale = torch.nn.Parameter(
+                    layer.w13_input_scale.max(), requires_grad=False
+                )
+                layer.w2_input_scale = torch.nn.Parameter(
+                    layer.w2_input_scale.max(), requires_grad=False
+                )
             if current_platform.is_fp8_fnuz():
                 # Normalize the weights and scales
                 w13_weight, w13_weight_scale, w13_input_scale = (
@@ -926,14 +928,22 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     )
                 )
                 # Reset the parameter
-                layer.w13_weight.copy_(w13_weight)
-                layer.w13_weight_scale.copy_(w13_weight_scale)
+                layer.w13_weight = torch.nn.Parameter(w13_weight, requires_grad=False)
+                layer.w13_weight_scale = torch.nn.Parameter(
+                    w13_weight_scale, requires_grad=False
+                )
                 if w13_input_scale is not None:
-                    layer.w13_input_scale.copy_(w13_input_scale)
-                layer.w2_weight.copy_(w2_weight)
-                layer.w2_weight_scale.copy_(w2_weight_scale)
+                    layer.w13_input_scale = torch.nn.Parameter(
+                        w13_input_scale, requires_grad=False
+                    )
+                layer.w2_weight = torch.nn.Parameter(w2_weight, requires_grad=False)
+                layer.w2_weight_scale = torch.nn.Parameter(
+                    w2_weight_scale, requires_grad=False
+                )
                 if w2_input_scale is not None:
-                    layer.w2_input_scale.copy_(w2_input_scale)
+                    layer.w2_input_scale = torch.nn.Parameter(
+                        w2_input_scale, requires_grad=False
+                    )
 
             # Fp8 moe kernel needs single weight scale for w13 per expert.
             # We take the max then dequant and requant each expert.
@@ -957,10 +967,12 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w13_weight, layer.w2_weight
                 )
 
-                layer.w13_weight.copy_(shuffled_w13)
-                layer.w2_weight.copy_(shuffled_w2)
+                layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+                layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
 
-            layer.w13_weight_scale.copy_(max_w13_scales)
+            layer.w13_weight_scale = torch.nn.Parameter(
+                max_w13_scales, requires_grad=False
+            )
 
             if self.flashinfer_moe_backend is not None:
                 # NOTE: weights have to be swapped since the activation is

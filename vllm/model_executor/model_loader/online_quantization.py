@@ -33,8 +33,6 @@ process_weights_after_loading(model, model_config, device)
 ```
 """
 
-from types import MethodType
-
 import torch
 from torch import nn
 
@@ -77,7 +75,10 @@ def restore_weights_for_reloading(model: nn.Module):
     for param_fqn in params_to_remove:
         module_name, param_name = param_fqn.rsplit(".", 1)
         module = model.get_submodule(module_name)
-        delattr(module, param_name)
+
+        # sometimes modules are shared, as is the case for `shared_experts`
+        if hasattr(module, param_name):
+            delattr(module, param_name)
 
     # restore parameters that were present at load time
     for param_fqn, meta_tensor in metadata.items():
@@ -89,7 +90,6 @@ def restore_weights_for_reloading(model: nn.Module):
         if _tensors_alike(original_tensor, meta_tensor):
             continue
 
-        delattr(module, param_name)  # delete before materialization to avoid oom
         param = _materialize_meta_tensor(meta_tensor)
         setattr(module, param_name, param)
 
@@ -125,11 +125,5 @@ def _materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     )
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = meta_tensor.__dict__
-
-    # rebind any references to the original tensor
-    # assume that methods are bound to the original tensor
-    for key, value in tensor.__dict__.items():
-        if isinstance(value, MethodType):
-            tensor[key] = MethodType(value.__func__, tensor)
 
     return tensor
