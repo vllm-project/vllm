@@ -188,7 +188,11 @@ def get_tokenizer(
     mistral_common_installed = importlib.util.find_spec("mistral_common") is not None
     if tokenizer_mode == "auto" and mistral_common_installed:
         allow_patterns = ["tekken.json", "tokenizer.model.v*"]
-        files_list = list_files_from_hf_or_path(tokenizer_name, allow_patterns)
+        files_list = list_files_from_hf_or_path(
+            model_name_or_path=str(tokenizer_name),
+            allow_patterns=allow_patterns,
+            revision=revision,
+        )
         if len(files_list) > 0:
             tokenizer_mode = "mistral"
 

@@ -408,11 +408,15 @@ def list_files_from_hf_or_path(
         ]
     # Local HF repo
     elif huggingface_hub.constants.HF_HUB_OFFLINE:
-        all_files = _list_local_hf_repo_files(model_name_or_path, revision)
+        all_files = _list_local_hf_repo_files(
+            repo_id=model_name_or_path, revision=revision
+        )
     # Remote HF repo
     else:
         hf_api = HfApi()
-        all_files = hf_api.list_repo_files(model_name_or_path, revision=revision)
+        all_files = hf_api.list_repo_files(
+            repo_id=model_name_or_path, revision=revision
+        )
     for pattern in allow_patterns:
         file_list.extend(
             [
