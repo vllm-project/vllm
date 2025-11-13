@@ -1647,6 +1647,8 @@ class NixlConnectorWorker:
             )
             return permuted_blocks
 
+        if len(self.device_kv_caches) == 0:
+            return
         split_k_and_v = not (
             self.use_mla or self._use_pallas or self.kv_topo.is_kv_layout_blocks_first
         )
@@ -1946,7 +1948,9 @@ class NixlConnectorWorker:
 
         # Get side handles.
         remote_block_size = self.kv_topo.remote_block_size[dst_engine_id]
-        local_xfer_side_handle = self.src_xfer_side_handles[remote_block_size]
+        local_xfer_side_handle = self.src_xfer_side_handles.get(
+            remote_block_size, self.src_xfer_side_handle
+        )
         remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
