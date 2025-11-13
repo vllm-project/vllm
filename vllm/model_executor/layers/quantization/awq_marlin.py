@@ -452,6 +452,7 @@ class AWQMarlinMoEMethod(FusedMoEMethodBase):
             raise ValueError("AWQMarlinMoEMethod only supports 4bit now.")
         self.quant_type = scalar_types.uint4
         self.input_dtype = None
+        self.use_marlin = True
 
     def create_weights(
         self,

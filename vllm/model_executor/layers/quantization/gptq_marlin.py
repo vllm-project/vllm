@@ -501,6 +501,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         else:
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
         self.input_dtype = None
+        self.use_marlin = True
 
     def create_weights(
         self,
