@@ -5,7 +5,6 @@
 import inspect
 import time
 import warnings
-from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -91,18 +90,6 @@ def initialize_model(
         return model_class(**kwargs)
 
 
-def default_model_weight_loader(
-    model: torch.nn.Module, weights_iterator: Iterable[tuple[str, torch.Tensor]]
-) -> set[str]:
-    loaded_weights = set()
-    for name, loaded_weight in weights_iterator:
-        param = model.get_parameter(name)
-        param.weight_loader(param, loaded_weight)
-        loaded_weights.add(name)
-
-    return loaded_weights
-
-
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
@@ -134,7 +121,7 @@ def process_weights_after_loading(
 
     counter_after_processing_weights = time.perf_counter()
     diff_seconds = counter_after_processing_weights - counter_before_processing_weights
-    logger.debug("Processing weights took %.2f seconds", diff_seconds)
+    logger.debug_once("Processed weights in %.2f seconds", diff_seconds, scope="local")
 
 
 @contextmanager

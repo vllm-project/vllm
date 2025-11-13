@@ -56,9 +56,6 @@ from vllm.model_executor.model_loader.online_quantization import (
     restore_weights_for_reloading,
 )
 from vllm.model_executor.model_loader.utils import (
-    default_model_weight_loader,
-)
-from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading as _process_weights_after_loading,
 )
 from vllm.model_executor.models.interfaces import (
@@ -3242,7 +3239,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         else:
             # load weights from kernel format
-            default_model_weight_loader(model, weights_iterator)
+            logger.warning_once(
+                "Reloading with `process_weights_after_loading=True` requires that "
+                "weights be in kernel format and already sharded",
+                scope="local",
+            )
+            loaded_weights = set()
+            for name, loaded_weight in weights_iterator:
+                param = model.get_parameter(name)
+                param.copy_(loaded_weight)
+                loaded_weights.add(name)
 
         # logging and validation
         counter_after_reloading = time.perf_counter()
