@@ -3,6 +3,7 @@
 
 
 from copy import deepcopy
+from types import MethodType
 
 import torch
 from torch import nn
@@ -17,56 +18,29 @@ ONLINE_RELOAD_QUANT_CONFIGS = {
     "fp8",
 }
 
-# Notes for Online Quantization
-# In terms of state of checkpoints, quantization config and their
-# correspondance to online quantization:
-# | Use Case      | Checkpoints          |  model_config.quantization |
-# | no quant      | high precision       |  None   |
-# | offline quant | quantized |  fp8, torchao etc. |
-# | online quant  | high precision | torchao etc. |
-#
-# The process for loading non-quantized checkpoint
-# 1. load non-quantized weights (load_weights)
-# 2. do any additional post processing (process_weights_after_loading)
-#
-# The process for loading offline quantized checkpoint
-# 1. load offline-quantized weights (load_weights)
-# 2. do any additional post processing (process_weights_after_loading)
+"""
 
-# The process for unquantized model reloading
-# (repeated run in RL training loop)
-# first run
-#   UI1. load_weights: load bfloat16 weights
-#   UI2. process_weights_after_loading: any additional post processing
-# subsequent run
-#   UC1: load_weights: load bfloat16 weights
-#      (shouldn't be any issues since we didn't change any attributes
-#       of the weights)
-#   UC2: process_weights_after_loading: any additional post processing
+First time loading lifecycle
+1. Model checkpoint is loaded by `ModelLoader.get_all_weights` into `weights_iterator`
+2. `weights_iterator` is loaded into model by `model.load_weights`
+3. Model state is captured by `record_weights_for_reloading`
+4. `process_weights_after_loading` converts model state into kernel format
+5. Model can run now that weights are in kernel format
 
-# The process for weight reloading with online quantization
-# (repeated run in RL training loop)
-# first run
-#  I1. load_weights: load bfloat16 weights
-#  I2. process_weights_after_loading:
-#        record weight metadata and attributes for R1 and R2
-#        quantize weights to fp8
-# subsequent run
-#  (beginning model weight is in fp8)
-#  load_weights:
-#    R1. restore bfloat16 model weight metadata
-#    R2. restore the model weight attributes
-#    R3. reload bfloat16 weights
-#    R4. quantize weights (by calling process_weights_after_loading),
-#    also set `process_weights_after_loading_already_called` to
-#    True to stop it from running again
-#  process_weights_after_loading (if called):
-#    this will be skipped since it's already ran in
-#    load_weights
+
+Subsequent reloading lifecycle
+1. Model weights updates are packed into an async/chunked `weights_iterator`
+or model checkpoint is loaded from disk into `weights_iterator`
+2. Model state is restored to by `restore_weights_for_reloading`
+3. 
+
+
+"""
 
 
 def record_weights_for_reloading(model: nn.Module, model_config: ModelConfig):
-    # this function should be called at the start of `process_weights_after_loading`
+    # this function should be called before `process_weights_after_loading`
+    # in practice, this happens at the very start of `process_weights_after_loading`
     from vllm.model_executor.model_loader.weight_utils import get_quant_config
 
     quant_config = get_quant_config(model_config, None)
@@ -76,7 +50,7 @@ def record_weights_for_reloading(model: nn.Module, model_config: ModelConfig):
     if not hasattr(model, "weight_loading_metadata"):
         model.weight_loading_metadata = {
             name: _copy_to_meta_tensor(param)
-            for name, param in model.named_parameters()
+            for name, param in model.named_parameters(remove_duplicate=False)
         }
 
 
@@ -137,5 +111,11 @@ def _materialize_meta_tensor(meta_tensor: torch.Tensor) -> torch.Tensor:
     )
     tensor.__class__ = meta_tensor.__class__
     tensor.__dict__ = deepcopy(meta_tensor.__dict__)
+
+    # rebind any references to the original tensor
+    # assume that methods are bound to the original tensor
+    for key, value in tensor.__dict__.items():
+        if isinstance(value, MethodType):
+            tensor[key] = MethodType(value.__func__, tensor)
 
     return tensor
