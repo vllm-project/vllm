@@ -915,9 +915,9 @@ __global__ void gather_and_maybe_dequant_cache(
     const int32_t* __restrict__ cu_seq_lens,   // [BATCH+1]
     const int32_t* __restrict__ token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNK]
     const int32_t total_tokens, const int32_t block_size,
-    const int32_t entry_size, const int64_t block_table_stride,
-    const int64_t cache_block_stride, const int64_t cache_entry_stride,
-    const int64_t dst_entry_stride, const float* __restrict__ scale,
+    const int64_t block_table_stride, const int64_t cache_block_stride,
+    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const float* __restrict__ scale,
     const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets per
                                                // batch
   constexpr int vec_size = sizeof(float4) / sizeof(scalar_t);
@@ -964,9 +964,9 @@ __global__ void gather_and_maybe_dequant_cache(
       }
     }
     // process tail
-    int32_t tail_cnt = entry_size % vec_size;
-    dst_ = dst_ + entry_size - tail_cnt;
-    src_ = src_ + entry_size - tail_cnt;
+    int32_t tail_cnt = ENTRY_SIZE % vec_size;
+    dst_ = dst_ + ENTRY_SIZE - tail_cnt;
+    src_ = src_ + ENTRY_SIZE - tail_cnt;
     for (int idx = threadIdx.x; idx < tail_cnt; idx += blockDim.x) {
       if constexpr (kv_dt == Fp8KVCacheDataType::kAuto) {
         dst_[idx] = static_cast<scalar_t>(src_[idx]);
