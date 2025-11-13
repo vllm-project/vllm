@@ -33,18 +33,13 @@ Subsequent reloading lifecycle
 or model checkpoint is loaded from disk into `weights_iterator`
 2. Model state is restored to by `restore_weights_for_reloading`
 3. 
-
-
 """
 
 
 def record_weights_for_reloading(model: nn.Module, model_config: ModelConfig):
     # this function should be called before `process_weights_after_loading`
     # in practice, this happens at the very start of `process_weights_after_loading`
-    from vllm.model_executor.model_loader.weight_utils import get_quant_config
-
-    quant_config = get_quant_config(model_config, None)
-    if quant_config.get_name() not in ONLINE_RELOAD_QUANT_CONFIGS:
+    if model_config.quantization not in ONLINE_RELOAD_QUANT_CONFIGS:
         return
 
     if not hasattr(model, "weight_loading_metadata"):
@@ -76,6 +71,7 @@ def restore_weights_for_reloading(model: nn.Module):
         if _tensors_alike(original_tensor, meta_tensor):
             continue
 
+        delattr(module, param_name)  # delete before materialization to avoid oom
         param = _materialize_meta_tensor(meta_tensor)
         setattr(module, param_name, param)
 

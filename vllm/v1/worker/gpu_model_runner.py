@@ -5,7 +5,7 @@ import gc
 import itertools
 import time
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import reduce
@@ -51,6 +51,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
+from vllm.model_executor.model_loader.online_quantization import (
+    restore_weights_for_reloading,
+)
+from vllm.model_executor.model_loader.utils import (
+    process_weights_after_loading as _process_weights_after_loading,
+)
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     is_mixture_of_experts,
@@ -133,9 +139,6 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
-from vllm.v1.worker.base import (
-    ModelRunnerBase,
-)
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -242,9 +245,7 @@ class ExecuteModelState(NamedTuple):
     kv_connector_output: KVConnectorOutput | None
 
 
-class GPUModelRunner(
-    LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ModelRunnerBase
-):
+class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -3181,6 +3182,70 @@ class GPUModelRunner(
             return tuple(layer_ids)
 
         return None
+
+    def reload_weights(
+        self,
+        weights_iterator: Iterable[tuple[str, torch.Tensor]] | None = None,
+        process_weights_after_loading: bool = True,
+    ) -> None:
+        # argument validation
+        if weights_iterator is None and not process_weights_after_loading:
+            logger.warning(
+                "Reloading from disk means that weights will be in checkpoint format. "
+                "Please use `process_weights_after_loading=True` "
+                "to avoid weight reloading errors"
+            )
+        if getattr(self, "model", None) is None:
+            raise ValueError("Cannot reload weights before model is loaded.")
+
+        model = self.get_model()
+        logger.info("Reloading weights inplace...")
+        counter_before_loading_weights = time.perf_counter()
+
+        # load weights from disk if none are provided
+        if weights_iterator is None:
+            model_loader = get_model_loader(self.load_config)
+            weights_iterator = model_loader.get_all_weights(self.model_config, model)
+            weights_iterator = cast(
+                Iterable[tuple[str, torch.Tensor]], weights_iterator
+            )
+
+        if process_weights_after_loading:
+            # restore to original model format
+            if hasattr(model, "weight_loading_metadata"):
+                restore_weights_for_reloading(model)
+            else:
+                logger.warning("Quant config is not supported")
+
+            # load weights from checkpoint/ original model format
+            loaded_weights = model.load_weights(weights_iterator)
+
+            # process weights into kernel format
+            device_config = self.vllm_config.device_config
+            load_config = self.vllm_config.load_config
+            load_device = (
+                device_config.device
+                if load_config.device is None
+                else load_config.device
+            )
+            _process_weights_after_loading(model, self.model_config, load_device)
+
+        else:
+            # load weights from kernel format
+            loaded_weights = set()
+            for name, loaded_weight in weights_iterator:
+                param = model.get_parameter(name)
+                param.weight_loader(param, loaded_weight)
+                loaded_weights.add(loaded_weight)
+
+        # logging
+        counter_after_loading_weights = time.perf_counter()
+        diff_seconds = counter_after_loading_weights - counter_before_loading_weights
+        logger.info_once(
+            f"Reloading {len(loaded_weights)} weights took %.2f seconds",
+            diff_seconds,
+            scope="local",
+        )
 
     def save_tensorized_model(
         self,

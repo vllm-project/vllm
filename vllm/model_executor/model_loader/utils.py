@@ -19,6 +19,9 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.model_loader.online_quantization import (
+    record_weights_for_reloading,
+)
 from vllm.model_executor.models.adapters import (
     as_embedding_model,
     as_reward_model,
@@ -88,11 +91,7 @@ def initialize_model(
 def process_weights_after_loading(
     model: nn.Module, model_config: ModelConfig, target_device: torch.device
 ) -> None:
-    # to avoid circular dependency
-    from vllm.model_executor.model_loader.online_quantization import (
-        record_weights_for_reloading,
-    )
-
+    # weight reloading: must be called before weights are processed
     record_weights_for_reloading(model, model_config)
 
     for _, module in model.named_modules():
