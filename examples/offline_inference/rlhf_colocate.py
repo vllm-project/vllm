@@ -79,9 +79,7 @@ class RayTrainingActor:
         # Ray sets CUDA_VISIBLE_DEVICES to the GPUs assigned to this actor.
         from transformers import AutoModelForCausalLM
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            "/mnt/nvme3n1/models/qwen2.5_7B"
-        )
+        self.model = AutoModelForCausalLM.from_pretrained("facebook/opt-125m")
         self.model.to("cuda:0")
         # Zero out all the parameters.
         for name, p in self.model.named_parameters():
@@ -306,7 +304,7 @@ def setup_train_cluster():
                 placement_group_capture_child_tasks=True,
             ),
         )(MyLLM).remote(
-            model="/mnt/nvme3n1/models/qwen2.5_7B",
+            model="facebook/opt-125m",
             enforce_eager=True,
             worker_extension_cls="rlhf_utils.ColocateWorkerExtension",
             tensor_parallel_size=2,
