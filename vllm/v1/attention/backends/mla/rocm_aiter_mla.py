@@ -179,12 +179,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             )
             self.paged_kv_last_page_len[num_reqs:].fill_(1)
             paged_kv_last_page_len = self.paged_kv_last_page_len[:num_reqs]
-            print(
-                "query start loc device shape: ",
-                query_start_loc_device.shape,
-                flush=True,
-            )
-            print("num reqs: ", num_reqs, flush=True)
             self.qo_indptr[: 1 + num_reqs].copy_(
                 query_start_loc_device, non_blocking=True
             )
