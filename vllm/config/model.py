@@ -2079,6 +2079,7 @@ def _get_and_verify_max_len(
             rope_parameters = {"": rope_parameters}
         for rp in rope_parameters.values():
             rope_type = rp["rope_type"]
+            scaling_factor = 1.0
 
             if rope_type not in ("su", "longrope", "llama3"):
                 if disable_sliding_window:
