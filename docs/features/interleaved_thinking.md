@@ -73,7 +73,7 @@ To use interleaved thinking with tool calls, specify a model that supports this 
             },
         }
     ]
-    messages = [{"role": "user", "content": "What's the weather     like in San Francisco?"}]
+    messages = [{"role": "user", "content": "What's the weather in Fahrenheit like in San Francisco?"}]
     response = client.chat.completions.create(
         model=client.models.list().data[0].id,
         messages=messages,
