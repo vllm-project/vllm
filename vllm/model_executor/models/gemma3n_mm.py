@@ -645,7 +645,7 @@ class Gemma3nForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if mm_input_by_modality is None:
             return []
@@ -664,7 +664,7 @@ class Gemma3nForConditionalGeneration(
                 multimodal_embeddings.extend(audio_embeddings)
         return multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: Optional[MultiModalEmbeddings] = None,
@@ -689,9 +689,9 @@ class Gemma3nForConditionalGeneration(
 
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
@@ -709,10 +709,10 @@ class Gemma3nForConditionalGeneration(
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # NOTE (NickLucche) During profiling, `get_input_embeddings` is not
+        # NOTE (NickLucche) During profiling, `embed_input_ids` is not
         # called, hence we don't have input_ids to compute PLEs. We simply
         # select a chunk of pre-allocated PLEs. During normal execution,
-        # `get_input_embeddings` is called before forward, hence this slice
+        # `embed_input_ids` is called before forward, hence this slice
         # will contain PLEs computed from the actual input_ids.
         per_layer_inputs = self.per_layer_embeddings[: inputs_embeds.shape[0]]
 
