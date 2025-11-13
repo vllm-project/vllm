@@ -180,21 +180,6 @@ def test_triton_unified_attn(
     else:
         num_q_blocks = len(seq_lens)
 
-    num_par_softmax_segments = 16
-    head_size_padded = 1 << (head_size - 1).bit_length()  # next power of 2 value
-    softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
-        dtype=torch.float32,
-    )
-    softmax_segm_max = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
-        dtype=torch.float32,
-    )
-    softmax_segm_expsum = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
-        dtype=torch.float32,
-    )
-
     unified_attention(
         q=maybe_quantized_query,
         k=maybe_quantized_key_cache,
@@ -217,10 +202,6 @@ def test_triton_unified_attn(
         num_q_blocks=num_q_blocks,
         block_q_seq_boundaries_tensor=block_q_seq_boundaries_tensor,
         seq_threshold_3D=seq_threshold_3D,
-        num_par_softmax_segments=num_par_softmax_segments,
-        softmax_segm_output=softmax_segm_output,
-        softmax_segm_max=softmax_segm_max,
-        softmax_segm_expsum=softmax_segm_expsum,
     )
 
     ref_output = ref_paged_attn(
