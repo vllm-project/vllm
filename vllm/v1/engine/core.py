@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
@@ -26,11 +27,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils.gc_utils import (
-    freeze_gc_heap,
-    maybe_attach_gc_debug_callback,
-)
+from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
 from vllm.utils.hashing import get_hash_fn_by_name
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
@@ -42,6 +41,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -63,7 +63,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import record_function_or_nullcontext
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -118,7 +117,23 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
+        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
+            Scheduler = resolve_obj_by_qualname(
+                vllm_config.scheduler_config.scheduler_cls
+            )
+        else:
+            Scheduler = vllm_config.scheduler_config.scheduler_cls
+
+        # This warning can be removed once the V1 Scheduler interface is
+        # finalized and we can maintain support for scheduler classes that
+        # implement it
+        if Scheduler is not V1Scheduler:
+            logger.warning(
+                "Using configured V1 scheduler class %s. "
+                "This scheduler interface is not public and "
+                "compatibility may not be maintained.",
+                vllm_config.scheduler_config.scheduler_cls,
+            )
 
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Encoder models without KV cache don't support
@@ -199,10 +214,6 @@ class EngineCore:
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
 
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        freeze_gc_heap()
-
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
@@ -266,6 +277,12 @@ class EngineCore:
                 f"request_id must be a string, got {type(request.request_id)}"
             )
 
+        logger.error(
+            "TzuLing EngineCore.add_request: Adding request %s (wave: %d)",
+            request.request_id,
+            request_wave
+        )
+
         if pooling_params := request.pooling_params:
             supported_pooling_tasks = [
                 task for task in self.get_supported_tasks() if task in POOLING_TASKS
@@ -286,6 +303,10 @@ class EngineCore:
             )
 
         self.scheduler.add_request(request)
+        logger.error(
+            "TzuLing EngineCore.add_request: Request %s added to scheduler",
+            request.request_id
+        )
 
     def abort_requests(self, request_ids: list[str]):
         """Abort requests from the scheduler."""
@@ -321,22 +342,32 @@ class EngineCore:
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
+            logger.error("TzuLing EngineCore.step: No requests in scheduler")
             return {}, False
-        with record_function_or_nullcontext("core step: schedule"):
-            scheduler_output = self.scheduler.schedule()
+        
+        logger.error("TzuLing EngineCore.step: Scheduling requests...")
+        scheduler_output = self.scheduler.schedule()
+        logger.error(
+            "TzuLing EngineCore.step: Scheduled %d tokens, %d requests",
+            scheduler_output.total_num_scheduled_tokens,
+            len(scheduler_output.scheduled_new_reqs) + scheduler_output.scheduled_cached_reqs.num_reqs
+        )
+        
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
+            if model_output is None:
+                model_output = self.model_executor.sample_tokens(grammar_output)
 
-        with record_function_or_nullcontext("core step: execute_model"):
-            future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-            with self.log_error_detail(scheduler_output):
-                model_output = future.result()
-                if model_output is None:
-                    model_output = self.model_executor.sample_tokens(grammar_output)
-
-        with record_function_or_nullcontext("core step: update_from_output"):
-            engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output
-            )
+        logger.error("TzuLing EngineCore.step: Model execution complete, updating scheduler...")
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
+        logger.error(
+            "TzuLing EngineCore.step: Generated %d outputs",
+            sum(len(outputs.outputs) for outputs in engine_core_outputs.values())
+        )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -374,49 +405,32 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            with record_function_or_nullcontext("core step_with_batch_queue: schedule"):
-                scheduler_output = self.scheduler.schedule()
-            with record_function_or_nullcontext(
-                "core step_with_batch_queue: execute_model"
-            ):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
+            scheduler_output = self.scheduler.schedule()
+            exec_future = self.model_executor.execute_model(
+                scheduler_output, non_block=True
+            )
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if scheduler_output.pending_structured_output_tokens:
-                with record_function_or_nullcontext(
-                    "core step_with_batch_queue: pending_structured_output_tokens"
-                ):
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_output
-                    # Block-wait for execute to return
-                    # (continues running async on the GPU).
-                    with self.log_error_detail(scheduler_output):
-                        exec_result = exec_future.result()
-                        assert exec_result is None
+                # We need to defer sampling until we have processed the model output
+                # from the prior step.
+                deferred_scheduler_output = scheduler_output
+                # Block-wait for execute to return (continues running async on the GPU).
+                with self.log_error_detail(scheduler_output):
+                    exec_result = exec_future.result()
+                    assert exec_result is None
             else:
-                with record_function_or_nullcontext(
-                    "core step_with_batch_queue: get_grammar_bitmask"
-                ):
-                    # We aren't waiting for any tokens, get any grammar
-                    # output immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
+                # We aren't waiting for any tokens, get any grammar output immediately.
+                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
                 # Block-wait for execute to return (continues running async on the GPU).
                 with self.log_error_detail(scheduler_output):
                     exec_result = exec_future.result()
 
                 if exec_result is None:
-                    with record_function_or_nullcontext(
-                        "core step_with_batch_queue: sample_tokens"
-                    ):
-                        # Call sample tokens.
-                        future = self.model_executor.sample_tokens(
-                            grammar_output, non_block=True
-                        )
+                    # Call sample tokens.
+                    future = self.model_executor.sample_tokens(
+                        grammar_output, non_block=True
+                    )
                 else:
                     # No sampling required (e.g. all requests finished).
                     future = cast(Future[ModelRunnerOutput], exec_future)
@@ -436,34 +450,27 @@ class EngineCore:
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
-        with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
-            # Block until the next result is available.
-            future, scheduler_output = batch_queue.pop()
-            with self.log_error_detail(scheduler_output):
-                model_output = future.result()
-        with record_function_or_nullcontext(
-            "core step_with_batch_queue: update_from_output"
-        ):
-            engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output
-            )
+
+        # Block until the next result is available.
+        future, scheduler_output = batch_queue.pop()
+        with self.log_error_detail(scheduler_output):
+            model_output = future.result()
+
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            with record_function_or_nullcontext(
-                "core step_with_batch_queue: deferred_scheduler_output"
-            ):
-                # We now have the tokens needed to compute the bitmask for the
-                # deferred request. Get the bitmask and call sample tokens.
-                grammar_output = self.scheduler.get_grammar_bitmask(
-                    deferred_scheduler_output
-                )
-                future = self.model_executor.sample_tokens(
-                    grammar_output, non_block=True
-                )
-                batch_queue.appendleft((future, deferred_scheduler_output))
+            # We now have the tokens needed to compute the bitmask for the
+            # deferred request. Get the bitmask and call sample tokens.
+            grammar_output = self.scheduler.get_grammar_bitmask(
+                deferred_scheduler_output
+            )
+            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
+            batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
 
@@ -656,6 +663,11 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
+
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
+        gc.collect()
+        gc.freeze()
 
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()
@@ -900,10 +912,17 @@ class EngineCoreProc(EngineCore):
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
 
+        logger.error("TzuLing _process_engine_step: Starting engine step...")
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        logger.error(
+            "TzuLing _process_engine_step: Step complete. Model executed: %s, Outputs: %d",
+            model_executed,
+            len(outputs) if outputs else 0
+        )
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
+            logger.error("TzuLing _process_engine_step: Putting output into queue for client %s", output[0])
             self.output_queue.put_nowait(output)
         # Post-step hook.
         self.post_step(model_executed)
@@ -1227,25 +1246,38 @@ class DPEngineCoreProc(EngineCoreProc):
             self._maybe_publish_request_counts()
 
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+            logger.error(
+                "TzuLing run_busy_loop: executed=%s, local_unfinished=%s, engines_running=%s",
+                executed,
+                local_unfinished_reqs,
+                self.engines_running
+            )
+            
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
+                    logger.error("TzuLing run_busy_loop: All engines idle, continuing...")
                     continue
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
+                logger.error("TzuLing run_busy_loop: Executing dummy batch...")
                 self.execute_dummy_batch()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
             )
+            logger.error(
+                "TzuLing run_busy_loop: After all-reduce, engines_running=%s",
+                self.engines_running
+            )
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
                     # Notify client that we are pausing the loop.
-                    logger.debug(
-                        "Wave %d finished, pausing engine loop.", self.current_wave
+                    logger.error(
+                        "TzuLing Wave %d finished, pausing engine loop.", self.current_wave
                     )
                     # In the coordinator case, dp rank 0 sends updates to the
                     # coordinator. Otherwise (offline spmd case), each rank

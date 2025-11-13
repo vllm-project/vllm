@@ -47,7 +47,7 @@ from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
-from .rebalance_algo import rebalance_experts
+from .rebalance_algo import rebalance_experts, rebalance_masked_experts
 from .rebalance_execute import rearrange_expert_weights_inplace
 
 logger = init_logger(__name__)
@@ -629,9 +629,32 @@ class EplbState:
         execute_shuffle: bool = True,
         global_expert_load: torch.Tensor | None = None,
         rank_mapping: dict[int, int] | None = None,
+        is_health_masking: bool = False,
     ) -> torch.Tensor | None:
         """
         Rearrange the experts according to the current load.
+        
+        Args:
+            model: The MixtureOfExperts model instance containing expert weights.
+            is_profile: If True, perform dummy communication to reserve buffers without
+                       actual weight movement. Used during profiling/warmup.
+            execute_shuffle: If True, actually perform the weight shuffle. If False,
+                           only compute and broadcast the new expert mappings.
+            global_expert_load: Pre-computed global expert load statistics.
+                              Shape: [num_layers, num_logical_experts].
+                              If None, will be computed from local statistics.
+            rank_mapping: Mapping from physical rank to new rank for elastic scaling/masking.
+                        - None: Normal periodic rearrangement (no scaling or masking)
+                        - len == ep_size: Scale-down or health-based masking
+                          {0:0, 1:1, 2:-1, 3:2} means rank 2 is masked/removed
+                        - len < ep_size: Scale-up (only maps old ranks)
+            is_health_masking: If True, this is health-based masking (not elastic scaling).
+                             For masking: maintain full ep_size tensors with -1 for masked ranks.
+                             For scale-down: shrink tensors to active rank count.
+                             Only meaningful when rank_mapping is provided.
+                             
+        Returns:
+            Global expert load window if execute_shuffle=False, otherwise None.
         """
 
         ep_group = get_ep_group().device_group
@@ -693,16 +716,27 @@ class EplbState:
         # TODO(bowen): Treat differently for prefill and decode nodes
         num_replicas = model.num_physical_experts
         num_groups = model.num_expert_groups
+        
+        # Handle rank_mapping scenarios
         if rank_mapping is not None and len(rank_mapping) == ep_group.size():
+            # rank_mapping provided with full ep_size
+            # This could be:
+            # 1. Health-based masking (is_health_masking=True): Keep full ep_size tensors
+            # 2. Actual scale-down (is_health_masking=False): Shrink tensors
+            
             # NOTE(yongji): scale down, we need to rebalance the experts on
             # remaining GPUs, transfer the experts while we haven't shutdown
             # the GPUs to be released.
             cpu_group = get_ep_group().cpu_group
             num_nodes = _node_count_with_rank_mapping(cpu_group, rank_mapping)
             num_gpus = sum(new_rank != -1 for new_rank in rank_mapping.values())
-            num_replicas = (
-                num_replicas // ep_group.size() * num_gpus
-            )  # handle num replicas change
+            
+            if not is_health_masking:
+                # Actual elastic scale-down: shrink replicas
+                num_replicas = (
+                    num_replicas // ep_group.size() * num_gpus
+                )  # handle num replicas change
+            # else: Health-based masking - keep full num_replicas (ep_size * experts_per_rank)
         else:
             num_nodes = get_node_count()
             num_gpus = ep_group.size()
@@ -716,17 +750,33 @@ class EplbState:
             )
 
         # Get new expert mappings
-        (
-            new_physical_to_logical_map,
-            new_logical_to_physical_map,
-            new_logical_replica_count,
-        ) = rebalance_experts(
-            global_expert_load_window,
-            num_replicas,
-            num_groups,
-            num_nodes,
-            num_gpus,
-        )
+        if is_health_masking:
+            # Health-based masking: use wrapper that maintains full ep_size
+            (
+                new_physical_to_logical_map,
+                new_logical_to_physical_map,
+                new_logical_replica_count,
+            ) = rebalance_masked_experts(
+                global_expert_load_window,
+                num_replicas,
+                num_groups,
+                num_nodes,
+                ep_group.size(),
+                rank_mapping,
+            )
+        else:
+            # Normal or scale-down: standard rebalance
+            (
+                new_physical_to_logical_map,
+                new_logical_to_physical_map,
+                new_logical_replica_count,
+            ) = rebalance_experts(
+                global_expert_load_window,
+                num_replicas,
+                num_groups,
+                num_nodes,
+                num_gpus,
+            )
 
         # Update expert weights
         rearrange_expert_weights_inplace(
@@ -743,9 +793,14 @@ class EplbState:
                 self.physical_to_logical_map.shape[1]
                 != new_physical_to_logical_map.shape[1]
             ):
-                self.physical_to_logical_map = new_physical_to_logical_map.to(
-                    self.physical_to_logical_map.device
-                )
+                # Only resize for actual scale events, not for health-based masking
+                if not is_health_masking:
+                    self.physical_to_logical_map = new_physical_to_logical_map.to(
+                        self.physical_to_logical_map.device
+                    )
+                # For health-based masking, just update in place (same size)
+                else:
+                    self.physical_to_logical_map.copy_(new_physical_to_logical_map)
             else:
                 self.physical_to_logical_map.copy_(new_physical_to_logical_map)
             max_physical_slots = new_logical_to_physical_map.shape[-1]

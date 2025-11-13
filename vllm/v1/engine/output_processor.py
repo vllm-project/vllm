@@ -8,6 +8,7 @@ from typing import Any, cast
 
 import torch
 
+from vllm.logger import init_logger
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -28,6 +29,8 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
+
+logger = init_logger(__name__)
 
 
 class RequestOutputCollector:
@@ -499,6 +502,11 @@ class OutputProcessor:
             ):
                 if req_state.queue is not None:
                     # AsyncLLM: put into queue for handling by generate().
+                    logger.error(
+                        "TzuLing OutputProcessor: Putting request_output for req %s into queue (finished: %s)",
+                        req_id,
+                        request_output.finished
+                    )
                     req_state.queue.put(request_output)
                 else:
                     # LLMEngine: return list of RequestOutputs.
