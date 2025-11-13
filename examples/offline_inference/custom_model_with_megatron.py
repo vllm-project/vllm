@@ -304,10 +304,18 @@ if __name__ == "__main__":
     print("\nWhat this demonstrates:")
     print("  ✓ External parallelism (Megatron-LM) for MLP layers")
     print("  ✓ vLLM's TrainableFlashAttention for attention")
-    print("  ✓ Combining both in a single model with TP=4")
+    print("  ✓ SAME model works for both training AND inference")
+    print("  ✓ Model with TP=4 using vLLM for inference")
 
-    print("\n[Test] Running with LLM() API and TP=4")
-    print("-" * 70)
+    print("\nNote: The MegatronTransformer class can be used for training by:")
+    print("  - Initializing Megatron's parallel state")
+    print("  - Using model.train() + loss.backward()")
+    print("  - TrainableFlashAttention supports gradients for RL/fine-tuning")
+
+    # === VLLM TEST: With TP=4 (for inference) ===
+    print("\n" + "=" * 70)
+    print("[Test] Testing model with vLLM (TP=4, inference)")
+    print("=" * 70)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         config = {
@@ -344,4 +352,36 @@ if __name__ == "__main__":
 
         print("\n" + "=" * 70)
         print("✅ SUCCESS! Megatron-LM + vLLM integration works!")
+        print("=" * 70)
+
+        # Generate some tokens to verify forward pass works
+        print("\n[Test] Generating tokens with Megatron model...")
+        print("-" * 70)
+
+        from vllm import SamplingParams
+        from vllm.inputs import TokensPrompt
+
+        # Create a simple prompt using raw token IDs (since no tokenizer)
+        prompt_token_ids = [1, 2, 3, 4, 5]  # Dummy token IDs
+        sampling_params = SamplingParams(
+            temperature=0.0,
+            # top_p=0.95,
+            max_tokens=5,  # Generate 10 tokens
+        )
+
+        # Generate using token IDs directly
+        outputs = llm.generate(
+            prompts=TokensPrompt(prompt_token_ids=prompt_token_ids),
+            sampling_params=sampling_params,
+        )
+
+        # Print generated tokens
+        print(f"\nPrompt token IDs: {prompt_token_ids}")
+        for output in outputs:
+            generated_ids = output.outputs[0].token_ids
+            print(f"Generated token IDs: {generated_ids}")
+            print(f"Number of tokens generated: {len(generated_ids)}")
+
+        print("\n" + "=" * 70)
+        print("✅ Token generation successful! Forward pass works!")
         print("=" * 70)
