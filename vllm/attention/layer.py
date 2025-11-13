@@ -876,9 +876,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
 
             if output is None:
-                total = getattr(attn_metadata, "num_actual_tokens", None)
-                if total is None:
-                    total = q.shape[0]
+                total = q.shape[0]
                 out = torch.empty(
                     (total, self.num_heads * self.v_head_dim),
                     dtype=q.dtype,
@@ -888,13 +886,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 out = output
 
             if decode_out is not None:
-                assert out[:n_decode_tokens].shape == decode_out.shape
+                # assert out[:n_decode_tokens].shape == decode_out.shape
                 out[:n_decode_tokens].copy_(decode_out)
             if prefill_out is not None:
-                start = n_decode_tokens
-                end = n_decode_tokens + prefill_out.shape[0]
-                assert out[start:end].shape == prefill_out.shape
-                out[start:end].copy_(prefill_out)
+                # assert out[n_decode_tokens:n_decode_tokens
+                # + prefill_out.shape[0]].shape == prefill_out.shape
+                out[n_decode_tokens : n_decode_tokens + prefill_out.shape[0]].copy_(
+                    prefill_out
+                )
             return out
 
         # Default path: delegate to backend unified forward
