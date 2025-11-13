@@ -18,6 +18,7 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -31,7 +32,6 @@ _CP_TOKENS_PER_ITER_ROCM = 32 * 1024
 
 if current_platform.is_rocm():
     import aiter
-    from aiter.ops.triton.utils.arch_info import get_num_sms
 
     from vllm.triton_utils import tl, triton
 
@@ -39,7 +39,7 @@ if current_platform.is_rocm():
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
     def num_programs(head_dim):
-        return min(head_dim, get_num_sms())
+        return min(head_dim, get_cu_count())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(
