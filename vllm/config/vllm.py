@@ -938,10 +938,7 @@ class VllmConfig:
         # The upper bound of the compile ranges is the max_num_batched_tokens
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         if max_num_batched_tokens is not None:
-            # We add 1 because the bounds checks in the compiler are exclusive
-            # and we want to include the max_num_batched_tokens
-            # in the compile range
-            computed_compile_ranges_split_points.append(max_num_batched_tokens + 1)
+            computed_compile_ranges_split_points.append(max_num_batched_tokens)
 
         # Add the compile ranges for flashinfer
         if compilation_config.pass_config.enable_fi_allreduce_fusion:
@@ -952,26 +949,22 @@ class VllmConfig:
                     self.model_config.get_hidden_size()
                     * self.model_config.dtype.itemsize
                 )
-                # We add 1 because the bounds checks in the compiler are
-                # exclusive and we want to include the max_token_num in the
-                # compile range
                 if (
                     max_num_batched_tokens is not None
                     and max_token_num < max_num_batched_tokens
                 ):
-                    computed_compile_ranges_split_points.append(max_token_num + 1)
+                    computed_compile_ranges_split_points.append(max_token_num)
 
         if compilation_config.compile_ranges_split_points is not None:
             for x in compilation_config.compile_ranges_split_points:
                 assert isinstance(x, int)
                 assert x > 0, f"Invalid compile range split point: {x}"
-                # Split points need to be inclusive of the end so we add 1.
                 if (
                     max_num_batched_tokens is not None
                     and x < max_num_batched_tokens
                     and x > 1
                 ):
-                    computed_compile_ranges_split_points.append(x + 1)
+                    computed_compile_ranges_split_points.append(x)
         compilation_config.compile_ranges_split_points = sorted(
             computed_compile_ranges_split_points
         )  # type: ignore

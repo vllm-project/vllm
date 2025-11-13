@@ -70,11 +70,11 @@ class PostGradPassManagerCheckRanges(InductorPass):
 def test_compile_ranges():
     post_grad_pass_manager = PostGradPassManagerCheckRanges(
         [
-            Range(start=1, end=9),
+            Range(start=1, end=8),
             Range(start=16, end=16),
-            Range(start=9, end=33),
+            Range(start=9, end=32),
             Range(start=64, end=64),
-            Range(start=33, end=8193),
+            Range(start=33, end=8192),
         ]
     )
     torch.set_default_device("cuda")
@@ -119,7 +119,7 @@ def test_compile_config_get_compile_ranges():
         compilation_config=compilation_config,
     )
     assert compilation_config.get_compile_ranges() == [
-        Range(start=1, end=9),
-        Range(start=9, end=33),
-        Range(start=33, end=8193),
+        Range(start=1, end=8),
+        Range(start=9, end=32),
+        Range(start=33, end=8192),
     ]

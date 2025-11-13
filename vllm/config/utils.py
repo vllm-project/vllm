@@ -182,7 +182,7 @@ def update_config(config: ConfigT, overrides: dict[str, Any]) -> ConfigT:
 class Range:
     """
     A range of numbers.
-    Inclusive of start, exclusive of end.
+    Inclusive of start, inclusive of end.
     """
 
     start: int
@@ -192,10 +192,10 @@ class Range:
         return self.start == self.end
 
     def __contains__(self, size: int) -> bool:
-        # Inclusive of start, exclusive of end
+        # Inclusive of start, inclusive of end
         if self.is_single_size():
             return size == self.start
-        return self.start <= size < self.end
+        return self.start <= size <= self.end
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Range):
@@ -206,11 +206,7 @@ class Range:
         return hash((self.start, self.end))
 
     def __str__(self) -> str:
-        return (
-            f"[{self.start}, {self.end + 1})"
-            if self.is_single_size()
-            else f"[{self.start}, {self.end})"
-        )
+        return f"[{self.start}, {self.end}]"
 
     def __repr__(self) -> str:
         return self.__str__()

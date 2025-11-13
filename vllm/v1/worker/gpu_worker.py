@@ -415,12 +415,12 @@ class Worker(WorkerBase):
 
         # For each compile_range, if none of the batch sizes
         # in warmup_sizes or cudagraph_capture_sizes are in the range,
-        # add the start of the range to ensure compilation/warmup.
+        # add the end of the range to ensure compilation/warmup.
         all_sizes = set(self.vllm_config.compilation_config.cudagraph_capture_sizes)
         all_sizes.update(warmup_sizes)
         for compile_range in compile_ranges:
             if not any(x in compile_range for x in all_sizes):
-                warmup_sizes.append(compile_range.end - 1)
+                warmup_sizes.append(compile_range.end)
 
         # We skip EPLB here since we don't want to record dummy metrics
         for size in sorted(warmup_sizes, reverse=True):

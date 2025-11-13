@@ -79,10 +79,11 @@ class PiecewiseBackend:
         # We only keep compilation management inside this class directly.
         for size in self.compile_sizes:
             range = Range(start=size, end=size)
-            self.range_entries[range] = RangeEntry(
-                compile_range=range,
-            )
-            self.to_be_compiled_ranges.add(range)
+            if range not in self.compile_ranges:
+                self.range_entries[range] = RangeEntry(
+                    compile_range=range,
+                )
+                self.to_be_compiled_ranges.add(range)
 
         for range in self.compile_ranges:
             self.range_entries[range] = RangeEntry(

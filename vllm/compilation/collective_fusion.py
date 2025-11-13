@@ -1188,7 +1188,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
         self.disabled = False
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        return compile_range.end - 1 <= self.max_token_num
+        return compile_range.end <= self.max_token_num
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph):
