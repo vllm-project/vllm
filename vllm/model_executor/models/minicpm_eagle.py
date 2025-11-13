@@ -193,7 +193,7 @@ class EagleMiniCPMModel(nn.Module):
             ]
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         return embedding * self.config.scale_emb
 
@@ -203,7 +203,7 @@ class EagleMiniCPMModel(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | IntermediateTensors:
-        input_embeds = self.get_input_embeddings(input_ids)
+        input_embeds = self.embed_input_ids(input_ids)
         input_embeds = self.input_norm1(input_embeds)
         hidden_states = self.input_norm2(hidden_states)
 
@@ -354,8 +354,8 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             vllm_config=vllm_config, prefix=prefix, start_layer=start_layer
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

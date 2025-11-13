@@ -93,7 +93,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
             config.hidden_size, eps=config.rms_norm_eps
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -107,7 +107,7 @@ class Qwen3NextMultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
-                inputs_embeds = self.get_input_embeddings(input_ids)
+                inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
             inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
             hidden_states = self.pre_fc_norm_hidden(hidden_states)
@@ -257,8 +257,8 @@ class Qwen3NextMTP(nn.Module, SupportsPP, QwenNextMixtureOfExperts):
         )
         self.set_moe_parameters()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

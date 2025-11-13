@@ -886,7 +886,7 @@ class ChameleonModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def get_image_tokens(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -912,7 +912,7 @@ class ChameleonModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -998,7 +998,7 @@ class ChameleonForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -1006,7 +1006,7 @@ class ChameleonForConditionalGeneration(
         image_tokens = self.model.get_image_tokens(
             image_input["data"].to(self.config.dtype)
         )
-        vision_embeddings = self.model.get_input_embeddings(image_tokens)
+        vision_embeddings = self.model.embed_input_ids(image_tokens)
         return vision_embeddings
 
     def forward(

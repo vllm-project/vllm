@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
+    VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
     VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: int | None = None
     LOCAL_RANK: int = 0
@@ -221,6 +222,7 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
+    VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLAT_LOGPROBS: bool = False
 
@@ -520,6 +522,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # when `VLLM_NCCL_SO_PATH` is not set, vllm will try to find the nccl
     # library file in the locations specified by `LD_LIBRARY_PATH`
     "LD_LIBRARY_PATH": lambda: os.environ.get("LD_LIBRARY_PATH", None),
+    # flag to control the chunk size (in MB) for sleeping memory allocations under ROCm
+    "VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE": lambda: int(
+        os.environ.get("VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE", "256")
+    ),
     # Use separate prefill and decode kernels for V1 attention instead of
     # the unified triton kernel.
     "VLLM_V1_USE_PREFILL_DECODE_ATTENTION": lambda: (
@@ -824,9 +830,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Note that it must be an absolute path.
     "VLLM_TORCH_PROFILER_DIR": lambda: (
         None
-        if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None
-        else os.path.abspath(
-            os.path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))
+        if (val := os.getenv("VLLM_TORCH_PROFILER_DIR")) is None
+        else (
+            val
+            if val.startswith("gs://") and val[5:] and val[5] != "/"
+            else os.path.abspath(os.path.expanduser(val))
         )
     ),
     # Enable torch profiler to record shapes if set
@@ -1468,6 +1476,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))
+    ),
+    # Limits when we run shared_experts in a separate stream.
+    # We found out that for large batch sizes, the separate stream
+    # execution is not beneficial (most likely because of the input clone)
+    # TODO(alexm-redhat): Tune to be more dynamic based on GPU type
+    "VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD": lambda: int(
+        int(os.getenv("VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD", 256))
     ),
     # Format for saving torch.compile cache artifacts
     # - "binary": saves as binary file

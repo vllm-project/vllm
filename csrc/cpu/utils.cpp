@@ -45,6 +45,16 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
   // Memory node binding
   if (numa_available() != -1) {
     int mem_node_id = numa_node_of_cpu(omp_cpu_ids.front());
+    // Verify all CPUs are on the same NUMA node
+    for (size_t i = 1; i < omp_cpu_ids.size(); ++i) {
+      int node_id = numa_node_of_cpu(omp_cpu_ids[i]);
+      TORCH_CHECK(node_id == mem_node_id, "CPU ", omp_cpu_ids[i],
+                  " is on NUMA node ", node_id, ", but CPU ",
+                  omp_cpu_ids.front(), " is on NUMA node ", mem_node_id,
+                  ". All CPUs should be on the same NUMA node for optimal "
+                  "performance. Memory will be bound to NUMA node ",
+                  mem_node_id, ".");
+    }
     bitmask* mask = numa_parse_nodestring(std::to_string(mem_node_id).c_str());
     bitmask* src_mask = numa_get_membind();
 
