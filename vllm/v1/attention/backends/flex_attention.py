@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlexAttention."""
 
+import math
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch._dynamo.decorators
@@ -19,16 +21,17 @@ from torch.nn.attention.flex_attention import (
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     is_quantized_kv_cache,
 )
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
-    vllm_kernel_override_batch_invariant,
+    vllm_is_batch_invariant,
 )
-from vllm.utils import cdiv, is_torch_equal_or_newer
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
@@ -70,14 +73,12 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 class FlexAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16, torch.float32]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        return  # FlexAttention supports any head size
+    supported_dtypes: ClassVar[list[torch.dtype]] = [
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
 
     @staticmethod
     def get_name() -> str:
@@ -86,10 +87,6 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
         return FlexAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlexAttentionMetadata
 
     @staticmethod
     def get_kv_cache_shape(
@@ -108,6 +105,10 @@ class FlexAttentionBackend(AttentionBackend):
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return []
 
 
 # @torch.compile(fullgraph=True, mode="reduce-overhead")
@@ -591,9 +592,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.headdim = self.model_config.get_head_size()
         self.block_size = kv_cache_spec.block_size
         self.kv_cache_spec = kv_cache_spec
-        self.direct_build: bool = is_torch_equal_or_newer("2.9.0.dev0")
-        self.q_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
-        self.kv_block_size: int = 16 if is_torch_equal_or_newer("2.9.0.dev0") else 128
+        supports_small_blocks = is_torch_equal_or_newer("2.9.0.dev0")
+        self.direct_build: bool = supports_small_blocks
+        self.q_block_size: int = 16 if supports_small_blocks else 128
+        self.kv_block_size: int = self.block_size if supports_small_blocks else 128
 
     def build(
         self,
@@ -657,7 +659,10 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
-            direct_build=self.direct_build,
+            # FIXME(Isotr0py): direct build has issue to build bidirectional
+            # attention block mask for encoder-only models, disable it temporarily.
+            # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
+            direct_build=(self.direct_build and common_attn_metadata.causal),
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
         )
@@ -719,7 +724,6 @@ class FlexAttentionImpl(AttentionImpl):
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("FlexAttention does not support kv sharing yet.")
 
-        FlexAttentionBackend.validate_head_size(head_size)
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "FlexAttention does not support quantized kv-cache. Yet"
@@ -767,7 +771,7 @@ class FlexAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
-            return output
+            return output.fill_(0)
             # query = self.view_as_4d(query).permute(0, 2, 1, 3)
             # return torch.empty_like(query)
 
@@ -863,7 +867,23 @@ def get_kernel_options(
     kernel_options: dict[str, int | bool] = {
         "FORCE_USE_FLEX_ATTENTION": True,
     }
-    if vllm_kernel_override_batch_invariant():
+
+    def ensure_divisible(candidate: int, block_size: int) -> int:
+        """Pick a kernel block size that divides the logical block."""
+        if block_size <= 0:
+            return candidate
+        candidate = min(candidate, block_size)
+        if candidate <= 0:
+            return block_size
+        if block_size % candidate == 0:
+            return candidate
+
+        candidate = math.gcd(candidate, block_size)
+        if candidate <= 1:
+            return block_size
+        return candidate
+
+    if vllm_is_batch_invariant():
         kernel_options["BLOCK_M"] = 16
         kernel_options["BLOCK_N"] = 16
         kernel_options["IS_DIVISIBLE"] = False
@@ -873,17 +893,27 @@ def get_kernel_options(
         kernel_options["BLOCK_N"] = block_n
         return kernel_options
     else:
-        kernel_options["BLOCK_M"] = 64
-        kernel_options["BLOCK_N"] = 64
-        if query.dtype == torch.float32:
-            kernel_options["BLOCK_M"] = 32
-            kernel_options["BLOCK_N"] = 32
-        # if current_platform.is_cuda():
+        preferred_block = 32 if query.dtype == torch.float32 else 64
+        block_lower_bound = 16
+
+        block_m_candidate = ensure_divisible(preferred_block, block_m)
+        block_n_candidate = ensure_divisible(preferred_block, block_n)
+
         if torch.cuda.is_available():
             device_props = torch.cuda.get_device_properties()
             max_shared_memory = device_props.shared_memory_per_block_optin
             if max_shared_memory < 144 * 1024:
-                kernel_options["BLOCK_M"] = kernel_options["BLOCK_M"] // 2
-                kernel_options["BLOCK_N"] = kernel_options["BLOCK_N"] // 2
+                block_m_candidate = ensure_divisible(
+                    max(1, block_m_candidate // 2), block_m
+                )
+                block_n_candidate = ensure_divisible(
+                    max(1, block_n_candidate // 2), block_n
+                )
+
+        block_m_candidate = max(block_m_candidate, block_lower_bound)
+        block_n_candidate = max(block_n_candidate, block_lower_bound)
+
+        kernel_options["BLOCK_M"] = block_m_candidate
+        kernel_options["BLOCK_N"] = block_n_candidate
 
     return kernel_options

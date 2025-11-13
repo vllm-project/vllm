@@ -11,7 +11,6 @@ if TYPE_CHECKING:
 
 import regex as re
 import torch
-import torch.distributed
 from torch import nn
 from transformers import MiniMaxConfig
 
@@ -42,7 +41,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -670,16 +668,14 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
-        self.lora_config = lora_config
 
         if not hasattr(config, "sliding_window"):
             config.sliding_window = None
 
         self.CONCAT_FFN = True
 
-        self.unpadded_vocab_size = self.config.vocab_size
         if hasattr(vllm_config.model_config, "max_model_len"):
             self.config.max_model_len = vllm_config.model_config.max_model_len
         self.model = MiniMaxText01Model(
@@ -687,15 +683,13 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 self.config.hidden_size,
-                org_num_embeddings=self.config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
 
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size, self.config.vocab_size
+                config.vocab_size, self.config.vocab_size
             )
 
         else:

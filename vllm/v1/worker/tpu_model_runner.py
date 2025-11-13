@@ -53,7 +53,8 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
-from vllm.utils import LayerBlockType, cdiv, is_pin_memory_available, prev_power_of_2
+from vllm.utils.math_utils import cdiv, prev_power_of_2
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (
     TPU_STR_DTYPE_TO_TORCH_DTYPE,
     PallasAttentionBackend,
@@ -91,7 +92,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 logger = init_logger(__name__)
 
@@ -210,7 +211,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Model-related.
         self.num_attn_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention
+            parallel_config, "attention"
         )
         self.num_query_heads = model_config.get_num_attention_heads(parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
@@ -371,6 +372,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             self.sample_from_logits_func = self.sample_from_logits
 
+        # For passing scheduler_output between successive
+        # execute_model() and sample_tokens() calls.
+        self.scheduler_output: SchedulerOutput | None = None
+        self.mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
+
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
             self.mm_budget.reset_cache()
@@ -482,7 +488,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
-            resumed_from_preemption = req_data.resumed_from_preemption[i]
+            resumed_from_preemption = req_id in req_data.resumed_req_ids
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
@@ -946,6 +952,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             device=self.device,
             pin_memory=self.pin_memory,
             merge_by_field_config=model.merge_by_field_config,
+            multimodal_cpu_fields=model.multimodal_cpu_fields,
         ):
             # Run the encoder.
             # `curr_group_outputs` is either of the following:
@@ -1077,7 +1084,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> ModelRunnerOutput:
+    ) -> ModelRunnerOutput | None:
+        if self.scheduler_output is not None:
+            raise RuntimeError(
+                "State error: sample_tokens() must be called "
+                "after execute_model() returns None."
+            )
         # Update cached state
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
@@ -1087,14 +1099,30 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             return self.kv_connector_no_forward(scheduler_output, self.vllm_config)
 
+        mm_embed_inputs = None
         if self.supports_mm_inputs:
             # Run the multimodal encoder if any.
             self._execute_mm_encoder(scheduler_output)
             mm_embed_inputs = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embed_inputs = None
 
         torch_xla.sync(wait=False)
+
+        self.scheduler_output = scheduler_output
+        self.mm_embed_inputs = mm_embed_inputs
+        return None
+
+    @torch.no_grad()
+    def sample_tokens(
+        self, grammar_output: "GrammarOutput | None"
+    ) -> ModelRunnerOutput:
+        if self.scheduler_output is None:
+            # Nothing to do (PP non-final rank case), output isn't used.
+            return None  # noqa
+        scheduler_output = self.scheduler_output
+        mm_embed_inputs = self.mm_embed_inputs
+        self.scheduler_output = None
+        self.mm_embed_inputs = None
+
         # Prepare inputs, the requests might be split into multiple
         # executions, combine the result of each execution.
         start_index = 0
@@ -1130,9 +1158,9 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             tpu_sampling_metadata = TPUSupportedSamplingMetadata.from_input_batch(
                 self.input_batch, padded_num_reqs, self.device
             )
-            if scheduler_output.grammar_bitmask is not None:
+            if grammar_output is not None:
                 require_struct_decoding, grammar_bitmask_padded, arange = (
-                    self.prepare_structured_decoding_input(logits, scheduler_output)
+                    self.prepare_structured_decoding_input(logits, grammar_output)
                 )
                 logits = self.structured_decode(
                     require_struct_decoding, grammar_bitmask_padded, logits, arange
@@ -1953,22 +1981,17 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self.model.get_input_embeddings(*args, **kwargs)
 
     def prepare_structured_decoding_input(
-        self, logits: torch.Tensor, scheduler_output: "SchedulerOutput"
+        self, logits: torch.Tensor, grammar_output: "GrammarOutput"
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        assert grammar_bitmask is not None
+        grammar_bitmask = grammar_output.grammar_bitmask
         num_reqs, _ = logits.shape
 
         # Reset pre-allocated tensors
         self.grammar_bitmask_cpu.zero_()
         self.require_structured_out_cpu.zero_()
 
-        sorted_struct_requests = sorted(
-            scheduler_output.structured_output_request_ids.items(),
-            key=lambda item: item[1],
-        )
         cumulative_mask_idx = 0
-        for req_id, _ in sorted_struct_requests:
+        for req_id in grammar_output.structured_output_request_ids:
             if req_id not in self.input_batch.req_id_to_index:
                 continue
             batch_index = self.input_batch.req_id_to_index[req_id]
@@ -2015,6 +2038,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 device=self.device,
                 pin_memory=self.pin_memory,
                 merge_by_field_config=model.merge_by_field_config,
+                multimodal_cpu_fields=model.multimodal_cpu_fields,
             )
         )
 

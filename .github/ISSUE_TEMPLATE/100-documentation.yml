@@ -21,11 +21,6 @@ body:
     value: >
       Thanks for contributing 🎉!
 - type: checkboxes
-  id: plan-to-implement
-  attributes:
-    options:
-      - label: Are you planning to implement the proposed documentation improvements?
-- type: checkboxes
   id: askllm
   attributes:
     label: Before submitting a new issue...

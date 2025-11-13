@@ -3,12 +3,17 @@
 
 import hashlib
 from collections.abc import Mapping
-from typing import Any, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.registry import AttentionBackendEnum
+else:
+    AttentionBackendEnum = Any
 
 
 @dataclass
@@ -70,6 +75,14 @@ class MultiModalConfig:
         {"image": 16, "video": {"count": 1, "num_frames": 32, "width": 512, 
         "height": 512}}
     """
+    enable_mm_embeds: bool = False
+    """If `True`, enables passing multimodal embeddings:
+    for `LLM` class, this refers to tensor inputs under `multi_modal_data`;
+    for the OpenAI-compatible server, this refers to chat messages with content
+    `"type": "*_embeds"`.
+
+    WARNING: The vLLM engine may crash if incorrect shape of embeddings is passed.
+    Only enable this flag for trusted users!"""
     media_io_kwargs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     """Additional args passed to process media inputs, keyed by modalities.
     For example, to set num_frames for video, set
@@ -112,6 +125,10 @@ class MultiModalConfig:
         DP (which is controlled by `--data-parallel-size`).
         This is only supported on a per-model basis and falls back to
         `"weights"` if the encoder does not support DP."""
+    mm_encoder_attn_backend: AttentionBackendEnum | None = None
+    """Optional override for the multi-modal encoder attention backend when
+    using vision transformers. Accepts any value from
+    `vllm.attention.backends.registry.AttentionBackendEnum` (e.g. `FLASH_ATTN`)."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""
@@ -148,6 +165,19 @@ class MultiModalConfig:
                 value[k] = BaseDummyOptions(**v)
         return value
 
+    @field_validator("mm_encoder_attn_backend", mode="before")
+    @classmethod
+    def _validate_mm_encoder_attn_backend(
+        cls, value: str | AttentionBackendEnum | None
+    ) -> AttentionBackendEnum | None:
+        if value is None or isinstance(value, AttentionBackendEnum):
+            return value
+
+        assert isinstance(value, str), (
+            "mm_encoder_attn_backend must be a string or an AttentionBackendEnum."
+        )
+        return AttentionBackendEnum[value.upper()]
+
     @model_validator(mode="after")
     def _validate_multimodal_config(self):
         if self.mm_processor_cache_type != "shm" and (
@@ -172,9 +202,11 @@ class MultiModalConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
-        factors: list[Any] = []
+        factors: list[Any] = [
+            self.mm_encoder_attn_backend.name
+            if self.mm_encoder_attn_backend is not None
+            else None
+        ]
         hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 

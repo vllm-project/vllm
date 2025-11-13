@@ -12,7 +12,7 @@ from typing import Any, ClassVar, Generic, TypeAlias, TypeVar
 
 import torch
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 from starlette.datastructures import Headers
 from typing_extensions import TypeIs
 
@@ -20,6 +20,10 @@ if sys.version_info >= (3, 12):
     from typing import TypedDict
 else:
     from typing_extensions import TypedDict
+
+from openai.types.responses import (
+    ToolChoiceFunction,
+)
 
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
@@ -36,6 +40,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.context import ConversationContext
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ClassificationRequest,
@@ -49,6 +54,8 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    FunctionCall,
+    FunctionDefinition,
     IOProcessorRequest,
     PoolingResponse,
     RerankRequest,
@@ -90,14 +97,14 @@ from vllm.tracing import (
     log_tracing_disabled_warning,
 )
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import (
+from vllm.utils import random_uuid
+from vllm.utils.async_utils import (
     AsyncMicrobatchTokenizer,
     collect_from_async_generator,
-    is_list_of,
     make_async,
     merge_async_iterators,
-    random_uuid,
 )
+from vllm.utils.collection_utils import is_list_of
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -345,22 +352,7 @@ class OpenAIServing:
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
-        else:
-            processed_inputs = processor.input_preprocessor._prompt_to_llm_inputs(
-                prompt
-            )
 
-        if processed_inputs["type"] == "embeds":
-            raise NotImplementedError
-
-        # This is a workaround to fix multimodal beam search; this is a
-        # bandaid fix for 2 small problems:
-        # 1. Multi_modal_data on the processed_inputs currently resolves to
-        #    `None`.
-        # 2. preprocessing above expands the multimodal placeholders. However,
-        #    this happens again in generation, so the double expansion causes
-        #    a mismatch.
-        # TODO - would be ideal to handle this more gracefully.
         prompt_text: str | None
         prompt_token_ids: list[int]
         multi_modal_data: MultiModalDataDict | None
@@ -373,9 +365,16 @@ class OpenAIServing:
             prompt_token_ids = prompt.get("prompt_token_ids", [])  # type: ignore
             multi_modal_data = prompt.get("multi_modal_data")  # type: ignore
 
-        mm_processor_kwargs: dict[str, Any] | None = processed_inputs.get(
-            "mm_processor_kwargs"
-        )  # type: ignore
+        mm_processor_kwargs: dict[str, Any] | None = None
+
+        # This is a workaround to fix multimodal beam search; this is a
+        # bandaid fix for 2 small problems:
+        # 1. Multi_modal_data on the processed_inputs currently resolves to
+        #    `None`.
+        # 2. preprocessing above expands the multimodal placeholders. However,
+        #    this happens again in generation, so the double expansion causes
+        #    a mismatch.
+        # TODO - would be ideal to handle this more gracefully.
 
         tokenized_length = len(prompt_token_ids)
 
@@ -1099,13 +1098,13 @@ class OpenAIServing:
         )
 
         if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest):
-                msg = "Tool usage is only supported for Chat Completions API"
+            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
+                msg = (
+                    "Tool usage is only supported for Chat Completions API "
+                    "or Responses API requests."
+                )
                 raise NotImplementedError(msg)
-
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request
-            )
+            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
         if tokenizer is None:
             assert isinstance(request_prompt, str), (
@@ -1297,6 +1296,92 @@ class OpenAIServing:
             return default
 
         return raw_request.headers.get("X-Request-Id", default)
+
+    @staticmethod
+    def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
+        """Pulls the data parallel rank from a header, if provided"""
+        if raw_request is None:
+            return None
+
+        rank_str = raw_request.headers.get("X-data-parallel-rank")
+        if rank_str is None:
+            return None
+
+        try:
+            return int(rank_str)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_tool_calls_from_content(
+        request: ResponsesRequest | ChatCompletionRequest,
+        tokenizer: AnyTokenizer,
+        enable_auto_tools: bool,
+        tool_parser_cls: Callable[[AnyTokenizer], ToolParser] | None,
+        content: str | None = None,
+    ) -> tuple[list[FunctionCall] | None, str | None]:
+        function_calls = list[FunctionCall]()
+        if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice and isinstance(
+            request.tool_choice, ChatCompletionNamedToolChoiceParam
+        ):
+            assert content is not None
+            # Forced Function Call
+            function_calls.append(
+                FunctionCall(name=request.tool_choice.function.name, arguments=content)
+            )
+            content = None  # Clear content since tool is called.
+        elif request.tool_choice == "required":
+            assert content is not None
+            tool_calls = TypeAdapter(list[FunctionDefinition]).validate_json(content)
+            function_calls.extend(
+                [
+                    FunctionCall(
+                        name=tool_call.name,
+                        arguments=json.dumps(tool_call.parameters, ensure_ascii=False),
+                    )
+                    for tool_call in tool_calls
+                ]
+            )
+            content = None  # Clear content since tool is called.
+        elif (
+            tool_parser_cls
+            and enable_auto_tools
+            and (request.tool_choice == "auto" or request.tool_choice is None)
+        ):
+            # Automatic Tool Call Parsing
+            try:
+                tool_parser = tool_parser_cls(tokenizer)
+            except RuntimeError as e:
+                logger.exception("Error in tool parser creation.")
+                raise e
+            tool_call_info = tool_parser.extract_tool_calls(
+                content if content is not None else "",
+                request=request,  # type: ignore
+            )
+            if tool_call_info is not None and tool_call_info.tools_called:
+                # extract_tool_calls() returns a list of tool calls.
+                function_calls.extend(
+                    FunctionCall(
+                        name=tool_call.function.name,
+                        arguments=tool_call.function.arguments,
+                    )
+                    for tool_call in tool_call_info.tool_calls
+                )
+                content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
+            else:
+                # No tool calls.
+                return None, content
+
+        return function_calls, content
 
     @staticmethod
     def _get_decoded_token(

@@ -34,7 +34,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import DispatchPooler, Pooler
+from vllm.model_executor.layers.pooler import DispatchPooler, DummyPooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -249,9 +249,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         pooler_config = vllm_config.model_config.pooler_config
         assert pooler_config is not None
 
-        self.pooler = DispatchPooler(
-            {"encode": Pooler.for_encode(pooler_config)},
-        )
+        self.pooler = DispatchPooler({"plugin": DummyPooler()})
 
     def get_input_embeddings(
         self,

@@ -19,12 +19,13 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import (
     inductor_partition_rule_context,
-    resolve_defined_ops,
+    should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_torch_equal_or_newer, resolve_obj_by_qualname
+from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .caching import VllmSerializableFunction
 from .compiler_interface import (
@@ -32,6 +33,7 @@ from .compiler_interface import (
     EagerAdaptor,
     InductorAdaptor,
     InductorStandaloneAdaptor,
+    is_compile_cache_enabled,
 )
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
@@ -50,13 +52,15 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             and hasattr(torch._inductor, "standalone_compile")
         ):
             logger.debug("Using InductorStandaloneAdaptor")
-            return InductorStandaloneAdaptor()
+            return InductorStandaloneAdaptor(
+                compilation_config.compile_cache_save_format
+            )
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
     else:
         assert compilation_config.backend == "eager", (
-            "Custom backends not supported with CompilationLevel.PIECEWISE"
+            "Custom backends not supported with CompilationMode.VLLM_COMPILE"
         )
 
         logger.debug("Using EagerAdaptor")
@@ -94,10 +98,9 @@ class CompilerManager:
         compilation (e.g. partition rules, pass context)."""
         with pass_context(runtime_shape):
             if self.compilation_config.use_inductor_graph_partition:
-                inductor_partition_ops = resolve_defined_ops(
+                with inductor_partition_rule_context(
                     self.compilation_config.splitting_ops
-                )
-                with inductor_partition_rule_context(inductor_partition_ops):
+                ):
                     yield
             else:
                 yield
@@ -237,17 +240,21 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if not envs.VLLM_DISABLE_COMPILE_CACHE and handle is not None:
+        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
             self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
             if graph_index == 0:
                 # adds some info logging for the first graph
                 if runtime_shape is None:
-                    logger.info("Cache the graph for dynamic shape for later use")
+                    logger.info_once(
+                        "Cache the graph for dynamic shape for later use", scope="local"
+                    )
                 else:
-                    logger.info(
-                        "Cache the graph of shape %s for later use", str(runtime_shape)
+                    logger.info_once(
+                        "Cache the graph of shape %s for later use",
+                        str(runtime_shape),
+                        scope="local",
                     )
             if runtime_shape is None:
                 logger.debug(
@@ -271,12 +278,17 @@ class CompilerManager:
             elapsed = now - compilation_start_time
             compilation_config.compilation_time += elapsed
             if runtime_shape is None:
-                logger.info("Compiling a graph for dynamic shape takes %.2f s", elapsed)
+                logger.info_once(
+                    "Compiling a graph for dynamic shape takes %.2f s",
+                    elapsed,
+                    scope="local",
+                )
             else:
-                logger.info(
+                logger.info_once(
                     "Compiling a graph for shape %s takes %.2f s",
                     runtime_shape,
                     elapsed,
+                    scope="local",
                 )
 
         return compiled_graph
@@ -291,7 +303,7 @@ class SplitItem:
 
 
 def split_graph(
-    graph: fx.GraphModule, resolved_ops: list[torch._ops.OpOverload]
+    graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
@@ -300,12 +312,8 @@ def split_graph(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        # Match node.target against resolved_ops
-        # node.target can be OpOverloadPacket, need to check .default
-        if node.op == "call_function" and (
-            node.target in resolved_ops
-            or (hasattr(node.target, "default") and node.target.default in resolved_ops)
-        ):
+
+        if should_split(node, splitting_ops):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
@@ -481,7 +489,7 @@ def set_model_tag(tag: str):
 
 class VllmBackend:
     """The compilation backend for `torch.compile` with vLLM.
-    It is used for compilation level of `CompilationLevel.PIECEWISE`,
+    It is used for compilation mode of `CompilationMode.VLLM_COMPILE`,
     where we customize the compilation.
 
     The major work of this backend is to split the graph into
@@ -600,13 +608,17 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
+        disable_cache = not is_compile_cache_enabled(
+            self.compilation_config.inductor_compile_config
+        )
 
         if disable_cache:
-            logger.info("vLLM's torch.compile cache is disabled.")
+            logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
         else:
-            logger.info(
-                "Using cache directory: %s for vLLM's torch.compile", local_cache_dir
+            logger.info_once(
+                "Using cache directory: %s for vLLM's torch.compile",
+                local_cache_dir,
+                scope="local",
             )
 
         self.compiler_manager.initialize_cache(
@@ -619,7 +631,9 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.time() - torch_compile_start_time
-        logger.info("Dynamo bytecode transform time: %.2f s", dynamo_time)
+        logger.info_once(
+            "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
+        )
         self.compilation_config.compilation_time += dynamo_time
 
         # we control the compilation process, each instance can only be
@@ -635,8 +649,7 @@ class VllmBackend:
         else:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
-        resolved_split_ops = resolve_defined_ops(fx_split_ops)
-        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 
@@ -671,7 +684,9 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug("Computation graph saved to %s", graph_path)
+            logger.debug_once(
+                "Computation graph saved to %s", graph_path, scope="local"
+            )
 
         self._called = True
 

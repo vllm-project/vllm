@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import (
-    CompilationLevel,
+    CompilationMode,
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
@@ -24,7 +24,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
-from vllm.utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.tree_attn import (
     TreeAttentionMetadata,
@@ -37,6 +37,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
@@ -86,7 +87,7 @@ class EagleProposer:
         self.use_cuda_graph = False
 
         compilation_config = self.vllm_config.compilation_config
-        if compilation_config.level == CompilationLevel.PIECEWISE:
+        if compilation_config.mode == CompilationMode.VLLM_COMPILE:
             cudagraph_mode = compilation_config.cudagraph_mode
             if cudagraph_mode != CUDAGraphMode.NONE and not cudagraph_mode.has_mode(
                 CUDAGraphMode.PIECEWISE
@@ -103,11 +104,12 @@ class EagleProposer:
             )
 
         self.cudagraph_batch_sizes = (
-            list(reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes))
+            (sorted(self.vllm_config.compilation_config.cudagraph_capture_sizes))
             if self.use_cuda_graph
             else []
         )
 
+        self.use_cuda_graph = self.use_cuda_graph and bool(self.cudagraph_batch_sizes)
         # persistent buffers for cuda graph
         self.input_ids = torch.zeros(
             self.max_num_tokens, dtype=torch.int32, device=device
@@ -148,11 +150,15 @@ class EagleProposer:
         )
 
         # Determine allowed attention backends once during initialization.
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         self.allowed_attn_types: tuple | None = None
         if current_platform.is_rocm():
             rocm_types = [TritonAttentionMetadata, FlashAttentionMetadata]
-            # vllm.v1.attention.backends.rocm_aiter_fa is an optional backend
-            if find_spec("vllm.v1.attention.backends.rocm_aiter_fa"):
+            # ROCM_AITER_FA is an optional backend
+            if find_spec(
+                AttentionBackendEnum.ROCM_AITER_FA.get_path(include_classname=False)
+            ):
                 from vllm.v1.attention.backends.rocm_aiter_fa import (
                     AiterFlashAttentionMetadata,
                 )
@@ -314,7 +320,12 @@ class EagleProposer:
             positions = target_positions[:, last_token_indices]
         else:
             positions = target_positions[last_token_indices]
-        if self.method in ("deepseek_mtp", "ernie_mtp", "longcat_flash_mtp"):
+        if self.method in (
+            "deepseek_mtp",
+            "ernie_mtp",
+            "longcat_flash_mtp",
+            "pangu_ultra_moe_mtp",
+        ):
             hidden_states = self.hidden_states[last_token_indices]
         else:
             hidden_states = hidden_states[last_token_indices]
@@ -938,7 +949,7 @@ class EagleProposer:
             self.vllm_config, DeepseekV32IndexerCache
         )
         draft_indexer_layer_names = indexer_layers.keys() - target_indexer_layer_names
-        self.attn_layer_names = list(draft_attn_layer_names)
+        self.attn_layer_names = list(draft_attn_layer_names - draft_indexer_layer_names)
         self.indexer_layer_names = list(draft_indexer_layer_names)
 
         if self.indexer_layer_names:
@@ -947,7 +958,7 @@ class EagleProposer:
                 indexer_layers[first_layer]
                 .get_attn_backend()
                 .get_builder_cls()(
-                    indexer_layers[first_layer].get_kv_cache_spec(),
+                    indexer_layers[first_layer].get_kv_cache_spec(self.vllm_config),
                     self.indexer_layer_names,
                     self.vllm_config,
                     self.device,
@@ -1049,16 +1060,18 @@ class EagleProposer:
         num_tokens: int,
         use_cudagraphs=True,
     ) -> None:
-        if use_cudagraphs and num_tokens <= self.cudagraph_batch_sizes[-1]:
+        # Determine if CUDA graphs should be used for this run.
+        cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
+        if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
 
         with set_forward_context(
             None,
             self.vllm_config,
             num_tokens=num_tokens,
-            cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-            if use_cudagraphs
-            else CUDAGraphMode.NONE,
+            cudagraph_runtime_mode=(
+                CUDAGraphMode.PIECEWISE if cudagraphs_enabled else CUDAGraphMode.NONE
+            ),
         ):
             if self.supports_mm_inputs:
                 input_ids = None
@@ -1140,8 +1153,15 @@ def compute_probs_and_sample_next_token(
         next_token_ids = logits.argmax(dim=-1)
         return next_token_ids, probs
 
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
+    assert sampling_metadata.temperature is not None
+
+    # Use epsilon comparison to detect greedy sampling (temperature ~ 0.0)
+    # consistent with sampler.py's _SAMPLING_EPS threshold
+    temperature = sampling_metadata.temperature
+    # Avoid division by zero if there are greedy requests.
+    if not sampling_metadata.all_random:
+        is_greedy = temperature < _SAMPLING_EPS
+        temperature = torch.where(is_greedy, 1.0, temperature)
     logits.div_(temperature.view(-1, 1))
     probs = logits.softmax(dim=-1, dtype=torch.float32)
 
