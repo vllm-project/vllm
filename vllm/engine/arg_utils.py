@@ -1733,41 +1733,41 @@ class EngineArgs:
                 )
                 _raise_unsupported_error(feature_name=name)
 
-    def _set_default_args(
-        self, usage_context: UsageContext, model_config: ModelConfig
-    ) -> None:
-        """Set Default Arguments for V1 Engine."""
-
-        # V1 uses chunked prefills and prefix caching by default
-        # for non-pooling tasks.
-        # For pooling tasks the default is False
+    @classmethod
+    def get_chunked_prefill_prefix_caching_defaults(
+        cls,
+        model_config: ModelConfig,
+    ) -> tuple[bool, bool]:
         if model_config.runner_type != "pooling":
-            self.enable_chunked_prefill = True
+            default_chunked_prefill = True
 
-            if self.enable_prefix_caching is None:
-                # Disable prefix caching default for hybrid models
-                # since the feature is still experimental.
-                if model_config.is_hybrid:
-                    self.enable_prefix_caching = False
-                else:
-                    self.enable_prefix_caching = True
+            # Disable prefix caching default for hybrid models
+            # since the feature is still experimental.
+            default_prefix_caching = not model_config.is_hybrid
         else:
+            assert model_config.pooler_config is not None
+
             pooling_type = model_config.pooler_config.pooling_type
-            is_causal = getattr(model_config.hf_config, "is_causal", True)
             incremental_prefill_supported = (
                 pooling_type is not None
                 and pooling_type.lower() == "last"
-                and bool(is_causal)
+                and getattr(model_config.hf_config, "is_causal", True)
             )
 
-            action = "Enabling" if incremental_prefill_supported else "Disabling"
+            default_chunked_prefill = incremental_prefill_supported
+            default_prefix_caching = incremental_prefill_supported
 
-            if self.enable_chunked_prefill is None:
-                self.enable_chunked_prefill = incremental_prefill_supported
-                logger.info("(%s) chunked prefill by default", action)
-            if self.enable_prefix_caching is None:
-                self.enable_prefix_caching = incremental_prefill_supported
-                logger.info("(%s) prefix caching by default", action)
+        return default_chunked_prefill, default_prefix_caching
+
+    @classmethod
+    def get_batch_defaults(
+        cls,
+        world_size: int,
+    ) -> tuple[dict[UsageContext | None, int], dict[UsageContext | None, int]]:
+        from vllm.usage.usage_lib import UsageContext
+
+        default_max_num_batched_tokens: dict[UsageContext | None, int]
+        default_max_num_seqs: dict[UsageContext | None, int]
 
         # When no user override, set the default values based on the usage
         # context.
@@ -1788,8 +1788,6 @@ class EngineArgs:
         # NOTE(Kuntai): Setting large `max_num_batched_tokens` for A100 reduces
         # throughput, see PR #17885 for more details.
         # So here we do an extra device name check to prevent such regression.
-        from vllm.usage.usage_lib import UsageContext
-
         if device_memory >= 70 * GiB_bytes and "a100" not in device_name:
             # For GPUs like H100 and MI300x, use larger default values.
             default_max_num_batched_tokens = {
@@ -1813,22 +1811,26 @@ class EngineArgs:
 
         # tpu specific default values.
         if current_platform.is_tpu():
-            default_max_num_batched_tokens_tpu = {
-                UsageContext.LLM_CLASS: {
-                    "V6E": 2048,
-                    "V5E": 1024,
-                    "V5P": 512,
-                },
-                UsageContext.OPENAI_API_SERVER: {
-                    "V6E": 1024,
-                    "V5E": 512,
-                    "V5P": 256,
-                },
-            }
+            chip_name = current_platform.get_device_name()
+
+            if chip_name == "V6E":
+                default_max_num_batched_tokens = {
+                    UsageContext.LLM_CLASS: 2048,
+                    UsageContext.OPENAI_API_SERVER: 1024,
+                }
+            elif chip_name == "V5E":
+                default_max_num_batched_tokens = {
+                    UsageContext.LLM_CLASS: 1024,
+                    UsageContext.OPENAI_API_SERVER: 512,
+                }
+            elif chip_name == "V5P":
+                default_max_num_batched_tokens = {
+                    UsageContext.LLM_CLASS: 512,
+                    UsageContext.OPENAI_API_SERVER: 256,
+                }
 
         # cpu specific default values.
         if current_platform.is_cpu():
-            world_size = self.pipeline_parallel_size * self.tensor_parallel_size
             default_max_num_batched_tokens = {
                 UsageContext.LLM_CLASS: 4096 * world_size,
                 UsageContext.OPENAI_API_SERVER: 2048 * world_size,
@@ -1838,39 +1840,59 @@ class EngineArgs:
                 UsageContext.OPENAI_API_SERVER: 128 * world_size,
             }
 
+        return default_max_num_batched_tokens, default_max_num_seqs
+
+    def _set_default_args(
+        self, usage_context: UsageContext, model_config: ModelConfig
+    ) -> None:
+        """Set Default Arguments for V1 Engine."""
+        (
+            default_chunked_prefill,
+            default_prefix_caching,
+        ) = self.get_chunked_prefill_prefix_caching_defaults(model_config)
+
+        if self.enable_chunked_prefill is None:
+            self.enable_chunked_prefill = default_chunked_prefill
+
+            if model_config.runner_type == "pooling":
+                logger.info(
+                    "%s chunked prefill by default",
+                    "Enabling" if default_chunked_prefill else "Disabling",
+                )
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = default_prefix_caching
+
+            if model_config.runner_type == "pooling":
+                logger.info(
+                    "%s chunked prefill by default",
+                    "Enabling" if default_prefix_caching else "Disabling",
+                )
+
+        world_size = self.pipeline_parallel_size * self.tensor_parallel_size
+        (
+            default_max_num_batched_tokens,
+            default_max_num_seqs,
+        ) = self.get_batch_defaults(world_size)
+
         use_context_value = usage_context.value if usage_context else None
-        if (
-            self.max_num_batched_tokens is None
-            and usage_context in default_max_num_batched_tokens
-        ):
-            if current_platform.is_tpu():
-                chip_name = current_platform.get_device_name()
-                if chip_name in default_max_num_batched_tokens_tpu[usage_context]:
-                    self.max_num_batched_tokens = default_max_num_batched_tokens_tpu[
-                        usage_context
-                    ][chip_name]
-                else:
-                    self.max_num_batched_tokens = default_max_num_batched_tokens[
-                        usage_context
-                    ]
-            else:
-                if not self.enable_chunked_prefill:
-                    self.max_num_batched_tokens = model_config.max_model_len
-                else:
-                    self.max_num_batched_tokens = default_max_num_batched_tokens[
-                        usage_context
-                    ]
+        if self.max_num_batched_tokens is None:
+            self.max_num_batched_tokens = default_max_num_batched_tokens.get(
+                usage_context,
+                SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            )
+
             logger.debug(
                 "Setting max_num_batched_tokens to %d for %s usage context.",
                 self.max_num_batched_tokens,
                 use_context_value,
             )
 
-        if self.max_num_seqs is None and usage_context in default_max_num_seqs:
-            self.max_num_seqs = min(
-                default_max_num_seqs[usage_context],
-                self.max_num_batched_tokens or sys.maxsize,
+        if self.max_num_seqs is None:
+            self.max_num_seqs = default_max_num_seqs.get(
+                usage_context,
+                SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
             )
+            self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
             logger.debug(
                 "Setting max_num_seqs to %d for %s usage context.",

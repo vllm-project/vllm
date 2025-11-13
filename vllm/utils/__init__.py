@@ -41,12 +41,6 @@ def __dir__() -> list[str]:
 
 logger = init_logger(__name__)
 
-# This value is chosen to have a balance between ITL and TTFT. Note it is
-# not optimized for throughput.
-DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
-POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
-MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
-
 # Constants related to forcing the attention backend selection
 
 # String name of register which may be set in order to
