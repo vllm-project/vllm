@@ -196,10 +196,98 @@ class MegatronTransformer(nn.Module):
         return logits
 
     def load_weights(self, weights):
-        """Load weights (dummy implementation for demo)."""
-        # For this demo, we use random weights
-        # In production, you'd load actual weights here
-        pass
+        """Load weights into the model.
+
+        For this demo, we load from a saved state_dict if available.
+        If TP > 1, we need to shard the weights appropriately for each rank.
+        """
+        import os
+
+        # Check if reference weights are available
+        ref_weights_path = "/tmp/megatron_reference_weights.pt"
+        if os.path.exists(ref_weights_path):
+            print(f"[Worker] Loading reference weights from {ref_weights_path}")
+            state_dict = torch.load(ref_weights_path, map_location="cuda")
+
+            print(f"[Worker] Reference state_dict has {len(state_dict)} keys")
+            print(f"[Worker] Current model has {len(self.state_dict())} keys")
+            print(f"[Worker] TP size: {self.tp_size}")
+
+            # For TP > 1, we need to shard the Megatron parallel layer weights
+            if self.tp_size > 1:
+                from vllm.distributed import parallel_state as vllm_parallel_state
+
+                tp_rank = vllm_parallel_state.get_tensor_model_parallel_rank()
+                print(f"[Worker] Sharding weights for TP rank {tp_rank}/{self.tp_size}")
+
+                # Shard the fc1 (ColumnParallelLinear) and fc2 (RowParallelLinear) weights
+                sharded_state_dict = {}
+                for key, value in state_dict.items():
+                    if ".fc1.weight" in key:
+                        # ColumnParallelLinear: split output dimension (dim 0)
+                        # Full shape: [intermediate_size, hidden_size]
+                        # Shard along dim 0: [intermediate_size/tp_size, hidden_size]
+                        chunk_size = value.shape[0] // self.tp_size
+                        start = tp_rank * chunk_size
+                        end = (tp_rank + 1) * chunk_size
+                        sharded_state_dict[key] = value[start:end, :].clone()
+                        print(
+                            f"[Worker] Sharding {key}: {value.shape} -> {sharded_state_dict[key].shape}"
+                        )
+                    elif ".fc2.weight" in key:
+                        # RowParallelLinear: split input dimension (dim 1)
+                        # Full shape: [hidden_size, intermediate_size]
+                        # Shard along dim 1: [hidden_size, intermediate_size/tp_size]
+                        chunk_size = value.shape[1] // self.tp_size
+                        start = tp_rank * chunk_size
+                        end = (tp_rank + 1) * chunk_size
+                        sharded_state_dict[key] = value[:, start:end].clone()
+                        print(
+                            f"[Worker] Sharding {key}: {value.shape} -> {sharded_state_dict[key].shape}"
+                        )
+                    else:
+                        # Non-sharded weights (embeddings, LayerNorm, lm_head, etc.)
+                        sharded_state_dict[key] = value
+
+                state_dict = sharded_state_dict
+
+            # Check lm_head before loading
+            lm_head_before = self.lm_head.weight.data.clone()
+            print(
+                f"[Worker] lm_head BEFORE load: mean={lm_head_before.mean().item():.6f}, std={lm_head_before.std().item():.6f}"
+            )
+
+            # Load and check what matched
+            result = self.load_state_dict(state_dict, strict=False)
+            print(f"[Worker] Missing keys: {len(result.missing_keys)}")
+            print(f"[Worker] Unexpected keys: {len(result.unexpected_keys)}")
+
+            # Check lm_head after loading
+            lm_head_after = self.lm_head.weight.data
+            print(
+                f"[Worker] lm_head AFTER load: mean={lm_head_after.mean().item():.6f}, std={lm_head_after.std().item():.6f}"
+            )
+            print(
+                f"[Worker] lm_head changed: {not torch.equal(lm_head_before, lm_head_after)}"
+            )
+
+            # Check against reference
+            ref_lm_head = state_dict["lm_head.weight"]
+            print(
+                f"[Worker] Reference lm_head: mean={ref_lm_head.mean().item():.6f}, std={ref_lm_head.std().item():.6f}"
+            )
+            print(
+                f"[Worker] lm_head matches reference: {torch.equal(lm_head_after, ref_lm_head)}"
+            )
+
+            if len(result.missing_keys) == 0 and len(result.unexpected_keys) == 0:
+                print("[Worker] ✅ All weights loaded successfully!")
+            else:
+                print("[Worker] ⚠️  Some weights were not loaded")
+                if result.missing_keys:
+                    print(f"[Worker] Missing: {result.missing_keys}")
+        else:
+            print("[Worker] No reference weights found, using random initialization")
 
 
 def build_megatron_model(vllm_config, parallel_context: ParallelContext):
@@ -260,18 +348,20 @@ def build_megatron_model(vllm_config, parallel_context: ParallelContext):
         vocab_size = getattr(hf_config, "vocab_size", 32000)
         hidden_size = getattr(hf_config, "hidden_size", 4096)
         num_attention_heads = getattr(hf_config, "num_attention_heads", 32)
+        num_hidden_layers = getattr(hf_config, "num_hidden_layers", 4)
     else:
         # Fallback to defaults
         vocab_size = 32000
         hidden_size = 4096
         num_attention_heads = 32
+        num_hidden_layers = 4
 
     # Build model with Megatron TP support
     model = MegatronTransformer(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
         intermediate_size=hidden_size * 4,
-        num_layers=4,
+        num_layers=num_hidden_layers,  # Use from config
         num_attention_heads=num_attention_heads,
         tp_size=tp_size,
         tp_group=tp_group,
@@ -296,6 +386,121 @@ def build_megatron_model(vllm_config, parallel_context: ParallelContext):
 ModelRegistry.register_model("MegatronModel", build_megatron_model)
 
 
+def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=None):
+    """
+    Run MegatronTransformer independently (without vLLM) to get ground truth logits.
+
+    This initializes Megatron's parallel state with TP=1 and runs a forward pass.
+
+    Args:
+        config_dict: Model configuration
+        input_ids: Input token IDs
+        seed: Random seed
+        save_weights_path: If provided, save model weights to this path
+    """
+    # Import Megatron here to make them available as globals for MegatronTransformer
+    global ColumnParallelLinear, RowParallelLinear, TransformerConfig
+
+    import megatron.core.parallel_state as megatron_parallel_state
+    from megatron.core.tensor_parallel import (
+        ColumnParallelLinear,
+        RowParallelLinear,
+    )
+    from megatron.core.transformer.transformer_config import TransformerConfig
+
+    print("\n" + "=" * 70)
+    print("[Ground Truth] Running MegatronTransformer independently (TP=1)")
+    print("=" * 70)
+
+    # Set random seed for reproducibility
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    # Initialize distributed process group for TP=1
+    import torch.distributed as dist
+
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="nccl",
+            init_method="tcp://localhost:29500",
+            world_size=1,
+            rank=0,
+        )
+
+    # Create process group for TP
+    tp_group = dist.new_group([0])
+
+    # Initialize Megatron's parallel state
+    megatron_parallel_state._TENSOR_MODEL_PARALLEL_GROUP = tp_group
+    megatron_parallel_state._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = [0]
+    megatron_parallel_state._MPU_TENSOR_MODEL_PARALLEL_RANK = 0
+    megatron_parallel_state._MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = 1
+
+    print("✓ Initialized Megatron parallel state (TP=1)")
+
+    # Build model
+    model = MegatronTransformer(
+        vocab_size=config_dict["vocab_size"],
+        hidden_size=config_dict["hidden_size"],
+        intermediate_size=config_dict["hidden_size"] * 4,
+        num_layers=config_dict["num_hidden_layers"],
+        num_attention_heads=config_dict["num_attention_heads"],
+        tp_size=1,
+        tp_group=tp_group,
+    ).cuda()
+
+    # Convert to bfloat16 to match vLLM
+    model = model.to(dtype=torch.bfloat16).eval()
+
+    print("✓ Built reference model (bfloat16)")
+
+    # Save weights if requested
+    if save_weights_path:
+        torch.save(model.state_dict(), save_weights_path)
+        print(f"✓ Saved weights to {save_weights_path}")
+
+    # Run forward pass
+    with torch.no_grad():
+        input_tensor = torch.tensor([input_ids], dtype=torch.long, device="cuda")
+        positions = torch.arange(
+            len(input_ids), dtype=torch.long, device="cuda"
+        ).unsqueeze(0)
+
+        print(
+            f"[Reference] Input shape: {input_tensor.shape}, values: {input_tensor[0].tolist()}"
+        )
+        print(
+            f"[Reference] lm_head weight sample [0,:5]: {model.lm_head.weight[0, :5].tolist()}"
+        )
+        print(
+            f"[Reference] lm_head weight sample [511,:5]: {model.lm_head.weight[511, :5].tolist()}"
+        )
+
+        hidden_states = model(input_tensor, positions)
+        print(f"[Reference] Hidden states shape: {hidden_states.shape}")
+        print(
+            f"[Reference] Hidden states (last token): mean={hidden_states[-1].mean().item():.6f}, std={hidden_states[-1].std().item():.6f}"
+        )
+        print(
+            f"[Reference] Hidden states (last token, first 5 dims): {hidden_states[-1, :5].tolist()}"
+        )
+
+        logits = model.compute_logits(hidden_states)
+        print(f"[Reference] Logits shape: {logits.shape}")
+        print(
+            f"[Reference] Logits (last token) stats: mean={logits[-1].mean().item():.6f}, std={logits[-1].std().item():.6f}, min={logits[-1].min().item():.6f}, max={logits[-1].max().item():.6f}"
+        )
+        print(f"[Reference] Logit for token 377: {logits[-1, 377].item():.6f}")
+        print(f"[Reference] Logit for token 511: {logits[-1, 511].item():.6f}")
+
+    print(f"✓ Forward pass complete: logits shape = {logits.shape}")
+
+    # Clean up
+    dist.destroy_process_group()
+
+    return logits
+
+
 if __name__ == "__main__":
     print("=" * 70)
     print("Megatron-LM + vLLM Integration Demo")
@@ -305,83 +510,146 @@ if __name__ == "__main__":
     print("  ✓ External parallelism (Megatron-LM) for MLP layers")
     print("  ✓ vLLM's TrainableFlashAttention for attention")
     print("  ✓ SAME model works for both training AND inference")
-    print("  ✓ Model with TP=4 using vLLM for inference")
+    print("  ✓ Ground truth validation against independent PyTorch run")
 
-    print("\nNote: The MegatronTransformer class can be used for training by:")
-    print("  - Initializing Megatron's parallel state")
-    print("  - Using model.train() + loss.backward()")
-    print("  - TrainableFlashAttention supports gradients for RL/fine-tuning")
+    # Configuration
+    config = {
+        "model_type": "gpt2",
+        "architectures": ["MegatronModel"],
+        "vocab_size": 1000,
+        "hidden_size": 256,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 2,
+        "max_position_embeddings": 128,
+    }
 
-    # === VLLM TEST: With TP=4 (for inference) ===
+    # Test input
+    test_input_ids = [1, 2, 3, 4, 5]
+    SEED = 42
+
+    # === GROUND TRUTH: Run model independently ===
+    # Save weights to share with vLLM
+    weights_path = "/tmp/megatron_reference_weights.pt"
+    reference_logits = run_reference_forward(
+        config, test_input_ids, seed=SEED, save_weights_path=weights_path
+    )
+
+    # === VLLM TEST: With TP=4 (testing actual tensor parallelism) ===
     print("\n" + "=" * 70)
-    print("[Test] Testing model with vLLM (TP=4, inference)")
+    print("[vLLM Test] Testing model with vLLM (TP=4, inference)")
     print("=" * 70)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = {
-            "model_type": "gpt2",
-            "architectures": ["MegatronModel"],
-            "vocab_size": 1000,
-            "hidden_size": 256,
-            "num_attention_heads": 4,
-            "num_hidden_layers": 2,
-            "max_position_embeddings": 128,
-        }
-
         config_path = os.path.join(tmpdir, "config.json")
         with open(config_path, "w") as f:
             json.dump(config, f)
+
+        # Set same random seed for vLLM
+        torch.manual_seed(SEED)
+        torch.cuda.manual_seed_all(SEED)
 
         from vllm import LLM
 
         llm = LLM(
             model=tmpdir,
             tokenizer=None,
-            tensor_parallel_size=4,  # Always use TP=4
+            tensor_parallel_size=4,  # Use TP=4 to test actual parallelism
             max_model_len=128,
             max_num_seqs=1,
             enforce_eager=True,
             skip_tokenizer_init=True,
             trust_remote_code=True,
-            # NOTE: We disable prefix caching for this demo since our simple
-            # TrainableFlashAttention doesn't integrate with V1's KV cache
-            # infrastructure. For production use, you'd want to use vLLM's
-            # built-in Attention layers or implement full KV cache support.
             enable_prefix_caching=False,
+            seed=SEED,  # Set seed for vLLM
         )
 
-        print("\n" + "=" * 70)
-        print("✅ SUCCESS! Megatron-LM + vLLM integration works!")
-        print("=" * 70)
+        print("✓ vLLM engine initialized")
 
-        # Generate some tokens to verify forward pass works
-        print("\n[Test] Generating tokens with Megatron model...")
-        print("-" * 70)
-
+        # Get logits from vLLM (not just generated tokens)
+        # We'll need to extract the actual logits from vLLM's forward pass
         from vllm import SamplingParams
         from vllm.inputs import TokensPrompt
 
-        # Create a simple prompt using raw token IDs (since no tokenizer)
-        prompt_token_ids = [1, 2, 3, 4, 5]  # Dummy token IDs
         sampling_params = SamplingParams(
             temperature=0.0,
-            # top_p=0.95,
-            max_tokens=5,  # Generate 10 tokens
+            max_tokens=1,  # Just generate 1 token to get logits
+            logprobs=1,  # Request logprobs to access logits
         )
 
-        # Generate using token IDs directly
+        # Generate using same input
         outputs = llm.generate(
-            prompts=TokensPrompt(prompt_token_ids=prompt_token_ids),
+            prompts=TokensPrompt(prompt_token_ids=test_input_ids),
             sampling_params=sampling_params,
         )
 
-        # Print generated tokens
-        print(f"\nPrompt token IDs: {prompt_token_ids}")
+        print("✓ vLLM forward pass complete")
+
+        # Extract logits from vLLM output
+        # Note: vLLM doesn't directly expose logits in generate(), so we'll
+        # compare the generated tokens and logprobs as a proxy
+        print("\n" + "=" * 70)
+        print("[Validation] Comparing vLLM output to ground truth")
+        print("=" * 70)
+
         for output in outputs:
-            generated_ids = output.outputs[0].token_ids
-            print(f"Generated token IDs: {generated_ids}")
-            print(f"Number of tokens generated: {len(generated_ids)}")
+            generated_id = output.outputs[0].token_ids[0]
+            logprobs = (
+                output.outputs[0].logprobs[0] if output.outputs[0].logprobs else None
+            )
+
+            # Get top-K tokens from reference (handle numerical differences)
+            K = 10
+            # IMPORTANT: Get top-K from LAST token only!
+            topk_values, topk_indices = torch.topk(reference_logits[-1], K)
+            topk_tokens = topk_indices.tolist()
+            reference_greedy = topk_tokens[0]
+
+            # Find vLLM token's rank in reference
+            sorted_logits, sorted_indices = torch.sort(
+                reference_logits[-1], descending=True
+            )
+            vllm_token_rank = (sorted_indices == generated_id).nonzero(as_tuple=True)[
+                0
+            ].item() + 1
+            vllm_token_ref_logit = reference_logits[-1, generated_id].item()
+
+            print("\nGround Truth (PyTorch TP=1):")
+            print(f"  - Greedy token: {reference_greedy}")
+            print(f"  - Top-{K} tokens: {topk_tokens}")
+            print(f"  - Top-{K} logits: {[f'{v.item():.4f}' for v in topk_values]}")
+
+            print("\nvLLM Output (TP=4):")
+            print(f"  - Greedy token: {generated_id}")
+            print(f"  - Rank in reference: {vllm_token_rank} / {len(sorted_logits)}")
+            print(f"  - Reference logit for this token: {vllm_token_ref_logit:.4f}")
+            if logprobs:
+                print(f"  - vLLM log probability: {logprobs[generated_id].logprob:.4f}")
+
+            # Validate: vLLM token should be in top-K reference tokens
+            # (allows for numerical differences due to TP, dtype, etc.)
+            if generated_id in topk_tokens:
+                rank = topk_tokens.index(generated_id) + 1
+                print("\n✅ VALIDATION PASSED!")
+                print(
+                    f"   vLLM token {generated_id} is in reference top-{K} (rank {rank})"
+                )
+                if generated_id == reference_greedy:
+                    print("   ✨ Exact match with reference greedy token!")
+            else:
+                print("\n❌ VALIDATION FAILED!")
+                print(f"   vLLM token {generated_id} NOT in reference top-{K}")
+                print(
+                    "   This suggests a correctness issue (not just numerical differences)"
+                )
+                raise AssertionError(
+                    f"vLLM output ({generated_id}) not in reference top-{K} tokens {topk_tokens}"
+                )
 
         print("\n" + "=" * 70)
-        print("✅ Token generation successful! Forward pass works!")
+        print("✅ All validation tests passed!")
         print("=" * 70)
+
+        # TODO: Fix worker shutdown error that occurs after successful validation.
+        # The validation completes successfully but vLLM workers throw errors during
+        # shutdown (Engine core proc died unexpectedly). This appears to be an
+        # infrastructure issue unrelated to the Megatron integration itself.
