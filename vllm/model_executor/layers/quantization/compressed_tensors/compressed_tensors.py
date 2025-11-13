@@ -19,7 +19,7 @@ from compressed_tensors.transform import TransformConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -158,8 +158,44 @@ class CompressedTensorsConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return CompressedTensorsKVCacheMethod(self)
         if isinstance(layer, FusedMoE):
-            return CompressedTensorsMoEMethod.get_moe_method(self, layer)
+            # FusedMoE was made by combining multiple Linears so need to
+            # make sure quantization config for Linear can target it
+            self._add_fused_moe_to_target_scheme_map()
+            unfused_names = [
+                prefix + proj_name
+                for proj_name in [".0.gate_proj", ".0.up_proj", ".0.down_proj"]
+            ]
+            all_quant_schemes = [self.get_scheme(layer, name) for name in unfused_names]
+            quant_scheme = all_quant_schemes.pop()
+
+            # multiple schemes found
+            if not all([scheme == quant_scheme for scheme in all_quant_schemes]):
+                raise ValueError(
+                    "All MoE projections need to have same "
+                    "quantization scheme but found multiple"
+                )
+
+            scheme_dict = self.get_scheme_dict(layer, unfused_names[0])
+
+            if quant_scheme is None or scheme_dict is None:  # ignored layer
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+
+            # valid qscheme
+            return CompressedTensorsMoEMethod.get_moe_method(
+                quant_scheme,
+                scheme_dict.get("weights"),
+                scheme_dict.get("input_activations"),
+                layer,
+            )
         return None
+
+    def _add_fused_moe_to_target_scheme_map(self):
+        if (
+            "Linear" not in self.target_scheme_map
+            or "FusedMoE" in self.target_scheme_map
+        ):
+            return
+        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
@@ -639,9 +675,38 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         raise NotImplementedError("No compressed-tensors compatible scheme was found.")
 
+    def get_scheme_dict(
+        self, layer: torch.nn.Module, layer_name: str | None = None
+    ) -> dict[str, QuantizationArgs | str | None] | None:
+        """
+        Extract the QuantizationArgs for a given layer.
+
+        Returns:
+            Tuple of (weight_quant, input_quant, format) or (None, None, None)
+            if layer should be ignored.
+        """
+        # TODO (@kylesayrs): support ignore module names with ct matching utils
+        if should_ignore_layer(
+            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+        ):
+            return None
+
+        # Will be empty for models with only sparsity
+        if self.target_scheme_map:
+            matched_target = find_matched_target(
+                layer_name=layer_name,
+                module=layer,
+                targets=self.target_scheme_map.keys(),
+                fused_mapping=self.packed_modules_mapping,
+            )
+
+            return self.target_scheme_map[matched_target]
+
+        return None
+
     def get_scheme(
         self, layer: torch.nn.Module, layer_name: str | None = None
-    ) -> Optional["CompressedTensorsScheme"]:
+    ) -> "CompressedTensorsScheme" | None:
         """
         compressed-tensors supports non uniform in the following way:
 
@@ -655,28 +720,15 @@ class CompressedTensorsConfig(QuantizationConfig):
         to select the CompressedTensorsScheme used for inference.
         """
 
-        # Find the "target" in the compressed-tensors config
-        # that our layer conforms to.
-        # TODO (@kylesayrs): support ignore module names with ct matching utils
-        if should_ignore_layer(
-            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
-        ):
+        # Use the new get_quant_args method to extract QuantizationArgs
+        scheme_dict = self.get_scheme_dict(layer, layer_name)
+
+        if scheme_dict is None:
             return None
 
-        # Will be empty for models with only sparsity
-        weight_quant = input_quant = None
-        if self.target_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping,
-            )
-
-            scheme_dict = self.target_scheme_map[matched_target]
-            weight_quant = scheme_dict.get("weights")
-            input_quant = scheme_dict.get("input_activations")
-            format = scheme_dict.get("format")
+        weight_quant = scheme_dict.get("weights")
+        input_quant = scheme_dict.get("input_activations")
+        format = scheme_dict.get("format")
 
         # Find the sparsity scheme of the layer
         # assume that fused layers inherit first component's sparsity scheme

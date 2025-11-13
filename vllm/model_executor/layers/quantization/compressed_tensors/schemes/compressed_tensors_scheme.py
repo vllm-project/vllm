@@ -53,3 +53,6 @@ class CompressedTensorsScheme(ABC):
         needs to occur.
         """
         raise NotImplementedError
+
+    def __eq__(self, other):
+        return isinstance(other, self.__class__) and self.__dict__ == other.__dict__
