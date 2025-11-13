@@ -99,6 +99,9 @@ MAX_HEADS = 128
 class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
     can_return_lse_for_decode: bool = True
 
+    def supports_compiled_split(self) -> bool:
+        return True
+
     def __init__(
         self,
         num_heads: int,

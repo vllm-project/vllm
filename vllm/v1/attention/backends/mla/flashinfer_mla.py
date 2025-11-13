@@ -71,6 +71,9 @@ g_fi_workspace = torch.zeros(
 
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    def supports_compiled_split(self) -> bool:
+        return True
+
     def __init__(
         self,
         num_heads: int,
