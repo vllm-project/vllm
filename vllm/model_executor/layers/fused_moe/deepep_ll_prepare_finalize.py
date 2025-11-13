@@ -139,6 +139,11 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         q_dtype = quant_config.quant_dtype
 
         if q_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH:
+            logger.info_once(
+                "Since VLLM_DEEPEPLL_NVFP4_DISPATCH==1, make sure "
+                "using the hybrid-ep branch of DeepEP"
+                "(https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep)"
+            )
             assert isinstance(x, tuple)
             x_scales = x[1]
             x = x[0].permute(2, 0, 1)
