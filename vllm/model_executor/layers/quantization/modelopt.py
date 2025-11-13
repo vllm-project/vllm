@@ -651,7 +651,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
             assert activation in ("silu", "relu2_no_mul"), (
                 "Expected activation to be in ('silu', 'relu2_no_mul'),"
-                "but got {activation}"
+                f"but got {activation}"
             )
             return flashinfer_cutlass_moe_fp8(
                 x,
