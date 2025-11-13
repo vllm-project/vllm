@@ -397,7 +397,9 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     # (Transformers v5, Transformers v4)
     rope_parameters_keys = ("rope_parameters", "rope_scaling")
     rope_parameters: dict | None = getattr_iter(text_config, rope_parameters_keys, None)
-
+    # No rope parameters to patch
+    if rope_parameters is None:
+        return
     # Forward compatibility for Transformers v5
     # (can be removed once Transformers v4 is no longer supported)
     cls_attr = getattr(type(text_config), "rope_scaling", None)
@@ -412,13 +414,12 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         text_config.rope_parameters = rope_parameters
         delattr(text_config, "rope_scaling")
 
-    if rope_parameters is not None:
-        # Handle nested rope_parameters in interleaved sliding attention models
-        if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
-            for rope_parameters_layer_type in rope_parameters.values():
-                patch_rope_parameters_dict(rope_parameters_layer_type)
-        else:
-            patch_rope_parameters_dict(rope_parameters)
+    # Handle nested rope_parameters in interleaved sliding attention models
+    if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        for rope_parameters_layer_type in rope_parameters.values():
+            patch_rope_parameters_dict(rope_parameters_layer_type)
+    else:
+        patch_rope_parameters_dict(rope_parameters)
 
 
 def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
