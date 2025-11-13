@@ -2,12 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-
-if current_platform.is_cuda_alike():
-    pass
 
 logger = init_logger(__name__)
 
@@ -83,13 +80,14 @@ def rocm_fp8_mqa_logits(
     """
 
     # TODO(ganyi): Uncomment this after aiter merge this kernel into main
-    # if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
-    #     from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
+    has_mqa_logits = hasattr("aiter.ops.triton", "fp8_mqa_logits")
+    if rocm_aiter_ops.is_enabled() and has_mqa_logits:
+        from aiter.ops.triton.fp8_mqa_logits import fp8_mqa_logits
 
-    #     kv, scale = kv
-    #     return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
-    # else:
-    return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
+        kv, scale = kv
+        return fp8_mqa_logits(q, kv, scale, weights, cu_seqlen_ks, cu_seqlen_ke)
+    else:
+        return fp8_mqa_logits_torch(q, kv, weights, cu_seqlen_ks, cu_seqlen_ke)
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
@@ -178,7 +176,8 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
-    if current_platform.is_rocm() and envs.VLLM_ROCM_USE_AITER:
+    has_paged_mqa_logits = hasattr("aiter.ops.triton", "pa_mqa_logits")
+    if rocm_aiter_ops.is_enabled() and has_paged_mqa_logits:
         from aiter.ops.triton.pa_mqa_logits import deepgemm_fp8_paged_mqa_logits_stage1
 
         batch_size, next_n, heads, _ = q_fp8.shape
