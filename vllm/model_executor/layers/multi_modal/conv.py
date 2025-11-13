@@ -111,9 +111,12 @@ class Conv2dLayer(ConvLayerBase):
             B, C, H, W = x.shape
             K1, K2 = self.kernel_size
             H, W = H // K1, W // K2
-            x = x.view(-1, self.in_channels * math.prod(self.kernel_size))
+            x = x.unfold(2, K1, K1).unfold(3, K2, K2)
+            x = x.permute(0, 2, 3, 1, 4, 5).reshape(
+                -1, self.in_channels * math.prod(self.kernel_size)
+            )
             x = F.linear(x, self.weight, self.bias)
-            x = x.view(B, self.out_channels, H, W)
+            x = x.view(B, H, W, self.out_channels).permute(0, 3, 1, 2)
         else:
             x = F.conv2d(
                 x,
@@ -192,9 +195,12 @@ class Conv3dLayer(ConvLayerBase):
             B, C, T, H, W = x.shape
             K1, K2, K3 = self.kernel_size
             T, H, W = T // K1, H // K2, W // K3
-            x = x.view(-1, self.in_channels * math.prod(self.kernel_size))
+            x = x.unfold(2, K1, K1).unfold(3, K2, K2).unfold(4, K3, K3)
+            x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(
+                -1, self.in_channels * math.prod(self.kernel_size)
+            )
             x = F.linear(x, self.weight, self.bias)
-            x = x.view(B, self.out_channels, T, H, W)
+            x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
         else:
             x = F.conv3d(
                 x,
