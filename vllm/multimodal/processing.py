@@ -842,14 +842,15 @@ def _iter_placeholders(
 
     Note that empty matches are ignored.
     """
-    prompt_len = len(prompt)
     mm_item_counts = {m: len(items) for m, items in mm_prompt_updates.items()}
 
     item_idx_by_modality = {modality: 0 for modality in mm_prompt_updates}
     if _all_placeholders_found(mm_item_counts, item_idx_by_modality):
         return
 
+    prompt_len = len(prompt)
     start_idx = 0
+
     while start_idx < prompt_len:
         found = False
 
