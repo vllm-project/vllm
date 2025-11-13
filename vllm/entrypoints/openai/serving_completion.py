@@ -34,7 +34,9 @@ from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import as_list, merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import as_list
+from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -58,6 +60,10 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             log_error_stack=log_error_stack,
         )
+
+        # set up logits processors
+        self.logits_processors = self.model_config.logits_processors
+
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.enable_force_include_usage = enable_force_include_usage
@@ -140,6 +146,9 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -176,6 +185,10 @@ class OpenAIServingCompletion(OpenAIServing):
                         max_tokens,
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
+                    )
+                    validate_logits_processors_parameters(
+                        self.logits_processors,
+                        sampling_params,
                     )
 
                 request_id_item = f"{request_id}-{i}"
@@ -223,6 +236,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         priority=request.priority,
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 generators.append(generator)
@@ -398,7 +412,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         # has_echoed[i] is reused here to indicate whether
                         # we have already returned the prompt token IDs.
-                        if not has_echoed[i]:
+                        if not has_echoed[i] and request.return_token_ids:
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 

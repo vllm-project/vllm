@@ -64,7 +64,7 @@ from .utils import (
 class OlmoAttention(nn.Module):
     """
     This is the attention block where the output is computed as
-    ``Attention(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
+    `Attention(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -144,7 +144,7 @@ class OlmoAttention(nn.Module):
 class OlmoMLP(nn.Module):
     """
     This is the MLP block where the output is computed as
-    ``MLP(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
+    `MLP(LN(x))` in `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -193,7 +193,7 @@ class OlmoMLP(nn.Module):
 class OlmoDecoderLayer(nn.Module):
     """
     This is a typical transformer block where the output is
-    computed as ``MLP(LN(x + Attention(LN(x))))``
+    computed as `MLP(LN(x + Attention(LN(x))))`
     (plus another skip connection).
     """
 
@@ -368,11 +368,9 @@ class OlmoForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
-            self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "lm_head"),
             )

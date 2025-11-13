@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-# ruff: noqa
+import contextlib
+import pathlib
+from copy import deepcopy
 
 from tblib import pickling_support
+
+# Import fixture
+from tests.v1.entrypoints.conftest import sample_json_schema  # noqa
+
+# ruff: noqa
 
 # Install support for pickling exceptions so that we can nicely propagate
 # failures from tests running in a subprocess.
@@ -40,7 +46,7 @@ from transformers import (
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from tests.models.utils import TokensTextLogprobs, TokensTextLogprobsPromptLogprobs
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
@@ -57,7 +63,8 @@ from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
-from vllm.utils import is_list_of, set_default_torch_num_threads
+from vllm.utils.collection_utils import is_list_of
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 logger = init_logger(__name__)
 
@@ -145,26 +152,6 @@ VIDEO_ASSETS = VideoTestAssets()
 """Singleton instance of {class}`VideoTestAssets`."""
 AUDIO_ASSETS = AudioTestAssets()
 """Singleton instance of {class}`AudioTestAssets`."""
-
-
-@pytest.fixture(scope="function", autouse=True)
-def cleanup_VLLM_USE_V1(monkeypatch):
-    """
-    The V1 oracle sets "VLLM_USE_V1" during loading. This means
-    that each invocation of a test change the env variable.
-
-    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
-    made during the test run by vLLM will be cleaned up.
-
-    This fixture is used by every test.
-    """
-
-    # If VLLM_USE_V1 is not set, set then delete. This will
-    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
-    # if VLLM modifies the value of envs.VLLM_USE_V1.
-    if "VLLM_USE_V1" not in os.environ:
-        monkeypatch.setenv("VLLM_USE_V1", "")
-        monkeypatch.delenv("VLLM_USE_V1")
 
 
 @pytest.fixture(autouse=True)
@@ -334,7 +321,7 @@ class HfRunner:
             trust_remote_code=trust_remote_code,
         )
         self.device = self.get_default_device()
-        self.dtype = torch_dtype = _get_and_verify_dtype(
+        self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,
             self.config,
             dtype=dtype,
@@ -342,7 +329,7 @@ class HfRunner:
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
-        model_kwargs.setdefault("torch_dtype", torch_dtype)
+        model_kwargs.setdefault("dtype", dtype)
 
         if is_sentence_transformer:
             # Lazy init required for AMD CI
@@ -388,7 +375,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_name,
-                torch_dtype=torch_dtype,
+                dtype=dtype,
                 trust_remote_code=trust_remote_code,
             )
 
@@ -398,7 +385,7 @@ class HfRunner:
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:
@@ -827,8 +814,9 @@ class VllmRunner:
         images: PromptImageInput | None = None,
         videos: PromptVideoInput | None = None,
         audios: PromptAudioInput | None = None,
+        return_logprobs: bool = False,
         **kwargs: Any,
-    ) -> list[tuple[list[list[int]], list[str]]]:
+    ) -> list[tuple[list[list[int]], list[str]]] | tuple[list, list]:
         inputs = self.get_inputs(prompts, images=images, videos=videos, audios=audios)
 
         req_outputs = self.llm.generate(
@@ -836,18 +824,23 @@ class VllmRunner:
         )
 
         outputs: list[tuple[list[list[int]], list[str]]] = []
+        logprobs = []
         for req_output in req_outputs:
             prompt_str = req_output.prompt
             prompt_ids = req_output.prompt_token_ids
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
+            req_logprobs = []
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
                 req_sample_output_strs.append((prompt_str or "") + output_str)
+                if sample.logprobs:
+                    req_logprobs.extend(sample.logprobs)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
-        return outputs
+            logprobs.append(req_logprobs)
+        return outputs if not return_logprobs else (outputs, logprobs)
 
     @staticmethod
     def _final_steps_generate_w_logprobs(
@@ -1011,8 +1004,12 @@ class VllmRunner:
         req_outputs = self.llm.embed(inputs, *args, **kwargs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
-    def encode(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.encode(prompts)
+    def token_embed(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.encode(prompts, pooling_task="token_embed")
+        return [req_output.outputs.data for req_output in req_outputs]
+
+    def token_classify(self, prompts: list[str]) -> list[list[float]]:
+        req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
     def reward(self, prompts: list[str]) -> list[list[float]]:
@@ -1063,6 +1060,101 @@ def caplog_vllm(temporary_enable_log_propagate, caplog):
     # To capture vllm log, we should enable propagate=True temporarily
     # because caplog depends on logs propagated to the root logger.
     yield caplog
+
+
+@pytest.fixture()
+def caplog_mp_fork():
+    """
+    This fixture enables capturing logs from a forked MP subprocess.
+    It should be used in conjunction with caplog_vllm.
+
+    By default, subprocess logs do not go through the parent process.
+    We instead create a queue listener in the parent process which
+    forwards logs to the logger's other handlers, and add a QueueHandler
+    to the root logger. Forked subprocesses will inherit the root logger
+    and pass their messages to the queue, which the listener will forward
+    to the root logger, which can be captured by caplog.
+
+    Note that this workaround only works for fork; with spawn, the subprocess
+    reinitializes logging and does not automatically inherit the queue.
+    We'd have to manually pass the queue to the subprocess at the spawn point.
+    See caplog_mp_spawn below.
+    """
+
+    @contextlib.contextmanager
+    def ctx():
+        import logging.handlers
+        import multiprocessing as mp
+
+        logger_queue: mp.Queue[logging.LogRecord] = mp.Queue()
+        logger = logging.getLogger()
+        handlers = logger.handlers
+
+        # The listener works on a background thread, not inherited by the child.
+        queue_listener = logging.handlers.QueueListener(logger_queue, *handlers)
+        queue_listener.start()
+
+        # Add queue handler after creating the listener to avoid cycle
+        logger.addHandler(logging.handlers.QueueHandler(logger_queue))
+        yield
+        queue_listener.stop()
+
+    return ctx
+
+
+class LogHolder:
+    def __init__(self):
+        self.text = None
+
+
+@pytest.fixture()
+def caplog_mp_spawn(tmp_path, monkeypatch):
+    """
+    This fixture enables capturing logs from a forked MP subprocess.
+    It does not require caplog_vllm (but it only contains logs from the child).
+
+    By default, subprocess logs do not go through the parent process.
+    We instead add a FileHandler to the config so the spawned child process
+    writes its logs to a temp file.
+    In the parent, we read the file and return the contents.
+
+    Note: this method could be extended to fork by either reconfiguring logging
+    in the parent or using a SocketHandler:
+    https://docs.python.org/3/howto/logging-cookbook.html#sending-and-receiving-logging-events-across-a-network # noqa: E501
+    """
+
+    @contextlib.contextmanager
+    def ctx(level: int | str):
+        from vllm.logger import DEFAULT_LOGGING_CONFIG
+
+        config_path = tmp_path / "vllm_logging_config.json"
+        log_path = tmp_path / "vllm.log"
+        log_holder = LogHolder()
+
+        config = deepcopy(DEFAULT_LOGGING_CONFIG)
+        if envs.VLLM_LOGGING_CONFIG_PATH:
+            path = pathlib.Path(envs.VLLM_LOGGING_CONFIG_PATH)
+            assert path.exists()
+            config = json.loads(path.read_text())
+
+        config["loggers"]["vllm"]["handlers"] += ["vllm_file"]
+        config["handlers"]["vllm_file"] = {
+            "class": "logging.FileHandler",
+            "formatter": "vllm",
+            "level": level,
+            "filename": log_path.as_posix(),
+        }
+
+        config_path.write_text(json.dumps(config))
+
+        with monkeypatch.context() as monkeypatch_ctx:
+            monkeypatch_ctx.setenv("VLLM_LOGGING_CONFIG_PATH", config_path.as_posix())
+            monkeypatch_ctx.setenv("VLLM_CONFIGURE_LOGGING", "1")
+            yield log_holder
+
+        log_holder.text = log_path.read_text()
+
+    return ctx
 
 
 @pytest.fixture(scope="session")

@@ -34,7 +34,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -53,6 +52,7 @@ from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import set_default_torch_dtype
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsTranscription
 from .utils import (
@@ -890,7 +890,7 @@ class WhisperForConditionalGeneration(
         self.dtype = vllm_config.model_config.dtype
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
-        self.unpadded_vocab_size = config.vocab_size
+
         self.proj_out = ParallelLMHead(
             config.vocab_size,
             config.d_model,
@@ -899,9 +899,7 @@ class WhisperForConditionalGeneration(
         )
         self.proj_out = self.proj_out.tie_weights(self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def forward(
         self,

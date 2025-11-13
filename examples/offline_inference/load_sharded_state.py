@@ -11,7 +11,7 @@ python save_sharded_state.py \
     --model /path/to/load \
     --quantization deepspeedfp \
     --tensor-parallel-size 8 \
-    --output /path/to/save/sharded/modele
+    --output /path/to/save/sharded/model
 
 python load_sharded_state.py \
     --model /path/to/saved/sharded/model \
@@ -25,7 +25,7 @@ python load_sharded_state.py \
 import dataclasses
 
 from vllm import LLM, EngineArgs, SamplingParams
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def parse_args():

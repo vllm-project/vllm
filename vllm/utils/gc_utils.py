@@ -37,7 +37,7 @@ class GCDebugConfig:
             except Exception:
                 self.enabled = False
                 logger.error("Failed to parse VLLM_GC_DEBUG(%s)", envs.VLLM_GC_DEBUG)
-        logger.info("GC Debug Config. %s", str(self))
+        logger.debug("GC Debug Config. %s", str(self))
 
     def __repr__(self) -> str:
         return f"enabled:{self.enabled},top_objects:{self.top_objects}"
@@ -87,6 +87,21 @@ class GCDebugger:
                     else ""
                 ),
             )
+
+
+def freeze_gc_heap() -> None:
+    """
+    Freeze all objects tracked by the garbage collector. It should be invoked
+    after server init / warmup, to reduce GC overhead from static objects
+    during serving time.
+    """
+    # Ensure all static objects are pushed down to the oldest generation for
+    # freeze
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
+    # Freeze all GC tracked objects
+    gc.freeze()
 
 
 def maybe_attach_gc_debug_callback() -> None:

@@ -94,7 +94,7 @@ class KVTransferConfig:
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError(
-                "Please specify kv_disagg_role when kv_connector "
+                "Please specify kv_role when kv_connector "
                 f"is set, supported roles are {get_args(KVRole)}"
             )
 

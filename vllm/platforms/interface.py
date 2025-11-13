@@ -7,28 +7,24 @@ import platform
 import random
 import sys
 from datetime import timedelta
-from platform import uname
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import torch
-from torch.distributed import PrefixStore, ProcessGroup
 
-from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.registry import _Backend
-    from vllm.config import ModelConfig, VllmConfig
+    from torch.distributed import PrefixStore, ProcessGroup
+
+    from vllm.attention.backends.registry import AttentionBackendEnum
+    from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
+    from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
-    _Backend = object
-    ModelConfig = object
-    VllmConfig = object
-    PoolingParams = object
-    SamplingParams = object
     FlexibleArgumentParser = object
 
 logger = init_logger(__name__)
@@ -36,7 +32,7 @@ logger = init_logger(__name__)
 
 def in_wsl() -> bool:
     # Reference: https://github.com/microsoft/WSL/issues/4071
-    return "microsoft" in " ".join(uname()).lower()
+    return "microsoft" in " ".join(platform.uname()).lower()
 
 
 class PlatformEnum(enum.Enum):
@@ -62,6 +58,31 @@ class CpuArchEnum(enum.Enum):
 class DeviceCapability(NamedTuple):
     major: int
     minor: int
+
+    def __lt__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) < (other.major, other.minor)
+
+    def __le__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) <= (other.major, other.minor)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) == (other.major, other.minor)
+
+    def __ge__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) >= (other.major, other.minor)
+
+    def __gt__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) > (other.major, other.minor)
 
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
@@ -178,18 +199,21 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> _Backend:
-        from vllm.attention.backends.registry import _Backend
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype
+    ) -> "AttentionBackendEnum":
+        # Import AttentionBackendEnum here to avoid circular import.
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
-        return _Backend.TORCH_SDPA
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: _Backend,
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int,
         use_v1: bool,
         use_mla: bool,
@@ -317,7 +341,7 @@ class Platform:
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Check and update the configuration for the current platform.
 
@@ -471,14 +495,7 @@ class Platform:
         """
         Whether to use allgather in LogitsProcessor to gather the logits.
         """
-        import vllm.envs as envs
-        from vllm.config import get_current_vllm_config
-
-        parallel_config = get_current_vllm_config().parallel_config
-        return (
-            envs.VLLM_USE_V1
-            or parallel_config.distributed_executor_backend == "external_launcher"
-        )
+        return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
@@ -498,9 +515,9 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: PromptType,
-        params: SamplingParams | PoolingParams,
-        processed_inputs: ProcessorInputs,
+        prompt: "PromptType",
+        params: "SamplingParams | PoolingParams",
+        processed_inputs: "ProcessorInputs",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -543,27 +560,18 @@ class Platform:
     def stateless_init_device_torch_dist_pg(
         cls,
         backend: str,
-        prefix_store: PrefixStore,
+        prefix_store: "PrefixStore",
         group_rank: int,
         group_size: int,
         timeout: timedelta,
-    ) -> ProcessGroup:
+    ) -> "ProcessGroup":
         """
         Init platform-specific torch distributed process group.
         """
-        raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
+        raise NotImplementedError
 
     @classmethod
-    def is_kv_cache_dtype_supported(
-        cls, kv_cache_dtype: str, model_config: ModelConfig
-    ) -> bool:
-        """
-        Returns if the kv_cache_dtype is supported by the current platform.
-        """
-        return False
-
-    @classmethod
-    def check_if_supports_dtype(cls, torch_dtype: torch.dtype):
+    def check_if_supports_dtype(cls, dtype: torch.dtype):
         """
         Check if the dtype is supported by the current platform.
         """
@@ -620,6 +628,13 @@ class Platform:
         Returns the nixl memory type for the current platform.
         """
         return None
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        return max_model_len
 
 
 class UnspecifiedPlatform(Platform):
