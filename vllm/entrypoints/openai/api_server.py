@@ -65,6 +65,7 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    InitWeightsSendGroupForRemoteInstanceReqInput,
     IOProcessorResponse,
     PoolingBytesResponse,
     PoolingRequest,
@@ -75,6 +76,7 @@ from vllm.entrypoints.openai.protocol import (
     ResponsesResponse,
     ScoreRequest,
     ScoreResponse,
+    SendWeightsToRemoteInstanceReqInput,
     StreamingResponsesResponse,
     TokenizeRequest,
     TokenizeResponse,
@@ -1266,6 +1268,44 @@ def load_log_config(log_config_file: str | None) -> dict | None:
             "Failed to load log config from file %s: error %s", log_config_file, e
         )
         return None
+
+
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
+@router.post("/init_weights_send_group_for_remote_instance")
+async def init_weights_send_group_for_remote_instance(
+    obj: InitWeightsSendGroupForRemoteInstanceReqInput, request: Request
+):
+    results = await request.app.state.engine_client.collective_rpc(
+        "init_weights_send_group_for_remote_instance",
+        args=(obj.model_dump(),),
+        timeout=30.0,
+    )
+    all_success = all(r["success"] for r in results)
+    return JSONResponse(
+        content={
+            "success": all_success,
+            "message": "Initialized" if all_success else "Failed",
+        },
+        status_code=200 if all_success else 400,
+    )
+
+
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
+@router.post("/send_weights_to_remote_instance")
+async def send_weights_to_remote_instance(
+    obj: SendWeightsToRemoteInstanceReqInput, request: Request
+):
+    results = await request.app.state.engine_client.collective_rpc(
+        "send_weights_to_remote_instance", args=(obj.model_dump(),), timeout=60.0
+    )
+    all_success = all(r["success"] for r in results)
+    return JSONResponse(
+        content={
+            "success": all_success,
+            "message": "Initialized" if all_success else "Failed",
+        },
+        status_code=200 if all_success else 400,
+    )
 
 
 class AuthenticationMiddleware:

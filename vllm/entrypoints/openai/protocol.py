@@ -3110,3 +3110,25 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
+class InitWeightsSendGroupForRemoteInstanceReqInput(OpenAIBaseModel):
+    """Request to initialize weights send group for remote instance."""
+
+    master_address: str = Field(description="The master address")
+    ports: str = Field(description="The ports for each rank's communication group")
+    group_rank: int = Field(description="The rank in the communication group")
+    world_size: int = Field(description="The world size")
+    group_name: str = Field(default="weight_send_group", description="The group name")
+    backend: str = Field(default="nccl", description="The backend")
+
+
+# Adapted from  https://github.com/sgl-project/sglang/pull/8215
+class SendWeightsToRemoteInstanceReqInput(OpenAIBaseModel):
+    """Request to send weights to remote instance."""
+
+    master_address: str = Field(description="The master address")
+    ports: str = Field(description="The ports for each rank's communication group")
+    group_name: str = Field(default="weight_send_group", description="The group name")
+    state_dict: int = Field(description="The state_dict() lenth")
