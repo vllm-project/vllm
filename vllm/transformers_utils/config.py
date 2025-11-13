@@ -472,8 +472,7 @@ def is_interleaved(config: PretrainedConfig) -> bool:
     """
     text_config = config.get_text_config()
     if layer_types := getattr(text_config, "layer_types", None):
-        interleaved_types = {"full_attention", "sliding_attention"}
-        return interleaved_types.issubset(layer_types)
+        return len(set(layer_types)) > 1
     return False
 
 
