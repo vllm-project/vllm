@@ -2005,3 +2005,102 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
             # v_up projection
             self._v_up_proj(attn_out, out=output[:num_decode_tokens])
         return output_padded
+
+    def forward_prefill(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+    ) -> torch.Tensor:
+        return self._forward_prefill(
+            q, k_c_normed, k_pe, kv_cache, attn_metadata, layer._k_scale
+        )
+
+    def forward_decode(
+        self,
+        layer: AttentionLayer,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+    ) -> torch.Tensor:
+        # mirroring the decode branch in forward()
+        if self.dcp_world_size is None:
+            self.dcp_world_size = get_dcp_group().world_size
+
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+
+        # Split q into no-rope and rope parts
+        decode_q_nope, decode_q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        # (B, N, P) -> (N, B, P)
+        decode_q_nope = decode_q_nope.transpose(0, 1)
+
+        if self.q_pad_num_heads is not None:
+            B, N, L = decode_q_pe.shape
+            decode_pe_padded = decode_q_pe.new_empty((B, self.q_pad_num_heads, L))
+            decode_pe_padded.resize_((B, N, L))
+            decode_pe_padded.copy_(decode_q_pe)
+            decode_q_pe = decode_pe_padded
+
+        if self.is_aiter_triton_fp8_bmm_enabled:
+            # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
+            decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                decode_q_nope,
+                self.W_K,
+                self.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            N, B, P = decode_q_nope.shape
+            _, _, L = self.W_UK_T.shape
+            if self.q_pad_num_heads is not None:
+                decode_ql_nope = decode_q_nope.new_empty((self.q_pad_num_heads, B, L))
+                decode_ql_nope.resize_((N, B, L))
+            else:
+                decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+            torch.bmm(decode_q_nope, self.W_UK_T, out=decode_ql_nope)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
+        if fp8_attention:
+            ql_nope_shape = decode_ql_nope.shape
+            decode_ql_nope, _ = ops.scaled_fp8_quant(
+                decode_ql_nope.reshape(
+                    [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+                ),
+                layer._q_scale,
+            )
+            decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+            q_pe_shape = decode_q_pe.shape
+            decode_q_pe, _ = ops.scaled_fp8_quant(
+                decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                layer._q_scale,
+            )
+            decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+
+        decode_q = (decode_ql_nope, decode_q_pe)
+        if self.dcp_world_size > 1:
+            assert not fp8_attention, "DCP not support fp8 kvcache now."
+            decode_q = torch.cat(decode_q, dim=-1)
+            decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+
+        attn_out, lse = self._forward_decode(decode_q, kv_cache, attn_metadata, layer)
+
+        if self.dcp_world_size > 1:
+            attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
+
+        out = torch.empty(
+            (q.shape[0], self.num_heads * self.v_head_dim),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        self._v_up_proj(attn_out, out=out)
+        return out
+
+    def supports_compiled_split(self) -> bool:
+        """MLACommonImpl supports the compiled split path."""
+        return True
