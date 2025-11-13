@@ -14,11 +14,14 @@ from typing import Any
 
 import pytest
 import torch
-import vllm.model_executor.layers.fused_moe  # noqa
 from torch.nn import Parameter
 from torch.nn import functional as F
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
+
+import vllm.model_executor.layers.fused_moe  # noqa
+from tests.kernels.moe.utils import fused_moe
+from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
@@ -57,9 +60,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-
-from tests.kernels.moe.utils import fused_moe
-from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]

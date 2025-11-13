@@ -49,7 +49,7 @@ class CompressedTensorsWNA16(CompressedTensorsScheme):
         group_size: int | None = None,
         symmetric: bool | None = True,
         actorder: ActivationOrdering | None = None,
-        layer_name: str | None = None
+        layer_name: str | None = None,
     ):
         self.pack_factor = 32 // num_bits
         self.strategy = strategy
