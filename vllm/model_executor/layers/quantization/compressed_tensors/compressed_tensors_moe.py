@@ -44,9 +44,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compress
     WNA16_SUPPORTED_BITS,
     WNA16_SUPPORTED_TYPES_MAP,
 )
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target,
-)
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     build_flashinfer_fp4_cutlass_moe_prepare_finalize,
@@ -108,7 +105,10 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         quant_scheme,
     ) -> "CompressedTensorsMoEMethod":
-        from vllm.model_executor.layers.quantization.compressed_tensors import CompressedTensorsConfig
+        from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+            CompressedTensorsConfig,
+        )
+
         weight_quant = quant_scheme.get("weights")
         input_quant = quant_scheme.get("input_activations")
 
@@ -2210,9 +2210,11 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert not enable_eplb, "EPLB not supported for W4A8-int MoE yet."
-        assert activation in ("silu", "swigluoai", "swiglu"), (
-            "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
-        )
+        assert activation in (
+            "silu",
+            "swigluoai",
+            "swiglu",
+        ), "Only SiLU/SwiGLUGU/SwiGLUUG are supported."
         assert expert_map is None, """expert_map/EP not implemented
         for CPU dyn-4bit MoE."""
 
