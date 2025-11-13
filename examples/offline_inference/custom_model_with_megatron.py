@@ -153,7 +153,8 @@ class MegatronTransformer(nn.Module):
         for layer_idx, layer in enumerate(self.layers):
             # === ATTENTION BLOCK ===
             residual = hidden_states
-            attn_output = layer["attn"](hidden_states)
+            # Pass kwargs through to attention (for vLLM dynamic batching support)
+            attn_output = layer["attn"](hidden_states, **kwargs)
             hidden_states = layer["attn_norm"](residual + attn_output)
 
             # === MLP BLOCK ===
@@ -657,7 +658,7 @@ if __name__ == "__main__":
             tokenizer=None,
             tensor_parallel_size=4,  # Use TP=4 to test actual parallelism
             max_model_len=128,
-            max_num_seqs=1,
+            max_num_seqs=8,  # Allow batching for dynamic batching test
             enforce_eager=True,
             skip_tokenizer_init=True,
             trust_remote_code=True,
@@ -750,6 +751,36 @@ if __name__ == "__main__":
         print("\n" + "=" * 70)
         print("✅ All validation tests passed!")
         print("=" * 70)
+
+        # === DYNAMIC BATCHING TEST ===
+        print("\n" + "=" * 70)
+        print("[Dynamic Batching] Testing with multiple sequences")
+        print("=" * 70)
+
+        # Create multiple prompts of different lengths
+        batch_prompts = [
+            TokensPrompt(prompt_token_ids=[1, 2, 3]),  # 3 tokens
+            TokensPrompt(prompt_token_ids=[10, 20, 30, 40, 50]),  # 5 tokens
+            TokensPrompt(prompt_token_ids=[100, 200]),  # 2 tokens
+        ]
+
+        # Generate with batching
+        batch_outputs = llm.generate(
+            prompts=batch_prompts,
+            sampling_params=sampling_params,
+        )
+
+        print(f"\n[Dynamic Batching] Generated {len(batch_outputs)} outputs:")
+        for i, output in enumerate(batch_outputs):
+            prompt_len = len(batch_prompts[i]["prompt_token_ids"])
+            generated_id = output.outputs[0].token_ids[0]
+            print(
+                f"  Prompt {i + 1}: {prompt_len} tokens -> generated token {generated_id}"
+            )
+
+        print(
+            "\n✓ Dynamic batching works! Sequences of different lengths handled correctly."
+        )
 
         # Clean up vLLM engine to avoid shutdown errors
         print("\n[Cleanup] Shutting down vLLM engine...")

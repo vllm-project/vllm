@@ -95,6 +95,11 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
+        cu_seqlens_q: torch.Tensor | None = None,
+        cu_seqlens_k: torch.Tensor | None = None,
+        max_seqlen_q: int | None = None,
+        max_seqlen_k: int | None = None,
+        **kwargs,  # Accept any additional vLLM-specific kwargs
     ) -> torch.Tensor:
         """
         Forward pass with flash attention.
@@ -102,6 +107,10 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         Args:
             hidden_states: Input tensor of shape [batch, seq_len, hidden_size]
             attention_mask: Optional attention mask (not yet fully supported)
+            cu_seqlens_q: Optional cumulative sequence lengths for queries (for vLLM varlen)
+            cu_seqlens_k: Optional cumulative sequence lengths for keys (for vLLM varlen)
+            max_seqlen_q: Optional max sequence length for queries (for vLLM varlen)
+            max_seqlen_k: Optional max sequence length for keys (for vLLM varlen)
 
         Returns:
             output: Attention output of shape [batch, seq_len, hidden_size]
@@ -126,22 +135,38 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
         v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
 
-        # Use flash attention in training mode WITH CUDA
-        if self.training and hidden_states.is_cuda:
+        # Use different paths for training vs inference:
+        # - Training: Use PyTorch SDPA (has full backward support)
+        # - Inference: Use FA v3 (faster, avoids PTX issues)
+        if not self.training and hidden_states.is_cuda:
             # Flatten batch dimension for varlen format
             # flash_attn_varlen_func expects [total_tokens, num_heads, head_dim]
             q_flat = q.reshape(batch_size * seq_len, self.num_heads, self.head_dim)
             k_flat = k.reshape(batch_size * seq_len, self.num_kv_heads, self.head_dim)
             v_flat = v.reshape(batch_size * seq_len, self.num_kv_heads, self.head_dim)
 
-            # Create cumulative sequence lengths for varlen format
-            cu_seqlens = torch.arange(
-                0,
-                (batch_size + 1) * seq_len,
-                step=seq_len,
-                dtype=torch.int32,
-                device=hidden_states.device,
-            )
+            # Use provided cu_seqlens if available (for vLLM dynamic batching)
+            # Otherwise create equal-length cu_seqlens for standard training
+            if cu_seqlens_q is not None:
+                # vLLM is providing variable-length sequence info
+                _cu_seqlens_q = cu_seqlens_q
+                _cu_seqlens_k = (
+                    cu_seqlens_k if cu_seqlens_k is not None else cu_seqlens_q
+                )
+                _max_seqlen_q = max_seqlen_q if max_seqlen_q is not None else seq_len
+                _max_seqlen_k = max_seqlen_k if max_seqlen_k is not None else seq_len
+            else:
+                # Standard training: assume all sequences have same length
+                _cu_seqlens_q = torch.arange(
+                    0,
+                    (batch_size + 1) * seq_len,
+                    step=seq_len,
+                    dtype=torch.int32,
+                    device=hidden_states.device,
+                )
+                _cu_seqlens_k = _cu_seqlens_q
+                _max_seqlen_q = seq_len
+                _max_seqlen_k = seq_len
 
             # Call flash attention varlen func
             # This supports backprop automatically via autograd
@@ -150,10 +175,10 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                 q=q_flat,
                 k=k_flat,
                 v=v_flat,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=seq_len,
-                max_seqlen_k=seq_len,
+                cu_seqlens_q=_cu_seqlens_q,
+                cu_seqlens_k=_cu_seqlens_k,
+                max_seqlen_q=_max_seqlen_q,
+                max_seqlen_k=_max_seqlen_k,
                 softmax_scale=self.scale,
                 causal=self.causal,
                 dropout_p=self.dropout if self.training else 0.0,
