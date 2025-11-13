@@ -1864,7 +1864,7 @@ class EngineArgs:
 
             if model_config.runner_type == "pooling":
                 logger.info(
-                    "%s chunked prefill by default",
+                    "%s prefix caching by default",
                     "Enabling" if default_prefix_caching else "Disabling",
                 )
 
