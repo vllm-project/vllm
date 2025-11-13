@@ -1,0 +1,13 @@
+#!/bin/bash
+# Local test runner template for generic model tests
+# Copy this file and customize LD_PRELOAD paths for your system
+# This file should NOT be checked into git
+
+# Customize these paths for your system:
+# export LD_PRELOAD="/path/to/libcublasLt.so:/path/to/libcublas.so"
+
+# Example for Meta internal systems:
+export LD_PRELOAD="/usr/local/fbcode/platform010/lib/libcublasLt.so:/usr/local/fbcode/platform010/lib/libcublas.so"
+
+# Run tests
+python -m pytest tests/models/test_generic_models.py "$@"
