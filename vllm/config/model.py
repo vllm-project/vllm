@@ -264,7 +264,8 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
-    """Enable sleep mode for the engine (only cuda platform is supported)."""
+    """Enable sleep mode for the engine (only cuda and
+    hip platforms are supported)."""
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
@@ -1341,7 +1342,8 @@ class ModelConfig:
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
             return num_experts[0]
-        return num_experts
+        # Coerce to 0 if explicitly set to None
+        return num_experts or 0
 
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig

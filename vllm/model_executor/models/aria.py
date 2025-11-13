@@ -613,7 +613,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -629,8 +629,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
+            multimodal_embeddings = self.embed_multimodal(**kwargs)
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 multimodal_embeddings,
                 is_multimodal=input_ids == self.config.image_token_index,
