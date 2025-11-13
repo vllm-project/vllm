@@ -823,7 +823,7 @@ def _all_placeholders_found(
     item_idx_by_modality: dict[str, int],
 ) -> bool:
     return all(
-        item_idx >= mm_item_counts.get(modality, 0)
+        item_idx >= mm_item_counts[modality]
         for modality, item_idx in item_idx_by_modality.items()
     )
 
