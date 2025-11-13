@@ -8,7 +8,6 @@ from collections import OrderedDict
 import copy
 from vllm.tokenformer.tokenformer_surgeon import (
     TokenformerSurgeon,
-    TokenformerAttentionAdapter,
 )
 from vllm.model_executor.models import SupportsLoRA, supports_tokenformer
 from vllm.lora.models import get_lora_id
@@ -27,52 +26,6 @@ from vllm.adapter_commons.utils import (
 )
 
 logger = init_logger(__name__)
-
-
-class vLLMTokenformerAttentionAdapter(TokenformerAttentionAdapter):
-    def __init__(self, layer, hidden_size, device):
-        super().__init__(layer, hidden_size, device)
-
-    def forward(
-        self,
-        query,
-        key,
-        value,
-        kv_cache: Optional[torch.Tensor],
-        attn_metadata: AttentionMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
-    ) -> torch.Tensor:
-
-        base_layer_results = self.layer(
-            query=query,
-            key=key,
-            value=value,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-            attn_type=attn_type,
-        )
-
-        seq_len = query.shape[0]
-        new_shape = [-1, self.layer.num_heads, seq_len, self.layer.head_dim]
-        reshaped_query = torch.reshape(query, new_shape)
-        reshaped_base_layer_results = torch.reshape(base_layer_results, new_shape)
-        result = super().forward(reshaped_query, reshaped_base_layer_results)
-        return torch.reshape(result, [-1, self.layer.num_heads * self.layer.head_dim])
-
-
-class vLLMTokenformerSurgeon(TokenformerSurgeon):
-
-    def __init__(
-        self,
-        model: nn.Module,
-        device: torch.device,
-    ):
-        super().__init__(model, device)
-
-    def update_attn(self, name, layer):
-        """Try to wrap the layer with a TokenformerAttentionAdaptor."""
-        if not self._is_attn_layer(name):
-            return
 
 
 class TokenformerModel(AdapterModel):
@@ -114,7 +67,7 @@ class TokenformerModelManager(AdapterModelManager):
         device: torch.device,
     ):
         if supports_tokenformer(model):
-            self.model = vLLMTokenformerSurgeon(model, device).insert_adapter_modules()
+            self.model = TokenformerSurgeon(model, device).insert_adapter_modules()
         else:
             self.model = model
         self._registered_adapters: Dict[int, Any] = {}
@@ -122,13 +75,7 @@ class TokenformerModelManager(AdapterModelManager):
         self.tokenformer_model_cls = TokenformerModel
         self.dtype = next(self.model.parameters()).dtype
         self.device = device
-        self.orig_lm_head = copy.deepcopy(
-            {
-                k: v.to(self.dtype)
-                for k, v in self.model.state_dict().items()
-                if "lm_head" in k
-            }
-        )
+        self.original_tensors = {}
         self._lru_adaptor_ids = []
 
     def activate_adapter(self, adapter_id: int) -> bool:
@@ -145,8 +92,14 @@ class TokenformerModelManager(AdapterModelManager):
         model_state_dict = self.model.state_dict()
         tokenformers = self._registered_adapters[adapter_id].tokenformers
 
-        for key, value in self.orig_lm_head.items():
-            logger.info(f"Loading original lm head {key} from adapter {adapter_id}")
+        # Save original tensors if not already saved
+        for key in tokenformers:
+            if key not in self.original_tensors:
+                logger.info(f"Saving original tensor {key} before loading adapter {adapter_id}")
+                self.original_tensors[key] = copy.deepcopy(model_state_dict[key])
+
+        for key, value in self.original_tensors.items():
+            logger.info(f"Loading original tensor {key} from adapter {adapter_id}")
             model_state_dict[key] = value
 
         for key, value in tokenformers.items():
@@ -175,8 +128,8 @@ class TokenformerModelManager(AdapterModelManager):
         for key in tokenformers:
             if "tokenformer_p" in key:
                 nn.init.zeros_(model_state_dict[key])
-            elif "lm_head" in key:
-                model_state_dict[key] = self.orig_lm_head[key]
+            elif key in self.original_tensors:
+                model_state_dict[key] = self.original_tensors[key]
 
         self.model.load_state_dict(model_state_dict, strict=False)
 
@@ -251,16 +204,16 @@ class TokenformerModelManager(AdapterModelManager):
     @property
     def adapter_slots(self) -> int:
         pass
-    
+
     @contextmanager
     def dummy_lora_cache(self):
         """Context manager for dummy LoRA cache during warmup."""
         # Simple pass-through context manager since tokenformer doesn't need special cache handling
         yield
-    
+
     def add_dummy_lora(self, lora_request, rank: int = 8):
         """Add a dummy LoRA for warmup purposes.
-        
+
         Args:
             lora_request: The LoRA request object
             rank: The rank for the dummy LoRA (default 8)
