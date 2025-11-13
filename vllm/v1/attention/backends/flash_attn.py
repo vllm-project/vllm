@@ -131,6 +131,12 @@ class FlashAttentionBackend(AttentionBackend):
         return kv_cache_dtype in ["auto"]
 
     @classmethod
+    def supports_sink(cls) -> bool:
+        if not is_flash_attn_varlen_func_available():
+            return False
+        return flash_attn_supports_sinks()
+
+    @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return capability >= DeviceCapability(8, 0)
 
