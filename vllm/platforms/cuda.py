@@ -298,6 +298,7 @@ class CudaPlatformBase(Platform):
         has_sink,
         use_sparse,
         device_capability,
+        attn_type,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
         dict["AttentionBackendEnum", list[str]],
@@ -318,6 +319,7 @@ class CudaPlatformBase(Platform):
                     has_sink,
                     use_sparse,
                     device_capability,
+                    attn_type,
                 )
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
@@ -339,7 +341,13 @@ class CudaPlatformBase(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
+        from vllm.attention import AttentionType
+
+        if attn_type is None:
+            attn_type = AttentionType.DECODER
+
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
@@ -356,6 +364,7 @@ class CudaPlatformBase(Platform):
                     has_sink,
                     use_sparse,
                     device_capability,
+                    attn_type,
                 )
             except ImportError:
                 invalid_reasons = ["ImportError"]
@@ -379,6 +388,7 @@ class CudaPlatformBase(Platform):
             has_sink,
             use_sparse,
             device_capability,
+            attn_type,
         )
         reasons_str = (
             "{"
