@@ -3,7 +3,6 @@
 """Attention layer."""
 
 from collections.abc import Callable
-import os
 from typing import cast
 
 import torch
@@ -11,6 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.registry import AttentionBackendEnum
@@ -745,7 +745,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
-        self._use_compiled_split = False
+        try:
+            self._use_compiled_split = bool(self.impl.supports_compiled_split())
+        except Exception:
+            self._use_compiled_split = False
 
     def forward(
         self,
@@ -813,32 +816,44 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_block_scale: torch.Tensor | None = None,
         allow_compiled_split: bool = True,
     ) -> torch.Tensor:
-        """Common MLA orchestration entry point.
-
-        """
+        """Common MLA orchestration entry point."""
         # compiled-region split path
         if self._use_compiled_split and allow_compiled_split:
-            # Determine dynamic split using a custom op 
-            n_decode_tokens = int(torch.ops.vllm.mla_split_batch(q, self.layer_name))
+            # latent and rope to kv cache up-front (outside backend)
+            if isinstance(kv_cache, torch.Tensor) and kv_cache.numel() > 0:
+                assert hasattr(attn_metadata, "slot_mapping")
+                ops.concat_and_cache_mla(
+                    kv_c_normed,
+                    k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=self._k_scale,
+                )
+
+            # to determine dynamic split
+            n_decode_tokens_t = torch.ops.vllm.mla_split_batch(q, self.layer_name)
+            total_toks = q.shape[0]
+            n_decode_tokens_t = torch.clamp(n_decode_tokens_t, min=0, max=total_toks)
+            n_decode_tokens = int(n_decode_tokens_t.item())  # graph break here
 
             # Fast path for trivial cases
             if n_decode_tokens <= 0:
-                prefill_q = q
-                prefill_k_c = kv_c_normed
-                prefill_k_pe = k_pe
                 prefill_out = self.impl.forward_prefill(
-                    self, prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
+                    self, q, kv_c_normed, k_pe, kv_cache, attn_metadata
                 )
                 if output is not None:
+                    assert output[: prefill_out.shape[0]].shape == prefill_out.shape
                     output[: prefill_out.shape[0]].copy_(prefill_out)
                     return output
                 return prefill_out
-            if n_decode_tokens >= q.shape[0]:
-                decode_q = q[:n_decode_tokens]
+            if n_decode_tokens >= total_toks:
+                decode_q = q if n_decode_tokens == total_toks else q[:n_decode_tokens]
                 decode_out = self.impl.forward_decode(
                     self, decode_q, kv_cache, attn_metadata
                 )
                 if output is not None:
+                    assert output[: decode_out.shape[0]].shape == decode_out.shape
                     output[: decode_out.shape[0]].copy_(decode_out)
                     return output
                 return decode_out
@@ -856,20 +871,30 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
             decode_out = None
             if decode_q.shape[0] > 0:
-                decode_out = self.impl.forward_decode(self, decode_q, kv_cache, attn_metadata)
+                decode_out = self.impl.forward_decode(
+                    self, decode_q, kv_cache, attn_metadata
+                )
 
             if output is None:
-                total = q.shape[0]
+                total = getattr(attn_metadata, "num_actual_tokens", None)
+                if total is None:
+                    total = q.shape[0]
                 out = torch.empty(
-                    (total, self.num_heads * self.v_head_dim), dtype=q.dtype, device=q.device
+                    (total, self.num_heads * self.v_head_dim),
+                    dtype=q.dtype,
+                    device=q.device,
                 )
             else:
                 out = output
 
             if decode_out is not None:
-                out[: n_decode_tokens].copy_(decode_out)
+                assert out[:n_decode_tokens].shape == decode_out.shape
+                out[:n_decode_tokens].copy_(decode_out)
             if prefill_out is not None:
-                out[n_decode_tokens : n_decode_tokens + prefill_out.shape[0]].copy_(prefill_out)
+                start = n_decode_tokens
+                end = n_decode_tokens + prefill_out.shape[0]
+                assert out[start:end].shape == prefill_out.shape
+                out[start:end].copy_(prefill_out)
             return out
 
         # Default path: delegate to backend unified forward
@@ -966,37 +991,16 @@ direct_register_custom_op(
 
 
 def mla_split_batch(q: torch.Tensor, layer_name: str) -> torch.Tensor:
-    """Returns number of decode tokens at the front of the varlen batch.
-    """
+    """Returns number of decode tokens at the front of the varlen batch."""
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
         attn_metadata = attn_metadata[layer_name]
     if attn_metadata is None:
         return torch.zeros((), dtype=torch.int64, device=q.device)
-    return torch.tensor(attn_metadata.num_decode_tokens, device=q.device, dtype=torch.int64)
-
-
-def mla_split_batch_fake(q: torch.Tensor, layer_name: str) -> torch.Tensor:
-    return torch.zeros((), dtype=torch.int64, device=q.device)
-
-
-direct_register_custom_op(
-    op_name="mla_split_batch",
-    op_func=mla_split_batch,
-    fake_impl=mla_split_batch_fake,
-)
-
-def mla_split_batch(q: torch.Tensor, layer_name: str) -> torch.Tensor:
-    """Returns number of decode tokens at the front of the varlen batch.
-    """
-    forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
-    if attn_metadata is None:
-        return torch.zeros((), dtype=torch.int64, device=q.device)
-    return torch.tensor(attn_metadata.num_decode_tokens, device=q.device, dtype=torch.int64)
+    return torch.tensor(
+        attn_metadata.num_decode_tokens, device=q.device, dtype=torch.int64
+    )
 
 
 def mla_split_batch_fake(q: torch.Tensor, layer_name: str) -> torch.Tensor:
