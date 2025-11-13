@@ -83,16 +83,15 @@ class _CallableRegisteredModel(_BaseRegisteredModel):
         class CallableModelWrapper(nn.Module):
             """Wrapper that calls the factory function with parallel context."""
 
-            def __init__(self, vllm_config=None, parallel_context=None, **kwargs):
+            def __init__(self, vllm_config, prefix="", **kwargs):
                 # Call super init FIRST
                 super().__init__()
 
-                # Extract parallel context from various possible sources
+                # Extract parallel_context from kwargs or create from vllm_config
+                parallel_context = kwargs.pop("parallel_context", None)
                 if parallel_context is None:
-                    # Try to create from vllm_config
-                    if vllm_config is not None and hasattr(
-                        vllm_config, "parallel_config"
-                    ):
+                    # Create from vllm_config's parallel_config
+                    if hasattr(vllm_config, "parallel_config"):
                         parallel_context = ParallelContext.from_config(
                             vllm_config.parallel_config
                         )
