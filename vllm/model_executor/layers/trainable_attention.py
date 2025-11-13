@@ -56,6 +56,9 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         causal: Whether to use causal masking. Defaults to True
     """
 
+    # Class variable for auto-generating unique layer names
+    _layer_counter = 0
+
     def __init__(
         self,
         hidden_size: int,
@@ -65,7 +68,6 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         dropout: float = 0.0,
         scale: float | None = None,
         causal: bool = True,
-        prefix: str = "",
     ):
         super().__init__()
 
@@ -99,15 +101,39 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         # For V1 engine, this is a list[torch.Tensor] indexed by virtual_engine
         self.kv_cache: list[torch.Tensor] | None = None
 
-        # Register layer in vLLM's static forward context for KV cache detection
-        if prefix:
+        # Auto-register for vLLM KV cache if in vLLM context
+        self._auto_register_for_kv_cache()
+
+    def _auto_register_for_kv_cache(self):
+        """Automatically register this layer for vLLM KV cache allocation.
+
+        This is called during __init__ and will register the layer if we're in
+        a vLLM context. If not in vLLM context (e.g., pure PyTorch training),
+        this silently does nothing.
+        """
+        # Initialize layer_name attribute
+        self.layer_name: str | None = None
+
+        try:
             from vllm.config import get_current_vllm_config
 
-            compilation_config = get_current_vllm_config().compilation_config
-            if prefix in compilation_config.static_forward_context:
-                raise ValueError(f"Duplicate layer name: {prefix}")
-            compilation_config.static_forward_context[prefix] = self
-            self.layer_name = prefix
+            config = get_current_vllm_config()
+            compilation_config = config.compilation_config
+
+            # Generate unique layer name using class counter
+            layer_name = f"trainable_attn_{TrainableFlashAttention._layer_counter}"
+            TrainableFlashAttention._layer_counter += 1
+
+            # Register this layer in static forward context
+            if layer_name in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {layer_name}")
+            compilation_config.static_forward_context[layer_name] = self
+            self.layer_name = layer_name
+
+        except (ImportError, RuntimeError, AttributeError):
+            # Not in vLLM context - this is fine!
+            # Layer will work normally for training/inference without vLLM
+            pass
 
     def forward(
         self,

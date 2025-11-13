@@ -96,8 +96,6 @@ class MegatronTransformer(nn.Module):
                         num_heads=num_attention_heads,
                         dropout=0.0,
                         causal=True,
-                        # Register layer name for vLLM KV cache
-                        prefix=f"layers.{i}.attn",
                     ),
                     "attn_norm": nn.LayerNorm(hidden_size),
                     # === MLP BLOCK ===
