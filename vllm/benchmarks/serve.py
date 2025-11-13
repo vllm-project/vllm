@@ -49,6 +49,7 @@ from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils.gc_utils import freeze_gc_heap
+from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
@@ -1333,8 +1334,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         api_url = f"{args.base_url}{args.endpoint}"
         base_url = f"{args.base_url}"
     else:
-        api_url = f"http://{args.host}:{args.port}{args.endpoint}"
-        base_url = f"http://{args.host}:{args.port}"
+        host_port = join_host_port(args.host, args.port)
+        api_url = f"http://{host_port}{args.endpoint}"
+        base_url = f"http://{host_port}"
 
     # Headers
     headers = None
