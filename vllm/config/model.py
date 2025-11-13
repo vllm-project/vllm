@@ -2078,9 +2078,9 @@ def _get_and_verify_max_len(
         # the verification, we convert any RopeParameters to dict[str, RopeParameters]
         if not set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
             rope_parameters = {"": rope_parameters}
+        scaling_factor = 1.0
         for rp in rope_parameters.values():
             rope_type = rp["rope_type"]
-            scaling_factor = 1.0
 
             if rope_type not in ("su", "longrope", "llama3"):
                 if disable_sliding_window:
@@ -2091,14 +2091,14 @@ def _get_and_verify_max_len(
                         "rope_parameters. Please raise an issue so we can investigate."
                     )
 
-                # NOTE: rope_type == "default" does not define factor
-                # https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
-                scaling_factor = rp.get("factor", 1.0)
+                # NOTE: rope_type == "default" does not define factor https://github.com/huggingface/transformers/blob/v4.45.2/src/transformers/modeling_rope_utils.py
+                # NOTE: This assumes all layer types have the same scaling factor.
+                scaling_factor = rp.get("factor", scaling_factor)
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
-            # Do this outside loop since all layers should have the same scaling
-            derived_max_model_len *= scaling_factor
+        # Do this outside loop since all layers should have the same scaling
+        derived_max_model_len *= scaling_factor
 
     if encoder_config and "max_seq_length" in encoder_config:
         derived_max_model_len = encoder_config["max_seq_length"]
