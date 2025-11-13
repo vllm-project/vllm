@@ -935,6 +935,7 @@ class NixlConnectorWorker:
             attn_backend=backend,
         )
         self._use_pallas = self.kv_topo._use_pallas
+        self._physical_blocks_per_logical_kv_block = 1
 
     def _nixl_handshake(
         self,
@@ -1132,6 +1133,22 @@ class NixlConnectorWorker:
                     self.device_id = cache.device.index
                 if base_addr in seen_base_addresses:
                     continue
+
+                # TODO (NickLucche): Get kernel_block_size in a cleaner way
+                # NHD default "view" for non-MLA cache
+                kernel_block_size = cache.shape[-2] if self.use_mla else cache.shape[-3]
+
+                if self.block_size != kernel_block_size:
+                    logger.info_once(
+                        "User-specified logical block size (%s) does not match"
+                        " physical kernel block size (%s). Using the latter. ",
+                        self.block_size,
+                        kernel_block_size,
+                    )
+                    self._physical_blocks_per_logical_kv_block = (
+                        self.block_size // kernel_block_size
+                    )
+                    self.block_size = kernel_block_size
 
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
@@ -1751,6 +1768,8 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
     ):
+        local_block_ids = self._logical_to_kernel_block_ids(local_block_ids)
+        remote_block_ids = self._logical_to_kernel_block_ids(remote_block_ids)
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
         # after we detect the txn is complete (which means we cannot make the
@@ -1876,7 +1895,7 @@ class NixlConnectorWorker:
             self._failed_recv_reqs.add(request_id)
 
     def _get_block_descs_ids(
-        self, engine_id: str, block_ids: list[int], layer_idx: int | None = None
+        self, engine_id: str, block_ids: np.ndarray, layer_idx: int | None = None
     ) -> np.ndarray:
         """
         Get the descs ids for a set of block ids.
@@ -1902,9 +1921,27 @@ class NixlConnectorWorker:
 
         # Compute the desc ids for each block.
         region_ids = region_ids[:, None]
-        block_ids = np.array(block_ids)[None, :]
+        block_ids = block_ids[None, :]
         descs_ids = region_ids * num_blocks + block_ids
         return descs_ids.flatten()
+
+    def _logical_to_kernel_block_ids(self, block_ids: list[int]) -> np.ndarray:
+        """
+        Convert logical block ids to kernel physical block ids.
+        This is required when the logical block size (the one set by the user)
+        does not match the one required by the attn backend.
+        """
+        block_ids_np = np.array(block_ids)
+        if self._physical_blocks_per_logical_kv_block == 1:
+            return block_ids_np
+        block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
+            1, -1
+        )
+        kernel_block_ids = (
+            block_ids_np.reshape(-1, 1) * self._physical_blocks_per_logical_kv_block
+            + block_arange
+        )
+        return kernel_block_ids.reshape(-1)
 
     def get_backend_aware_kv_block_len(self, layer_idx: int):
         """
