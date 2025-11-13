@@ -2462,6 +2462,80 @@ class GPUModelRunner(
             **model_kwargs,
         )
 
+    def _determine_batch_execution_and_padding(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+        max_num_scheduled_tokens: int,
+        use_cascade_attn: bool,
+        force_eager: bool = False,
+        force_uniform_decode: bool | None = None,
+    ) -> tuple[
+        CUDAGraphMode, BatchDescriptor, UBatchSlices | None, torch.Tensor | None
+    ]:
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        uniform_decode = (
+            (
+                (max_num_scheduled_tokens == self.uniform_decode_query_len)
+                # TODO(lucas): sequence parallelism padding can force us out of
+                # uniform decode and as a result FULL cudagraphs; we should
+                # add a warning to users when this occurs.
+                and (num_tokens_padded == max_num_scheduled_tokens * num_reqs)
+            )
+            if force_uniform_decode is None
+            else force_uniform_decode
+        )
+
+        dispatch_cudagraph = (
+            lambda num_tokens: self.cudagraph_dispatcher.dispatch(
+                num_tokens=num_tokens,
+                has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                use_cascade_attn=use_cascade_attn,
+                uniform_decode=uniform_decode,
+            )
+            if not force_eager
+            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
+        )
+
+        cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+        num_tokens_padded = batch_descriptor.num_tokens
+
+        # Extra coordination when running data-parallel since we need to coordinate
+        # across ranks
+        ubatch_slices, num_tokens_across_dp = None, None
+        if self.vllm_config.parallel_config.data_parallel_size > 1:
+            # Disable DP padding when running eager to avoid excessive padding when
+            # running prefills. This lets us set enforce_eager on the prefiller in
+            # a P/D setup and still use CUDA graphs (enabled by this padding) on the
+            # decoder.
+            allow_dp_padding = (
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+            )
+
+            ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
+                num_tokens_unpadded=num_tokens_padded,
+                parallel_config=self.parallel_config,
+                allow_microbatching=True,
+                allow_dp_padding=allow_dp_padding,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+            )
+
+            # Extract DP padding if there is any
+            if num_tokens_across_dp is not None:
+                dp_rank = self.parallel_config.data_parallel_rank
+                num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
+
+                # Re-dispatch with DP padding
+                cudagraph_mode, batch_descriptor = dispatch_cudagraph(num_tokens_padded)
+                # Assert to make sure the agreed upon token count is correct otherwise
+                # num_tokens_across_dp will no-longer be valid
+                assert batch_descriptor.num_tokens == num_tokens_padded
+
+        return cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -2506,6 +2580,7 @@ class GPUModelRunner(
                 tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
                 num_scheduled_tokens_np = np.array(tokens, dtype=np.int32)
                 max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+                num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
                 (
                     logits_indices,
@@ -2525,58 +2600,17 @@ class GPUModelRunner(
                         scheduler_output.num_common_prefix_blocks,
                     )
 
-                num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
-                num_tokens_padded = self._pad_for_sequence_parallelism(
-                    num_tokens_unpadded
-                )
-                uniform_decode = (
-                    (max_num_scheduled_tokens == self.uniform_decode_query_len)
-                    # TODO(lucas): sequence parallelism padding can force us out of
-                    # uniform decode and as a result FULL cudagraphs; we should
-                    # add a warning to users when this occurs.
-                    and (num_tokens_padded == max_num_scheduled_tokens * num_reqs)
-                )
-
-                # Disable DP padding when running eager to avoid excessive padding when
-                # running prefills. This lets us set enforce_eager on the prefiller in
-                # a P/D setup and still use CUDA graphs (enabled by this padding) on the
-                # decoder.
-                allow_dp_padding = (
-                    self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-                )
-
-                ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens_unpadded,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=True,
-                    allow_dp_padding=allow_dp_padding,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    num_scheduled_tokens_per_request=num_scheduled_tokens,
-                )
-
-                # Extract DP padding if there is any
-                if num_tokens_across_dp is not None:
-                    dp_rank = self.parallel_config.data_parallel_rank
-                    num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
-
-                # Will return an unpadded batch descriptor if cudagraph is not NONE.
-                # For DP the assumptiong here is that this cudagraph shapes are the same
-                # across all DP ranks. When DP padding is enabled, all ranks will
-                # get the same amount of CG padding preserving the goal of DP padding to
-                # have all the ranks process the same amount of tokens (run the same
-                # number of MoE DP chunks when DP chunking is enabled).
-                # NOTE(lucas): this will break slightly when we have seperate cudagraph
-                # sizes for decode and mixed prefill-decode cudagraphs; in that case,
-                # `coordinate_batch_across_dp` will need to synchronize uniform_decode
-                # too.
-                cudagraph_runtime_mode, batch_descriptor = (
-                    self.cudagraph_dispatcher.dispatch(
-                        num_tokens=num_tokens_padded,
-                        has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
-                        use_cascade_attn=cascade_attn_prefix_lens is not None,
-                        uniform_decode=uniform_decode,
-                    )
+                (
+                    cudagraph_mode,
+                    batch_descriptor,
+                    ubatch_slices,
+                    num_tokens_across_dp,
+                ) = self._determine_batch_execution_and_padding(
+                    num_tokens=num_tokens_unpadded,
+                    num_reqs=num_reqs,
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    max_num_scheduled_tokens=max_num_scheduled_tokens,
+                    use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
 
                 num_tokens_padded = batch_descriptor.num_tokens
@@ -2616,7 +2650,7 @@ class GPUModelRunner(
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
         if self.calculate_kv_scales:
-            cudagraph_runtime_mode = CUDAGraphMode.NONE
+            cudagraph_mode = CUDAGraphMode.NONE
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
@@ -2628,7 +2662,7 @@ class GPUModelRunner(
                 self.vllm_config,
                 num_tokens=num_tokens_padded,
                 num_tokens_across_dp=num_tokens_across_dp,
-                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                cudagraph_runtime_mode=cudagraph_mode,
                 batch_descriptor=batch_descriptor,
                 ubatch_slices=ubatch_slices,
             ),
@@ -3483,43 +3517,25 @@ class GPUModelRunner(
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list, dtype=np.int32)
-
         num_tokens_unpadded = int(num_scheduled_tokens.sum())
-        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens_unpadded)
-        # Check that sequence_parallelism padding did not mess up the uniform decode
-        # batch shape
-        assert not uniform_decode or num_tokens_padded == num_tokens_unpadded
 
         num_sampled_tokens = np.ones(num_reqs, dtype=np.int32)
 
-        # Disable DP padding when running eager
-        allow_dp_padding = self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-
-        # We currently only microbatch if the number of tokens is
-        # over a certain threshold.
-        ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
-            num_tokens_unpadded=num_tokens_unpadded,
-            parallel_config=self.vllm_config.parallel_config,
-            allow_microbatching=allow_microbatching,
-            allow_dp_padding=allow_dp_padding,
-            num_tokens_padded=num_tokens_padded,
-            uniform_decode=uniform_decode,
-            num_scheduled_tokens_per_request=num_scheduled_tokens,
-        )
-
-        num_tokens_padded = num_tokens_padded
-        if num_tokens_across_dp is not None:
-            dp_rank = self.parallel_config.data_parallel_rank
-            num_tokens_padded = int(num_tokens_across_dp[dp_rank])
-
-        _cg_mode, batch_descriptor = (
-            self.cudagraph_dispatcher.dispatch(
-                num_tokens=num_tokens_padded,
-                uniform_decode=uniform_decode,
-                has_lora=activate_lora and self.lora_config is not None,
+        _cudagraph_mode, batch_descriptor, ubatch_slices, num_tokens_across_dp = (
+            self._determine_batch_execution_and_padding(
+                num_tokens=num_tokens_unpadded,
+                num_reqs=num_reqs,
+                num_scheduled_tokens_np=num_scheduled_tokens,
+                max_num_scheduled_tokens=max_query_len,
+                use_cascade_attn=False,
+                force_eager=is_profile
+                or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
+                # `force_uniform_decode` is used for cudagraph capture; because for
+                # capturing mixed prefill-decode batches, we sometimes use
+                # num_tokens == num_reqs which looks like a uniform decode batch to the
+                # dispatcher; but we actually want to capture a piecewise cudagraph
+                force_uniform_decode=uniform_decode,
             )
-            if not is_profile
-            else (CUDAGraphMode.NONE, BatchDescriptor(num_tokens_padded))
         )
 
         num_tokens_padded = batch_descriptor.num_tokens
@@ -3534,13 +3550,13 @@ class GPUModelRunner(
             # warm ups for cudagraph capture
             assert (
                 cudagraph_runtime_mode == CUDAGraphMode.NONE
-                or cudagraph_runtime_mode == _cg_mode
+                or cudagraph_runtime_mode == _cudagraph_mode
             ), (
                 f"Cudagraph runtime mode mismatch at dummy_run. "
-                f"Expected {_cg_mode}, but got {cudagraph_runtime_mode}."
+                f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
             )
         else:
-            cudagraph_runtime_mode = _cg_mode
+            cudagraph_runtime_mode = _cudagraph_mode
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
