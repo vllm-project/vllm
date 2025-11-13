@@ -345,12 +345,12 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-class ClientGuard:
+class ClientSentinel:
     def __init__(
         self,
         fault_receiver_addr: str,
         cmd_addr: str,
-        engine_registry: list[bytes],
+        engine_registry: dict[int, bytes],
         engine_exception_q: queue.Queue[FaultInfo],
         fault_pub_addr: str,
         engine_status_dict: ThreadSafeDict[int, str],
@@ -382,15 +382,15 @@ class ClientGuard:
             self.engine_status_dict,
         )
 
-        self.logger = self._make_client_guard_logger()
+        self.logger = self._make_client_sentinel_logger()
 
-        self.client_guard_dead = False
+        self.client_sentinel_dead = False
         Thread(
             target=self.fault_receiver, daemon=True, name="EngineCoreFaultReceiver"
         ).start()
 
-    def _make_client_guard_logger(self):
-        prefix = "[client_guard] "
+    def _make_client_sentinel_logger(self):
+        prefix = "[client_sentinel] "
 
         def log(msg, *args, level="info", **kwargs):
             """
@@ -427,7 +427,7 @@ class ClientGuard:
         engine_core component. It is designed to run continuously to ensure no critical
         error information from the engine core is missed.
         """
-        while not self.client_guard_dead:
+        while not self.client_sentinel_dead:
             try:
                 _, sender_identity, message = recv_router_dealer_message(
                     self.fault_receiver_socket
@@ -457,13 +457,13 @@ class ClientGuard:
                 break
         self.logger("Fault receiver thread has stopped.")
 
-    def shutdown_guard(self):
-        self.client_guard_dead = True
+    def shutdown_sentinel(self):
+        self.client_sentinel_dead = True
         self.fault_receiver_socket.close()
         self.cmd_socket.close()
         self.fault_pub_socket.close()
         self.zmq_ctx.term()
-        self.logger("ClientGuard is closed.", level="info")
+        self.logger("ClientSentinel is closed.", level="info")
 
 
 @dataclass
@@ -484,7 +484,7 @@ class BackgroundResources:
     output_queue_task: asyncio.Task | None = None
     stats_update_task: asyncio.Task | None = None
     shutdown_path: str | None = None
-    client_guard: ClientGuard | None = None
+    client_sentinel: ClientSentinel | None = None
 
     # Set if any of the engines are dead. Here so that the output
     # processing threads can access it without holding a ref to the client.
@@ -498,8 +498,8 @@ class BackgroundResources:
             self.engine_manager.close()
         if self.coordinator is not None:
             self.coordinator.close()
-        if self.client_guard is not None:
-            self.client_guard.shutdown_guard()
+        if self.client_sentinel is not None:
+            self.client_sentinel.shutdown_sentinel()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -689,7 +689,7 @@ class MPClient(EngineCoreClient):
                     "addresses.client_cmd_addr should not be None at fault tolerance"
                     " scenario"
                 )
-                self.engine_registry = addresses.engine_core_guard_identities
+                self.engine_registry = addresses.engine_core_sentinel_identities
                 assert self.engine_registry is not None
                 assert addresses.fault_pub_socket_addr is not None, (
                     "addresses.fault_pub_socket_addr should not be None at"
@@ -698,7 +698,7 @@ class MPClient(EngineCoreClient):
                 self.engine_status_dict: ThreadSafeDict[int, str] = ThreadSafeDict()
                 for engine_id in range(vllm_config.parallel_config.data_parallel_size):
                     self.engine_status_dict[engine_id] = "Healthy"
-                self.client_guard = ClientGuard(
+                self.client_sentinel = ClientSentinel(
                     addresses.fault_report_addr,
                     addresses.client_cmd_addr,
                     self.engine_registry,
@@ -706,7 +706,7 @@ class MPClient(EngineCoreClient):
                     addresses.fault_pub_socket_addr,
                     self.engine_status_dict,
                 )
-                self.resources.client_guard = self.client_guard
+                self.resources.client_sentinel = self.client_sentinel
             success = True
         finally:
             if not success:
@@ -859,7 +859,7 @@ class MPClient(EngineCoreClient):
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
         """handle fault of current instance by instruction"""
-        return await self.client_guard.handle_fault(instruction, timeout, **kwargs)
+        return await self.client_sentinel.handle_fault(instruction, timeout, **kwargs)
 
     async def fault_reporter(self):
         return self.engine_status_dict.to_dict()

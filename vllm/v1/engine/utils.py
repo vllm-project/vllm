@@ -83,11 +83,11 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
     #
     fault_report_addr: str | None = None
-    # ZMQ client_cmd socket address of client guard
+    # ZMQ client_cmd socket address of client sentinel
     client_cmd_addr: str | None = None
-    # identities of engine_core_guard
-    engine_core_guard_identities: list[bytes] | None = None
-    # ZMQ fault_pub_socket address of client guard
+    # identities of engine_core_sentinel
+    engine_core_sentinel_identities: dict[int, bytes] | None = None
+    # ZMQ fault_pub_socket address of client sentinel
     fault_pub_socket_addr: str | None = None
 
 
@@ -133,7 +133,7 @@ class CoreEngineProcManager:
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
             identity = generate_identity_group(
-                "core_engine_proc_manager", "client_guard", "report", 1
+                "core_engine_proc_manager", "client_sentinel", "report", 1
             )[0]
             zmq_addr = get_engine_client_zmq_addr(
                 local_only=False,
@@ -198,7 +198,7 @@ class CoreEngineProcManager:
                 self.close()
 
     def _report_engine_dead(self, dead_message):
-        """Send engine dead message to ClientGuard"""
+        """Send engine dead message to ClientSentinel"""
         try:
             self.engine_down_socket.send_multipart(
                 [
@@ -206,7 +206,7 @@ class CoreEngineProcManager:
                     dead_message.encode("utf-8"),
                 ]
             )
-            logger.info("Sent message to ClientGuard: %s", dead_message)
+            logger.info("Sent message to ClientSentinel: %s", dead_message)
         except Exception as e:
             logger.error("Failed to send message: %s", e)
 
@@ -359,7 +359,7 @@ class CoreEngineActorManager:
                 port=vllm_config.fault_tolerance_config.internal_fault_report_port,
             )
             identity = generate_identity_group(
-                "core_engine_actor_manager", "clinet_guard", "report", 1
+                "core_engine_actor_manager", "clinet_sentinel", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -923,12 +923,15 @@ def launch_core_engines(
         addresses.client_cmd_addr = get_engine_client_zmq_addr(
             local_only=client_local_only, host=host
         )
-        addresses.engine_core_guard_identities = generate_identity_group(
+        identity_group = generate_identity_group(
             peer1="client",
-            peer2="engine_core_guard",
+            peer2="engine_core_sentinel",
             use="report and cmd",
             n=dp_size,
         )
+        addresses.engine_core_sentinel_identities = {
+            rank: identity for rank, identity in enumerate(identity_group)
+        }
         addresses.fault_pub_socket_addr = get_engine_client_zmq_addr(
             local_only=False,
             host="0.0.0.0",
@@ -1341,7 +1344,7 @@ class FaultHandler:
     def __init__(
         self,
         cmd_socket: zmq.Socket,
-        client_cmd_registry: list[bytes],
+        client_cmd_registry: dict[int, bytes],
         engine_exception_q: queue.Queue[FaultInfo],
         engine_status_dict: ThreadSafeDict[int, str],
     ) -> None:
@@ -1349,7 +1352,7 @@ class FaultHandler:
         self.engine_exception_q = engine_exception_q
         self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
         self.engine_identity_to_index: dict[bytes, int] = {
-            identity: i for i, identity in enumerate(client_cmd_registry)
+            identity: i for i, identity in client_cmd_registry.items()
         }
         # ensure handle_fault is executed sequentially
         self._task_queue: asyncio.Queue = asyncio.Queue()
@@ -1445,7 +1448,7 @@ class FaultHandler:
 
             if response is None:
                 self.logger(
-                    "EngineCoreGuard[%s] did not respond"
+                    "EngineCoreSentinel[%s] did not respond"
                     ' to command "%s" within timeout.',
                     engine_index,
                     instruction,
@@ -1454,7 +1457,8 @@ class FaultHandler:
                 all_success = False
             elif not response.get("success", False):
                 self.logger(
-                    'EngineCoreGuard[%s] failed to execute command "%s" (reason: %s)',
+                    "EngineCoreSentinel[%s] failed to execute "
+                    'command "%s" (reason: %s)',
                     engine_index,
                     instruction,
                     response.get("reason", "unknown"),

@@ -11,7 +11,7 @@ import pytest
 import zmq
 
 from vllm.utils.collection_utils import ThreadSafeDict
-from vllm.v1.engine.core_client import ClientGuard
+from vllm.v1.engine.core_client import ClientSentinel
 from vllm.v1.engine.utils import FaultHandler, FaultInfo
 
 FAULT_RECEIVER_ADDR = "tcp://127.0.0.1:8844"
@@ -31,59 +31,59 @@ def create_test_thread_safe_dict(initial_data=None):
     return tsd
 
 
-def create_client_guard(
+def create_client_sentinel(
     engine_exception_q: queue.Queue, engine_status_dict: ThreadSafeDict[int, str]
 ):
-    return ClientGuard(
+    return ClientSentinel(
         fault_receiver_addr=FAULT_RECEIVER_ADDR,
         cmd_addr=CMD_ADDR,
-        engine_registry=[b"engine_identity"],
+        engine_registry={0: b"engine_identity"},
         engine_exception_q=engine_exception_q,
         fault_pub_addr=FAULT_PUB_ADDR,
         engine_status_dict=engine_status_dict,
     )
 
 
-def test_client_guard_initialization():
+def test_client_sentinel_initialization():
     engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
-    guard = create_client_guard(engine_exception_q, engine_status_dict)
+    sentinel = create_client_sentinel(engine_exception_q, engine_status_dict)
 
-    assert guard.engine_registry == [b"engine_identity"]
-    assert not guard.client_guard_dead
-    assert isinstance(guard.fault_handler, FaultHandler)
-    assert guard.engine_exception_q is engine_exception_q
+    assert sentinel.engine_registry[0] == b"engine_identity"
+    assert not sentinel.client_sentinel_dead
+    assert isinstance(sentinel.fault_handler, FaultHandler)
+    assert sentinel.engine_exception_q is engine_exception_q
 
-    assert guard.fault_receiver_socket.type == zmq.ROUTER
-    assert guard.cmd_socket.type == zmq.ROUTER
-    assert guard.fault_pub_socket.type == zmq.PUB
+    assert sentinel.fault_receiver_socket.type == zmq.ROUTER
+    assert sentinel.cmd_socket.type == zmq.ROUTER
+    assert sentinel.fault_pub_socket.type == zmq.PUB
 
-    guard.shutdown_guard()
+    sentinel.shutdown_sentinel()
 
 
 @pytest.mark.asyncio
 async def test_handle_fault():
     engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
-    guard = create_client_guard(engine_exception_q, engine_status_dict)
+    sentinel = create_client_sentinel(engine_exception_q, engine_status_dict)
 
     engine_exception_q.put_nowait(
         FaultInfo(engine_id="1", message="test exception", type="test")
     )
 
-    guard.fault_handler.handle_fault = AsyncMock(return_value=True)
+    sentinel.fault_handler.handle_fault = AsyncMock(return_value=True)
 
-    result = await guard.handle_fault("pause", 5)
+    result = await sentinel.handle_fault("pause", 5)
     assert result is True
-    guard.fault_handler.handle_fault.assert_awaited_once_with("pause", 5)
+    sentinel.fault_handler.handle_fault.assert_awaited_once_with("pause", 5)
 
-    guard.shutdown_guard()
+    sentinel.shutdown_sentinel()
 
 
 def test_fault_receiver():
     engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
-    guard = create_client_guard(engine_exception_q, engine_status_dict)
+    sentinel = create_client_sentinel(engine_exception_q, engine_status_dict)
 
     def send_test_message():
         ctx = zmq.Context()
@@ -125,13 +125,13 @@ def test_fault_receiver():
 
     assert engine_status_dict[1] == "Dead"
 
-    guard.shutdown_guard()
+    sentinel.shutdown_sentinel()
 
 
 def test_fault_receiver_unhealthy():
     engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
-    guard = create_client_guard(engine_exception_q, engine_status_dict)
+    sentinel = create_client_sentinel(engine_exception_q, engine_status_dict)
 
     def send_unhealthy_message():
         ctx = zmq.Context()
@@ -149,22 +149,22 @@ def test_fault_receiver_unhealthy():
 
     assert engine_status_dict[1] == "Unhealthy"
 
-    guard.shutdown_guard()
+    sentinel.shutdown_sentinel()
 
 
-def test_shutdown_guard():
+def test_shutdown_sentinel():
     engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
-    guard = create_client_guard(engine_exception_q, engine_status_dict)
+    sentinel = create_client_sentinel(engine_exception_q, engine_status_dict)
 
-    original_fault_sock = guard.fault_receiver_socket
-    original_cmd_sock = guard.cmd_socket
-    original_pub_sock = guard.fault_pub_socket
-    original_ctx = guard.zmq_ctx
+    original_fault_sock = sentinel.fault_receiver_socket
+    original_cmd_sock = sentinel.cmd_socket
+    original_pub_sock = sentinel.fault_pub_socket
+    original_ctx = sentinel.zmq_ctx
 
-    guard.shutdown_guard()
+    sentinel.shutdown_sentinel()
 
-    assert guard.client_guard_dead is True
+    assert sentinel.client_sentinel_dead is True
 
     with pytest.raises(zmq.ZMQError):
         original_fault_sock.recv()
@@ -182,7 +182,7 @@ def test_shutdown_guard():
 async def test_handle_fault_async():
     engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({0: "Unhealthy"})
-    guard = create_client_guard(engine_exception_q, engine_status_dict)
+    sentinel = create_client_sentinel(engine_exception_q, engine_status_dict)
 
     time.sleep(0.1)
     ctx = zmq.Context().instance()
@@ -213,11 +213,11 @@ async def test_handle_fault_async():
     threading.Thread(target=receive_cmd, args=(cmd_socket,), daemon=True).start()
     threading.Thread(target=response_cmd, args=(cmd_socket,), daemon=True).start()
 
-    result = await guard.handle_fault("retry", 3)
+    result = await sentinel.handle_fault("retry", 3)
 
     assert result is True
     assert engine_status_dict[0] == "Healthy"
 
     cmd_socket.close()
     ctx.term()
-    guard.shutdown_guard()
+    sentinel.shutdown_sentinel()
