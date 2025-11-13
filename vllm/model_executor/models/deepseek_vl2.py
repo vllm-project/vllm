@@ -403,18 +403,10 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
             )
 
-        if self.text_config.topk_method == "noaux_tc":
-            architectures = ["DeepseekV3ForCausalLM"]
-        elif not self.text_config.use_mla:
-            architectures = ["DeepseekForCausalLM"]
-        else:
-            architectures = ["DeepseekV2ForCausalLM"]
-
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
             hf_config=self.text_config,
             prefix=maybe_prefix(prefix, "language"),
-            architectures=architectures,
         )
 
         self.make_empty_intermediate_tensors = (
@@ -627,7 +619,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
