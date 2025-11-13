@@ -39,7 +39,7 @@ Output:    ' in the hands of the people.\n\nThe future of AI is in the'
 ------------------------------------------------------------
 """
 
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -76,13 +76,21 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
     """Example of wrapping a fake request-level logit processor to create a
     batch-level logits processor"""
 
+    @classmethod
+    def validate_params(cls, params: SamplingParams):
+        target_token: Any | None = params.extra_args and params.extra_args.get(
+            "target_token"
+        )
+        if target_token is not None and not isinstance(target_token, int):
+            raise ValueError(f"target_token value {target_token} is not int")
+
     def is_argmax_invariant(self) -> bool:
         return False
 
     def new_req_logits_processor(
         self,
         params: SamplingParams,
-    ) -> Optional[RequestLogitsProcessor]:
+    ) -> RequestLogitsProcessor | None:
         """This method returns a new request-level logits processor, customized
         to the `target_token` value associated with a particular request.
 
@@ -96,17 +104,10 @@ class WrappedPerReqLogitsProcessor(AdapterLogitsProcessor):
         Returns:
           `Callable` request logits processor, or None
         """
-        target_token: Optional[Any] = params.extra_args and params.extra_args.get(
+        target_token: Any | None = params.extra_args and params.extra_args.get(
             "target_token"
         )
         if target_token is None:
-            return None
-        if not isinstance(target_token, int):
-            logger.warning(
-                "target_token value %s is not int; not applying logits"
-                " processor to request.",
-                target_token,
-            )
             return None
         return DummyPerReqLogitsProcessor(target_token)
 

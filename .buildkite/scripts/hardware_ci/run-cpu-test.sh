@@ -49,6 +49,7 @@ function cpu_tests() {
   # Run kernel tests
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
+    pytest -x -v -s tests/kernels/attention/test_cpu_attn.py
     pytest -x -v -s tests/kernels/test_onednn.py"
 
   # Run basic model test
@@ -58,11 +59,8 @@ function cpu_tests() {
     # pytest -x -v -s tests/kernels/attention/test_cache.py -m cpu_model
     # pytest -x -v -s tests/kernels/attention/test_mla_decode_cpu.py -m cpu_model
 
-    # Note: disable Bart until supports V1
-    pytest -x -v -s tests/models/language/generation -m cpu_model \
-                --ignore=tests/models/language/generation/test_bart.py
-    VLLM_CPU_SGL_KERNEL=1 pytest -x -v -s tests/models/language/generation -m cpu_model \
-                --ignore=tests/models/language/generation/test_bart.py
+    pytest -x -v -s tests/models/language/generation -m cpu_model
+    VLLM_CPU_SGL_KERNEL=1 pytest -x -v -s tests/models/language/generation -m cpu_model
 
     pytest -x -v -s tests/models/language/pooling -m cpu_model
     pytest -x -v -s tests/models/multimodal/generation \
@@ -73,13 +71,13 @@ function cpu_tests() {
   docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -x -s -v \
-    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs[False-10-32-neuralmagic/Llama-3.2-1B-quantized.w8a8]"
+    tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_logprobs"
 
   # Note: disable it until supports V1
   # Run AWQ test
   # docker exec cpu-test-"$NUMA_NODE" bash -c "
   #   set -e
-  #   VLLM_USE_V1=0 pytest -x -s -v \
+  #   pytest -x -s -v \
   #   tests/quantization/test_ipex_quant.py"
 
   # Run multi-lora tests
@@ -119,4 +117,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 40 mins.
 export -f cpu_tests
-timeout 2h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"
+timeout 2.5h bash -c "cpu_tests $CORE_RANGE $NUMA_NODE"

@@ -17,30 +17,21 @@ from vllm.lora.request import LoRARequest
 # 100 training iterations with a training batch size of 100.
 
 
-@pytest.fixture(scope="function", autouse=True)
-def use_v1_only(monkeypatch: pytest.MonkeyPatch):
-    """
-    Since Multi-LoRA is only supported on the v1 TPU backend, set VLLM_USE_V1=1
-    for all tests in this file
-    """
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-        yield
-
-
 def setup_vllm(num_loras: int, tp: int) -> vllm.LLM:
-    return vllm.LLM(model="Qwen/Qwen2.5-3B-Instruct",
-                    max_model_len=256,
-                    max_seq_len_to_capture=256,
-                    max_num_seqs=8,
-                    tensor_parallel_size=tp,
-                    enable_lora=True,
-                    max_loras=num_loras,
-                    max_lora_rank=8)
+    return vllm.LLM(
+        model="Qwen/Qwen2.5-3B-Instruct",
+        max_model_len=256,
+        max_num_seqs=8,
+        tensor_parallel_size=tp,
+        enable_lora=True,
+        max_loras=num_loras,
+        max_lora_rank=8,
+    )
 
 
-TPU_TENSOR_PARALLEL_SIZES = [1, tpu.num_available_chips()
-                             ] if tpu.num_available_chips() > 1 else [1]
+TPU_TENSOR_PARALLEL_SIZES = (
+    [1, tpu.num_available_chips()] if tpu.num_available_chips() > 1 else [1]
+)
 
 
 @pytest.mark.parametrize("tp", TPU_TENSOR_PARALLEL_SIZES)
@@ -56,12 +47,19 @@ def test_single_lora(tp: int):
     prompt = "What is 1+1? \n"
 
     lora_request = LoRARequest(
-        "lora_adapter_1", 1,
-        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_1_adapter")
-    output = llm.generate(prompt,
-                          sampling_params=vllm.SamplingParams(max_tokens=256,
-                                                              temperature=0),
-                          lora_request=lora_request)[0].outputs[0].text
+        "lora_adapter_1",
+        1,
+        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_1_adapter",
+    )
+    output = (
+        llm.generate(
+            prompt,
+            sampling_params=vllm.SamplingParams(max_tokens=256, temperature=0),
+            lora_request=lora_request,
+        )[0]
+        .outputs[0]
+        .text
+    )
 
     answer = output.strip()[0]
 
@@ -74,13 +72,12 @@ def test_lora_hotswapping(tp: int):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, even
     if we only have space to store 1.
-    
+
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=x, for a range of x.
     """
 
-    lora_name_template = \
-        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
+    lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     lora_requests = [
         LoRARequest(f"lora_adapter_{i}", i, lora_name_template.format(i))
         for i in range(1, 5)
@@ -91,10 +88,15 @@ def test_lora_hotswapping(tp: int):
     prompt = "What is 1+1? \n"
 
     for i, req in enumerate(lora_requests):
-        output = llm.generate(prompt,
-                              sampling_params=vllm.SamplingParams(
-                                  max_tokens=256, temperature=0),
-                              lora_request=req)[0].outputs[0].text
+        output = (
+            llm.generate(
+                prompt,
+                sampling_params=vllm.SamplingParams(max_tokens=256, temperature=0),
+                lora_request=req,
+            )[0]
+            .outputs[0]
+            .text
+        )
         answer = output.strip()[0]
 
         assert answer.isdigit()
@@ -106,12 +108,11 @@ def test_multi_lora(tp: int):
     """
     This test ensures we can run multiple LoRA adapters on the TPU backend, when
     we have enough space to store all of them.
-    
+
     We run "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_x_adapter" which
     will force Qwen2.5-3B-Instruct to claim 1+1=x, for a range of x.
     """
-    lora_name_template = \
-        "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
+    lora_name_template = "Username6568/Qwen2.5-3B-Instruct-1_plus_1_equals_{}_adapter"
     lora_requests = [
         LoRARequest(f"lora_adapter_{i}", i, lora_name_template.format(i))
         for i in range(1, 5)
@@ -122,10 +123,15 @@ def test_multi_lora(tp: int):
     prompt = "What is 1+1? \n"
 
     for i, req in enumerate(lora_requests):
-        output = llm.generate(prompt,
-                              sampling_params=vllm.SamplingParams(
-                                  max_tokens=256, temperature=0),
-                              lora_request=req)[0].outputs[0].text
+        output = (
+            llm.generate(
+                prompt,
+                sampling_params=vllm.SamplingParams(max_tokens=256, temperature=0),
+                lora_request=req,
+            )[0]
+            .outputs[0]
+            .text
+        )
 
         answer = output.strip()[0]
 
