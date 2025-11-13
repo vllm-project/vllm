@@ -184,7 +184,6 @@ def populate_loras(
                 slot_idx,
                 lora_a=lora.lora_a,
                 lora_b=lora.lora_b,
-                embeddings_tensor=lora.embeddings_tensor,
             )
 
             lora_dict[lora_id] = lora
@@ -305,7 +304,6 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             id_to_index,
             max_loras,
             vocab_size,
-            lora_config.lora_extra_vocab_size,
         )
 
         lora_result = lora_embedding(torch.cat(inputs))
@@ -421,7 +419,6 @@ def test_lm_head_logits_processor(
             id_to_index,
             max_loras,
             vocab_size,
-            lora_config.lora_extra_vocab_size,
         )
         input_ = torch.rand(20, 1024)
 
@@ -468,7 +465,6 @@ def test_lm_head_logits_processor(
             id_to_index,
             max_loras,
             vocab_size,
-            lora_config.lora_extra_vocab_size,
         )
 
         lora_result = lora_logits_processor._get_logits(
@@ -550,7 +546,6 @@ def test_linear_replicated(
             id_to_index,
             max_loras,
             512,
-            lora_config.lora_extra_vocab_size,
         )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
@@ -673,7 +668,6 @@ def test_linear_parallel(
             id_to_index,
             max_loras,
             512,
-            lora_config.lora_extra_vocab_size,
         )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
@@ -819,7 +813,6 @@ def test_column_parallel_packed(
             id_to_index,
             max_loras,
             512,
-            lora_config.lora_extra_vocab_size,
         )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
@@ -856,7 +849,6 @@ def test_column_parallel_packed(
             id_to_index,
             max_loras,
             512,
-            lora_config.lora_extra_vocab_size,
         )
 
         lora_result = lora_linear(torch.cat(inputs))[0]

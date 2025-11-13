@@ -21,7 +21,6 @@ class LoRALayerWeights:
         lora_alpha: int,
         lora_a: torch.Tensor,
         lora_b: torch.Tensor,
-        embeddings_tensor: torch.Tensor | None = None,
         scaling: float | None = None,
     ) -> None:
         self.module_name = module_name
@@ -29,7 +28,6 @@ class LoRALayerWeights:
         self.lora_alpha = lora_alpha
         self.lora_a = lora_a
         self.lora_b = lora_b
-        self.embeddings_tensor = embeddings_tensor
 
         if scaling is None:
             self.scaling = self.lora_alpha / self.rank
@@ -56,18 +54,11 @@ class LoRALayerWeights:
     def is_packed(self) -> bool:
         return False
 
-    @property
-    def extra_vocab_size(self) -> int:
-        return (
-            self.embeddings_tensor.shape[0] if self.embeddings_tensor is not None else 0
-        )
-
     @classmethod
     def from_config(
         cls,
         module_name: str,
         peft_helper: PEFTHelper,
-        embeddings_tensor: torch.Tensor | None = None,
     ) -> "LoRALayerWeights":
         # lora_a and lora_b are set to None for config-based construction
         return cls(
@@ -76,7 +67,6 @@ class LoRALayerWeights:
             peft_helper.lora_alpha,
             None,
             None,
-            embeddings_tensor,
             peft_helper.vllm_lora_scaling_factor,
         )
 
@@ -89,7 +79,6 @@ class LoRALayerWeights:
         rank: int,
         dtype: torch.dtype,
         device: torch.types.Device,
-        embeddings_tensor_dim: int | None = None,
     ) -> "LoRALayerWeights":
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         lora_a = torch.zeros(
@@ -99,24 +88,12 @@ class LoRALayerWeights:
             [output_dim, rank], dtype=dtype, device=device, pin_memory=pin_memory
         )
 
-        embeddings_tensor = (
-            torch.rand(
-                10,
-                embeddings_tensor_dim,
-                dtype=dtype,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if embeddings_tensor_dim
-            else None
-        )
         return cls(
             module_name,
             rank=rank,
             lora_alpha=1,
             lora_a=lora_a,
             lora_b=lora_b,
-            embeddings_tensor=embeddings_tensor,
         )
 
 
@@ -139,7 +116,6 @@ class PackedLoRALayerWeights(LoRALayerWeights):
             lora_a=lora_a,
             lora_b=lora_b,
             scaling=scaling,  # type: ignore
-            embeddings_tensor=None,
         )
         self.lora_alphas = lora_alphas
         if scaling is None:
