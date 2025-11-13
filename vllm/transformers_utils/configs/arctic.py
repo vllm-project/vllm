@@ -132,7 +132,7 @@ class ArcticConfig(PretrainedConfig):
         bos_token_id=1,
         eos_token_id=2,
         tie_word_embeddings=False,
-        rope_theta=1e6,
+        rope_parameters: dict[str, Any] | None = None,
         sliding_window=None,
         attention_dropout=0.0,
         num_experts_per_tok=1,
@@ -165,7 +165,15 @@ class ArcticConfig(PretrainedConfig):
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
-        self.rope_theta = rope_theta
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        rope_parameters = rope_scaling or rope_parameters
+        rope_theta = kwargs.pop("rope_theta", 1e6)
+        if rope_parameters is None:
+            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
+        elif "rope_theta" not in rope_parameters:
+            rope_parameters["rope_theta"] = rope_theta
+        self.rope_parameters = rope_parameters
         self.attention_dropout = attention_dropout
 
         self.num_experts_per_tok = num_experts_per_tok

@@ -576,12 +576,9 @@ class Plamo2AttentionMixer(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rope_theta = (
-            config.rope_parameters["rope_theta"]
-            if hasattr(config, "rope_parameters")
-            else 10000
-        )
-        self.rope_parameters = getattr(config, "rope_parameters", None)
+        if "rope_theta" not in config.rope_parameters:
+            config.rope_parameters["rope_theta"] = 10000
+
         max_position = config.max_position_embeddings
         if hasattr(vllm_config.model_config, "max_model_len") and isinstance(
             vllm_config.model_config.max_model_len, int
@@ -592,8 +589,7 @@ class Plamo2AttentionMixer(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=self.rope_theta,
-            rope_parameters=self.rope_parameters,
+            rope_parameters=config.rope_parameters,
         )
         self.q_norm = RMSNorm(config.hidden_size_per_head, eps=config.rms_norm_eps)
         self.q_norm.weight = torch.nn.Parameter(
