@@ -63,7 +63,7 @@ class EPLBConfig:
     This is turned off by default since it will cause communication overhead.
     """
 
-    policy: EPLBPolicy = "default"
+    policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
 
 
