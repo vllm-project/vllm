@@ -440,7 +440,7 @@ class MiniCPMModel(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embedding = self.embed_tokens(input_ids)
         return embedding * self.config.scale_emb
 
@@ -455,7 +455,7 @@ class MiniCPMModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             hidden_states = intermediate_tensors["hidden_states"]
@@ -615,8 +615,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
         return MiniCPMModel(vllm_config=vllm_config, prefix=prefix)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
         self.model.aux_hidden_state_layers = layers

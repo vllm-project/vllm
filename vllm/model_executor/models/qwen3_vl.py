@@ -1100,7 +1100,7 @@ class Qwen3LLMModel(Qwen3Model):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -1493,9 +1493,7 @@ class Qwen3VLForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -1557,7 +1555,7 @@ class Qwen3VLForConditionalGeneration(
 
         return deepstack_input_embeds, multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1565,9 +1563,9 @@ class Qwen3VLForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self._get_text_embeddings(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            self.language_model.get_input_embeddings,
+            self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
@@ -1577,7 +1575,7 @@ class Qwen3VLForConditionalGeneration(
 
         if is_multimodal is None:
             raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "`embed_input_ids` now requires `is_multimodal` arg, "
                 "please update your model runner according to "
                 "https://github.com/vllm-project/vllm/pull/16229."
             )

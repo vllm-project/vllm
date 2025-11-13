@@ -46,7 +46,7 @@ class ModernBertEmbeddings(nn.Module):
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=eps, bias=config.norm_bias)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.tok_embeddings(input_ids)
 
     def forward(
@@ -225,8 +225,8 @@ class ModernBertModel(nn.Module):
             config.hidden_size, eps=config.norm_eps, bias=config.norm_bias
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embeddings.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = self.hf_to_vllm_mapper.apply(weights)
@@ -337,8 +337,8 @@ class ModernBertForSequenceClassification(nn.Module, SupportsCrossEncoding):
             }
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         self_weights = []
@@ -424,8 +424,8 @@ class ModernBertForTokenClassification(nn.Module):
             }
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self, skip_prefixes=["drop"])

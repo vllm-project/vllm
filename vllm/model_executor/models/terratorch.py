@@ -251,7 +251,7 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
 
         self.pooler = DispatchPooler({"plugin": DummyPooler()})
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
