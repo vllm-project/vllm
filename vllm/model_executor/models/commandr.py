@@ -288,17 +288,12 @@ class CohereModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
         self.quant_config = quant_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
@@ -316,7 +311,7 @@ class CohereModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -330,7 +325,7 @@ class CohereModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -424,17 +419,15 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
         # currently all existing command R models have `tie_word_embeddings`
         # enabled
         assert config.tie_word_embeddings
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         self.quant_config = quant_config
         self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, scale=config.logit_scale
+            config.vocab_size, scale=config.logit_scale
         )
         self.model = CohereModel(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
@@ -443,8 +436,8 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsQuant):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     @torch.no_grad()
     def forward(

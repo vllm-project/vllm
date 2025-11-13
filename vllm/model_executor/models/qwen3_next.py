@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -58,7 +59,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -109,7 +109,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
 
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts = config.num_experts
 
@@ -173,6 +173,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            routing_method_type=RoutingMethodType.Renormalize,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -462,6 +463,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         # Part 2: Core Attention (Custom Op)
         # ============================================================
+        # Note: we should not use torch.empty here like other attention backends,
+        # see discussions in https://github.com/vllm-project/vllm/pull/28182
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
@@ -583,7 +586,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=non_spec_state_indices_tensor[
-                    : attn_metadata.num_decodes
+                    : attn_metadata.num_actual_tokens
                 ],
                 validate_data=True,
             )
@@ -595,10 +598,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             mixed_qkv_non_spec
         )
 
-        beta = b.sigmoid()
-        # g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
-        g = fused_gdn_gating(self.A_log, a, self.dt_bias)
-        g, beta = map(lambda x: rearrange(x, "l d -> 1 l d"), (g, beta))
+        g, beta = fused_gdn_gating(self.A_log, a, b, self.dt_bias)
 
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -966,22 +966,17 @@ class Qwen3NextModel(nn.Module):
 
         config: Qwen3NextConfig = vllm_config.model_config.hf_config
         parallel_config = vllm_config.parallel_config
-        lora_config = vllm_config.lora_config
+
         eplb_config = parallel_config.eplb_config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
+
+        self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
         )
 
         def get_layer(prefix: str):
@@ -1003,7 +998,7 @@ class Qwen3NextModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -1017,7 +1012,7 @@ class Qwen3NextModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -1129,99 +1124,7 @@ class Qwen3NextModel(nn.Module):
         return loaded_params
 
 
-class Qwen3NextForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsPP, MixtureOfExperts, IsHybrid
-):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config = vllm_config.model_config.hf_config
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        lora_config = vllm_config.lora_config
-        scheduler_config = vllm_config.scheduler_config
-        assert not cache_config.enable_prefix_caching, (
-            "Qwen3Next currently does not support prefix caching"
-        )
-        self.quant_config = vllm_config.quant_config
-
-        super().__init__()
-        self.config = config
-        self.scheduler_config = scheduler_config
-        self.model = Qwen3NextModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
-        self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            padding_size=DEFAULT_VOCAB_PADDING_SIZE
-            # We need bigger padding if using lora for kernel
-            # compatibility
-            if not lora_config
-            else lora_config.lora_vocab_padding_size,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-        # Set MoE hyperparameters
-        self.expert_weights = []
-
-        self.moe_layers: list[SharedFusedMoE] = []
-        example_layer = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-
-            assert isinstance(layer, Qwen3NextDecoderLayer)
-            if isinstance(layer.mlp, Qwen3NextSparseMoeBlock):
-                example_layer = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
-
-        if example_layer is None:
-            raise RuntimeError("No Qwen3Next layer found in the model.layers.")
-
-        self.num_moe_layers = len(self.moe_layers)
-        self.num_expert_groups = 1
-        self.num_shared_experts = 0
-        self.num_logical_experts = example_layer.n_logical_experts
-        self.num_physical_experts = example_layer.n_physical_experts
-        self.num_local_physical_experts = example_layer.n_local_physical_experts
-        self.num_routed_experts = example_layer.n_routed_experts
-        self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
+class QwenNextMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -1239,8 +1142,83 @@ class Qwen3NextForCausalLM(
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def set_moe_parameters(self):
+        self.expert_weights = []
+
+        self.moe_layers = []
+        example_moe = None
+        for layer in self.model.layers:
+            if isinstance(layer, Qwen3NextDecoderLayer) and isinstance(
+                layer.mlp, Qwen3NextSparseMoeBlock
+            ):
+                example_moe = layer.mlp
+                self.moe_layers.append(layer.mlp.experts)
+
+            if example_moe is None:
+                raise RuntimeError("No Qwen3Next layer found in the model.layers.")
+
+        # Set MoE hyperparameters
+        self.num_moe_layers = len(self.moe_layers)
+        self.num_expert_groups = 1
+        self.num_shared_experts = 0
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+
+class Qwen3NextForCausalLM(
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsPP,
+    QwenNextMixtureOfExperts,
+    IsHybrid,
+):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+
+        scheduler_config = vllm_config.scheduler_config
+        assert not cache_config.enable_prefix_caching, (
+            "Qwen3Next currently does not support prefix caching"
+        )
+        self.quant_config = vllm_config.quant_config
+
+        super().__init__()
+        self.config = config
+        self.scheduler_config = scheduler_config
+        self.model = Qwen3NextModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
+        # Set MoE hyperparameters
+        self.set_moe_parameters()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -1345,12 +1323,13 @@ direct_register_custom_op(
 )
 
 
-# g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
 @triton.jit
 def fused_gdn_gating_kernel(
     g,
+    beta_output,
     A_log,
     a,
+    b,
     dt_bias,
     seq_len,
     NUM_HEADS: tl.constexpr,
@@ -1364,6 +1343,7 @@ def fused_gdn_gating_kernel(
     mask = head_off < NUM_HEADS
     blk_A_log = tl.load(A_log + head_off, mask=mask)
     blk_a = tl.load(a + off, mask=mask)
+    blk_b = tl.load(b + off, mask=mask)
     blk_bias = tl.load(dt_bias + head_off, mask=mask)
     # If the model is loaded in fp16, without the .float() here, A might be -inf
     x = blk_a.to(tl.float32) + blk_bias.to(tl.float32)
@@ -1372,20 +1352,44 @@ def fused_gdn_gating_kernel(
     )
     blk_g = -tl.exp(blk_A_log.to(tl.float32)) * softplus_x
     tl.store(g + off, blk_g.to(g.dtype.element_ty), mask=mask)
+    # compute beta_output = sigmoid(b)
+    blk_beta_output = tl.sigmoid(blk_b.to(tl.float32))
+    tl.store(
+        beta_output + off, blk_beta_output.to(beta_output.dtype.element_ty), mask=mask
+    )
 
 
 def fused_gdn_gating(
     A_log: torch.Tensor,
     a: torch.Tensor,
+    b: torch.Tensor,
     dt_bias: torch.Tensor,
     beta: float = 1.0,
     threshold: float = 20.0,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Fused computation of g and beta for Gated Delta Net.
+    g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+    beta_output = b.sigmoid()
+    TODO maybe use torch.compile to replace this triton kernel
+    """
     batch, num_heads = a.shape
     seq_len = 1
     grid = (batch, seq_len, triton.cdiv(num_heads, 8))
-    g = torch.empty_like(a, dtype=torch.float32)
+    g = torch.empty(1, batch, num_heads, dtype=torch.float32, device=a.device)
+    beta_output = torch.empty(1, batch, num_heads, dtype=b.dtype, device=b.device)
     fused_gdn_gating_kernel[grid](
-        g, A_log, a, dt_bias, seq_len, num_heads, beta, threshold, 8, num_warps=1
+        g,
+        beta_output,
+        A_log,
+        a,
+        b,
+        dt_bias,
+        seq_len,
+        num_heads,
+        beta,
+        threshold,
+        8,
+        num_warps=1,
     )
-    return g
+    return g, beta_output
