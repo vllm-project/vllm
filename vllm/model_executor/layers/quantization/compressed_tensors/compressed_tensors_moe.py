@@ -1532,7 +1532,8 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         num_experts = layer.w13_weight_g_idx.shape[0]
         device = layer.w13_weight_g_idx.device
         is_a_8bit = (
-            self.marlin_input_dtype is not None or self.marlin_input_dtype.itemsize == 1
+            self.marlin_input_dtype is not None
+            and self.marlin_input_dtype.itemsize == 1
         )
 
         if self.marlin_input_dtype == torch.float8_e4m3fn:
@@ -1613,7 +1614,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             group_size=self.group_size,
             is_a_8bit=is_a_8bit,
         )
-        if self.input_dtype == torch.int8 and layer.num_groups_w13 > 1:
+        if self.marlin_input_dtype == torch.int8 and layer.num_groups_w13 > 1:
             marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
                 marlin_w13_scales
             )
@@ -1631,7 +1632,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             group_size=self.group_size,
             is_a_8bit=is_a_8bit,
         )
-        if self.input_dtype == torch.int8 and layer.num_groups_w2 > 1:
+        if self.marlin_input_dtype == torch.int8 and layer.num_groups_w2 > 1:
             marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
                 marlin_w2_scales
             )
