@@ -719,7 +719,7 @@ class _ModelRegistry:
     def register_model(
         self,
         model_arch: str,
-        model_cls: type[nn.Module] | str,
+        model_cls: type[nn.Module] | str | Callable,
     ) -> None:
         """
         Register an external model to be used in vLLM.
@@ -731,6 +731,19 @@ class _ModelRegistry:
           lazily import the model. This is useful to avoid initializing CUDA
           when importing the model and thus the related error
           `RuntimeError: Cannot re-initialize CUDA in forked subprocess`.
+        - A callable (factory function) that takes `(vllm_config, parallel_context)`
+          and returns a model instance. This allows models to access vLLM's
+          parallel configuration during construction.
+
+        Example with callable:
+            ```python
+            def build_my_model(vllm_config, parallel_context):
+                tp_size = parallel_context.get_tensor_parallel_world_size()
+                return MyModel(config=vllm_config.hf_config, tp_size=tp_size)
+
+
+            ModelRegistry.register_model("MyModel", build_my_model)
+            ```
         """
         if not isinstance(model_arch, str):
             msg = f"`model_arch` should be a string, not a {type(model_arch)}"
@@ -753,10 +766,19 @@ class _ModelRegistry:
             model = _LazyRegisteredModel(*split_str)
         elif isinstance(model_cls, type) and issubclass(model_cls, nn.Module):
             model = _RegisteredModel.from_model_cls(model_cls)
+        elif callable(model_cls):
+            # Support factory functions/callables
+            from vllm.model_executor.models.callable_model import (
+                _CallableRegisteredModel,
+            )
+
+            model = _CallableRegisteredModel(
+                callable_factory=model_cls, model_arch=model_arch
+            )
         else:
             msg = (
-                "`model_cls` should be a string or PyTorch model class, "
-                f"not a {type(model_arch)}"
+                "`model_cls` should be a string, PyTorch model class, or callable, "
+                f"not a {type(model_cls)}"
             )
             raise TypeError(msg)
 
