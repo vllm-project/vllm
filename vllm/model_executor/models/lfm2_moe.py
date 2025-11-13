@@ -190,7 +190,7 @@ class Lfm2MoeAttention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -243,7 +243,7 @@ class Lfm2MoeAttention(nn.Module):
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             base=self.rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -293,14 +293,8 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
 
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if rope_scaling is not None and getattr(
-            config, "original_max_position_embeddings", None
-        ):
-            rope_scaling["original_max_position_embeddings"] = (
-                config.original_max_position_embeddings
-            )
+        if ompe := getattr(config, "original_max_position_embeddings", None):
+            config.rope_parameters["original_max_position_embeddings"] = ompe
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
         self.self_attn = Lfm2MoeAttention(
@@ -309,8 +303,8 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_theta=config.rope_parameters["rope_theta"],
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
