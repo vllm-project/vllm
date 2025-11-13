@@ -474,7 +474,7 @@ def _merge_multimodal_embeddings(
 
 @deprecated(
     "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.get_input_embeddings` and will be "
+    "`SupportsMultiModal.embed_input_ids` and will be "
     "removed in v0.12."
 )
 def merge_multimodal_embeddings(
