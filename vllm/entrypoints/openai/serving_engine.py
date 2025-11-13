@@ -1238,7 +1238,7 @@ class OpenAIServing:
 
             # Call the tool and update the context with the result.
             tool_output = await context.call_tool()
-            context.append_output(tool_output)
+            context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
             # yield context
@@ -1386,6 +1386,8 @@ class OpenAIServing:
                     for tool_call in tool_call_info.tool_calls
                 )
                 content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
             else:
                 # No tool calls.
                 return None, content

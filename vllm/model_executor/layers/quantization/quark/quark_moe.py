@@ -8,6 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -21,10 +22,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-    is_rocm_aiter_moe_enabled,
-    use_mxfp4_aiter_moe,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_moe_fp8_layer_for_marlin,
 )
@@ -122,7 +119,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         if current_platform.is_rocm():
             self.use_marlin = False
 
-        self.rocm_aiter_moe_enabled = is_rocm_aiter_moe_enabled()
+        self.rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
     def create_weights(
         self,
@@ -309,12 +306,8 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 )
         # Property to determine if AITER is used
         if self.rocm_aiter_moe_enabled:
-            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (  # noqa E501
-                shuffle_weights,
-            )
-
             # reshaping weights is required for aiter moe kernel.
-            shuffled_w13, shuffled_w2 = shuffle_weights(
+            shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
                 layer.w13_weight.data, layer.w2_weight.data
             )
 
@@ -470,13 +463,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "not implemented. Please open an issue."
             )
 
+        self.use_rocm_aiter_moe = rocm_aiter_ops.is_fused_moe_enabled()
+
         self.emulate = not current_platform.supports_mx() or not (
-            use_mxfp4_aiter_moe() and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
+            self.use_rocm_aiter_moe and self.ocp_mx_scheme == "w_mxfp4_a_mxfp4"
         )
         if self.emulate:
             logger.warning_once(
                 f"The current mode (supports_mx={current_platform.supports_mx()}, "
-                f"use_mxfp4_aiter_moe={use_mxfp4_aiter_moe()}, "
+                f"use_mxfp4_aiter_moe={self.use_rocm_aiter_moe}, "
                 f"ocp_mx_scheme={self.ocp_mx_scheme}) "
                 "does not support native MXFP4/MXFP6 "
                 "computation. Simulated weight dequantization and activation "
@@ -656,28 +651,18 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         if not self.emulate:
-            from aiter import ActivationType, QuantType
-            from aiter.fused_moe import fused_moe
-
-            aiter_acts = {
-                ActivationType.No.name.lower(): ActivationType.No,
-                ActivationType.Silu.name.lower(): ActivationType.Silu,
-                ActivationType.Gelu.name.lower(): ActivationType.Gelu,
-            }
-            assert activation in aiter_acts, (
-                f"Aiter CK fp4 MoE doesn't support activation {activation}"
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                rocm_aiter_fused_experts,
             )
-            out = fused_moe(
+
+            out = rocm_aiter_fused_experts(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
-                topk_weights,
-                topk_ids,
-                quant_type=QuantType.per_1x32,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                activation=aiter_acts[activation],
-                doweight_stage1=False,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                quant_config=self.moe_quant_config,
             )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
