@@ -46,6 +46,7 @@ def _lora_shrink_kernel(
     GROUP_SIZE_M: tl.constexpr,
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
