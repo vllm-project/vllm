@@ -641,8 +641,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 prefix=f"{prefix}.merger",
             )
 
-        self._persistent_hidden_states_buffer = torch.empty((4096, 1176), device=self.device, dtype=self.dtype)
-        self._persistent_rotary_pos_emb_buffer = torch.empty((4096, 40), device=self.device, dtype=self.dtype)
+        self._persistent_hidden_states_buffer = torch.empty((8192, 1176), device=self.device, dtype=self.dtype)
+        self._persistent_rotary_pos_emb_buffer = torch.empty((8192, 40), device=self.device, dtype=torch.float32)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -788,13 +788,15 @@ class Qwen2_5_VisionTransformer(nn.Module):
         cu_seqlens: list = []
 
         # logger.info(f"X Shape: {x.shape}")
-        if seq_len < 4096:
+        if seq_len < 8192:
             hidden_states = self._persistent_hidden_states_buffer[:seq_len]
             hidden_states.copy_(x, non_blocking=True)
         else:
             hidden_states = x.to(device=self.device, dtype=self.dtype)
 
-        hidden_states = self.patch_embed(hidden_states)
+        from vllm.compilation.backends import set_is_first_graph_in_sequence, set_is_last_graph_in_sequence
+        with set_is_first_graph_in_sequence(True), set_is_last_graph_in_sequence(False):
+            hidden_states = self.patch_embed(hidden_states)
 
         window_index_id = 0
         cu_window_seqlens_last = 0
@@ -848,7 +850,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
             device=self.device, non_blocking=True
         )
         rotary_pos_emb = rotary_pos_emb.to(device=self.device, non_blocking=True)
-        if seq_len < 4096:
+        if seq_len < 8192:
             rotary_pos_emb = self._persistent_rotary_pos_emb_buffer[:seq_len].copy_(rotary_pos_emb)
         window_index = window_index.to(device=hidden_states.device, non_blocking=True)
         reverse_indices = reverse_indices.to(
@@ -877,22 +879,22 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # logger.info(f"After Copy, tmp address: {tmp.storage().data_ptr()}")
 
         # logger.info(f"Before Input to Vision Block, Shape: {hidden_states.shape}")
+        with set_is_first_graph_in_sequence(False), set_is_last_graph_in_sequence(False):
+            for layer_num, blk in enumerate(self.blocks):
+                if layer_num in self.fullatt_block_indexes:
+                    cu_seqlens_now = cu_seqlens
+                    max_seqlen_now = max_seqlen_full
+                else:
+                    cu_seqlens_now = cu_window_seqlens
+                    max_seqlen_now = max_seqlen_window
 
-        for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-                max_seqlen_now = max_seqlen_full
-            else:
-                cu_seqlens_now = cu_window_seqlens
-                max_seqlen_now = max_seqlen_window
-
-            hidden_states = blk(
-                hidden_states,
-                cu_seqlens=cu_seqlens_now,
-                rotary_pos_emb_cos=rotary_pos_emb_cos,
-                rotary_pos_emb_sin=rotary_pos_emb_sin,
-                max_seqlen=max_seqlen_now,
-            )
+                hidden_states = blk(
+                    hidden_states,
+                    cu_seqlens=cu_seqlens_now,
+                    rotary_pos_emb_cos=rotary_pos_emb_cos,
+                    rotary_pos_emb_sin=rotary_pos_emb_sin,
+                    max_seqlen=max_seqlen_now,
+                )
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
         # for long visual tokens sequences.
@@ -900,7 +902,8 @@ class Qwen2_5_VisionTransformer(nn.Module):
             hidden_states = cast_overflow_tensors(hidden_states)
 
         # adapter
-        hidden_states = self.merger(hidden_states)
+        with set_is_first_graph_in_sequence(False), set_is_last_graph_in_sequence(True):
+            hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
         return hidden_states
 

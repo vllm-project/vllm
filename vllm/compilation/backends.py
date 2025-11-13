@@ -48,6 +48,41 @@ from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
 
+# A global flag to indicate if the current graph being compiled
+# is the last one in a sequence of graphs (e.g., a sequence of blocks).
+# This is a workaround to control CUDAGraph weak_ref_output behavior
+# in **vit** piecewise compilation.
+_is_last_graph_in_vit_sequence: bool = True
+
+@contextmanager
+def set_is_last_graph_in_sequence(is_last: bool):
+    """Context manager to indicate if the current graph being compiled
+    is the last one in a sequence of graphs (e.g., a sequence of blocks).
+    """
+    global _is_last_graph_in_vit_sequence
+    original_value = _is_last_graph_in_vit_sequence
+    _is_last_graph_in_vit_sequence = is_last
+    try:
+        yield
+    finally:
+        _is_last_graph_in_vit_sequence = original_value
+
+# A global flag to indicate if the current graph being compiled
+# is the first one in a sequence of graphs (e.g., a sequence of blocks).
+_is_first_graph_in_vit_sequence: bool = True
+
+@contextmanager
+def set_is_first_graph_in_sequence(is_first: bool):
+    """Context manager to indicate if the current graph being compiled
+    is the first one in a sequence of graphs (e.g., a sequence of blocks).
+    """
+    global _is_first_graph_in_vit_sequence
+    original_value = _is_first_graph_in_vit_sequence
+    _is_first_graph_in_vit_sequence = is_first
+    try:
+        yield
+    finally:
+        _is_first_graph_in_vit_sequence = original_value
 
 def make_copy_and_call(
     sym_tensor_indices: list[int],
@@ -449,8 +484,10 @@ def wrap_with_cudagraph_if_needed(
         runtime_mode=CUDAGraphMode.PIECEWISE,
         cudagraph_options=CUDAGraphOptions(
             debug_log_enable=is_first_graph,
-            gc_disable=not is_first_graph,
-            weak_ref_output=is_last_graph,
+            gc_disable=not is_first_graph
+                        or not _is_first_graph_in_vit_sequence,
+            weak_ref_output=is_last_graph
+                        and _is_last_graph_in_vit_sequence,
         ),
     )
 
