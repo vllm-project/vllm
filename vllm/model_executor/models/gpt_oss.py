@@ -269,7 +269,7 @@ class GptOssModel(nn.Module):
         )
         self.aux_hidden_state_layers = tuple[int, ...]()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
 
     def forward(
@@ -283,7 +283,7 @@ class GptOssModel(nn.Module):
             if inputs_embeds is not None:
                 x = inputs_embeds
             else:
-                x = self.get_input_embeddings(input_ids)
+                x = self.embed_input_ids(input_ids)
 
             residual = None
         else:
@@ -703,8 +703,8 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         num_layers = len(self.model.layers)
         return (2, num_layers // 2, num_layers - 3)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
