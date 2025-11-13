@@ -320,12 +320,12 @@ def test_flashinfer_cutedsl_moe_masked(
 
     w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
         w1,
-        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,  # noqa: E501
+        torch.ones(num_experts, dtype=torch.int32, device=w1.device) * 2 * inter_dim,
         w1_global_scale,
     )
     w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
         w2,
-        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,  # noqa: E501
+        torch.ones(num_experts, dtype=torch.int32, device=w2.device) * hidden_dim,
         w2_global_scale,
     )
 
