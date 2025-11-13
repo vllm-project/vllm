@@ -81,7 +81,7 @@ class GraniteMoeHybridMambaDecoderLayer(nn.Module):
             model_config=model_config,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.mixer",
+            prefix=f"{prefix}.mamba",
         )
 
         self.block_sparse_moe = None
@@ -570,6 +570,53 @@ class GraniteMoeHybridModel(nn.Module):
                         shard_id="w2",
                         expert_id=e,
                     )
+            
+            elif ('.block_sparse_moe.output_linear.experts.' in n and 
+                (n.endswith('.weight') or n.endswith('.weight_scale'))):
+                
+                # Extract expert ID from the parameter name
+                expert_idx = int(n.split('.experts.')[1].split('.')[0]) if '.experts.' in n else None
+                
+                # Generate the target w2 name
+                w2_name = n.replace(
+                    f'.block_sparse_moe.output_linear.experts.{expert_idx}.weight',
+                    f".block_sparse_moe.experts.{expert_idx}.w2.weight")
+                
+                w2_param = p
+                _load_expert(n.replace(f'.output_linear.experts.{expert_idx}.', '.experts.w2_'),
+                            w2_param,
+                            w2_name,
+                            shard_id='w2',
+                            expert_id=expert_idx)
+
+            elif ('.block_sparse_moe.input_linear.experts.' in n and 
+                (n.endswith('.weight') or n.endswith('.weight_scale'))):
+
+                # Extract expert ID from the parameter name
+                expert_idx = int(n.split('.experts.')[1].split('.')[0]) if '.experts.' in n else None
+                
+                # Generate the target w1 and w3 names
+                w1_name = n.replace(
+                    f'.block_sparse_moe.input_linear.experts.{expert_idx}.weight',
+                    f".block_sparse_moe.experts.{expert_idx}.w1.weight")
+                w3_name = n.replace(
+                    f'.block_sparse_moe.input_linear.experts.{expert_idx}.weight',
+                    f".block_sparse_moe.experts.{expert_idx}.w3.weight")
+                
+                # Split the parameter into w1 and w3
+                w1_param, w3_param = p.chunk(2, dim=0)
+
+                _load_expert(n.replace(f'.input_linear.experts.{expert_idx}.', '.experts.w13_'),
+                            w1_param,
+                            w1_name,
+                            shard_id='w1',
+                            expert_id=expert_idx)
+                _load_expert(n.replace(f'.input_linear.experts.{expert_idx}.', '.experts.w13_'),
+                            w3_param,
+                            w3_name,
+                            shard_id='w3',
+                            expert_id=expert_idx)
+
             elif n.endswith(".block_sparse_moe.router.layer.weight"):
                 gate_name = n.replace(
                     ".block_sparse_moe.router.layer.weight",
@@ -651,50 +698,6 @@ class GraniteMoeHybridForCausalLM(
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
         )
-
-    def maybe_update_quant_config(self, quant_config: QuantizationConfig) -> QuantizationConfig:
-        """
-        Update quant config so that ignored module and target module names
-        match the vLLM model names.
-        Granite model specific: mamba -> mixer remapping.
-        """
-        remapping_rules = [
-            # Granite model: mamba -> mixer remapping
-            (
-                r"model\.layers\.(\d+)\.mamba\.in_proj",
-                r"model.layers.\1.mixer.in_proj",
-            ),
-            (
-                r"model\.layers\.(\d+)\.mamba\.out_proj",
-                r"model.layers.\1.mixer.out_proj",
-            ),
-        ]
-        # Update ignore list
-        if hasattr(quant_config, "ignore"):
-            updated_ignore = []
-            for name in quant_config.ignore:
-                updated_name = name
-                for pattern, repl in remapping_rules:
-                    if re.fullmatch(pattern, name):
-                        updated_name = re.sub(pattern, repl, name)
-                updated_ignore.append(updated_name)
-            quant_config.ignore = updated_ignore
-        # Update target list
-        if hasattr(quant_config, "config_groups"):
-            config_groups = quant_config.config_groups
-            for group_name in config_groups:
-                if "targets" in config_groups[group_name]:
-                    targets = []
-                    for name in config_groups[group_name]["targets"]:
-                        updated_name = name
-                        for pattern, repl in remapping_rules:
-                            if re.fullmatch(pattern, name):
-                                updated_name = re.sub(pattern, repl, name)
-                        targets.append(updated_name)
-                config_groups[group_name]["targets"] = targets
-            quant_config.config_groups = config_groups
-        return quant_config
-
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
