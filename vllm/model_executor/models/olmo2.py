@@ -99,7 +99,6 @@ class Olmo2Attention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.max_position_embeddings = self.config.max_position_embeddings
-        self.rope_theta = self.config.rope_theta
 
         # Attention input projection. Projects x -> (q, k, v)
         self.qkv_proj = QKVParallelLinear(
@@ -123,10 +122,14 @@ class Olmo2Attention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         sliding_window = None
-        if (
-            layer_types := getattr(self.config, "layer_types", None)
-        ) is not None and layer_types[layer_idx] == "sliding_attention":
-            sliding_window = self.config.sliding_window
+        rope_parameters = {"rope_theta": self.config.rope_parameters["rope_theta"]}
+        if layer_types := getattr(self.config, "layer_types", None):
+            layer_type = layer_types[layer_idx]
+            if layer_type == "sliding_attention":
+                sliding_window = self.config.sliding_window
+            elif layer_type == "full_attention":
+                # Rope scaling is only applied on full attention layers.
+                rope_parameters.update(self.config.rope_parameters)
 
         self.attn = Attention(
             self.num_heads,
@@ -139,15 +142,13 @@ class Olmo2Attention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        # Rotary embeddings. Rope scaling is only applied on full attention
-        # layers.
-        self.rope_scaling = self.config.rope_scaling if sliding_window is None else None
+        # Rotary embeddings.
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,  # type: ignore
-            rope_scaling=self.rope_scaling,
+            base=rope_parameters["rope_theta"],
+            rope_parameters=rope_parameters,
         )
 
         # Attention output projection.
