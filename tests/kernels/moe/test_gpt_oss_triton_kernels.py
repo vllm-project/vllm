@@ -201,7 +201,7 @@ class ModelConfig:
     sliding_window: int = 128
     initial_context_length: int = 4096
     rope_theta: float = 150000.0
-    rope_scaling_factor: float = 32.0
+    rope_parameters_factor: float = 32.0
     rope_ntk_alpha: float = 1.0
     rope_ntk_beta: float = 32.0
 

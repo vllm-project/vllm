@@ -25,7 +25,7 @@ class Olmo3Config(PretrainedConfig):
         eos_token_id=50279,
         tie_word_embeddings=False,
         rope_theta=10000.0,
-        rope_scaling=None,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         rms_norm_eps=1e-5,
@@ -64,7 +64,9 @@ class Olmo3Config(PretrainedConfig):
         self.initializer_range = initializer_range
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        self.rope_parameters = rope_scaling or rope_parameters
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
 

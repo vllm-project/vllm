@@ -30,7 +30,7 @@ class KimiLinearConfig(PretrainedConfig):
         bos_token_id=1,
         eos_token_id=2,
         rope_theta=10000.0,
-        rope_scaling=None,
+        rope_parameters=None,
         tie_word_embeddings=False,
         moe_intermediate_size: int | None = None,
         moe_renormalize: bool = True,
@@ -74,7 +74,9 @@ class KimiLinearConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        self.rope_parameters = rope_scaling or rope_parameters
 
         self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank

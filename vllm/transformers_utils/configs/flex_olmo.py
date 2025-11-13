@@ -26,7 +26,7 @@ class FlexOlmoConfig(PretrainedConfig):
         eos_token_id=100257,
         tie_word_embeddings=False,
         rope_theta=500000.0,
-        rope_scaling=None,
+        rope_parameters=None,
         attention_bias=False,
         attention_dropout=0.0,
         num_experts_per_tok=5,
@@ -63,7 +63,9 @@ class FlexOlmoConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_cache = use_cache
         self.rope_theta = rope_theta
-        self.rope_scaling = rope_scaling
+        # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
+        rope_scaling = kwargs.pop("rope_scaling", None)
+        self.rope_parameters = rope_scaling or rope_parameters
         self.attention_bias = attention_bias
         self.attention_dropout = attention_dropout
         self.num_experts_per_tok = num_experts_per_tok
@@ -73,5 +75,5 @@ class FlexOlmoConfig(PretrainedConfig):
         self.norm_topk_prob = norm_topk_prob
         # Validate the correctness of rotary position embeddings parameters
         # BC: if there is a 'type' field, move it to 'rope_type'.
-        if self.rope_scaling is not None and "type" in self.rope_scaling:
-            self.rope_scaling["rope_type"] = self.rope_scaling["type"]
+        if self.rope_parameters is not None and "type" in self.rope_parameters:
+            self.rope_parameters["rope_type"] = self.rope_parameters["type"]
