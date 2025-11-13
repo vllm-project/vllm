@@ -579,6 +579,7 @@ class Processor:
             prompt_len == max_prompt_len
             and prompt_type == "decoder"
             and not model_config.is_multimodal_model
+            and self.model_config.runner_type != "pooling"
         ):
             suggestion = (
                 "Make sure that `max_model_len` is no smaller than the "
