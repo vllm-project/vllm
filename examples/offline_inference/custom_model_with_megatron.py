@@ -335,6 +335,11 @@ if __name__ == "__main__":
             enforce_eager=True,
             skip_tokenizer_init=True,
             trust_remote_code=True,
+            # NOTE: We disable prefix caching for this demo since our simple
+            # TrainableFlashAttention doesn't integrate with V1's KV cache
+            # infrastructure. For production use, you'd want to use vLLM's
+            # built-in Attention layers or implement full KV cache support.
+            enable_prefix_caching=False,
         )
 
         print("\n" + "=" * 70)

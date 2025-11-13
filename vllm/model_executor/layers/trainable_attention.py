@@ -16,8 +16,12 @@ from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import flash_attn_varlen_func
 
+from vllm.config import VllmConfig
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-class TrainableFlashAttention(nn.Module):
+
+class TrainableFlashAttention(nn.Module, AttentionLayerBase):
     """
     Training-compatible flash attention module using vLLM's optimized kernels.
 
@@ -189,6 +193,39 @@ class TrainableFlashAttention(nn.Module):
         output = self.o_proj(attn_output)
 
         return output
+
+    def get_attn_backend(self):
+        """
+        Get the attention backend for this layer.
+
+        For TrainableFlashAttention, we don't use a specific vLLM backend
+        since we implement attention directly. Return None to indicate
+        this layer manages its own attention computation.
+        """
+        # Import here to avoid circular dependency
+        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+
+        return FlashAttentionBackend
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> FullAttentionSpec:
+        """
+        Return KV cache specification for V1 engine integration.
+
+        This allows TrainableFlashAttention to work with vLLM's V1 engine
+        by providing the necessary KV cache metadata.
+        """
+        block_size = vllm_config.cache_config.block_size
+        # Determine the dtype for KV cache
+        kv_cache_dtype = vllm_config.cache_config.cache_dtype
+        if kv_cache_dtype == "auto":
+            kv_cache_dtype = vllm_config.model_config.dtype
+
+        return FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=self.num_kv_heads,
+            head_size=self.head_dim,
+            dtype=kv_cache_dtype,
+        )
 
 
 __all__ = ["TrainableFlashAttention"]
