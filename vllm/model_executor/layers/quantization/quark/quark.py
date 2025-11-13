@@ -57,7 +57,7 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
-        self.ignore = cast(list[str], self.quant_config.get("exclude"))
+        self.ignore: list[str] = cast(list[str], self.quant_config.get("exclude", []))
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
