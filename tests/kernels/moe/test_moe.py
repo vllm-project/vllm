@@ -667,7 +667,7 @@ class MarlinMoEWeightData:
         elif input_type == scalar_types.float8_e4m3fn:
             input_dtype = torch.float8_e4m3fn
         else:
-            input_dtype = input_type
+            input_dtype = w.dtype
 
         w_ref_l: list[torch.Tensor] = []
         qweight_l: list[torch.Tensor] = []

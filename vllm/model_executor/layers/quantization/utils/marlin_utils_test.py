@@ -131,7 +131,7 @@ def marlin_quantize(
     group_size: int,
     act_order: bool,
     test_perm: torch.Tensor | None = None,
-    input_dtype: torch.Tensor | None = None,
+    input_dtype: torch.dtype | None = None,
 ):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
@@ -177,7 +177,7 @@ def awq_marlin_quantize(
     w: torch.Tensor,
     quant_type: ScalarType,
     group_size: int,
-    input_dtype: torch.Tensor | None = None,
+    input_dtype: torch.dtype | None = None,
 ):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     size_k, size_n = w.shape
