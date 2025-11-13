@@ -83,6 +83,37 @@ The initialization code should look like this:
 
     For a complete example, see [custom_model_with_megatron.py](../../../examples/offline_inference/custom_model_with_megatron.py).
 
+!!! note "Using External Parallelism Libraries"
+    When using external parallelism libraries like Megatron-LM, you can access vLLM's process groups directly from `ParallelContext`:
+
+    ```python
+    def build_model(vllm_config, parallel_context):
+        # Get vLLM's tensor parallel process group
+        tp_group = parallel_context.get_tp_process_group()
+        tp_rank = parallel_context.get_tensor_parallel_rank()
+        tp_size = parallel_context.get_tensor_parallel_world_size()
+
+        # Pass to external library (e.g., Megatron-LM)
+        from megatron.core.tensor_parallel import ColumnParallelLinear
+        layer = ColumnParallelLinear(
+            hidden_size,
+            output_size,
+            tp_group=tp_group,  # Use vLLM's process group!
+        )
+    ```
+
+    This is much cleaner than importing vLLM's internal `parallel_state` module and extracting the process group manually. The `ParallelContext` API provides:
+
+    - `get_tp_process_group()`: Get tensor parallel process group
+    - `get_pp_process_group()`: Get pipeline parallel process group
+    - `get_tensor_parallel_rank()`: Get TP rank
+    - `get_tensor_parallel_world_size()`: Get TP world size
+    - `get_pipeline_parallel_rank()`: Get PP rank
+    - `get_pipeline_parallel_world_size()`: Get PP world size
+
+    See [custom_model_with_megatron.py](../../../examples/offline_inference/custom_model_with_megatron.py) for a complete example.
+
+
 ### Computation Code
 
 - Add a `embed_input_ids` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.
