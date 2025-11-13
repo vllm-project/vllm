@@ -156,8 +156,6 @@ class CohereAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
-        self.rope_theta = config.rope_theta
-        self.rope_scaling = getattr(config, "rope_scaling", None)
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
@@ -175,23 +173,29 @@ class CohereAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=self.max_position_embeddings,
-            base=self.rope_theta,
-            rope_scaling=self.rope_scaling,
-            is_neox_style=False,
-        )
 
         # Model v2 has interleaved sliding windows, v1 does not
         self.v1 = isinstance(config, CohereConfig)
 
         self.sliding_window = None
+        rope_parameters = getattr(config, "rope_parameters", None)
         if not self.v1:
             layer_idx = extract_layer_index(prefix)
-            if config.layer_types[layer_idx] == "sliding_attention":
+            layer_type = config.layer_types[layer_idx]
+            if layer_type == "sliding_attention":
                 self.sliding_window = config.sliding_window
+            if config.rope_parameters and layer_type in rope_parameters:
+                # Transformers v5
+                rope_parameters = rope_parameters[layer_type]
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=self.max_position_embeddings,
+            base=rope_parameters["rope_theta"],
+            rope_parameters=rope_parameters,
+            is_neox_style=False,
+        )
 
         self.attn = Attention(
             self.num_heads,
