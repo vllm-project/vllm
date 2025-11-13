@@ -821,10 +821,12 @@ struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
 
+#if !defined(__powerpc__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
 };
+#endif
 
 template <typename T>
 void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
