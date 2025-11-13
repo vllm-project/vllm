@@ -317,11 +317,10 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
-        in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
 
-        # Early return if no work and not participating in DP synchronization
-        needs_dp_sync = in_dp_mode and getattr(self, "engines_running", False)
-        if not (self.scheduler.has_requests() or needs_dp_sync):
+        # Check for any requests remaining in the scheduler - unfinished,
+        # or finished and not yet removed from the batch.
+        if not self.scheduler.has_requests():
             return {}, False
         with record_function_or_nullcontext("core step: schedule"):
             scheduler_output = self.scheduler.schedule()
@@ -339,11 +338,7 @@ class EngineCore:
                 scheduler_output, model_output
             )
 
-        # Mark as executed if we processed tokens OR participated in DP sync
-        has_tokens = scheduler_output.total_num_scheduled_tokens > 0
-        executed = has_tokens or in_dp_mode
-
-        return engine_core_outputs, executed
+        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
         if self.use_spec_decode and model_executed:
@@ -387,9 +382,7 @@ class EngineCore:
                 exec_future = self.model_executor.execute_model(
                     scheduler_output, non_block=True
                 )
-            has_tokens = scheduler_output.total_num_scheduled_tokens > 0
-            in_dp_mode = self.vllm_config.parallel_config.data_parallel_size > 1
-            model_executed = has_tokens or in_dp_mode
+            model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if scheduler_output.pending_structured_output_tokens:
                 with record_function_or_nullcontext(
