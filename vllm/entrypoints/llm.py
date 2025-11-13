@@ -1747,7 +1747,10 @@ class LLM:
         # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
         # Therefore, keep most requests waiting outside the core.
         # Todo: Whether to support priority scheduling?
-        max_seqs_in_core = self.llm_engine.vllm_config.scheduler_config.max_num_seqs * 2
+        max_request_in_core = (
+            self.llm_engine.vllm_config.scheduler_config.max_num_seqs * 2
+        )
+        n_request_in_core = 0
         n_waited_request = len(self.request_queue)
 
         if self.pool is not None:
@@ -1756,9 +1759,7 @@ class LLM:
             tasks = (self.process_inputs(t) for t in self.request_queue)
 
         while n_waited_request or self.llm_engine.has_unfinished_requests():
-            num_unfinished_requests = self.llm_engine.get_num_unfinished_requests()
-
-            for i in range(max_seqs_in_core - num_unfinished_requests):
+            for i in range(max_request_in_core - n_request_in_core):
                 if n_waited_request == 0:
                     break
 
@@ -1769,6 +1770,7 @@ class LLM:
                     (request_id, params, lora_request, priority),
                 ) = next(tasks)
                 n_waited_request -= 1
+                n_request_in_core += 1
 
                 self.llm_engine.add_request(
                     request_id,
@@ -1783,6 +1785,7 @@ class LLM:
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
+                    n_request_in_core -= 1
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
