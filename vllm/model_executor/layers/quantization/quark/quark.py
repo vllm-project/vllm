@@ -32,6 +32,7 @@ from vllm.model_executor.layers.quantization.quark.utils import (
     deep_compare,
     should_ignore_layer,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkLinearMethod"]
@@ -67,6 +68,34 @@ class QuarkConfig(QuantizationConfig):
 
     def get_name(self) -> QuantizationMethods:
         return "quark"
+
+    def apply_vllm_mapper(  # noqa: B027
+        self, hf_to_vllm_mapper: "WeightsMapper"
+    ):
+        """
+        Interface for models to update module names referenced in
+        quantization configs in order to reflect the vllm model structure
+
+        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
+            structure of the qconfig) to vllm model structure
+        """
+        # TODO (@kylesayrs): add implementations for all subclasses
+        # from vllm.debug import ForkedPdb; ForkedPdb().set_trace()
+        # import copy
+        quant_config_with_hf_to_vllm_mapper = {}
+
+        for k, v in self.quant_config.items():
+            if isinstance(v, list):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_list(v)
+            elif isinstance(v, dict):
+                quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
+            else:
+                if v is not None:
+                    quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply(v)
+                else:
+                    quant_config_with_hf_to_vllm_mapper[k] = v
+
+        self.quant_config = quant_config_with_hf_to_vllm_mapper
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
