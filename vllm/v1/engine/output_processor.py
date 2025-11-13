@@ -215,33 +215,28 @@ class RequestState:
             # Only the final output is required in FINAL_ONLY mode.
             return None
 
-        assert self.detokenizer is not None
-
-        # Send output request only when
-        # 1. It has finished, or
-        # 2. It is the first token, or
-        # 3. It has reached the stream interval number of tokens
-        if not (
-            finished
-            or self.sent_tokens_offset == 0
-            or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
-            >= self.stream_interval
-        ):
-            return None
-
-        if self.output_kind == RequestOutputKind.DELTA:
-            # Send tokens from the offset in DELTA mode
-            tokens_to_send = self.detokenizer.output_token_ids[
-                self.sent_tokens_offset :
-            ]
-            self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
-        else:
-            if self.stream_interval > 1 and final_only:
-                logger.warning_once(
-                    "stream_interval > 1 is not supported for FINAL_ONLY mode. "
-                    "Ignoring the stream_interval setting."
-                )
-            tokens_to_send = new_token_ids
+        if self.stream_interval > 1:
+            assert self.detokenizer is not None
+    
+            # Send output request only when
+            # 1. It has finished, or
+            # 2. It is the first token, or
+            # 3. It has reached the stream interval number of tokens
+            if not (
+                finished
+                or self.sent_tokens_offset == 0
+                or len(self.detokenizer.output_token_ids) - self.sent_tokens_offset
+                >= self.stream_interval
+            ):
+                return None
+    
+            if self.output_kind == RequestOutputKind.DELTA:
+                # Send tokens from the offset in DELTA mode, otherwise all
+                # tokens are sent.
+                new_token_ids = self.detokenizer.output_token_ids[
+                    self.sent_tokens_offset :
+                ]
+                self.sent_tokens_offset = len(self.detokenizer.output_token_ids)
 
         request_id = self.request_id
         if pooling_output is not None:
