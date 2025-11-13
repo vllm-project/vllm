@@ -133,7 +133,7 @@ class Platform:
     additional_env_vars: list[str] = []
 
     _global_graph_pool: Any | None = None
-    
+
     @property
     def pass_key(self) -> str:
         return "post_grad_custom_post_pass"
@@ -180,7 +180,7 @@ class Platform:
         # exact GPU model statelessly here. So we return True for
         # all ROCm platforms for now.
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
-    
+
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class of a device."""
