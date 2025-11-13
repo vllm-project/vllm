@@ -84,6 +84,13 @@ class FlexAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "FLEX_ATTENTION"
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """FlexAttention supports both decoder and encoder-only attention."""
+        from vllm.attention import AttentionType
+
+        return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
+
     @staticmethod
     def get_impl_cls() -> type["FlexAttentionImpl"]:
         return FlexAttentionImpl
