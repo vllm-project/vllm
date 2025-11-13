@@ -832,20 +832,9 @@ struct VecTypeTrait<float> {
   using vec_t = vec_op::FP32Vec16;
 };
 
-// BF16 support varies by platform:
-// - x86: always available
-// - ARM: only available with ARMv8.6-A BF16 extension (e.g., Apple M2+, AWS
-// Graviton3+)
-// - PowerPC/others: not available
-#if defined(__aarch64__)
-  #ifdef ARM_BF16_SUPPORT
-template <>
-struct VecTypeTrait<c10::BFloat16> {
-  using vec_t = vec_op::BF16Vec16;
-};
-  #endif
+// ARM only supports BF16 with ARMv8.6-A extension
+#if (defined(__aarch64__) && !defined(ARM_BF16_SUPPORT))
 #else
-// Non-ARM platforms (x86, etc.) have BF16Vec16 available
 template <>
 struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
