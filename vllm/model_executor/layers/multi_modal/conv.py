@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.utils.torch_utils import is_torch_equal
 
 
 class ConvLayerBase(CustomOp):
@@ -104,33 +105,43 @@ class Conv2dLayer(ConvLayerBase):
 
     num_dim = 2
 
+    def _forward_mulmat(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 4
+        B, C, H, W = x.shape
+        K1, K2 = self.kernel_size
+        H, W = H // K1, W // K2
+        x = x.unfold(2, K1, K1).unfold(3, K2, K2)
+        x = x.permute(0, 2, 3, 1, 4, 5).reshape(
+            -1, self.in_channels * math.prod(self.kernel_size)
+        )
+        x = F.linear(x, self.weight, self.bias)
+        x = x.view(B, H, W, self.out_channels).permute(0, 3, 1, 2)
+        return x
+
+    def _forward_conv(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 4
+        x = F.conv2d(
+            x,
+            self.weight,
+            self.bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
+        return x
+
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """Expected input shape: (batch_size, in_channels, height, width)"""
         assert x.dim() == 4
         if self.enable_linear:
-            B, C, H, W = x.shape
-            K1, K2 = self.kernel_size
-            H, W = H // K1, W // K2
-            x = x.unfold(2, K1, K1).unfold(3, K2, K2)
-            x = x.permute(0, 2, 3, 1, 4, 5).reshape(
-                -1, self.in_channels * math.prod(self.kernel_size)
-            )
-            x = F.linear(x, self.weight, self.bias)
-            x = x.view(B, H, W, self.out_channels).permute(0, 3, 1, 2)
+            return self._forward_mulmat(x)
         else:
-            x = F.conv2d(
-                x,
-                self.weight,
-                self.bias,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self.groups,
-            )
-        return x
+            return self._forward_conv(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_native(x)
+        # By default, we use CUDNN's convolution ops with optimization.
+        return self._forward_conv(x)
 
 
 class CausalConv2dLayer(Conv2dLayer):
@@ -145,13 +156,15 @@ class CausalConv2dLayer(Conv2dLayer):
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: int,
-        stride: int = 1,
-        padding: int | tuple | str = 0,
-        dilation: int | tuple = 1,
+        kernel_size: int | tuple[int, ...],
+        stride: int | tuple[int, ...] = 1,
+        padding: int | tuple[int, ...] = 0,
+        dilation: int | tuple[int, ...] = 1,
         groups: int = 1,
         bias: bool = True,
         padding_mode: str = "zeros",
+        *,
+        params_dtype: torch.dtype | None = None,
     ) -> None:
         if padding is not None:
             raise ValueError(
@@ -171,6 +184,7 @@ class CausalConv2dLayer(Conv2dLayer):
             groups,
             bias,
             padding_mode,
+            params_dtype=params_dtype,
         )
 
     def forward(
@@ -188,30 +202,45 @@ class Conv3dLayer(ConvLayerBase):
 
     num_dim = 3
 
-    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        """Expected input shape: (batch_size, in_channels, time, height, width)"""
+    def _forward_mulmat(self, x: torch.Tensor) -> torch.Tensor:
         assert x.dim() == 5
-        if self.enable_linear:
-            B, C, T, H, W = x.shape
-            K1, K2, K3 = self.kernel_size
-            T, H, W = T // K1, H // K2, W // K3
-            x = x.unfold(2, K1, K1).unfold(3, K2, K2).unfold(4, K3, K3)
-            x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(
-                -1, self.in_channels * math.prod(self.kernel_size)
-            )
-            x = F.linear(x, self.weight, self.bias)
-            x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
-        else:
-            x = F.conv3d(
-                x,
-                self.weight,
-                self.bias,
-                stride=self.stride,
-                padding=self.padding,
-                dilation=self.dilation,
-                groups=self.groups,
-            )
+        B, C, T, H, W = x.shape
+        K1, K2, K3 = self.kernel_size
+        T, H, W = T // K1, H // K2, W // K3
+        x = x.unfold(2, K1, K1).unfold(3, K2, K2).unfold(4, K3, K3)
+        x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(
+            -1, self.in_channels * math.prod(self.kernel_size)
+        )
+        x = F.linear(x, self.weight, self.bias)
+        x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
         return x
 
+    def _forward_conv(self, x: torch.Tensor) -> torch.Tensor:
+        assert x.dim() == 5
+        x = F.conv3d(
+            x,
+            self.weight,
+            self.bias,
+            stride=self.stride,
+            padding=self.padding,
+            dilation=self.dilation,
+            groups=self.groups,
+        )
+        return x
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """Expected input shape: (batch_size, in_channels, time, height, width)"""
+        if self.enable_linear:
+            return self._forward_mulmat(x)
+        else:
+            return self._forward_conv(x)
+
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_native(x)
+        # PyTorch2.9.0 disabled CUDNN's Conv3D, which caused a
+        # significant performance regression.
+        # See: https://github.com/vllm-project/vllm/issues/27406
+        # and https://github.com/pytorch/pytorch/issues/166122
+        # By default, we use CUDNN's convolution ops with optimization.
+        if self.enable_linear and is_torch_equal("2.9.0"):
+            return self._forward_mulmat(x)
+        return self._forward_conv(x)
