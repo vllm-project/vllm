@@ -613,7 +613,11 @@ class EplbState:
                     all_ranks_buffer_ready = self._all_ranks_buffer_ready(
                         eplb_model_state
                     )
-                if eplb_model_state.is_async_enabled and eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
+                if (
+                    eplb_model_state.is_async_enabled
+                    and eplb_model_state.ep_buffer_ready
+                    and all_ranks_buffer_ready
+                ):
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
@@ -623,16 +627,16 @@ class EplbState:
                         eplb_model_state.layer_to_transfer
                         >= eplb_model_state.model.num_moe_layers
                     ):
-                            self.post_eplb(eplb_model_state, is_profile)
-                            eplb_model_state.rebalanced = False
-                            eplb_model_state.layer_to_transfer = 0
-                            eplb_model_state.pending_global_ready_check = False
-                            logger.info(
-                                "finish async transfer for model %s rank %d layer %d",
-                                eplb_model_state.model_name,
-                                ep_group.rank(),
-                                eplb_model_state.model.num_moe_layers,
-                            )
+                        self.post_eplb(eplb_model_state, is_profile)
+                        eplb_model_state.rebalanced = False
+                        eplb_model_state.layer_to_transfer = 0
+                        eplb_model_state.pending_global_ready_check = False
+                        logger.info(
+                            "finish async transfer for model %s rank %d layer %d",
+                            eplb_model_state.model_name,
+                            ep_group.rank(),
+                            eplb_model_state.model.num_moe_layers,
+                        )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if any(
