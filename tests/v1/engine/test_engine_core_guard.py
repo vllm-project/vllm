@@ -12,7 +12,7 @@ import zmq
 
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine.core import (
-    EngineCoreGuard,
+    EngineCoreSentinel,
     EngineLoopPausedError,
 )
 from vllm.v1.serial_utils import serialize_method_call
@@ -20,13 +20,13 @@ from vllm.v1.serial_utils import serialize_method_call
 CLIENT_CMD_ADDR = "tcp://127.0.0.1:8844"
 WORKER_CMD_ADDR = "tcp://127.0.0.1:8845"
 FAULT_REPORT_ADDR = "tcp://127.0.0.1:8846"
-GUARD_IDENTITY = b"engine_guard_0"
+SENTINEL_IDENTITY = b"engine_sentinel_0"
 
 
-def create_engine_core_guard(
+def create_engine_core_sentinel(
     fault_signal_q: queue.Queue, busy_loop_active: threading.Event
 ):
-    return EngineCoreGuard(
+    return EngineCoreSentinel(
         engine_index=0,
         fault_signal_q=fault_signal_q,
         cmd_q=queue.Queue(),
@@ -35,31 +35,31 @@ def create_engine_core_guard(
         client_cmd_addr=CLIENT_CMD_ADDR,
         worker_cmd_addr=WORKER_CMD_ADDR,
         fault_report_addr=FAULT_REPORT_ADDR,
-        guard_identity=GUARD_IDENTITY,
+        sentinel_identity=SENTINEL_IDENTITY,
         tp_size=1,
         pp_size=1,
         dp_size=1,
     )
 
 
-def test_engine_core_guard_initialization():
+def test_engine_core_sentinel_initialization():
     fault_signal_q: queue.Queue = queue.Queue()
     busy_loop_active = threading.Event()
 
-    guard = create_engine_core_guard(fault_signal_q, busy_loop_active)
+    sentinel = create_engine_core_sentinel(fault_signal_q, busy_loop_active)
 
-    assert guard.engine_index == 0
-    assert guard.tp_size == 1
-    assert guard.pp_size == 1
-    assert not guard.communicator_aborted
-    assert guard.engine_running is True
-    assert guard.daemon is True
+    assert sentinel.engine_index == 0
+    assert sentinel.tp_size == 1
+    assert sentinel.pp_size == 1
+    assert not sentinel.communicator_aborted
+    assert sentinel.engine_running is True
+    assert sentinel.daemon is True
 
-    assert guard.fault_report_socket.type == zmq.DEALER
-    assert guard.client_cmd_socket.type == zmq.DEALER
-    assert guard.worker_cmd_socket.type == zmq.ROUTER
+    assert sentinel.fault_report_socket.type == zmq.DEALER
+    assert sentinel.client_cmd_socket.type == zmq.DEALER
+    assert sentinel.worker_cmd_socket.type == zmq.ROUTER
 
-    guard.shutdown()
+    sentinel.shutdown()
 
 
 @pytest.mark.parametrize("instruction", ["pause", "retry"])
@@ -73,7 +73,7 @@ def test_run_handle_instruction(instruction):
 
     time.sleep(0.1)
 
-    guard = create_engine_core_guard(fault_signal_q, busy_loop_active)
+    sentinel = create_engine_core_sentinel(fault_signal_q, busy_loop_active)
     time.sleep(0.1)
 
     ctx = zmq.Context()
@@ -96,7 +96,7 @@ def test_run_handle_instruction(instruction):
         logging.info(identity)
         cmd_socket.send_multipart([b"", json.dumps(response_dict).encode("utf-8")])
 
-    threading.Thread(target=guard.run, daemon=True).start()
+    threading.Thread(target=sentinel.run, daemon=True).start()
     time.sleep(0.1)
 
     param = {"timeout": 3}
@@ -106,7 +106,7 @@ def test_run_handle_instruction(instruction):
         param["new_stateless_dp_group_port"] = 23456
     serial_instruction = serialize_method_call(instruction, **param)
     client_socket.send_multipart(
-        [GUARD_IDENTITY, b"", serial_instruction.encode("utf-8")]
+        [SENTINEL_IDENTITY, b"", serial_instruction.encode("utf-8")]
     )
     if instruction == "pause":
         fault_signal_q.put(EngineLoopPausedError(Exception("test error")))
@@ -127,4 +127,4 @@ def test_run_handle_instruction(instruction):
 
     client_socket.close()
     worker_cmd_socket.close()
-    guard.shutdown()
+    sentinel.shutdown()

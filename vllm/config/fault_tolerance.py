@@ -39,10 +39,10 @@ class FaultToleranceConfig:
 
     engine_core_cmd_addr: str = ""
     """
-    The ZMQ address between engine_core_guard and worker_guard.
+    The ZMQ address between engine_core_sentinel and worker_sentinel.
     It will be initialized and assigned in EngineCore, then passed
     to the Worker via vllm_config—this is required for the Worker
-    to spin up the WorkerGuard.
+    to spin up the WorkerSentinel.
     """
 
     gloo_comm_timeout: int = 30

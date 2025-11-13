@@ -89,12 +89,12 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
-class EngineCoreGuard(threading.Thread):  # changed
+class EngineCoreSentinel(threading.Thread):
     """
-    EngineCoreGuard monitors a single EngineCore instance, responsible for:
+    EngineCoreSentinel monitors a single EngineCore instance, responsible for:
       1. Receiving fault signals (exceptions raised in EngineCore busy loop)
-      2. Receiving and executing commands from ClientGuard
-      3. Reporting execution results or faults back to the ClientGuard
+      2. Receiving and executing commands from ClientSentinel
+      3. Reporting execution results or faults back to the ClientSentinel
     """
 
     def __init__(
@@ -107,7 +107,7 @@ class EngineCoreGuard(threading.Thread):  # changed
         client_cmd_addr: str,
         worker_cmd_addr: str,
         fault_report_addr: str,
-        guard_identity: bytes,
+        sentinel_identity: bytes,
         tp_size: int,
         pp_size: int,
         dp_size: int,
@@ -123,30 +123,34 @@ class EngineCoreGuard(threading.Thread):  # changed
         self.dp_size = dp_size
 
         self.ctx = zmq.Context()
-        # Client <-> EngineCoreGuard sockets
+        # Client <-> EngineCoreSentinel sockets
         self.fault_report_socket = make_zmq_socket(
             self.ctx,
             fault_report_addr,
             zmq.DEALER,
             bind=False,
-            identity=guard_identity,
+            identity=sentinel_identity,
         )
 
         self.client_cmd_socket = make_zmq_socket(
-            self.ctx, client_cmd_addr, zmq.DEALER, bind=False, identity=guard_identity
+            self.ctx,
+            client_cmd_addr,
+            zmq.DEALER,
+            bind=False,
+            identity=sentinel_identity,
         )
-        # EngineCoreGuard <-> WorkerGuard sockets
+        # EngineCoreSentinel <-> WorkerSentinel sockets
         self.worker_cmd_socket = make_zmq_socket(
             self.ctx, worker_cmd_addr, zmq.ROUTER, bind=True
         )
         self.poller = zmq.Poller()
         self.communicator_aborted = False
         self.engine_running = True
-        self.engine_core_guard_dead = False
-        self.logger = self._make_engine_core_guard_logger()
+        self.engine_core_sentinel_dead = False
+        self.logger = self._make_engine_core_sentinel_logger()
 
-    def _make_engine_core_guard_logger(self):
-        prefix = f"[EngineCoreGuard_{self.engine_index}] "
+    def _make_engine_core_sentinel_logger(self):
+        prefix = f"[EngineCoreSentinel_{self.engine_index}] "
 
         def log(msg, *args, level="info", **kwargs):
             """
@@ -159,10 +163,10 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def run(self) -> None:
         """
-        Run the main monitoring loop for EngineCoreGuard.
+        Run the main monitoring loop for EngineCoreSentinel.
         """
         poll_timeout_ms = 100
-        while not self.engine_core_guard_dead:
+        while not self.engine_core_sentinel_dead:
             # Check for engine fault signals
             try:
                 engine_exception = self.fault_signal_q.get_nowait()
@@ -172,7 +176,7 @@ class EngineCoreGuard(threading.Thread):  # changed
                     self.logger("Engine paused", level="info")
                 else:
                     self.logger(
-                        "[EngineCoreGuard] Detected exception %s: %s\n Call Stack:\n%s",
+                        "Detected exception %s: %s\n Call Stack:\n%s",
                         type(engine_exception).__name__,
                         engine_exception,
                         "".join(traceback.format_tb(engine_exception.__traceback__)),
@@ -189,7 +193,9 @@ class EngineCoreGuard(threading.Thread):  # changed
                     poll_timeout=poll_timeout_ms,
                 )
             except zmq.ZMQError:
-                self.logger("Socket closed, terminating EngineCoreGuard", level="info")
+                self.logger(
+                    "Socket closed, terminating EngineCoreSentinel", level="info"
+                )
                 break
 
             if has_msg:
@@ -237,7 +243,7 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def _execute_cmd(self, cmd_str):
         """
-        Execute a command received from ClientGuard.
+        Execute a command received from ClientSentinel.
         """
         method, method_uuid, method_params = deserialize_method_call(cmd_str)
         self.logger("Executing command: %s", method, level="info")
@@ -300,7 +306,7 @@ class EngineCoreGuard(threading.Thread):  # changed
 
     def retry(self, new_stateless_dp_group_port: int, timeout: int = 1):
         """
-        Handle the retry instruction from the ClientGuard.
+        Handle the retry instruction from the ClientSentinel.
         This instruction tells the EngineCore to continue its busy loop
         after being suspended due to an exception.
         """
@@ -355,7 +361,7 @@ class EngineCoreGuard(threading.Thread):  # changed
             self.worker_cmd_socket.close()
         if self.ctx is not None:
             self.ctx.term()
-        self.engine_core_guard_dead = True
+        self.engine_core_sentinel_dead = True
 
 
 def busy_loop_wrapper(busy_loop_func):
@@ -1156,15 +1162,15 @@ class EngineCoreProc(EngineCore):
                 self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
                 self.cmd_q: queue.Queue[str | None] = queue.Queue(maxsize=1)
                 self.engine_recovery_timeout = ft_config.engine_recovery_timeout
-                engine_core_guard_ids = addresses.engine_core_guard_identities
-                assert engine_core_guard_ids is not None
+                engine_core_sentinel_ids = addresses.engine_core_sentinel_identities
+                assert engine_core_sentinel_ids is not None
                 assert addresses.fault_report_addr is not None
                 assert addresses.client_cmd_addr is not None
                 assert addresses.engine_core_cmd_addrs is not None
                 engine_core_cmd_addr = addresses.engine_core_cmd_addrs[
                     vllm_config.parallel_config.data_parallel_rank
                 ]
-                self.engine_core_guard = EngineCoreGuard(
+                self.engine_core_sentinel = EngineCoreSentinel(
                     engine_index=self.engine_index,
                     fault_signal_q=self.fault_signal_q,
                     cmd_q=self.cmd_q,
@@ -1173,12 +1179,12 @@ class EngineCoreProc(EngineCore):
                     fault_report_addr=addresses.fault_report_addr,
                     client_cmd_addr=addresses.client_cmd_addr,
                     worker_cmd_addr=engine_core_cmd_addr,
-                    guard_identity=engine_core_guard_ids[self.engine_index],
+                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     tp_size=vllm_config.parallel_config.tensor_parallel_size,
                     pp_size=vllm_config.parallel_config.pipeline_parallel_size,
                     dp_size=vllm_config.parallel_config.data_parallel_size,
                 )
-                self.engine_core_guard.start()
+                self.engine_core_sentinel.start()
                 vllm_config.fault_tolerance_config.engine_core_cmd_addr = (
                     engine_core_cmd_addr
                 )
@@ -1858,7 +1864,7 @@ class EngineCoreProc(EngineCore):
     def shutdown(self):
         super().shutdown()
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
-            self.engine_core_guard.shutdown()
+            self.engine_core_sentinel.shutdown()
 
 
 class DPEngineCoreProc(EngineCoreProc):
