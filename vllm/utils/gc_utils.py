@@ -89,6 +89,21 @@ class GCDebugger:
             )
 
 
+def freeze_gc_heap() -> None:
+    """
+    Freeze all objects tracked by the garbage collector. It should be invoked
+    after server init / warmup, to reduce GC overhead from static objects
+    during serving time.
+    """
+    # Ensure all static objects are pushed down to the oldest generation for
+    # freeze
+    gc.collect(0)
+    gc.collect(1)
+    gc.collect(2)
+    # Freeze all GC tracked objects
+    gc.freeze()
+
+
 def maybe_attach_gc_debug_callback() -> None:
     """
     Attached a callback for GC debug when VLLM_GC_DEBUG is enabled.
