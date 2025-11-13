@@ -343,18 +343,16 @@ def build_megatron_model(vllm_config, parallel_context: ParallelContext):
         TransformerConfig,
     )
 
-    # Get vLLM's tensor parallel process group
-    # Set Megatron's global tensor parallel group to vLLM's group
-    # Megatron layers require this even though they also accept tp_group as parameter
-    from vllm.distributed import parallel_state as vllm_parallel_state
-
-    tp_coordinator = vllm_parallel_state.get_tp_group()
-    tp_group = tp_coordinator.device_group
+    # Get vLLM's tensor parallel process group from parallel context
+    # No need to import vllm.distributed.parallel_state!
+    tp_group = parallel_context.get_tp_process_group()
     tp_rank = parallel_context.get_tensor_parallel_rank()
     tp_size = parallel_context.get_tensor_parallel_world_size()
 
     assert tp_group is not None, "Failed to get TP process group from vLLM!"
 
+    # Set Megatron's global tensor parallel group to vLLM's group
+    # Megatron layers require this even though they also accept tp_group as parameter
     megatron_parallel_state._TENSOR_MODEL_PARALLEL_GROUP = tp_group
     megatron_parallel_state._MPU_TENSOR_MODEL_PARALLEL_RANK = tp_rank
     megatron_parallel_state._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = list(range(tp_size))

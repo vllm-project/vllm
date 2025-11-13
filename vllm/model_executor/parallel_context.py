@@ -96,6 +96,54 @@ class ParallelContext:
         """
         return self.data_parallel_size
 
+    def get_tp_process_group(self):
+        """
+        Get the tensor parallel process group (PyTorch ProcessGroup).
+
+        This is the actual torch.distributed.ProcessGroup object that can be
+        passed to external parallelism libraries like Megatron-LM.
+
+        Returns:
+            torch.distributed.ProcessGroup for tensor parallelism, or None if
+            not initialized
+
+        Example:
+            ```python
+            def build_model(vllm_config, parallel_context):
+                tp_group = parallel_context.get_tp_process_group()
+
+                # Pass to Megatron layers
+                from megatron.core.tensor_parallel import ColumnParallelLinear
+
+                layer = ColumnParallelLinear(
+                    hidden_size,
+                    output_size,
+                    tp_group=tp_group,  # Clean!
+                )
+            ```
+        """
+        try:
+            tp_coordinator = parallel_state.get_tp_group()
+            return tp_coordinator.device_group
+        except (AssertionError, AttributeError):
+            # Parallel state not initialized
+            return None
+
+    def get_pp_process_group(self):
+        """
+        Get the pipeline parallel process group (PyTorch ProcessGroup).
+
+        Returns:
+            torch.distributed.ProcessGroup for pipeline parallelism, or None
+            if not initialized
+        """
+        try:
+            pp_coordinator = parallel_state.get_pp_group()
+            return pp_coordinator.device_group
+        except (AssertionError, AttributeError):
+            # Parallel state not initialized
+            return None
+
     @staticmethod
     def from_config(parallel_config) -> "ParallelContext":
         """
