@@ -561,6 +561,8 @@ class EngineArgs:
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
+    stream_interval: int = SchedulerConfig.stream_interval
+
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
@@ -1073,6 +1075,9 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
+        scheduler_group.add_argument(
+            "--stream-interval", **scheduler_kwargs["stream_interval"]
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1579,6 +1584,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            stream_interval=self.stream_interval,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
