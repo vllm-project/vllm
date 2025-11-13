@@ -192,6 +192,7 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
         # The float activation will be quantized (dynamic, per-token) to INT8.
         act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK
 
+        assert isinstance(self.quant_config, IPEXConfig)
         qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
             weight_dtype=weight_dtype,
             lowp_mode=lowp_mode,
@@ -263,6 +264,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
         # The float activation will be quantized (dynamic, per-token) to INT8.
         act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH
 
+        assert isinstance(self.quant_config, IPEXConfig)
         qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
             weight_dtype=weight_dtype,
             lowp_mode=lowp_mode,
