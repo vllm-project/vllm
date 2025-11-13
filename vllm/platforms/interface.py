@@ -546,13 +546,6 @@ class Platform:
         return cls._global_graph_pool
 
     @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        """
-        Returns the total number of compute units (CU) on single GPU.
-        """
-        raise NotImplementedError
-
-    @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
         """
         Get static graph wrapper class for static graph.
