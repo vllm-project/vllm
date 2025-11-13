@@ -690,7 +690,7 @@ if __name__ == "__main__":
         print("=" * 70)
 
         for output in outputs:
-            generated_id = output.outputs[0].token_ids[0]
+            single_query_token = output.outputs[0].token_ids[0]
             logprobs = (
                 output.outputs[0].logprobs[0] if output.outputs[0].logprobs else None
             )
@@ -706,10 +706,10 @@ if __name__ == "__main__":
             sorted_logits, sorted_indices = torch.sort(
                 reference_logits[-1], descending=True
             )
-            vllm_token_rank = (sorted_indices == generated_id).nonzero(as_tuple=True)[
-                0
-            ].item() + 1
-            vllm_token_ref_logit = reference_logits[-1, generated_id].item()
+            vllm_token_rank = (sorted_indices == single_query_token).nonzero(
+                as_tuple=True
+            )[0].item() + 1
+            vllm_token_ref_logit = reference_logits[-1, single_query_token].item()
 
             print("\nGround Truth (PyTorch TP=1):")
             print(f"  - Greedy token: {reference_greedy}")
@@ -717,30 +717,32 @@ if __name__ == "__main__":
             print(f"  - Top-{K} logits: {[f'{v.item():.4f}' for v in topk_values]}")
 
             print("\nvLLM Output (TP=4):")
-            print(f"  - Greedy token: {generated_id}")
+            print(f"  - Greedy token: {single_query_token}")
             print(f"  - Rank in reference: {vllm_token_rank} / {len(sorted_logits)}")
             print(f"  - Reference logit for this token: {vllm_token_ref_logit:.4f}")
             if logprobs:
-                print(f"  - vLLM log probability: {logprobs[generated_id].logprob:.4f}")
+                print(
+                    f"  - vLLM log probability: {logprobs[single_query_token].logprob:.4f}"
+                )
 
             # Validate: vLLM token should be in top-K reference tokens
             # (allows for numerical differences due to TP, dtype, etc.)
-            if generated_id in topk_tokens:
-                rank = topk_tokens.index(generated_id) + 1
+            if single_query_token in topk_tokens:
+                rank = topk_tokens.index(single_query_token) + 1
                 print("\n✅ VALIDATION PASSED!")
                 print(
-                    f"   vLLM token {generated_id} is in reference top-{K} (rank {rank})"
+                    f"   vLLM token {single_query_token} is in reference top-{K} (rank {rank})"
                 )
-                if generated_id == reference_greedy:
+                if single_query_token == reference_greedy:
                     print("   ✨ Exact match with reference greedy token!")
             else:
                 print("\n❌ VALIDATION FAILED!")
-                print(f"   vLLM token {generated_id} NOT in reference top-{K}")
+                print(f"   vLLM token {single_query_token} NOT in reference top-{K}")
                 print(
                     "   This suggests a correctness issue (not just numerical differences)"
                 )
                 raise AssertionError(
-                    f"vLLM output ({generated_id}) not in reference top-{K} tokens {topk_tokens}"
+                    f"vLLM output ({single_query_token}) not in reference top-{K} tokens {topk_tokens}"
                 )
 
         print("\n" + "=" * 70)
@@ -753,9 +755,12 @@ if __name__ == "__main__":
         print("=" * 70)
 
         # Create multiple prompts of different lengths
+        # Include the same prompt as the single-query test to verify consistency
         batch_prompts = [
             TokensPrompt(prompt_token_ids=[1, 2, 3]),  # 3 tokens
-            TokensPrompt(prompt_token_ids=[10, 20, 30, 40, 50]),  # 5 tokens
+            TokensPrompt(
+                prompt_token_ids=test_input_ids
+            ),  # 5 tokens (same as single query!)
             TokensPrompt(prompt_token_ids=[100, 200]),  # 2 tokens
         ]
 
@@ -768,9 +773,20 @@ if __name__ == "__main__":
         print(f"\n[Dynamic Batching] Generated {len(batch_outputs)} outputs:")
         for i, output in enumerate(batch_outputs):
             prompt_len = len(batch_prompts[i]["prompt_token_ids"])
-            generated_id = output.outputs[0].token_ids[0]
+            batch_generated_id = output.outputs[0].token_ids[0]
             print(
-                f"  Prompt {i + 1}: {prompt_len} tokens -> generated token {generated_id}"
+                f"  Prompt {i + 1}: {prompt_len} tokens -> generated token {batch_generated_id}"
+            )
+
+        # Verify the batched result matches the single-query result
+        batched_token = batch_outputs[1].outputs[0].token_ids[0]  # Middle prompt
+        if batched_token == single_query_token:
+            print(
+                f"\n✓ Batched query matches single query! Both generated token {single_query_token}"
+            )
+        else:
+            print(
+                f"\n⚠️  Batched token {batched_token} != single query token {single_query_token}"
             )
 
         print(
