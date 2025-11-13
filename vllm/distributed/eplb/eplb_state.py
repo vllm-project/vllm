@@ -630,9 +630,10 @@ class EplbState:
                             eplb_model_state.layer_to_transfer = 0
                             eplb_model_state.pending_global_ready_check = False
                 logger.info(
-                    "finish async transfer for model %s rank %d",
+                    "finish async transfer for model %s rank %d layer %d",
                     eplb_model_state.model_name,
                     ep_group.rank(),
+                    eplb_model_state.layer_to_transfer,
                 )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
