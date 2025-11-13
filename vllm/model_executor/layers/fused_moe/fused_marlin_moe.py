@@ -521,6 +521,7 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @property
     def quant_type_id(self) -> int:
+        # uint4b8 will be set for int4 weight and float4_e2m1f will be used for mxfp4
         return (
             scalar_types.uint4b8.id
             if self.quant_config.use_int4_w4a16
