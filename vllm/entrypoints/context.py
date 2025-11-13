@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Union
 from openai.types.responses.tool import Mcp
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
+from vllm import envs
 from vllm.entrypoints.harmony_utils import (
     get_encoding,
     get_streamable_parser_for_assistant,
@@ -79,7 +80,11 @@ class TurnMetrics:
 
 class ConversationContext(ABC):
     @abstractmethod
-    def append_output(self, output) -> None:
+    def append_output(self, output: RequestOutput) -> None:
+        pass
+
+    @abstractmethod
+    def append_tool_output(self, output) -> None:
         pass
 
     @abstractmethod
@@ -109,6 +114,28 @@ class ConversationContext(ABC):
         raise NotImplementedError("Should not be called.")
 
 
+def _create_json_parse_error_messages(
+    last_msg: Message, e: json.JSONDecodeError
+) -> list[Message]:
+    """
+    Creates an error message when json parse failed.
+    """
+    error_msg = (
+        f"Error parsing tool arguments as JSON: {str(e)}. "
+        "Please ensure the tool call arguments are valid JSON and try again."
+    )
+    content = TextContent(text=error_msg)
+    author = Author(role=Role.TOOL, name=last_msg.recipient)
+    return [
+        Message(
+            author=author,
+            content=[content],
+            recipient=Role.ASSISTANT,
+            channel=last_msg.channel,
+        )
+    ]
+
+
 class SimpleContext(ConversationContext):
     def __init__(self):
         self.last_output = None
@@ -127,6 +154,9 @@ class SimpleContext(ConversationContext):
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
+
+    def append_tool_output(self, output) -> None:
+        raise NotImplementedError("Should not be called.")
 
     def need_builtin_tool_call(self) -> bool:
         return False
@@ -182,28 +212,28 @@ class HarmonyContext(ConversationContext):
         if self.parser.current_channel in {"analysis", "commentary"}:
             self.num_reasoning_tokens += 1
 
-    def append_output(self, output: RequestOutput | list[Message]) -> None:
-        if isinstance(output, RequestOutput):
-            output_token_ids = output.outputs[0].token_ids
-            self.parser = get_streamable_parser_for_assistant()
-            for token_id in output_token_ids:
-                self.parser.process(token_id)
-                # Check if the current token is part of reasoning content
-                self._update_num_reasoning_tokens()
-            self._update_prefill_token_usage(output)
-            self._update_decode_token_usage(output)
-            # Append current turn to all turn list for next turn's calculations
-            self.all_turn_metrics.append(self.current_turn_metrics.copy())
-            self.current_turn_metrics.reset()
-            # append_output is called only once before tool calling
-            # in non-streaming case
-            # so we can append all the parser messages to _messages
-            output_msgs = self.parser.messages
-            # The responses finish reason is set in the last message
-            self.finish_reason = output.outputs[0].finish_reason
-        else:
-            # Tool output.
-            output_msgs = output
+    def append_output(self, output: RequestOutput) -> None:
+        output_token_ids = output.outputs[0].token_ids
+        self.parser = get_streamable_parser_for_assistant()
+        for token_id in output_token_ids:
+            self.parser.process(token_id)
+            # Check if the current token is part of reasoning content
+            self._update_num_reasoning_tokens()
+        self._update_prefill_token_usage(output)
+        self._update_decode_token_usage(output)
+        # Append current turn to all turn list for next turn's calculations
+        self.all_turn_metrics.append(self.current_turn_metrics.copy())
+        self.current_turn_metrics.reset()
+        # append_output is called only once before tool calling
+        # in non-streaming case
+        # so we can append all the parser messages to _messages
+        output_msgs = self.parser.messages
+        # The responses finish reason is set in the last message
+        self.finish_reason = output.outputs[0].finish_reason
+        self._messages.extend(output_msgs)
+
+    def append_tool_output(self, output: list[Message]) -> None:
+        output_msgs = output
         self._messages.extend(output_msgs)
 
     def _update_prefill_token_usage(self, output: RequestOutput) -> None:
@@ -339,7 +369,13 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1]
-        args = json.loads(last_msg.content[0].text)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.content[0].text)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.content[0].text)
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
@@ -420,7 +456,13 @@ class HarmonyContext(ConversationContext):
         if isinstance(tool_session, Tool):
             return await tool_session.get_result(self)
         tool_name = last_msg.recipient.split(".")[1].split(" ")[0]
-        args = json.loads(last_msg.content[0].text)
+        if envs.VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY:
+            try:
+                args = json.loads(last_msg.content[0].text)
+            except json.JSONDecodeError as e:
+                return _create_json_parse_error_messages(last_msg, e)
+        else:
+            args = json.loads(last_msg.content[0].text)
         result = await tool_session.call_tool(tool_name, args)
         result_str = result.content[0].text
         content = TextContent(text=result_str)
@@ -467,45 +509,45 @@ class StreamingHarmonyContext(HarmonyContext):
     def messages(self) -> list:
         return self._messages
 
-    def append_output(self, output: RequestOutput | list[Message]) -> None:
-        if isinstance(output, RequestOutput):
-            # append_output is called for each output token in streaming case,
-            # so we only want to add the prompt tokens once for each message.
-            if self.first_tok_of_message:
-                self._update_prefill_token_usage(output)
-            # Reset self.first_tok_of_message if needed:
-            # if the current token is the last one of the current message
-            # (finished=True), then the next token processed will mark the
-            # beginning of a new message
-            self.first_tok_of_message = output.finished
-            for tok in output.outputs[0].token_ids:
-                self.parser.process(tok)
-            self._update_decode_token_usage(output)
+    def append_output(self, output: RequestOutput) -> None:
+        # append_output is called for each output token in streaming case,
+        # so we only want to add the prompt tokens once for each message.
+        if self.first_tok_of_message:
+            self._update_prefill_token_usage(output)
+        # Reset self.first_tok_of_message if needed:
+        # if the current token is the last one of the current message
+        # (finished=True), then the next token processed will mark the
+        # beginning of a new message
+        self.first_tok_of_message = output.finished
+        for tok in output.outputs[0].token_ids:
+            self.parser.process(tok)
+        self._update_decode_token_usage(output)
 
-            # For streaming, update previous turn when message is complete
-            if output.finished:
-                self.all_turn_metrics.append(self.current_turn_metrics.copy())
-                self.current_turn_metrics.reset()
-            # Check if the current token is part of reasoning content
-            self._update_num_reasoning_tokens()
-            self.last_tok = tok
-            if len(self._messages) - self.num_init_messages < len(self.parser.messages):
-                self._messages.extend(
-                    self.parser.messages[len(self._messages) - self.num_init_messages :]
-                )
-        else:
-            # Handle the case of tool output in direct message format
-            assert len(output) == 1, "Tool output should be a single message"
-            msg = output[0]
-            # Sometimes the recipient is not set for tool messages,
-            # so we set it to "assistant"
-            if msg.author.role == Role.TOOL and msg.recipient is None:
-                msg.recipient = "assistant"
-            toks = self.encoding.render(msg)
-            for tok in toks:
-                self.parser.process(tok)
-            self.last_tok = toks[-1]
-            # TODO: add tool_output messages to self._messages
+        # For streaming, update previous turn when message is complete
+        if output.finished:
+            self.all_turn_metrics.append(self.current_turn_metrics.copy())
+            self.current_turn_metrics.reset()
+        # Check if the current token is part of reasoning content
+        self._update_num_reasoning_tokens()
+        self.last_tok = tok
+        if len(self._messages) - self.num_init_messages < len(self.parser.messages):
+            self._messages.extend(
+                self.parser.messages[len(self._messages) - self.num_init_messages :]
+            )
+
+    def append_tool_output(self, output: list[Message]) -> None:
+        # Handle the case of tool output in direct message format
+        assert len(output) == 1, "Tool output should be a single message"
+        msg = output[0]
+        # Sometimes the recipient is not set for tool messages,
+        # so we set it to "assistant"
+        if msg.author.role == Role.TOOL and msg.recipient is None:
+            msg.recipient = "assistant"
+        toks = self.encoding.render(msg)
+        for tok in toks:
+            self.parser.process(tok)
+        self.last_tok = toks[-1]
+        # TODO: add tool_output messages to self._messages
 
     def is_expecting_start(self) -> bool:
         return self.parser.state == StreamState.EXPECT_START
