@@ -50,6 +50,12 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm.config.pooler import get_use_activation
+from vllm.entrypoints.openai.protocol_base import OpenAIBaseModel
+from vllm.entrypoints.pooling.score.protocol import (
+    RerankRequest,
+    RerankResponse,
+    ScoreRequest,
+)
 from vllm.tasks import PoolingTask
 from vllm.utils.serial_utils import (
     EmbedDType,
@@ -80,7 +86,6 @@ from pydantic import (
 )
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam, make_tool_call_id
-from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.pooling_params import PoolingParams
@@ -96,38 +101,6 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
-
-
-class OpenAIBaseModel(BaseModel):
-    # OpenAI API does allow extra fields
-    model_config = ConfigDict(extra="allow")
-
-    # Cache class field names
-    field_names: ClassVar[set[str] | None] = None
-
-    @model_validator(mode="wrap")
-    @classmethod
-    def __log_extra_fields__(cls, data, handler):
-        result = handler(data)
-        if not isinstance(data, dict):
-            return result
-        field_names = cls.field_names
-        if field_names is None:
-            # Get all class field names and their potential aliases
-            field_names = set()
-            for field_name, field in cls.model_fields.items():
-                field_names.add(field_name)
-                if alias := getattr(field, "alias", None):
-                    field_names.add(alias)
-            cls.field_names = field_names
-
-        # Compare against both field names and aliases
-        if any(k not in field_names for k in data):
-            logger.warning(
-                "The following fields were present in the request but ignored: %s",
-                data.keys() - field_names,
-            )
-        return result
 
 
 class ErrorInfo(OpenAIBaseModel):
@@ -1757,121 +1730,6 @@ class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
 PoolingRequest: TypeAlias = (
     PoolingCompletionRequest | PoolingChatRequest | IOProcessorRequest
 )
-
-
-class ScoreRequest(OpenAIBaseModel):
-    model: str | None = None
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-
-    # --8<-- [start:score-extra-params]
-
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
-    )
-    # --8<-- [end:score-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
-        )
-
-
-class RerankRequest(OpenAIBaseModel):
-    model: str | None = None
-    query: str | ScoreMultiModalParam
-    documents: list[str] | ScoreMultiModalParam
-    top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-
-    # --8<-- [start:rerank-extra-params]
-
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
-    )
-    # --8<-- [end:rerank-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
-        )
-
-
-class RerankDocument(BaseModel):
-    text: str | None = None
-    multi_modal: ScoreContentPartParam | None = None
-
-
-class RerankResult(BaseModel):
-    index: int
-    document: RerankDocument
-    relevance_score: float
-
-
-class RerankUsage(BaseModel):
-    total_tokens: int
-
-
-class RerankResponse(OpenAIBaseModel):
-    id: str
-    model: str
-    usage: RerankUsage
-    results: list[RerankResult]
 
 
 class CompletionLogProbs(OpenAIBaseModel):

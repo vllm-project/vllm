@@ -11,18 +11,20 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
-    RerankDocument,
-    RerankRequest,
-    RerankResponse,
-    RerankResult,
-    RerankUsage,
-    ScoreRequest,
     ScoreResponse,
     ScoreResponseData,
     UsageInfo,
 )
 from vllm.entrypoints.openai.serving_engine import OpenAIServing
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
+from vllm.entrypoints.pooling.score.protocol import (
+    RerankDocument,
+    RerankRequest,
+    RerankResponse,
+    RerankResult,
+    RerankUsage,
+    ScoreRequest,
+)
 from vllm.entrypoints.score_utils import (
     ScoreContentPartParam,
     ScoreMultiModalParam,
