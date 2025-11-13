@@ -1,6 +1,14 @@
 # Meetups
 
-We host regular meetups in San Francisco Bay Area every 2 months. We will share the project updates from the vLLM team and have guest speakers from the industry to share their experience and insights. Please find the materials of our previous meetups below:
+We host regular meetups around the world. We will share the project updates from the vLLM team and have guest speakers from the industry to share their experience and insights.
+
+## Upcoming Meetups
+
+Stay tuned for upcoming meetups! Follow us on [Twitter/X](https://x.com/vllm_project), join our [Slack](https://slack.vllm.ai), and follow vLLM on [Luma](https://luma.com/vLLM-Meetups) to get notified about new events.
+
+## Past Meetups
+
+Below you'll find slides and recordings from our previous meetups:
 
 - [vLLM Zurich Meetup](https://luma.com/0gls27kb), November 6th 2025. [[Slides]](https://docs.google.com/presentation/d/1UC9PTLCHYXQpOmJDSFg6Sljra3iVXzc09DeEI7dnxMc/edit?usp=sharing) [[Recording]](https://www.youtube.com/watch?v=6m6ZE6yVEDI)
 - [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/xSrYXjNgr1HbCP4ExYNG1w), November 1st 2025. [[Slides]](https://drive.google.com/drive/folders/1nQJ8ZkLSjKxvu36sSHaceVXtttbLvvu-?usp=drive_link)
@@ -26,4 +34,12 @@ We host regular meetups in San Francisco Bay Area every 2 months. We will share 
 - [The second vLLM meetup](https://lu.ma/ygxbpzhl), with IBM Research, January 31st 2024. [[Slides]](https://docs.google.com/presentation/d/12mI2sKABnUw5RBWXDYY-HtHth4iMSNcEoQ10jDQbxgA/edit?usp=sharing) [[Video (vLLM Update)]](https://youtu.be/Y0C-DUvEnZQ) [[Video (IBM Research & torch.compile)]](https://youtu.be/m0dMtFLI-dg)
 - [The first vLLM meetup](https://lu.ma/first-vllm-meetup), with a16z, October 5th 2023. [[Slides]](https://docs.google.com/presentation/d/1QL-XPFXiFpDBh86DbEegFXBXFXjix4v032GhShbKf3s/edit?usp=sharing)
 
-We are always looking for speakers and sponsors at San Francisco Bay Area and potentially other locations. If you are interested in speaking or sponsoring, please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu).
+## Get Involved
+
+**Want to host or speak at a vLLM meetup?** We're always looking for speakers and sponsors for our meetups. Whether you want to:
+
+- Share your vLLM feature, use case, project extension, or deployment experience
+- Host a meetup in your city
+- Sponsor an event
+
+Please contact us at [vllm-questions@lists.berkeley.edu](mailto:vllm-questions@lists.berkeley.edu).
