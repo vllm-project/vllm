@@ -210,7 +210,30 @@ endif()
 if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
+    set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
     if(ASIMD_FOUND)
+        # Set number of parallel build processes
+        include(ProcessorCount)
+        ProcessorCount(NPROC)
+        if(NOT NPROC)
+            set(NPROC 4)
+        endif()
+        # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
+        # and create a local shim dir with it
+        vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
+
+        find_library(OPEN_MP
+            NAMES gomp
+            PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
+        if (OPEN_MP)
+            set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+        endif()
+
+        # Fetch and populate ACL
         if(DEFINED ENV{ACL_ROOT_DIR} AND IS_DIRECTORY "$ENV{ACL_ROOT_DIR}")
             message(STATUS "Using ACL from specified source directory: $ENV{ACL_ROOT_DIR}")
         else()
@@ -224,38 +247,53 @@ if ((AVX512_FOUND AND NOT AVX512_DISABLED) OR (ASIMD_FOUND AND NOT APPLE_SILICON
                 GIT_PROGRESS   TRUE
             )
             set(ENV{ACL_ROOT_DIR} "${arm_compute_SOURCE_DIR}")
+            set(ACL_LIB_DIR "$ENV{ACL_ROOT_DIR}/build")
         endif()
 
-        # Build ACL with scons
-        include(ProcessorCount)
-        ProcessorCount(_NPROC)
-        set(_scons_cmd
-        scons -j${_NPROC}
-            Werror=0 debug=0 neon=1 examples=0 embed_kernels=0 os=linux
-            arch=armv8.2-a build=native benchmark_examples=0 fixed_format_kernels=1
-            multi_isa=1 openmp=1 cppthreads=0
+        # Build ACL with CMake
+        set(ARM_COMPUTE_BUILD_SHARED_LIB "OFF")
+        set(CMAKE_BUILD_TYPE "Release")
+        set(ARM_COMPUTE_ARCH "armv8.2-a")
+        set(ARM_COMPUTE_ENABLE_ASSERTS "OFF")
+        set(ARM_COMPUTE_ENABLE_CPPTHREADS "OFF")
+        set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
+        set(ARM_COMPUTE_ENABLE_OPENMP "ON")
+        set(ARM_COMPUTE_ENABLE_WERROR "OFF")
+        set(ARM_COMPUTE_BUILD_EXAMPLES "OFF")
+        set(ARM_COMPUTE_BUILD_TESTING "OFF")
+
+        set(_cmake_config_cmd
+             ${CMAKE_COMMAND} -G Ninja -B build 
+            -DARM_COMPUTE_BUILD_SHARED_LIB=OFF 
+            -DCMAKE_BUILD_TYPE=Release 
+            -DARM_COMPUTE_ARCH=armv8.2-a 
+            -DARM_COMPUTE_ENABLE_ASSERTS=OFF 
+            -DARM_COMPUTE_ENABLE_CPPTHREADS=OFF 
+            -DARM_COMPUTE_ENABLE_OPENMP=ON 
+            -DARM_COMPUTE_ENABLE_WERROR=OFF 
+            -DARM_COMPUTE_BUILD_EXAMPLES=OFF 
+            -DARM_COMPUTE_BUILD_TESTING=OFF)
+        set(_cmake_build_cmd
+            ${CMAKE_COMMAND} --build build -- -j${NPROC}
         )
 
-        # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-        # and create a local shim dir with it
-        include("${CMAKE_CURRENT_LIST_DIR}/utils.cmake")
-        vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
-
-        if(NOT VLLM_TORCH_GOMP_SHIM_DIR STREQUAL "")
-            list(APPEND _scons_cmd extra_link_flags=-L${VLLM_TORCH_GOMP_SHIM_DIR})
-        endif()
-
         execute_process(
-            COMMAND ${_scons_cmd}
+            COMMAND ${_cmake_config_cmd}
+            WORKING_DIRECTORY "$ENV{ACL_ROOT_DIR}"
+        )
+        execute_process(
+            COMMAND ${_cmake_build_cmd}
             WORKING_DIRECTORY "$ENV{ACL_ROOT_DIR}"
             RESULT_VARIABLE _acl_rc
         )
+
         if(NOT _acl_rc EQUAL 0)
             message(FATAL_ERROR "ACL SCons build failed (exit ${_acl_rc}).")
         endif()
+        message(STATUS "Arm Compute Library (ACL) built successfully.")
 
-        set(ONEDNN_AARCH64_USE_ACL "ON")
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wl,-rpath,$ENV{ACL_ROOT_DIR}/build/")
+        # VLLM/oneDNN settings for ACL
+        set(ONEDNN_AARCH64_USE_ACL ON CACHE BOOL "" FORCE)
         add_compile_definitions(VLLM_USE_ACL)
     endif()
 
