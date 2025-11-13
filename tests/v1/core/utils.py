@@ -3,6 +3,7 @@
 
 import torch
 
+from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
@@ -33,6 +34,10 @@ from vllm.v1.structured_output import StructuredOutputManager
 EOS_TOKEN_ID = 50256
 
 
+def mock_kv(matched_tokens: int, is_async: bool):
+    return MockKVConfig(matched_tokens=matched_tokens, is_async=is_async)
+
+
 def create_scheduler(
     model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
@@ -40,7 +45,7 @@ def create_scheduler(
     enable_prefix_caching: bool | None = None,
     long_prefill_token_threshold: int = 0,
     disable_chunked_mm_input: bool = False,
-    use_kv_connector: bool = False,
+    use_kv_connector: None | bool | MockKVConfig = None,
     num_blocks: int = 10000,
     block_size: int = 16,
     max_model_len: int | None = None,
@@ -94,15 +99,22 @@ def create_scheduler(
         cache_dtype="auto",
         **kwargs_cache,
     )
-    kv_transfer_config = (
-        KVTransferConfig(
+    kv_transfer_config = None
+    if isinstance(use_kv_connector, MockKVConfig):
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="MockKVConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "matched_tokens": use_kv_connector.matched_tokens,
+                "is_async": use_kv_connector.is_async,
+            },
+        )
+    elif use_kv_connector:
+        kv_transfer_config = KVTransferConfig(
             kv_connector="SharedStorageConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         )
-        if use_kv_connector
-        else None
-    )
 
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
