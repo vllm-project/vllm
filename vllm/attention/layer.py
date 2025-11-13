@@ -786,8 +786,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_metadata=attn_metadata,
                 )
         else:
-            # Even when using opaque attention ops on the platform, prefer the
-            # layer-owned orchestration so the split remains visible to compilation.
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 return self.forward_impl(
