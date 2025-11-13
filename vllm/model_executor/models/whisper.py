@@ -13,7 +13,6 @@ from transformers import (
     BatchFeature,
     WhisperConfig,
     WhisperFeatureExtractor,
-    WhisperProcessor,
 )
 from transformers.models.whisper.modeling_whisper import sinusoids
 
@@ -660,16 +659,6 @@ class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
 
-    def get_hf_processor(self, **kwargs: object) -> WhisperProcessor:
-        # HACK: Transformers 4.53.2 has issue with whisper tokenizer to
-        # initialize processor. We use a monkeypatch to fix it here.
-        # See: https://github.com/vllm-project/vllm/issues/20224
-        processor_class = WhisperProcessor
-        tokenizer_class = ("WhisperTokenizer", "WhisperTokenizerFast")
-        if processor_class.tokenizer_class != tokenizer_class:
-            processor_class.tokenizer_class = tokenizer_class
-        return self.ctx.get_hf_processor(processor_class, **kwargs)
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -891,7 +880,7 @@ class WhisperForConditionalGeneration(
         self.dtype = vllm_config.model_config.dtype
 
         self.model = WhisperModel(vllm_config=vllm_config, prefix=prefix)
-        self.unpadded_vocab_size = config.vocab_size
+
         self.proj_out = ParallelLMHead(
             config.vocab_size,
             config.d_model,
@@ -900,9 +889,7 @@ class WhisperForConditionalGeneration(
         )
         self.proj_out = self.proj_out.tie_weights(self.model.decoder.embed_tokens)
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
     def forward(
         self,
