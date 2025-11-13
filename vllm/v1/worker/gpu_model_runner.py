@@ -3536,25 +3536,20 @@ class GPUModelRunner(
             )
         )
 
+        if cudagraph_runtime_mode is None:
+            cudagraph_runtime_mode = _cudagraph_mode
+        else:
+            assert cudagraph_runtime_mode == _cudagraph_mode, (
+                f"Cudagraph runtime mode mismatch at dummy_run. "
+                f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
+            )
+
         num_tokens_padded = batch_descriptor.num_tokens
         num_reqs_padded = (
             batch_descriptor.num_reqs
             if batch_descriptor.num_reqs is not None
             else num_reqs
         )
-
-        if cudagraph_runtime_mode is not None:
-            # we allow forcing NONE when the dispatcher disagrees to support
-            # warm ups for cudagraph capture
-            assert (
-                cudagraph_runtime_mode == CUDAGraphMode.NONE
-                or cudagraph_runtime_mode == _cudagraph_mode
-            ), (
-                f"Cudagraph runtime mode mismatch at dummy_run. "
-                f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
-            )
-        else:
-            cudagraph_runtime_mode = _cudagraph_mode
 
         attn_metadata: PerLayerAttnMetadata | None = None
 
