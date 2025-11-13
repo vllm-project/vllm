@@ -3,8 +3,8 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/attention @LucasWilkinson
-/vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill
-/vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @comaniac @njhill @22quinn
+/vllm/attention/backends/abstract.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
+/vllm/executor/executor_base.py @zhuohan123 @youkaichao @alexm-redhat @njhill @22quinn
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
@@ -20,15 +20,15 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
 # so spam a lot of people
-/vllm/config @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
-/vllm/config/cache.py @simon-mo @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
+/vllm/config @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg
+/vllm/config/cache.py @WoosukKwon @youkaichao @robertgshaw2-redhat @mgoin @tlrmchlsmth @houseroad @hmellor @yewentao256 @ProExpertProg @heheda12345
 
 # vLLM V1
 /vllm/v1/attention @LucasWilkinson
 /vllm/v1/attention/backends/mla @pavanimajety
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
-/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
+/vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC
 /vllm/v1/sample @22quinn @houseroad @njhill
 /vllm/v1/spec_decode @benchislett @luccafong
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
@@ -36,11 +36,11 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/offloading @ApostaC
 
 # Test ownership
-/.buildkite/lm-eval-harness @mgoin @simon-mo
+/.buildkite/lm-eval-harness @mgoin 
 /tests/distributed/test_multi_node_assignment.py @youkaichao
 /tests/distributed/test_pipeline_parallel.py @youkaichao
 /tests/distributed/test_same_node.py @youkaichao
-/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @simon-mo @aarnphm @NickLucche
+/tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
 /tests/evals @mgoin
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
 /tests/models @DarkLight1337 @ywang96
@@ -49,7 +49,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/test_inputs.py @DarkLight1337 @ywang96
 /tests/v1/entrypoints/llm/test_struct_output_generate.py @mgoin @russellb @aarnphm
 /tests/v1/structured_output @mgoin @russellb @aarnphm
-/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @comaniac @alexm-redhat @heheda12345 @ApostaC
+/tests/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC
 /tests/weight_loading @mgoin @youkaichao @yewentao256
 /tests/lora @jeejeelee
 /tests/models/language/generation/test_hybrid.py @tdoublep
