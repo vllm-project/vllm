@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
+import vllm.envs as envs
 from vllm.beam_search import (
     BeamSearchInstance,
     BeamSearchOutput,
@@ -82,6 +83,7 @@ from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.processor import ProcessorPool
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -353,9 +355,14 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.processor = self.llm_engine.processor
         self.io_processor = self.llm_engine.io_processor
-        self.pool = ThreadPool(4)
+
+        if envs.VLLM_NUM_PREPROCESSOR > 0:
+            self.pool = ThreadPool(4)
+            self.processor = ProcessorPool(self.llm_engine.processor)
+        else:
+            self.pool = None
+            self.processor = self.llm_engine.processor
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer()
@@ -1739,10 +1746,14 @@ class LLM:
 
         # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
         # Therefore, keep most requests waiting outside the core.
+        # Todo: Whether to support priority scheduling?
         max_seqs_in_core = self.llm_engine.vllm_config.scheduler_config.max_num_seqs * 2
         n_waited_request = len(self.request_queue)
-        tasks = self.pool.imap(self.process_inputs, self.request_queue)
-        # tasks = (self.process_inputs(t) for t in self.request_queue)
+
+        if self.pool is not None:
+            tasks = self.pool.imap_unordered(self.process_inputs, self.request_queue)
+        else:
+            tasks = (self.process_inputs(t) for t in self.request_queue)
 
         while n_waited_request or self.llm_engine.has_unfinished_requests():
             num_unfinished_requests = self.llm_engine.get_num_unfinished_requests()
