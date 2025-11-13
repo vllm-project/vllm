@@ -674,6 +674,10 @@ class BaseMultiModalReceiverCache(
         mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
         """Update multimodal features with cached encoder outputs."""
+        # Touch each previously-cached item in the input request, to align with P0
+        for feature in mm_features:
+            self.get(feature.identifier)
+
         for feature in mm_features:
             feature.data = self.get_and_update_item(feature.data, feature.identifier)
         return mm_features
