@@ -3540,7 +3540,7 @@ class GPUModelRunner(
             cudagraph_runtime_mode = _cudagraph_mode
         else:
             assert cudagraph_runtime_mode == _cudagraph_mode, (
-                f"Cudagraph runtime mode mismatch at dummy_run. "
+                f"Cudagraph runtime mode mismatch in dummy_run. "
                 f"Expected {_cudagraph_mode}, but got {cudagraph_runtime_mode}."
             )
 
