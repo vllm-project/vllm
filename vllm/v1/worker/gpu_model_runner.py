@@ -1090,7 +1090,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         :return: tuple[
             logits_indices, spec_decode_metadata,
-            ubatch_slices, num_tokens_across_dp
+            ubatch_slices, num_tokens_across_dp,
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
