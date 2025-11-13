@@ -844,7 +844,7 @@ def test_fused_marlin_moe(
         torch_output = torch_experts(
             a,
             w1_data.w_ref,
-            w1_data.w_ref,
+            w2_data.w_ref,
             topk_weight=topk_weight,
             topk_ids=topk_ids,
             global_num_experts=e,
