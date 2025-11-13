@@ -76,7 +76,6 @@ def test_prm_models(
     math_step_prompts,
     model: str,
     dtype: str,
-    monkeypatch,
 ) -> None:
     check_transformers_version(
         "Qwen/Qwen2.5-Math-PRM-7B", max_transformers_version="4.53.2"
@@ -84,11 +83,6 @@ def test_prm_models(
 
     if current_platform.is_cpu():
         pytest.skip("CPU only supports V1")
-
-    if current_platform.is_rocm():
-        # ROCm Triton FA does not currently support sliding window attention
-        # switch to use ROCm CK FA backend
-        monkeypatch.setenv("VLLM_USE_TRITON_FLASH_ATTN", "False")
 
     with vllm_runner(model, max_model_len=1024, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.reward(math_step_prompts)
