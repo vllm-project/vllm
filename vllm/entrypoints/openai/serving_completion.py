@@ -186,10 +186,10 @@ class OpenAIServingCompletion(OpenAIServing):
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
                     )
-                    # validate_logits_processors_parameters(
-                    #     self.logits_processors,
-                    #     sampling_params,
-                    # )
+                    validate_logits_processors_parameters(
+                        self.logits_processors,
+                        sampling_params,
+                    )
 
                 request_id_item = f"{request_id}-{i}"
 

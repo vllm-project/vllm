@@ -939,9 +939,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
 
         self.backend = "none"
         if envs.VLLM_NVFP4_GEMM_BACKEND is None:
-            # if has_flashinfer():
-            #     self.backend = "flashinfer-cutlass"
-            if cutlass_fp4_supported():
+            if has_flashinfer():
+                self.backend = "flashinfer-cutlass"
+            elif cutlass_fp4_supported():
                 self.backend = "cutlass"
             elif is_fp4_marlin_supported():
                 self.backend = "marlin"
@@ -1654,7 +1654,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_method_type = layer.routing_method_type
             if use_llama4_routing:
                 routing_method_type = RoutingMethodType.Llama4
-            router_logits = router_logits.to(torch.float32) if routing_method_type == RoutingMethodType.DeepSeekV3 else router_logits
+            router_logits = (
+                router_logits.to(torch.float32)
+                if routing_method_type == RoutingMethodType.DeepSeekV3
+                else router_logits
+            )
             routing_bias = e_score_correction_bias
             if routing_bias is not None:
                 routing_bias = routing_bias.to(torch.bfloat16)
