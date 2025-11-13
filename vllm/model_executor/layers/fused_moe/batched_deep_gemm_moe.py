@@ -316,30 +316,23 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def estimate_expected_m(
         self, global_num_experts: int, max_tokens_per_expert: int, topk: int
     ) -> int:
-        from forward_context import get_forward_context
+        from vllm.forward_context import get_forward_context
 
         dp_meta = get_forward_context().dp_metadata
         assert dp_meta is not None, (
             f"{self.__class__.__name__} expects is expected to be run "
             "in a DP/EP scenario. But can't find DP Metadata"
         )
-        total_num_tokens = dp_meta.num_tokens_across_dp_cpu.sum()
+        total_num_tokens = dp_meta.num_tokens_across_dp_cpu.sum().item()
         total_num_tokens_replicated = total_num_tokens * topk
 
         # Assume even load balancing
-        estimate = next_power_of_2(total_num_tokens_replicated // (global_num_experts))
+        estimate = next_power_of_2(
+            int(total_num_tokens_replicated // global_num_experts)
+        )
         # clamp estimate
         estimate = max(estimate, 16)
         estimate = min(max_tokens_per_expert, estimate)
-
-        s = "estimate expected m : \n"
-        s += f"  - global num experts    : {global_num_experts} \n"
-        s += f"  - max tokens per expert : {max_tokens_per_expert} \n"
-        s += f"  - topk                  : {topk} \n"
-        s += f"  - total_num_tokens      : {dp_meta.num_tokens_across_dp_cpu} \n"
-        s += f"  - output estimate == {estimate}\n"
-        print(s)
-
         return estimate
 
     def apply(
