@@ -178,13 +178,13 @@ class CohereAttention(nn.Module):
         self.v1 = isinstance(config, CohereConfig)
 
         self.sliding_window = None
-        rope_parameters = getattr(config, "rope_parameters", None)
+        rope_parameters = config.rope_parameters
         if not self.v1:
             layer_idx = extract_layer_index(prefix)
             layer_type = config.layer_types[layer_idx]
             if layer_type == "sliding_attention":
                 self.sliding_window = config.sliding_window
-            if config.rope_parameters and layer_type in rope_parameters:
+            if layer_type in rope_parameters:
                 # Transformers v5
                 rope_parameters = rope_parameters[layer_type]
 
