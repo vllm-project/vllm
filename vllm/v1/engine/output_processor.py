@@ -8,7 +8,6 @@ from typing import Any, cast
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.outputs import (
     CompletionOutput,
     PoolingOutput,
@@ -29,8 +28,6 @@ from vllm.v1.metrics.stats import (
     RequestStateStats,
     SchedulerStats,
 )
-
-logger = init_logger(__name__)
 
 
 class RequestOutputCollector:
