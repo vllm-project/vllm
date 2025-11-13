@@ -56,7 +56,7 @@ def test_decoder_max_context_length_validation(
                 f"requested output tokens (at least 1) is longer than "
                 f"the maximum model length of {max_model_len}. "
                 "Make sure that `max_model_len` is no smaller than the number of "
-                "text tokens (prompt + generated tokens)."
+                "text tokens (prompt + requested output tokens)."
             )
             with pytest.raises(ValueError) as excinfo:
                 vllm_model.generate_greedy(prompt_ids, max_tokens)
