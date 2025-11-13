@@ -613,14 +613,12 @@ class EplbState:
                     all_ranks_buffer_ready = self._all_ranks_buffer_ready(
                         eplb_model_state
                     )
-                logger.info("ep_buffer_ready: %d", eplb_model_state.ep_buffer_ready)
                 if eplb_model_state.is_async_enabled and eplb_model_state.ep_buffer_ready and all_ranks_buffer_ready:
                     self.move_to_workspace(
                         model_state=eplb_model_state,
                         ep_group=ep_group,
                         is_profile=is_profile,
                     )
-                    logger.info("eplb_state eplb_model_state.layer_to_transfer: %d, eplb_model_state.model.num_moe_layers: %d", eplb_model_state.layer_to_transfer, eplb_model_state.model.num_moe_layers)
                     if (
                         eplb_model_state.layer_to_transfer
                         >= eplb_model_state.model.num_moe_layers
@@ -629,12 +627,12 @@ class EplbState:
                             eplb_model_state.rebalanced = False
                             eplb_model_state.layer_to_transfer = 0
                             eplb_model_state.pending_global_ready_check = False
-                logger.info(
-                    "finish async transfer for model %s rank %d layer %d",
-                    eplb_model_state.model_name,
-                    ep_group.rank(),
-                    eplb_model_state.layer_to_transfer,
-                )
+                            logger.info(
+                                "finish async transfer for model %s rank %d layer %d",
+                                eplb_model_state.model_name,
+                                ep_group.rank(),
+                                eplb_model_state.model.num_moe_layers,
+                            )
 
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             if any(
@@ -867,7 +865,6 @@ class EplbState:
 
         # Signal async thread to start transferring layers
         if self.is_async and (not is_profile):
-            logger.info("EPLB async rearrange triggered for model %s", eplb_model_state.model_name)
             self.rearrange_event.set()
         return None
 
