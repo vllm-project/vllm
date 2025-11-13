@@ -485,6 +485,21 @@ class MambaMixer2(MambaBase, CustomOp):
         self.cache_config = cache_config
         self.prefix = prefix
 
+        # Pre-compute sizes for forward pass
+        self.tped_intermediate_size = self.intermediate_size // self.tp_size
+        self.tped_conv_size = self.conv_dim // self.tp_size
+        self.tped_dt_size = self.num_heads // self.tp_size
+
+        self.split_hidden_states_B_C_fn = lambda hidden_states_B_C: torch.split(
+            hidden_states_B_C,
+            [
+                self.tped_intermediate_size,
+                self.groups_ssm_state_size // self.tp_size,
+                self.groups_ssm_state_size // self.tp_size,
+            ],
+            dim=-1,
+        )
+
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -503,13 +518,9 @@ class MambaMixer2(MambaBase, CustomOp):
             projected_states = projected_states * mup_vector
 
         # 2. Prepare inputs for conv + SSM
-        gate_size = self.intermediate_size // self.tp_size
-        conv_size = self.conv_dim // self.tp_size
-        dt_size = self.num_heads // self.tp_size
-
         hidden_states_B_C, dt = torch.split(
-            projected_states[..., gate_size:],
-            [conv_size, dt_size],
+            projected_states[..., self.tped_intermediate_size :],
+            [self.tped_conv_size, self.tped_dt_size],
             dim=-1,
         )
 
@@ -536,7 +547,7 @@ class MambaMixer2(MambaBase, CustomOp):
         # GatedRMSNorm internally applying SiLU to the gate
         # SiLU is applied internally before normalization, unlike standard
         # norm usage
-        gate = projected_states[..., :gate_size]
+        gate = projected_states[..., : self.tped_intermediate_size]
         hidden_states = self.norm(ssm_output, gate)
 
         # 5. Final linear projection
