@@ -96,8 +96,9 @@ class LLMEngine:
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
+        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats
+            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
