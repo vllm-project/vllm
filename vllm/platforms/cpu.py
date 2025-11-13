@@ -134,6 +134,7 @@ class CpuPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
         from vllm.attention.backends.registry import AttentionBackendEnum
 
