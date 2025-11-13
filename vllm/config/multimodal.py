@@ -170,6 +170,9 @@ class MultiModalConfig:
     def _validate_mm_encoder_attn_backend(
         cls, value: str | AttentionBackendEnum | None
     ) -> AttentionBackendEnum | None:
+        # We need to import the real type here (deferred to avoid circular import).
+        from vllm.attention.backends.registry import AttentionBackendEnum
+
         if value is None or isinstance(value, AttentionBackendEnum):
             return value
 
