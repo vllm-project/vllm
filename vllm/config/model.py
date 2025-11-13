@@ -2073,8 +2073,9 @@ def _get_and_verify_max_len(
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
     if rope_parameters is not None and "gemma3" not in hf_config.model_type:
-        # In Transformers v5 this could be RopeParameters or dict[str, RopeParameters]
-        # To simplify, we convert any RopeParameters to dict[str, RopeParameters]
+        # In Transformers v5 rope_parameters could be RopeParameters or
+        # dict[str, RopeParameters] where RopeParameters is a TypedDict. To simplify
+        # the verification, we convert any RopeParameters to dict[str, RopeParameters]
         if not set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
             rope_parameters = {"": rope_parameters}
         for rp in rope_parameters.values():
