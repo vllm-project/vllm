@@ -432,6 +432,20 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
 
 
 def patch_rope_parameters_dict(rope_parameters: dict[str, Any]) -> None:
+    if "rope_type" in rope_parameters and "type" in rope_parameters:
+        rope_type = rope_parameters["rope_type"]
+        rope_type_legacy = rope_parameters["type"]
+        if rope_type != rope_type_legacy:
+            raise ValueError(
+                f"Found conflicts between 'rope_type={rope_type}' (modern "
+                f"field) and 'type={rope_type_legacy}' (legacy field). "
+                "You should only specify one of them."
+            )
+
+    if "rope_type" not in rope_parameters and "type" in rope_parameters:
+        rope_parameters["rope_type"] = rope_parameters["type"]
+        logger.info("Replacing legacy 'type' key with 'rope_type'")
+
     if "rope_type" not in rope_parameters:
         raise ValueError("rope_parameters should have a 'rope_type' key")
 

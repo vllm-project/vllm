@@ -2080,6 +2080,8 @@ def _get_and_verify_max_len(
             rope_parameters = {"": rope_parameters}
         scaling_factor = 1.0
         for rp in rope_parameters.values():
+            # No need to consider "type" key because of patch_rope_parameters when
+            # loading HF config
             rope_type = rp["rope_type"]
 
             if rope_type not in ("su", "longrope", "llama3"):
