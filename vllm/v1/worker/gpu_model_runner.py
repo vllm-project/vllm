@@ -52,7 +52,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.model_loader.online_quantization import (
+    RELOADABLE_QUANT_CONFIGS,
     restore_weights_for_reloading,
+)
+from vllm.model_executor.model_loader.utils import (
+    default_model_weight_loader,
 )
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading as _process_weights_after_loading,
@@ -3199,8 +3203,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             raise ValueError("Cannot reload weights before model is loaded.")
 
         model = self.get_model()
-        logger.info("Reloading weights inplace...")
-        counter_before_loading_weights = time.perf_counter()
+        weights_to_load = {name for name, _ in model.named_parameters()}
+        counter_before_reloading = time.perf_counter()
 
         # load weights from disk if none are provided
         if weights_iterator is None:
@@ -3210,12 +3214,18 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 Iterable[tuple[str, torch.Tensor]], weights_iterator
             )
 
+        # begin loading weights
+        logger.info("Reloading weights inplace...")
         if process_weights_after_loading:
-            # restore to original model format
-            if hasattr(model, "weight_loading_metadata"):
+            if self.model_config.quantization in RELOADABLE_QUANT_CONFIGS:
                 restore_weights_for_reloading(model)
             else:
-                logger.warning("Quant config is not supported")
+                logger.warning_once(
+                    "Given quantization %s does not support weight reloading. "
+                    "Consider adding to list of supported configs: %s",
+                    self.model_config.quantization,
+                    f"{RELOADABLE_QUANT_CONFIGS}",
+                )
 
             # load weights from checkpoint/ original model format
             loaded_weights = model.load_weights(weights_iterator)
@@ -3232,20 +3242,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         else:
             # load weights from kernel format
-            loaded_weights = set()
-            for name, loaded_weight in weights_iterator:
-                param = model.get_parameter(name)
-                param.weight_loader(param, loaded_weight)
-                loaded_weights.add(loaded_weight)
+            default_model_weight_loader(model, weights_iterator)
 
-        # logging
-        counter_after_loading_weights = time.perf_counter()
-        diff_seconds = counter_after_loading_weights - counter_before_loading_weights
-        logger.info_once(
-            f"Reloading {len(loaded_weights)} weights took %.2f seconds",
-            diff_seconds,
-            scope="local",
-        )
+        # logging and validation
+        counter_after_reloading = time.perf_counter()
+        diff_seconds = counter_after_reloading - counter_before_reloading
+        logger.info("Reloading and processing weights took %.2f seconds", diff_seconds)
+        if self.model_config.quantization is None and loaded_weights is not None:
+            weights_not_loaded = weights_to_load - loaded_weights
+            if weights_not_loaded:
+                raise ValueError(
+                    "Following weights were not initialized from "
+                    f"checkpoint: {weights_not_loaded}"
+                )
 
     def save_tensorized_model(
         self,
