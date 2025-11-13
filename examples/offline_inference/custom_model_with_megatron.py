@@ -135,7 +135,6 @@ class MegatronTransformer(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        positions: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
         """Required by vLLM."""
@@ -464,9 +463,6 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
     model.eval()
     with torch.no_grad():
         input_tensor = torch.tensor([input_ids], dtype=torch.long, device="cuda")
-        positions = torch.arange(
-            len(input_ids), dtype=torch.long, device="cuda"
-        ).unsqueeze(0)
 
         print(
             f"[Reference] Input shape: {input_tensor.shape}, values: {input_tensor[0].tolist()}"
@@ -478,7 +474,7 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
             f"[Reference] lm_head weight sample [511,:5]: {model.lm_head.weight[511, :5].tolist()}"
         )
 
-        hidden_states = model(input_tensor, positions)
+        hidden_states = model(input_tensor)
         print(f"[Reference] Hidden states shape: {hidden_states.shape}")
         print(
             f"[Reference] Hidden states (last token): mean={hidden_states[-1].mean().item():.6f}, std={hidden_states[-1].std().item():.6f}"
@@ -511,10 +507,9 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
 
     # Create a dummy input matching the model's expected format
     test_input_ids = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long, device="cuda")
-    test_positions = torch.arange(5, dtype=torch.long, device="cuda").unsqueeze(0)
 
     # Forward through the entire model
-    hidden_states = model(test_input_ids, test_positions)
+    hidden_states = model(test_input_ids)
     print(f"[Training] Hidden states shape after full forward: {hidden_states.shape}")
 
     # Compute logits
