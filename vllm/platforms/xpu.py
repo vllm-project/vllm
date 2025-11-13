@@ -101,7 +101,11 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
-        return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+        xpu_use_triton_kernel = os.getenv("XPU_USE_TRITON_KERNEL", "0") == "1"
+        if not xpu_use_triton_kernel:
+            return "vllm.lora.punica_wrapper.punica_xpu.PunicaWrapperXPU"
+        else:
+            return "vllm.lora.punica_wrapper.punica_gpu.PunicaWrapperGPU"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
