@@ -1243,14 +1243,6 @@ class DPEngineCoreProc(EngineCoreProc):
                 # if the model didn't execute any ready requests.
                 self.execute_dummy_batch()
 
-                # After dummy batch, check if we should continue or wait.
-                # If we have no local work, sync with other ranks before continuing.
-                if not local_unfinished_reqs:
-                    self.engines_running = self._has_global_unfinished_reqs(
-                        local_unfinished_reqs
-                    )
-                    continue
-
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
