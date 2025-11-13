@@ -5,6 +5,7 @@
 from pathlib import Path
 
 import gguf
+from gguf.constants import Keys, VisionProjectorType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
@@ -41,70 +42,87 @@ def detect_gguf_multimodal(model: str) -> Path | None:
 
 
 def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
-    """
-    Extract vision config parameters from mmproj.gguf metadata.
+    """Extract vision config parameters from mmproj.gguf metadata.
 
-    Reads vision encoder configuration from GGUF metadata fields instead of
-    using hardcoded values. This makes the implementation robust across
-    different Gemma3 model sizes and future variations.
+    Reads vision encoder configuration from GGUF metadata fields using
+    standardized GGUF constants. Automatically detects the projector type
+    (e.g., gemma3, llama4) and applies model-specific parameters accordingly.
+
+    The function extracts standard CLIP vision parameters from GGUF metadata
+    and applies projector-type-specific customizations. For unknown projector
+    types, it uses safe defaults from SiglipVisionConfig.
 
     Args:
         mmproj_path: Path to mmproj.gguf file (str or Path)
 
     Returns:
-        SiglipVisionConfig if extraction succeeds, None if required fields missing
+        SiglipVisionConfig if extraction succeeds, None if any required
+        field is missing from the GGUF metadata
 
     Raises:
-        Exception: Exceptions from GGUF reading (file not found, corrupted,
-            etc.) propagate directly from gguf.GGUFReader.
+        Exception: Exceptions from GGUF reading (file not found, corrupted
+            file, etc.) propagate directly from gguf.GGUFReader
     """
-
     reader = gguf.GGUFReader(str(mmproj_path))
 
-    # FIXME(Isotr0py, GGUF): Map from GGUF constants for standardization
-    # see: https://github.com/ggml-org/llama.cpp/blob/392e09a60852d0e879d4bbedd5ace3e6852f719e/gguf-py/gguf/constants.py#L261-L281
-    # Extract vision config parameters from GGUF metadata
-    hidden_size = reader.get_field("clip.vision.embedding_length")
-    intermediate_size = reader.get_field("clip.vision.feed_forward_length")
-    num_hidden_layers = reader.get_field("clip.vision.block_count")
-    num_attention_heads = reader.get_field("clip.vision.attention.head_count")
-    image_size = reader.get_field("clip.vision.image_size")
-    patch_size = reader.get_field("clip.vision.patch_size")
-    layer_norm_eps = reader.get_field("clip.vision.attention.layer_norm_epsilon")
+    # Detect projector type to apply model-specific parameters
+    projector_type = None
+    projector_type_field = reader.get_field(Keys.Clip.PROJECTOR_TYPE)
+    if projector_type_field:
+        try:
+            projector_type = bytes(projector_type_field.parts[-1]).decode("utf-8")
+        except (AttributeError, UnicodeDecodeError) as e:
+            logger.warning("Failed to decode projector type from GGUF: %s", e)
 
-    # Validate all required fields are present
-    if any(
-        field is None
-        for field in [
-            hidden_size,
-            intermediate_size,
-            num_hidden_layers,
-            num_attention_heads,
-            image_size,
-            patch_size,
-            layer_norm_eps,
-        ]
-    ):
-        logger.warning("Missing required vision config fields in mmproj.gguf")
-        return None
+    # Map GGUF field constants to SiglipVisionConfig parameters.
+    # Uses official GGUF constants from gguf-py for standardization.
+    # Format: {gguf_constant: (param_name, dtype)}
+    VISION_CONFIG_FIELDS = {
+        Keys.ClipVision.EMBEDDING_LENGTH: ("hidden_size", int),
+        Keys.ClipVision.FEED_FORWARD_LENGTH: ("intermediate_size", int),
+        Keys.ClipVision.BLOCK_COUNT: ("num_hidden_layers", int),
+        Keys.ClipVision.Attention.HEAD_COUNT: ("num_attention_heads", int),
+        Keys.ClipVision.IMAGE_SIZE: ("image_size", int),
+        Keys.ClipVision.PATCH_SIZE: ("patch_size", int),
+        Keys.ClipVision.Attention.LAYERNORM_EPS: ("layer_norm_eps", float),
+    }
 
-    # Extract scalar values from GGUF field parts
-    config = SiglipVisionConfig(
-        hidden_size=int(hidden_size.parts[-1]),
-        intermediate_size=int(intermediate_size.parts[-1]),
-        num_hidden_layers=int(num_hidden_layers.parts[-1]),
-        num_attention_heads=int(num_attention_heads.parts[-1]),
-        image_size=int(image_size.parts[-1]),
-        patch_size=int(patch_size.parts[-1]),
-        layer_norm_eps=float(layer_norm_eps.parts[-1]),
-        # Parameters not in GGUF - use safe defaults
-        num_channels=3,  # Standard RGB
-        attention_dropout=0.0,  # No dropout during inference
-        num_image_tokens=256,  # Gemma3 uses 4x4 pooling: 4096/16=256
-        vision_use_head=False,  # Gemma3 doesn't use pooling head
-    )
+    # Extract and validate all required fields
+    config_params = {}
+    for gguf_key, (param_name, dtype) in VISION_CONFIG_FIELDS.items():
+        field = reader.get_field(gguf_key)
+        if field is None:
+            logger.warning(
+                "Missing required vision config field '%s' in mmproj.gguf",
+                gguf_key,
+            )
+            return None
+        # Extract scalar value from GGUF field and convert to target type
+        config_params[param_name] = dtype(field.parts[-1])
 
-    logger.info("Extracted vision config from mmproj.gguf metadata")
+    # Apply model-specific parameters based on projector type
+    if projector_type == VisionProjectorType.GEMMA3:
+        # Gemma3 doesn't use the vision pooling head (multihead attention)
+        # This is a vLLM-specific parameter used in SiglipVisionTransformer
+        config_params["vision_use_head"] = False
+        logger.info("Detected Gemma3 projector, disabling vision pooling head")
+    # Add other projector-type-specific customizations here as needed
+    # elif projector_type == VisionProjectorType.LLAMA4:
+    #     config_params["vision_use_head"] = ...
+
+    # Create config with extracted parameters
+    # Note: num_channels and attention_dropout use SiglipVisionConfig defaults
+    # (3 and 0.0 respectively) which are correct for all models
+    config = SiglipVisionConfig(**config_params)
+
+    if projector_type:
+        logger.info(
+            "Extracted vision config from mmproj.gguf (projector_type: %s)",
+            projector_type,
+        )
+    else:
+        logger.info("Extracted vision config from mmproj.gguf metadata")
+
     return config
 
 
