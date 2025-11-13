@@ -188,20 +188,17 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
     the server in the core process (=P1). The data flow is as follows:
 
     ```
-                  is_cached() x N    get_and_update()
-    P0: From API -----------------> -----------------> To P1
+                 get_and_update()
+    P0: From API -----------------> To P1
 
                  get_and_update()
     P1: From P0 -----------------> To model
     ```
 
-    `is_cached()` can be called any number of times in P0. However,
     `get_and_update()` must be called in P0 and P1 one after another
     so that their cache eviction order remains the same.
 
-    This ensures that the keys in P0 and P1 caches are mirrored,
-    allowing us to determine whether a key is cached in P1 by looking
-    up the P0 cache, without having to communicate with P1.
+    This ensures that the keys in P0 and P1 caches are mirrored.
     """
 
     @abstractmethod
@@ -311,37 +308,6 @@ class BaseMultiModalProcessorCache(
     """The required interface for caches on P0."""
 
     @abstractmethod
-    def is_cached_item(self, mm_hash: str) -> bool:
-        """
-        Check whether a multi-modal item is
-        in the underlying cache.
-
-        This **DOES NOT** update the cache eviction order.
-
-        Args:
-            mm_hash: The hash of the item to check.
-
-        Returns:
-            `True` if the item is cached, otherwise `False`.
-        """
-        raise NotImplementedError
-
-    def is_cached(self, mm_hashes: list[str]) -> list[bool]:
-        """
-        Check whether a sequence of multi-modal items are
-        in the underlying cache.
-
-        This **DOES NOT** update the cache eviction order.
-
-        Args:
-            mm_hashes: The hash of each item to check.
-
-        Returns:
-            For each item, `True` if the item is cached, otherwise `False`.
-        """
-        return [self.is_cached_item(mm_hash) for mm_hash in mm_hashes]
-
-    @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """
         Get (and reset) the multi-modal cache stats.
@@ -372,10 +338,6 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
             mm_config.mm_processor_cache_gb,
             MultiModalProcessorCacheItem,
         )
-
-    @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
 
     @override
     def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
@@ -434,10 +396,6 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
             mm_config.mm_processor_cache_gb,
             MultiModalProcessorCacheItemMetadata,
         )
-
-    @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return mm_hash in self._cache
 
     @override
     def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
@@ -516,10 +474,6 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             info = info_delta
 
         return info
-
-    @override
-    def is_cached_item(self, mm_hash: str) -> bool:
-        return self._shm_cache.is_cached(mm_hash)
 
     @override
     def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
