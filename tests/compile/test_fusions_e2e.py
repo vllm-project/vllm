@@ -47,8 +47,12 @@ if current_platform.is_cuda():
         ModelBackendTestCase(
             # Use smaller model for L40s in CI
             model_name="RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8",
-            model_kwargs=dict(max_model_len=1024),
-            backend=AttentionBackendEnum.TRITON_ATTN,
+            # TODO while llama4 is broken, use FLASHINFER for llama3 on Blackwell
+            #  so FI attention+fp8_quant is at least tested once
+            model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
+            backend=AttentionBackendEnum.FLASHINFER
+            if is_blackwell()
+            else AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=32,
                 allreduce_fusion=65,
@@ -59,11 +63,11 @@ if current_platform.is_cuda():
         ModelBackendTestCase(
             model_name="nvidia/Llama-4-Scout-17B-16E-Instruct-FP8",
             model_kwargs=dict(max_model_len=1024, kv_cache_dtype="fp8"),
-            # TODO FlashInfer attn broken on Hopper for llama4:
+            # TODO FlashInfer attn broken on Hopper with kvcache=fp8:
             # https://github.com/vllm-project/vllm/issues/28568
-            backend=AttentionBackendEnum.FLASHINFER
-            if is_blackwell()
-            else AttentionBackendEnum.TRITON_ATTN,
+            # TODO FlashInfer attn broken on Blackwell for llama4:
+            # https://github.com/vllm-project/vllm/issues/28604
+            backend=AttentionBackendEnum.TRITON_ATTN,
             matches=Matches(
                 attention_fusion=48,
                 allreduce_fusion=96,
@@ -108,7 +112,7 @@ if current_platform.is_cuda():
                 attention_fusion=0,
                 allreduce_fusion=97,
                 sequence_parallel=49,
-                async_tp=48,
+                async_tp=48,  # mlp is moe, no fusion there
             ),
         ),
     ]
