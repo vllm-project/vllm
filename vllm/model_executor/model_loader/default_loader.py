@@ -22,7 +22,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     fastsafetensors_weights_iterator,
     filter_duplicate_safetensors_files,
     filter_files_not_needed_for_inference,
-    ls_files_from_hf_or_path,
+    list_files_from_hf_or_path,
     maybe_download_from_modelscope,
     multi_thread_pt_weights_iterator,
     multi_thread_safetensors_weights_iterator,
@@ -103,7 +103,7 @@ class DefaultModelLoader(BaseModelLoader):
             load_format = (
                 "mistral"
                 if len(
-                    ls_files_from_hf_or_path(
+                    list_files_from_hf_or_path(
                         model_name_or_path, ["*/consolidated*.safetensors"], revision
                     )
                 )
@@ -112,7 +112,7 @@ class DefaultModelLoader(BaseModelLoader):
             )
 
         # Some quantized models use .pt files for storing the weights.
-        if load_format in "hf":
+        if load_format == "hf":
             allow_patterns = ["*.safetensors", "*.bin"]
         elif load_format == "safetensors" or load_format == "fastsafetensors":
             use_safetensors = True
