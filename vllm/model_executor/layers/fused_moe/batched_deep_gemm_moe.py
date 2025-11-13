@@ -19,7 +19,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -313,6 +313,35 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
 
+    def estimate_expected_m(
+        self, global_num_experts: int, max_tokens_per_expert: int, topk: int
+    ) -> int:
+        from forward_context import get_forward_context
+
+        dp_meta = get_forward_context().dp_metadata
+        assert dp_meta is not None, (
+            f"{self.__class__.__name__} expects is expected to be run "
+            "in a DP/EP scenario. But can't find DP Metadata"
+        )
+        total_num_tokens = dp_meta.num_tokens_across_dp_cpu.sum()
+        total_num_tokens_replicated = total_num_tokens * topk
+
+        # Assume even load balancing
+        estimate = next_power_of_2(total_num_tokens_replicated // (global_num_experts))
+        # clamp estimate
+        estimate = max(estimate, 16)
+        estimate = min(max_tokens_per_expert, estimate)
+
+        s = "estimate expected m : \n"
+        s += f"  - global num experts    : {global_num_experts} \n"
+        s += f"  - max tokens per expert : {max_tokens_per_expert} \n"
+        s += f"  - topk                  : {topk} \n"
+        s += f"  - total_num_tokens      : {dp_meta.num_tokens_across_dp_cpu} \n"
+        s += f"  - output estimate == {estimate}\n"
+        print(s)
+
+        return estimate
+
     def apply(
         self,
         output: torch.Tensor,
@@ -348,10 +377,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         workspace1 = _resize_cache(workspace13, (E, max_num_tokens, N))
 
-        # (from deepgemm docs) : A value hint (which is a value on CPU)
-        # for the M expectation of each batch, correctly setting this value
-        # may lead to better performance.
-        expected_m = max_num_tokens
+        expected_m = self.estimate_expected_m(
+            global_num_experts=global_num_experts,
+            max_tokens_per_expert=max_num_tokens,
+            topk=topk_ids.size(-1),
+        )
+
         fp8_m_grouped_gemm_nt_masked(
             (a1q, a1q_scale),
             (w1, self.w1_scale),
