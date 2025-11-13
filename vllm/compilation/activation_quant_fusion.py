@@ -85,28 +85,26 @@ if rocm_aiter_ops.is_enabled():
     )
 
     class AiterSiluMulFp8BlockQuantPattern(ActivationQuantPattern):
-        def __init__(self):
+        def __init__(self, use_triton: bool):
             self.silu_and_mul_matcher = MatcherSiluAndMul()
+            self.use_triton = use_triton
 
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
-                use_triton: bool,
             ):
                 at1 = self.silu_and_mul_matcher.forward_custom(input)
-                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, self.use_triton)
                 return at2[0], at2[1]
 
             def replacement(
                 input: torch.Tensor,
-                use_triton: bool,
             ):
                 at = FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
                 return at[0], at[1]
 
             inputs = [
                 self.silu_and_mul_matcher.inputs()[0],
-                False,  # use_triton
             ]
 
             register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
@@ -228,8 +226,9 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        if rocm_aiter_ops.is_enaled():
-            AiterSiluMulFp8BlockQuantPattern().register(self.patterns)
+        if rocm_aiter_ops.is_enabled():
+            for use_triton in [False, True]:
+                AiterSiluMulFp8BlockQuantPattern(use_triton).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 
@@ -244,6 +243,6 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
         ]
-        if rocm_aiter_ops.is_enaled():
+        if rocm_aiter_ops.is_enabled():
             fusion_patterns.append(AiterSiluMulFp8BlockQuantPattern)
         return VllmInductorPass.hash_source(self, *fusion_patterns)

@@ -327,6 +327,31 @@ def _rocm_aiter_gemm_a8w8_fake(
     return Y
 
 
+def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+
+    return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+
+
+def _rocm_aiter_triton_gemm_a8w8_blockscale_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
+    return Y
+
+
 def _rocm_aiter_gemm_a8w8_blockscale_impl(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -594,7 +619,7 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_linear_fp8_enaled(cls) -> bool:
         """ "Verifies device specs and availability of env variable."""
-        return cls.is_linear_enabled() and current_platform.is_fp8_fnuz()
+        return cls.is_linear_enabled()
 
     @classmethod
     @if_aiter_supported
@@ -722,6 +747,14 @@ class rocm_aiter_ops:
                 op_func=_rocm_aiter_gemm_a8w8_impl,
                 mutates_args=[],
                 fake_impl=_rocm_aiter_gemm_a8w8_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
+                op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -1070,9 +1103,9 @@ class rocm_aiter_ops:
         block_size: list[int],
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
-
-        return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
+        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
+            A, B, As, Bs, output_dtype
+        )
 
     @staticmethod
     def group_fp8_quant(

@@ -339,28 +339,27 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
 if rocm_aiter_ops.is_rmsnorm_enabled():
 
     class AiterRMSGroupQuantFP8Pattern:
-        def __init__(self, epsilon: float, quant_dtype: torch.dtype):
+        def __init__(self, epsilon: float, quant_dtype: torch.dtype, use_triton: bool):
             self.epsilon = epsilon
             self.quant_dtype = quant_dtype
+            self.use_triton = use_triton
 
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
                 weight: torch.Tensor,
-                use_triton: bool,
             ):
                 at1 = AITER_RMS_OP(
                     x=input, weight=weight, variance_epsilon=self.epsilon
                 )
 
-                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, self.use_triton)
 
                 return at2[0], at2[1]
 
             def replacement(
                 input: torch.Tensor,
                 weight: torch.Tensor,
-                use_triton: bool,
             ):
                 at = AITER_RMS_GROUP_QUANT_OP(
                     x=input,
@@ -374,22 +373,21 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
             inputs = [
                 empty_bf16(5, 4),  # input
                 empty_bf16(1, 5),  # weight
-                False,  # use_triton
             ]
 
             pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
 
     class AiterFusedAddRMSGroupQuantPattern:
-        def __init__(self, epsilon: float, quant_dtype: torch.dtype):
+        def __init__(self, epsilon: float, quant_dtype: torch.dtype, use_triton: bool):
             self.epsilon = epsilon
             self.quant_dtype = quant_dtype
+            self.use_triton = use_triton
 
         def register(self, pm_pass: PatternMatcherPass):
             def pattern(
                 input: torch.Tensor,
                 residual: torch.Tensor,
                 weight: torch.Tensor,
-                use_triton: bool,
             ):
                 at1 = AITER_RMS_ADD_OP(
                     x=input,
@@ -398,7 +396,7 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
                     variance_epsilon=self.epsilon,
                 )
 
-                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, use_triton=use_triton)
+                at2 = AITER_GROUP_FP8_QUANT_OP(at1[0], 128, self.use_triton)
 
                 # result, scale, residual
                 return at2[0], at2[1], at1[1]
@@ -407,7 +405,6 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
                 input: torch.Tensor,
                 residual: torch.Tensor,
                 weight: torch.Tensor,
-                use_triton: bool,
             ):
                 at = AITER_RMS_ADD_GROUP_QUANT_OP(
                     x=input,
@@ -424,7 +421,6 @@ if rocm_aiter_ops.is_rmsnorm_enabled():
                 empty_bf16(5, 4),  # input
                 empty_bf16(5, 4),  # residual
                 empty_bf16(1, 5),  # weight
-                False,  # use_triton
             ]
 
             pm.register_replacement(pattern, replacement, inputs, pm.fwd_only, pm_pass)
@@ -462,11 +458,14 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
 
             if rocm_aiter_ops.is_rmsnorm_enabled():
                 # Fuse rms_norm + dynamic group fp8 quant
-                AiterRMSGroupQuantFP8Pattern(epsilon, FP8_DTYPE).register(self.patterns)
+                for use_triton in [False, True]:
+                    AiterRMSGroupQuantFP8Pattern(
+                        epsilon, FP8_DTYPE, use_triton
+                    ).register(self.patterns)
 
-                AiterFusedAddRMSGroupQuantPattern(epsilon, FP8_DTYPE).register(
-                    self.patterns
-                )
+                    AiterFusedAddRMSGroupQuantPattern(
+                        epsilon, FP8_DTYPE, use_triton
+                    ).register(self.patterns)
 
             # Fuse rms_norm + dynamic per-token fp8 quant
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
