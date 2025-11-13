@@ -71,7 +71,6 @@ async def transfer_run_periodically(
         for model_state in state.model_states.values():
             if not model_state.is_async_enabled:
                 continue
-            logger.info("async worker model_state.model_name: %s, model_state.model.num_moe_layers %d", model_state.model_name, model_state.model.num_moe_layers)
             current_num_layers = model_state.model.num_moe_layers
             while (
                 model_state.rebalanced
@@ -102,7 +101,6 @@ async def transfer_run_periodically(
                             cuda_stream=cuda_stream,
                             rank_mapping=rank_mapping,
                         )
-                        logger.info("async model_state.model_name: %s, transfer_layer layer: %d", model_state.model_name, model_state.layer_to_transfer)
                         event = torch.cuda.Event(blocking=False)
                         cuda_stream.record_event(event)
                         model_state.buffer_ready_event = event
@@ -114,5 +112,4 @@ async def transfer_run_periodically(
                         break
                     await asyncio.sleep(0.001)
 
-        logger.info("async worker completed current EPLB pass, clearing event")
         state.rearrange_event.clear()
