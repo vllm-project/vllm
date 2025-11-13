@@ -335,7 +335,7 @@ class DeepseekV2MoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts
-            if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            if self.is_fusion_moe_shared_experts_enabled
             else None,
         )
 
