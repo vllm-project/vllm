@@ -410,7 +410,7 @@ class DeepseekV2Attention(nn.Module):
         q_lora_rank: int,
         kv_lora_rank: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -485,21 +485,21 @@ class DeepseekV2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if rope_scaling:
-            rope_scaling["rope_type"] = "deepseek_yarn"
+        if rope_parameters:
+            rope_parameters["rope_type"] = "deepseek_yarn"
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=False,
         )
 
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
+        if rope_parameters:
+            mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
+            scaling_factor = rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
@@ -904,7 +904,7 @@ class DeepseekV2MLAAttention(nn.Module):
         q_lora_rank: int | None,
         kv_lora_rank: int,
         rope_theta: float = 10000,
-        rope_scaling: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -981,19 +981,19 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        if rope_scaling:
-            rope_scaling["rope_type"] = "deepseek_yarn"
+        if rope_parameters:
+            rope_parameters["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
             base=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_parameters=rope_parameters,
             is_neox_style=False,
         )
-        if rope_scaling:
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", False)
-            scaling_factor = rope_scaling["factor"]
+        if rope_parameters:
+            mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
+            scaling_factor = rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
@@ -1073,8 +1073,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         moe_layer_freq = getattr(config, "moe_layer_freq", 1)
         # DecoderLayers are created with `make_layers` which passes the prefix
@@ -1107,8 +1105,8 @@ class DeepseekV2DecoderLayer(nn.Module):
             v_head_dim=v_head_dim,
             q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
+            rope_theta=config.rope_parameters["rope_theta"],
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
