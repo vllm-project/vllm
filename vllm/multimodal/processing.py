@@ -1219,6 +1219,11 @@ class MultiModalProcessingInfo(NamedTuple):
     prompt_updates: MultiModalPromptUpdates
 
 
+OptionalPreCachedMediaItems: TypeAlias = dict[
+    str, list[tuple[MultiModalKwargsItem | None, Sequence[ResolvedPromptUpdate]] | None]
+]
+
+
 class BaseMultiModalProcessor(ABC, Generic[_I]):
     """
     Abstract base class to process multi-modal inputs to be used in vLLM.
@@ -1671,7 +1676,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         cache: BaseMultiModalProcessorCache,
         mm_data_items: MultiModalDataItems,
         mm_hashes: MultiModalHashes,
-    ) -> tuple[list[MultiModalKwargsItem | None], MultiModalDataItems]:
+    ) -> tuple[OptionalPreCachedMediaItems, MultiModalDataItems]:
         mm_cached_items = {
             modality: cache.get(hashes) for modality, hashes in mm_hashes.items()
         }
@@ -1717,7 +1722,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes: MultiModalHashes,
         mm_missing_kwargs: MultiModalKwargsItems,
         mm_missing_prompt_updates: MultiModalPromptUpdates,
-        mm_cached_items: list[MultiModalKwargsItem | None],
+        mm_cached_items: OptionalPreCachedMediaItems,
     ) -> tuple[MultiModalKwargsOptionalItems, MultiModalPromptUpdates]:
         mm_missing_next_idx = defaultdict[str, int](lambda: 0)
 
