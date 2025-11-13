@@ -331,7 +331,7 @@ class Llama4DecoderLayer(nn.Module):
         self.layer_idx = extract_layer_index(prefix)
         self.global_layer = config.no_rope_layers[self.layer_idx] == 0
         self.hidden_size = config.hidden_size
-        rope_theta = config.rope_theta
+        rope_theta = config.rope_parameters["rope_theta"]
         rope_parameters = config.rope_parameters
         max_position_embeddings = config.max_position_embeddings
 

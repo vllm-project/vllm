@@ -128,7 +128,7 @@ class Zamba2Attention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.config = config
         self.num_hybrid_layers = num_hybrid_layers
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
 
         self.attention_hidden_size = config.attention_hidden_size
         self.total_num_attention_heads = config.num_attention_heads

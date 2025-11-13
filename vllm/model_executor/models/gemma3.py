@@ -172,7 +172,7 @@ class Gemma3Attention(nn.Module):
                 rope_parameters = {"rope_type": "default"}
             else:
                 # Global attention. Use the values in config.json.
-                base = config.rope_theta
+                base = config.rope_parameters["rope_theta"]
                 rope_parameters = config.rope_parameters
 
         self.rotary_emb = get_rope(

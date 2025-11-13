@@ -247,7 +247,7 @@ class Step3TextDecoderLayer(nn.Module):
             max_position_embedding=config.max_position_embedding,
             head_dim=config.head_dim,
             share_q_dim=config.share_q_dim,
-            rope_theta=config.rope_theta,
+            rope_theta=config.rope_parameters["rope_theta"],
             rope_parameters=rope_parameters,
             prefix=f"{prefix}.self_attn",
         )

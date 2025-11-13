@@ -396,12 +396,19 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     text_config = config.get_text_config()
     # (Transformers v5, Transformers v4)
     rope_parameters_keys = ("rope_parameters", "rope_scaling")
-    rope_parameters = getattr_iter(text_config, rope_parameters_keys, None)
+    rope_parameters: dict | None = getattr_iter(text_config, rope_parameters_keys, None)
 
     # Forward compatibility for Transformers v5
     # (can be removed once Transformers v4 is no longer supported)
     cls_attr = getattr(type(text_config), "rope_scaling", None)
     if not isinstance(cls_attr, property):
+        # rope_theta now lives in rope_parameters
+        if rope_theta := getattr(text_config, "rope_theta", None):
+            # Ensure rope_parameters exists if rope_theta is set
+            rope_parameters = rope_parameters or {}
+            rope_parameters["rope_theta"] = rope_theta
+            delattr(text_config, "rope_theta")
+        # Move rope config from rope_scaling to rope_parameters
         text_config.rope_parameters = rope_parameters
         delattr(text_config, "rope_scaling")
 

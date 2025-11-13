@@ -291,7 +291,7 @@ class Llama4VisionAttention(nn.Module):
             rotary_dim=config.hidden_size // config.num_attention_heads // 2,
             # number of image patches
             max_position=(config.image_size // config.patch_size) ** 2,
-            base=config.rope_theta,
+            base=config.rope_parameters["rope_theta"],
             rope_parameters={"rope_type": "mllama4"},
             is_neox_style=False,
             dtype=torch.complex64,  # important

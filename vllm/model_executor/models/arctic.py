@@ -292,7 +292,7 @@ class ArcticAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
 
         self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
         self.scaling = self.head_dim**-0.5
 
         self.qkv_proj = QKVParallelLinear(

@@ -303,7 +303,7 @@ if __name__ == "__main__":
                 q_size = num_heads * head_dim
                 kv_size = num_kv_heads * head_dim
                 is_neox_style = True
-                rope_theta = config.rope_theta
+                rope_theta = config.rope_parameters["rope_theta"]
                 max_position = config.max_position_embeddings
 
                 for num_tokens in num_tokens_list:

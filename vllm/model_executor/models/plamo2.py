@@ -576,7 +576,11 @@ class Plamo2AttentionMixer(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self.rope_theta = config.rope_theta if hasattr(config, "rope_theta") else 10000
+        self.rope_theta = (
+            config.rope_parameters["rope_theta"]
+            if hasattr(config, "rope_parameters")
+            else 10000
+        )
         self.rope_parameters = getattr(config, "rope_parameters", None)
         max_position = config.max_position_embeddings
         if hasattr(vllm_config.model_config, "max_model_len") and isinstance(

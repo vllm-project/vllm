@@ -67,7 +67,7 @@ class OAIAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=config.max_position_embeddings,
-            base=config.rope_theta,
+            base=config.rope_parameters["rope_theta"],
             dtype=torch.float32,
             rope_parameters={
                 "rope_type": "yarn",
@@ -90,7 +90,7 @@ class OAIAttention(nn.Module):
         self.q_size = self.num_attention_heads * self.head_dim // tp_size
         self.kv_size = self.num_key_value_heads * self.head_dim // tp_size
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = config.rope_theta
+        self.rope_theta = config.rope_parameters["rope_theta"]
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=self.hidden_size,

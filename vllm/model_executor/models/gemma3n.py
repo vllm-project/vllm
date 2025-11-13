@@ -349,7 +349,7 @@ class Gemma3nAttention(nn.Module):
                 rope_parameters = {"rope_type": "default"}
             else:
                 # Global attention. Use the values in config.json.
-                base = config.rope_theta
+                base = config.rope_parameters["rope_theta"]
                 rope_parameters = config.rope_parameters
 
         first_kv_shared_layer_idx = (
