@@ -136,7 +136,7 @@ class Platform:
     
     @property
     def pass_key(self) -> str:
-        return ""
+        return "post_grad_custom_post_pass"
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -184,7 +184,7 @@ class Platform:
     @classmethod
     def get_pass_manager_cls(cls) -> str:
         """Get the pass manager class of a device."""
-        return ""
+        return "vllm.compilation.pass_manager.PostGradPassManager"
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):

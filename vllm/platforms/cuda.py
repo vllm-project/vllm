@@ -117,15 +117,6 @@ class CudaPlatformBase(Platform):
         # Kepler and Maxwell NVIDIA GPUs, only FP32 is supported,
         # though vLLM doesn't support these GPUs.
         return [torch.float32]
-    
-    @property
-    def pass_key(self) -> str:
-        return "post_grad_custom_post_pass"
-
-    @classmethod
-    def get_pass_manager_cls(cls) -> str:
-        """Get the pass manager class of a device."""
-        return "vllm.compilation.pass_manager.PostGradPassManager"
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:

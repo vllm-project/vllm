@@ -62,7 +62,7 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
         logger.debug("Using EagerAdaptor")
         return EagerAdaptor()
     else:
-        logger.debug(f"Using custom backend: {compilation_config.backend}")
+        logger.debug("Using custom backend: %s", compilation_config.backend)
         return resolve_obj_by_qualname(compilation_config.backend)()
 
 
