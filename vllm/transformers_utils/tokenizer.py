@@ -15,7 +15,7 @@ from typing_extensions import assert_never
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader.weight_utils import ls_files_from_hf_or_path
+from vllm.model_executor.model_loader.weight_utils import list_files_from_hf_or_path
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 from vllm.transformers_utils.tokenizers import MistralTokenizer
 from vllm.transformers_utils.utils import check_gguf_file
@@ -188,7 +188,7 @@ def get_tokenizer(
     mistral_common_installed = importlib.util.find_spec("mistral_common") is not None
     if tokenizer_mode == "auto" and mistral_common_installed:
         allow_patterns = ["*/tekken.json", "*/tokenizer.model.v*"]
-        files_list = ls_files_from_hf_or_path(tokenizer_name, allow_patterns)
+        files_list = list_files_from_hf_or_path(tokenizer_name, allow_patterns)
         if len(files_list) > 0:
             tokenizer_mode = "mistral"
 
