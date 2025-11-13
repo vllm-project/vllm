@@ -26,7 +26,6 @@
 # limitations under the License.
 """Inference-only Qwen2.5-VL model compatible with HuggingFace weights."""
 
-import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import lru_cache, partial
 from typing import Annotated, Any, Literal, TypeAlias
@@ -61,9 +60,9 @@ from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.multi_modal import get_conv_layer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -110,7 +109,6 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
-    conv3d_to_linear_weight,
     get_vit_attn_backend,
     run_dp_sharded_mrope_vision_model,
 )
@@ -554,12 +552,13 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         self.temporal_patch_size = temporal_patch_size
         self.hidden_size = hidden_size
 
-        kernel_size = (temporal_patch_size, patch_size, patch_size)
-        self.proj = ReplicatedLinear(
-            in_channels * math.prod(kernel_size),
-            hidden_size,
-            bias=False,
-            return_bias=False,
+        self.proj = get_conv_layer(
+            in_channels=in_channels,
+            out_channels=hidden_size,
+            kernel_size=(temporal_patch_size, patch_size, patch_size),
+            stride=patch_size,
+            enable_bias=False,
+            conv_type="conv3d",
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -987,9 +986,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
-            if name.endswith("patch_embed.proj.weight"):
-                loaded_weight = conv3d_to_linear_weight(loaded_weight)
-
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
