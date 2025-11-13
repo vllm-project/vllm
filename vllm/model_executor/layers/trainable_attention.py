@@ -8,6 +8,8 @@ flash attention implementation, enabling backpropagation for RL and fine-tuning
 use cases.
 """
 
+import itertools
+
 import torch
 import torch.nn as nn
 
@@ -56,8 +58,8 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         causal: Whether to use causal masking. Defaults to True
     """
 
-    # Class variable for auto-generating unique layer names
-    _layer_counter = 0
+    # Class variable for auto-generating unique layer names (thread-safe)
+    _layer_counter = itertools.count()
 
     def __init__(
         self,
@@ -122,8 +124,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
             # Generate unique layer name using class counter
             # Format: "layers.{index}" for compatibility with extract_layer_index()
-            layer_name = f"layers.{TrainableFlashAttention._layer_counter}"
-            TrainableFlashAttention._layer_counter += 1
+            layer_name = f"layers.{next(TrainableFlashAttention._layer_counter)}"
 
             # Register this layer in static forward context
             if layer_name in compilation_config.static_forward_context:
@@ -149,12 +150,19 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
         Args:
             hidden_states: Input tensor of shape [total_tokens, hidden_size]
+                          or [batch, seq_len, hidden_size]
             attention_mask: Optional attention mask (not yet fully supported)
             **kwargs: Additional vLLM-specific kwargs (intermediate_tensors, etc.)
 
         Returns:
             output: Attention output of same shape as hidden_states
         """
+        # Handle both batched [batch, seq, hidden] and flattened [total_tokens, hidden]
+        input_is_batched = hidden_states.dim() == 3
+        if input_is_batched:
+            batch_size, seq_len, _ = hidden_states.shape
+            hidden_states = hidden_states.view(-1, self.hidden_size)
+
         total_tokens = hidden_states.shape[0]
 
         # Project to Q, K, V
@@ -292,6 +300,10 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         # Flatten heads and project output
         attn_output = attn_output.reshape(total_tokens, -1)
         output = self.o_proj(attn_output)
+
+        # Restore original shape if input was batched
+        if input_is_batched:
+            output = output.view(batch_size, seq_len, self.hidden_size)
 
         return output
 

@@ -27,6 +27,7 @@ For more details on Megatron-LM:
 
 import json
 import os
+import socket
 import tempfile
 
 import torch
@@ -37,6 +38,15 @@ from vllm.model_executor.layers.trainable_attention import (
 )
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.parallel_context import ParallelContext
+
+
+def find_free_port() -> int:
+    """Find a free port on localhost."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        s.listen(1)
+        port = s.getsockname()[1]
+    return port
 
 
 class MegatronTransformer(nn.Module):
@@ -211,7 +221,10 @@ class MegatronTransformer(nn.Module):
         import os
 
         # Check if reference weights are available
-        ref_weights_path = "/tmp/megatron_reference_weights.pt"
+        # Use environment variable to allow dynamic path configuration
+        ref_weights_path = os.environ.get(
+            "MEGATRON_REFERENCE_WEIGHTS_PATH", "/tmp/megatron_reference_weights.pt"
+        )
         if os.path.exists(ref_weights_path):
             print(f"[Worker] Loading reference weights from {ref_weights_path}")
             state_dict = torch.load(ref_weights_path, map_location="cuda")
@@ -411,9 +424,11 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
     import torch.distributed as dist
 
     if not dist.is_initialized():
+        # Use a dynamic free port to avoid conflicts
+        free_port = find_free_port()
         dist.init_process_group(
             backend="nccl",
-            init_method="tcp://localhost:29500",
+            init_method=f"tcp://localhost:{free_port}",
             world_size=1,
             rank=0,
         )
@@ -628,182 +643,202 @@ if __name__ == "__main__":
     SEED = 42
 
     # === GROUND TRUTH: Run model independently ===
-    # Save weights to share with vLLM
-    weights_path = "/tmp/megatron_reference_weights.pt"
-    reference_logits = run_reference_forward(
-        config, test_input_ids, seed=SEED, save_weights_path=weights_path
-    )
+    # Create a temporary file for weights to avoid conflicts
+    with tempfile.NamedTemporaryFile(
+        suffix=".pt", delete=False, prefix="megatron_weights_"
+    ) as weights_file:
+        weights_path = weights_file.name
 
-    # === VLLM TEST: With TP=4 (testing actual tensor parallelism) ===
-    print("\n" + "=" * 70)
-    print("[vLLM Test] Testing model with vLLM (TP=4, inference)")
-    print("=" * 70)
+    # Set environment variable so worker processes can find the weights
+    os.environ["MEGATRON_REFERENCE_WEIGHTS_PATH"] = weights_path
 
-    with tempfile.TemporaryDirectory() as tmpdir:
-        config_path = os.path.join(tmpdir, "config.json")
-        with open(config_path, "w") as f:
-            json.dump(config, f)
-
-        # Set same random seed for vLLM
-        torch.manual_seed(SEED)
-        torch.cuda.manual_seed_all(SEED)
-
-        from vllm import LLM
-
-        llm = LLM(
-            model=tmpdir,
-            tokenizer=None,
-            tensor_parallel_size=4,  # Use TP=4 to test actual parallelism
-            max_model_len=128,
-            max_num_seqs=8,  # Allow batching for dynamic batching test
-            enforce_eager=True,
-            skip_tokenizer_init=True,
-            trust_remote_code=True,
-            enable_prefix_caching=False,
-            seed=SEED,  # Set seed for vLLM
+    try:
+        reference_logits = run_reference_forward(
+            config, test_input_ids, seed=SEED, save_weights_path=weights_path
         )
 
-        print("✓ vLLM engine initialized")
-
-        # Get logits from vLLM (not just generated tokens)
-        # We'll need to extract the actual logits from vLLM's forward pass
-        from vllm import SamplingParams
-        from vllm.inputs import TokensPrompt
-
-        sampling_params = SamplingParams(
-            temperature=0.0,
-            max_tokens=1,  # Just generate 1 token to get logits
-            logprobs=1,  # Request logprobs to access logits
-        )
-
-        # Generate using same input
-        outputs = llm.generate(
-            prompts=TokensPrompt(prompt_token_ids=test_input_ids),
-            sampling_params=sampling_params,
-        )
-
-        print("✓ vLLM forward pass complete")
-
-        # Extract logits from vLLM output
-        # Note: vLLM doesn't directly expose logits in generate(), so we'll
-        # compare the generated tokens and logprobs as a proxy
+        # === VLLM TEST: With TP=4 (testing actual tensor parallelism) ===
         print("\n" + "=" * 70)
-        print("[Validation] Comparing vLLM output to ground truth")
+        print("[vLLM Test] Testing model with vLLM (TP=4, inference)")
         print("=" * 70)
 
-        for output in outputs:
-            single_query_token = output.outputs[0].token_ids[0]
-            logprobs = (
-                output.outputs[0].logprobs[0] if output.outputs[0].logprobs else None
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.json")
+            with open(config_path, "w") as f:
+                json.dump(config, f)
+
+            # Set same random seed for vLLM
+            torch.manual_seed(SEED)
+            torch.cuda.manual_seed_all(SEED)
+
+            from vllm import LLM
+
+            llm = LLM(
+                model=tmpdir,
+                tokenizer=None,
+                tensor_parallel_size=4,  # Use TP=4 to test actual parallelism
+                max_model_len=128,
+                max_num_seqs=8,  # Allow batching for dynamic batching test
+                enforce_eager=True,
+                skip_tokenizer_init=True,
+                trust_remote_code=True,
+                enable_prefix_caching=False,
+                seed=SEED,  # Set seed for vLLM
             )
 
-            # Get top-K tokens from reference (handle numerical differences)
-            K = 10
-            # IMPORTANT: Get top-K from LAST token only!
-            topk_values, topk_indices = torch.topk(reference_logits[-1], K)
-            topk_tokens = topk_indices.tolist()
-            reference_greedy = topk_tokens[0]
+            print("✓ vLLM engine initialized")
 
-            # Find vLLM token's rank in reference
-            sorted_logits, sorted_indices = torch.sort(
-                reference_logits[-1], descending=True
+            # Get logits from vLLM (not just generated tokens)
+            # We'll need to extract the actual logits from vLLM's forward pass
+            from vllm import SamplingParams
+            from vllm.inputs import TokensPrompt
+
+            sampling_params = SamplingParams(
+                temperature=0.0,
+                max_tokens=1,  # Just generate 1 token to get logits
+                logprobs=1,  # Request logprobs to access logits
             )
-            vllm_token_rank = (sorted_indices == single_query_token).nonzero(
-                as_tuple=True
-            )[0].item() + 1
-            vllm_token_ref_logit = reference_logits[-1, single_query_token].item()
 
-            print("\nGround Truth (PyTorch TP=1):")
-            print(f"  - Greedy token: {reference_greedy}")
-            print(f"  - Top-{K} tokens: {topk_tokens}")
-            print(f"  - Top-{K} logits: {[f'{v.item():.4f}' for v in topk_values]}")
+            # Generate using same input
+            outputs = llm.generate(
+                prompts=TokensPrompt(prompt_token_ids=test_input_ids),
+                sampling_params=sampling_params,
+            )
 
-            print("\nvLLM Output (TP=4):")
-            print(f"  - Greedy token: {single_query_token}")
-            print(f"  - Rank in reference: {vllm_token_rank} / {len(sorted_logits)}")
-            print(f"  - Reference logit for this token: {vllm_token_ref_logit:.4f}")
-            if logprobs:
-                print(
-                    f"  - vLLM log probability: "
-                    f"{logprobs[single_query_token].logprob:.4f}"
+            print("✓ vLLM forward pass complete")
+
+            # Extract logits from vLLM output
+            # Note: vLLM doesn't directly expose logits in generate(), so we'll
+            # compare the generated tokens and logprobs as a proxy
+            print("\n" + "=" * 70)
+            print("[Validation] Comparing vLLM output to ground truth")
+            print("=" * 70)
+
+            for output in outputs:
+                single_query_token = output.outputs[0].token_ids[0]
+                logprobs = (
+                    output.outputs[0].logprobs[0]
+                    if output.outputs[0].logprobs
+                    else None
                 )
 
-            # Validate: vLLM token should be in top-K reference tokens
-            # (allows for numerical differences due to TP, dtype, etc.)
-            if single_query_token in topk_tokens:
-                rank = topk_tokens.index(single_query_token) + 1
-                print("\n✅ VALIDATION PASSED!")
-                print(
-                    f"   vLLM token {single_query_token} is in reference "
-                    f"top-{K} (rank {rank})"
+                # Get top-K tokens from reference (handle numerical differences)
+                K = 10
+                # IMPORTANT: Get top-K from LAST token only!
+                topk_values, topk_indices = torch.topk(reference_logits[-1], K)
+                topk_tokens = topk_indices.tolist()
+                reference_greedy = topk_tokens[0]
+
+                # Find vLLM token's rank in reference
+                sorted_logits, sorted_indices = torch.sort(
+                    reference_logits[-1], descending=True
                 )
-                if single_query_token == reference_greedy:
-                    print("   ✨ Exact match with reference greedy token!")
+                vllm_token_rank = (sorted_indices == single_query_token).nonzero(
+                    as_tuple=True
+                )[0].item() + 1
+                vllm_token_ref_logit = reference_logits[-1, single_query_token].item()
+
+                print("\nGround Truth (PyTorch TP=1):")
+                print(f"  - Greedy token: {reference_greedy}")
+                print(f"  - Top-{K} tokens: {topk_tokens}")
+                print(f"  - Top-{K} logits: {[f'{v.item():.4f}' for v in topk_values]}")
+
+                print("\nvLLM Output (TP=4):")
+                print(f"  - Greedy token: {single_query_token}")
+                print(
+                    f"  - Rank in reference: {vllm_token_rank} / {len(sorted_logits)}"
+                )
+                print(f"  - Reference logit for this token: {vllm_token_ref_logit:.4f}")
+                if logprobs:
+                    print(
+                        f"  - vLLM log probability: "
+                        f"{logprobs[single_query_token].logprob:.4f}"
+                    )
+
+                # Validate: vLLM token should be in top-K reference tokens
+                # (allows for numerical differences due to TP, dtype, etc.)
+                if single_query_token in topk_tokens:
+                    rank = topk_tokens.index(single_query_token) + 1
+                    print("\n✅ VALIDATION PASSED!")
+                    print(
+                        f"   vLLM token {single_query_token} is in reference "
+                        f"top-{K} (rank {rank})"
+                    )
+                    if single_query_token == reference_greedy:
+                        print("   ✨ Exact match with reference greedy token!")
+                else:
+                    print("\n❌ VALIDATION FAILED!")
+                    print(
+                        f"   vLLM token {single_query_token} NOT in reference top-{K}"
+                    )
+                    print(
+                        "   This suggests a correctness issue "
+                        "(not just numerical differences)"
+                    )
+                    raise AssertionError(
+                        f"vLLM output ({single_query_token}) not in reference "
+                        f"top-{K} tokens {topk_tokens}"
+                    )
+
+            print("\n" + "=" * 70)
+            print("✅ All validation tests passed!")
+            print("=" * 70)
+
+            # === DYNAMIC BATCHING TEST ===
+            print("\n" + "=" * 70)
+            print("[Dynamic Batching] Testing with multiple sequences")
+            print("=" * 70)
+
+            # Create multiple prompts of different lengths
+            # Include the same prompt as the single-query test to verify consistency
+            batch_prompts = [
+                TokensPrompt(prompt_token_ids=[1, 2, 3]),  # 3 tokens
+                TokensPrompt(
+                    prompt_token_ids=test_input_ids
+                ),  # 5 tokens (same as single query!)
+                TokensPrompt(prompt_token_ids=[100, 200]),  # 2 tokens
+            ]
+
+            # Generate with batching
+            batch_outputs = llm.generate(
+                prompts=batch_prompts,
+                sampling_params=sampling_params,
+            )
+
+            print(f"\n[Dynamic Batching] Generated {len(batch_outputs)} outputs:")
+            for i, output in enumerate(batch_outputs):
+                prompt_len = len(batch_prompts[i]["prompt_token_ids"])
+                batch_generated_id = output.outputs[0].token_ids[0]
+                print(
+                    f"  Prompt {i + 1}: {prompt_len} tokens -> "
+                    f"generated token {batch_generated_id}"
+                )
+
+            # Verify the batched result matches the single-query result
+            batched_token = batch_outputs[1].outputs[0].token_ids[0]  # Middle prompt
+            if batched_token == single_query_token:
+                print(
+                    f"\n✓ Batched query matches single query! Both generated "
+                    f"token {single_query_token}"
+                )
             else:
-                print("\n❌ VALIDATION FAILED!")
-                print(f"   vLLM token {single_query_token} NOT in reference top-{K}")
                 print(
-                    "   This suggests a correctness issue "
-                    "(not just numerical differences)"
-                )
-                raise AssertionError(
-                    f"vLLM output ({single_query_token}) not in reference "
-                    f"top-{K} tokens {topk_tokens}"
+                    f"\n⚠️  Batched token {batched_token} != single query "
+                    f"token {single_query_token}"
                 )
 
-        print("\n" + "=" * 70)
-        print("✅ All validation tests passed!")
-        print("=" * 70)
-
-        # === DYNAMIC BATCHING TEST ===
-        print("\n" + "=" * 70)
-        print("[Dynamic Batching] Testing with multiple sequences")
-        print("=" * 70)
-
-        # Create multiple prompts of different lengths
-        # Include the same prompt as the single-query test to verify consistency
-        batch_prompts = [
-            TokensPrompt(prompt_token_ids=[1, 2, 3]),  # 3 tokens
-            TokensPrompt(
-                prompt_token_ids=test_input_ids
-            ),  # 5 tokens (same as single query!)
-            TokensPrompt(prompt_token_ids=[100, 200]),  # 2 tokens
-        ]
-
-        # Generate with batching
-        batch_outputs = llm.generate(
-            prompts=batch_prompts,
-            sampling_params=sampling_params,
-        )
-
-        print(f"\n[Dynamic Batching] Generated {len(batch_outputs)} outputs:")
-        for i, output in enumerate(batch_outputs):
-            prompt_len = len(batch_prompts[i]["prompt_token_ids"])
-            batch_generated_id = output.outputs[0].token_ids[0]
             print(
-                f"  Prompt {i + 1}: {prompt_len} tokens -> "
-                f"generated token {batch_generated_id}"
+                "\n✓ Dynamic batching works! Sequences of different lengths "
+                "handled correctly."
             )
 
-        # Verify the batched result matches the single-query result
-        batched_token = batch_outputs[1].outputs[0].token_ids[0]  # Middle prompt
-        if batched_token == single_query_token:
-            print(
-                f"\n✓ Batched query matches single query! Both generated "
-                f"token {single_query_token}"
-            )
-        else:
-            print(
-                f"\n⚠️  Batched token {batched_token} != single query "
-                f"token {single_query_token}"
-            )
+            # Clean up vLLM engine to avoid shutdown errors
+            print("\n[Cleanup] Shutting down vLLM engine...")
+            del llm
+            print("[Cleanup] ✓ vLLM engine shutdown complete")
 
-        print(
-            "\n✓ Dynamic batching works! Sequences of different lengths "
-            "handled correctly."
-        )
-
-        # Clean up vLLM engine to avoid shutdown errors
-        print("\n[Cleanup] Shutting down vLLM engine...")
-        del llm
-        print("[Cleanup] ✓ vLLM engine shutdown complete")
+    finally:
+        # Clean up temporary weights file
+        if os.path.exists(weights_path):
+            os.unlink(weights_path)
+            print(f"[Cleanup] ✓ Removed temporary weights file: {weights_path}")
