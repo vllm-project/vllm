@@ -37,6 +37,7 @@
 
 #ifdef USE_ROCM
   #define FINAL_MASK 0xffffffffffffffffULL
+  #define __syncwarp() __builtin_amdgcn_wave_barrier()
 #else
   #define FINAL_MASK 0xffffffff
 #endif
