@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import multiprocessing
 import random
+import threading
 import time
 
+import multiprocess as mp
 import numpy as np
+import pytest
 import torch.distributed as dist
 
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
@@ -33,7 +35,7 @@ def distributed_run(fn, world_size):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        p = multiprocessing.Process(target=fn, args=(env,))
+        p = mp.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -45,7 +47,7 @@ def distributed_run(fn, world_size):
 
 
 def worker_fn_wrapper(fn):
-    # `multiprocessing.Process` cannot accept environment variables directly
+    # `mp.Process` cannot accept environment variables directly
     # so we need to pass the environment variables as arguments
     # and update the environment variables in the function
     def wrapped_fn(env):
@@ -115,3 +117,66 @@ def worker_fn():
 
 def test_shm_broadcast():
     distributed_run(worker_fn, 4)
+
+
+@worker_fn_wrapper
+def worker_fn_test_cancel():
+    rank = dist.get_rank()
+    if rank == 0:
+        port = get_open_port()
+        ip = "127.0.0.1"
+        dist.broadcast_object_list([ip, port], src=0)
+    else:
+        recv = [None, None]
+        dist.broadcast_object_list(recv, src=0)
+        ip, port = recv  # type: ignore
+
+    stateless_pg = StatelessProcessGroup.create(ip, port, rank, dist.get_world_size())
+
+    for pg in [dist.group.WORLD, stateless_pg]:
+        writer_rank = 2
+        message_queue = MessageQueue.create_from_process_group(
+            pg, 40 * 1024, 2, writer_rank
+        )
+
+        if pg == dist.group.WORLD:
+            dist.barrier()
+        else:
+            pg.barrier()
+
+        if rank != writer_rank:
+            # Put into idle mode
+            message_queue._spin_condition.last_read = 0
+
+            shutdown_event = threading.Event()
+
+            def shutdown_thread(mq, shutdown_event):
+                shutdown_event.wait()
+                mq.shutdown()
+
+            threading.Thread(
+                target=shutdown_thread, args=(message_queue, shutdown_event)
+            ).start()
+
+            with pytest.raises(TimeoutError):
+                message_queue.dequeue(timeout=0.001)
+
+            shutdown_event.set()
+
+            message_queue.dequeue(timeout=1)
+
+            assert message_queue.shutting_down
+        else:
+            # Write nothing
+            message_queue.shutdown()
+
+        if pg == dist.group.WORLD:
+            print(f"torch distributed passed the test! Rank {rank}")
+            dist.barrier()
+        else:
+            print(f"StatelessProcessGroup passed the test! Rank {rank}")
+            pg.barrier()
+
+
+def test_message_queue_shutdown():
+    distributed_run(worker_fn_test_cancel, 4)
