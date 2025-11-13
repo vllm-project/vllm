@@ -145,6 +145,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
             # Call flash attention varlen func
             # This supports backprop automatically via autograd
+            # Force FA v3 to avoid PTX compilation issues
             attn_output = flash_attn_varlen_func(
                 q=q_flat,
                 k=k_flat,
@@ -156,6 +157,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                 softmax_scale=self.scale,
                 causal=self.causal,
                 dropout_p=self.dropout if self.training else 0.0,
+                fa_version=3,
             )
 
             # Reshape back: [batch, seq_len, num_heads, head_dim]

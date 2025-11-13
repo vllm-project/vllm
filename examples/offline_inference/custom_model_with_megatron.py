@@ -503,33 +503,53 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
 
     model.train()  # Switch to train mode
 
-    # Create a simple test: forward pass through just the MLP layers
-    # This avoids flash attention CUDA PTX issues while still testing Megatron gradients
-    print("[Training] Testing Megatron MLP backward pass (fc1 + fc2 + GELU)...")
-
-    # Create a dummy input
-    test_input = torch.randn(
-        1, 5, model.hidden_size, dtype=torch.bfloat16, device="cuda", requires_grad=True
+    # Test full model backward pass (attention + MLP)
+    print(
+        "[Training] Testing full model backward pass (TrainableFlashAttention + Megatron MLP)..."
     )
 
-    # Forward through first layer's MLP (Megatron layers)
-    mlp_out = model.layers[0]["fc1"](test_input)
-    if isinstance(mlp_out, tuple):
-        mlp_out = mlp_out[0]
-    mlp_out = model.layers[0]["act"](mlp_out)
-    mlp_out = model.layers[0]["fc2"](mlp_out)
-    if isinstance(mlp_out, tuple):
-        mlp_out = mlp_out[0]
+    # Create a dummy input matching the model's expected format
+    test_input_ids = torch.tensor([[1, 2, 3, 4, 5]], dtype=torch.long, device="cuda")
+    test_positions = torch.arange(5, dtype=torch.long, device="cuda").unsqueeze(0)
 
-    # Create a simple loss
-    loss = mlp_out.sum()
-    print(f"[Training] MLP output sum (loss): {loss.item():.6f}")
+    # Forward through the entire model
+    hidden_states = model(test_input_ids, test_positions)
+    print(f"[Training] Hidden states shape after full forward: {hidden_states.shape}")
 
-    # Backward pass
+    # Compute logits
+    train_logits = model.compute_logits(hidden_states)
+    print(f"[Training] Logits shape: {train_logits.shape}")
+
+    # Create a simple loss (sum of logits)
+    loss = train_logits.sum()
+    print(f"[Training] Loss (logits sum): {loss.item():.6f}")
+
+    # Backward pass through the entire model
     loss.backward()
 
-    # Check that gradients were computed
+    # Check that gradients were computed across all component types
     grad_checks = []
+
+    # Check embedding gradient
+    if model.embeddings.weight.grad is not None:
+        grad_checks.append(
+            (
+                "embeddings.weight",
+                model.embeddings.weight.grad.abs().max().item(),
+                model.embeddings.weight.grad.abs().mean().item(),
+            )
+        )
+
+    # Check attention gradients (TrainableFlashAttention)
+    attn_qkv = model.layers[0]["attn"].qkv
+    if attn_qkv.weight.grad is not None:
+        grad_checks.append(
+            (
+                "layers[0].attn.qkv.weight (TrainableFlashAttention)",
+                attn_qkv.weight.grad.abs().max().item(),
+                attn_qkv.weight.grad.abs().mean().item(),
+            )
+        )
 
     # Check Megatron fc1 (ColumnParallelLinear) gradient
     fc1_weight = model.layers[0]["fc1"].weight
@@ -553,13 +573,13 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
             )
         )
 
-    # Check input gradient (flows through Megatron layers)
-    if test_input.grad is not None:
+    # Check lm_head gradient
+    if model.lm_head.weight.grad is not None:
         grad_checks.append(
             (
-                "test_input (gradient flows through Megatron)",
-                test_input.grad.abs().max().item(),
-                test_input.grad.abs().mean().item(),
+                "lm_head.weight",
+                model.lm_head.weight.grad.abs().max().item(),
+                model.lm_head.weight.grad.abs().mean().item(),
             )
         )
 
@@ -573,7 +593,9 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
         for name, max_grad, mean_grad in grad_checks:
             print(f"    - {name}: max={max_grad:.6f}, mean={mean_grad:.6f}")
 
-    print("\n✓ Backward pass successful! Megatron-LM layers support training.")
+    print("\n✓ Backward pass successful! Full model supports training:")
+    print("  - TrainableFlashAttention (vLLM attention with backward pass)")
+    print("  - Megatron-LM ColumnParallelLinear and RowParallelLinear")
 
     # Clean up
     dist.destroy_process_group()
@@ -729,7 +751,7 @@ if __name__ == "__main__":
         print("✅ All validation tests passed!")
         print("=" * 70)
 
-        # TODO: Fix worker shutdown error that occurs after successful validation.
-        # The validation completes successfully but vLLM workers throw errors during
-        # shutdown (Engine core proc died unexpectedly). This appears to be an
-        # infrastructure issue unrelated to the Megatron integration itself.
+        # Clean up vLLM engine to avoid shutdown errors
+        print("\n[Cleanup] Shutting down vLLM engine...")
+        del llm
+        print("[Cleanup] ✓ vLLM engine shutdown complete")
