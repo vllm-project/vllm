@@ -24,7 +24,9 @@ from huggingface_hub.utils import (
     RepositoryNotFoundError,
     RevisionNotFoundError,
 )
+from packaging.version import Version
 from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
+from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -35,7 +37,6 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
-from vllm.config.utils import getattr_iter
 from vllm.logger import init_logger
 from vllm.transformers_utils.config_parser_base import ConfigParserBase
 from vllm.transformers_utils.utils import (
@@ -394,25 +395,33 @@ def file_or_path_exists(
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     text_config = config.get_text_config()
-    # (Transformers v5, Transformers v4)
-    rope_parameters_keys = ("rope_parameters", "rope_scaling")
-    rope_parameters: dict | None = getattr_iter(text_config, rope_parameters_keys, None)
-    # No rope parameters to patch
+
+    if Version(TRANSFORMERS_VERSION) >= Version("5.0.0.dev0"):
+        from transformers.modeling_rope_utils import RopeParameters
+
+        rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
+            text_config, "rope_parameters", None
+        )
+    else:
+        # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
+        rope_theta: float | None = getattr(text_config, "rope_theta", None)
+        rope_scaling: dict | None = getattr(text_config, "rope_scaling", None)
+        rope_parameters = rope_scaling
+        # Move rope_theta into rope_parameters
+        if rope_theta is not None:
+            rope_parameters = rope_parameters or {"rope_type": "default"}
+            rope_parameters["rope_theta"] = rope_theta
+        # Write back to text_config
+        text_config.rope_parameters = rope_parameters
+        # Delete legacy attributes
+        if hasattr(text_config, "rope_theta"):
+            delattr(text_config, "rope_theta")
+        if hasattr(text_config, "rope_scaling"):
+            delattr(text_config, "rope_scaling")
+
+    # No RoPE parameters to patch
     if rope_parameters is None:
         return
-    # Forward compatibility for Transformers v5
-    # (can be removed once Transformers v4 is no longer supported)
-    cls_attr = getattr(type(text_config), "rope_scaling", None)
-    if not isinstance(cls_attr, property):
-        # rope_theta now lives in rope_parameters
-        if rope_theta := getattr(text_config, "rope_theta", None):
-            # Ensure rope_parameters exists if rope_theta is set
-            rope_parameters = rope_parameters or {}
-            rope_parameters["rope_theta"] = rope_theta
-            delattr(text_config, "rope_theta")
-        # Move rope config from rope_scaling to rope_parameters
-        text_config.rope_parameters = rope_parameters
-        delattr(text_config, "rope_scaling")
 
     # Handle nested rope_parameters in interleaved sliding attention models
     if set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
