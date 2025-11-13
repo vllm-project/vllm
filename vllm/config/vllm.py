@@ -28,6 +28,7 @@ from vllm.utils import random_uuid
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
+from .ec_transfer import ECTransferConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -103,6 +104,8 @@ class VllmConfig:
     """The configurations for distributed KV cache transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
+    ec_transfer_config: ECTransferConfig | None = None
+    """The configurations for distributed EC cache transfer."""
     # some opaque config, only used to provide additional information
     # for the hash computation, mainly used for testing, debugging or out of
     # tree config registration.
@@ -181,6 +184,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.ec_transfer_config:
+            vllm_factors.append(self.ec_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.additional_config:
@@ -649,14 +656,6 @@ class VllmConfig:
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
 
-            # final migrate the deprecated flags
-            self.compilation_config.use_cudagraph = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-            self.compilation_config.full_cuda_graph = (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            )
-
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
             assert a2a_backend in ["deepep_low_latency", "deepep_high_throughput"], (
@@ -846,7 +845,9 @@ class VllmConfig:
                 )
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
-                cudagraph_capture_sizes = dedup_sizes
+                cudagraph_capture_sizes = [
+                    i for i in dedup_sizes if i <= max_num_tokens
+                ]
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
