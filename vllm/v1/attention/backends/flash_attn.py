@@ -207,7 +207,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    cudagraph_support = (
+    _cudagraph_support = (
         AttentionCGSupport.ALWAYS
         if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH
