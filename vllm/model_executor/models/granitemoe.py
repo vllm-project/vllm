@@ -140,9 +140,8 @@ class GraniteMoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_parameters: dict[str, Any],
         max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         attention_multiplier: float | None = None,
@@ -172,7 +171,6 @@ class GraniteMoeAttention(nn.Module):
             if attention_multiplier is not None
             else self.head_dim**-1
         )
-        self.rope_theta = rope_theta
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -194,9 +192,8 @@ class GraniteMoeAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            base=int(self.rope_theta),
-            is_neox_style=True,
             rope_parameters=rope_parameters,
+            is_neox_style=True,
         )
         self.attn = Attention(
             self.num_heads,
@@ -235,16 +232,12 @@ class GraniteMoeDecoderLayer(nn.Module):
         parallel_config = vllm_config.parallel_config
 
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
-        rope_theta = getattr(config, "rope_theta", 10000)
-        rope_parameters = getattr(config, "rope_parameters", None)
         self.self_attn = GraniteMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
             num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
