@@ -595,7 +595,7 @@ class SiglipTextTransformer(nn.Module):
         self.final_layer_norm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.head = nn.Linear(embed_dim, config.projection_size)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings.token_embedding(input_ids)
 
     def forward(
@@ -1117,7 +1117,7 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
     def get_language_model(self) -> torch.nn.Module:
         return self.text_model
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1130,16 +1130,16 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         )
 
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

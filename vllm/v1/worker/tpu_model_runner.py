@@ -962,7 +962,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # (feature_size, hidden_size) in case the feature size is dynamic
             # depending on the input multimodal items.
             torch_xla.sync(wait=False)
-            curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
+            curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
             torch_xla.sync(wait=False)
 
             sanity_check_mm_encoder_outputs(
@@ -1065,7 +1065,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds = self.model.get_input_embeddings(
+            inputs_embeds = self.model.embed_input_ids(
                 input_ids,
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
@@ -1484,14 +1484,12 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 )
                 # Run multimodal encoder.
                 torch_xla.sync(wait=False)
-                mm_embeds = self.model.get_multimodal_embeddings(
-                    **batched_dummy_mm_inputs
-                )
+                mm_embeds = self.model.embed_multimodal(**batched_dummy_mm_inputs)
                 torch_xla.sync(wait=False)
                 num_patches = mm_embeds[0].shape[0]
                 items_size = num_patches * num_items
 
-                # NOTE (NickLucche) pre-compile `get_input_embeddings` when mm
+                # NOTE (NickLucche) pre-compile `embed_input_ids` when mm
                 # embeddings are present. We assume `--disable-mm-chunked`,
                 # hence only whole items can be scheduled. This implies we just
                 # need to compile when `num_items` fit the (padded) `input_ids`
@@ -1519,7 +1517,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         assert a is None
                         torch_xla.sync(wait=False)
 
-            # Pre-compile `get_input_embeddings` when mm_embeddings are not
+            # Pre-compile `embed_input_ids` when mm_embeddings are not
             # present. Chunk is only made of text, no mm_placeholders.
             for num_tokens in self.num_tokens_paddings:
                 placeholders_ids = torch.zeros(
@@ -1738,7 +1736,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     # impact of recompilation until it's fixed.
                     start = time.perf_counter()
                     torch_xla.sync(wait=False)
-                    dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    dummy_encoder_outputs = self.model.embed_multimodal(
                         **batched_dummy_mm_inputs
                     )
                     torch_xla.sync(wait=False)
@@ -1974,11 +1972,11 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             )
         return logits_cloned
 
-    def get_multimodal_embeddings(self, *args, **kwargs):
-        return self.model.get_multimodal_embeddings(*args, **kwargs)
+    def embed_multimodal(self, *args, **kwargs):
+        return self.model.embed_multimodal(*args, **kwargs)
 
-    def get_input_embeddings(self, *args, **kwargs):
-        return self.model.get_input_embeddings(*args, **kwargs)
+    def embed_input_ids(self, *args, **kwargs):
+        return self.model.embed_input_ids(*args, **kwargs)
 
     def prepare_structured_decoding_input(
         self, logits: torch.Tensor, grammar_output: "GrammarOutput"
