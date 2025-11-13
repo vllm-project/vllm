@@ -786,22 +786,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_metadata=attn_metadata,
                 )
         else:
+            # Even when using opaque attention ops on the platform, prefer the
+            # layer-owned orchestration so the split remains visible to compilation.
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    output,
-                    self.layer_name,
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
+                    output=output,
                 )
-                return output
             else:
-                return torch.ops.vllm.unified_mla_attention(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                 )
 
     def forward_impl(
@@ -809,109 +812,87 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_cache: list[torch.Tensor] | torch.Tensor,
-        attn_metadata: object,
+        kv_cache: torch.Tensor,
+        attn_metadata,
         output: torch.Tensor | None = None,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
         allow_compiled_split: bool = True,
     ) -> torch.Tensor:
-        """Common MLA orchestration entry point."""
-        # compiled-region split path
-        if self._use_compiled_split and allow_compiled_split:
-            # latent and rope to kv cache up-front (outside backend)
-            if isinstance(kv_cache, torch.Tensor) and kv_cache.numel() > 0:
-                assert hasattr(attn_metadata, "slot_mapping")
-                ops.concat_and_cache_mla(
-                    kv_c_normed,
-                    k_pe.squeeze(1),
-                    kv_cache,
-                    attn_metadata.slot_mapping.flatten(),
-                    kv_cache_dtype=self.kv_cache_dtype,
-                    scale=self._k_scale,
-                )
+        """Forward implementation for MLA attention.
 
-            # to determine dynamic split
-            n_decode_tokens_t = torch.ops.vllm.mla_split_batch(q, self.layer_name)
-            total_toks = q.shape[0]
-            n_decode_tokens_t = torch.clamp(n_decode_tokens_t, min=0, max=total_toks)
-            n_decode_tokens = int(n_decode_tokens_t.item())  # graph break here
-
-            # Fast path for trivial cases
-            if n_decode_tokens <= 0:
-                prefill_out = self.impl.forward_prefill(
-                    self, q, kv_c_normed, k_pe, kv_cache, attn_metadata
-                )
-                if output is not None:
-                    assert output[: prefill_out.shape[0]].shape == prefill_out.shape
-                    output[: prefill_out.shape[0]].copy_(prefill_out)
-                    return output
-                return prefill_out
-            if n_decode_tokens >= total_toks:
-                decode_q = q if n_decode_tokens == total_toks else q[:n_decode_tokens]
-                decode_out = self.impl.forward_decode(
-                    self, decode_q, kv_cache, attn_metadata
-                )
-                if output is not None:
-                    assert output[: decode_out.shape[0]].shape == decode_out.shape
-                    output[: decode_out.shape[0]].copy_(decode_out)
-                    return output
-                return decode_out
-
-            # Mixed batch: split and process
-            decode_q = q[:n_decode_tokens]
-            prefill_q = q[n_decode_tokens:]
-            prefill_k_c = kv_c_normed[n_decode_tokens:]
-            prefill_k_pe = k_pe[n_decode_tokens:]
-
-            prefill_out = None
-            if prefill_q.shape[0] > 0:
-                prefill_out = self.impl.forward_prefill(
-                    self, prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
-                )
-            decode_out = None
-            if decode_q.shape[0] > 0:
-                decode_out = self.impl.forward_decode(
-                    self, decode_q, kv_cache, attn_metadata
-                )
-
-            if output is None:
-                total = q.shape[0]
-                out = torch.empty(
-                    (total, self.num_heads * self.v_head_dim),
-                    dtype=q.dtype,
-                    device=q.device,
-                )
-            else:
-                out = output
-
-            if decode_out is not None:
-                # assert out[:n_decode_tokens].shape == decode_out.shape
-                out[:n_decode_tokens].copy_(decode_out)
-            if prefill_out is not None:
-                # assert out[n_decode_tokens:n_decode_tokens
-                # + prefill_out.shape[0]].shape == prefill_out.shape
-                out[n_decode_tokens : n_decode_tokens + prefill_out.shape[0]].copy_(
-                    prefill_out
-                )
-            return out
-
-        # Default path: delegate to backend unified forward
-        if self.attn_backend.accept_output_buffer:
-            assert output is not None
-            self.impl.forward(
-                self,
-                q,
-                kv_c_normed,
-                k_pe,
-                kv_cache,
-                attn_metadata,
-                output=output,
-                output_scale=output_scale,
-                output_block_scale=output_block_scale,
+        This method always handles decode/prefill orchestration in the layer
+        """
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for MLA"
             )
-            return output
-        return self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+
+        # Allocate output if not provided
+        if output is None:
+            output = torch.empty(
+                (q.shape[0], self.num_heads * self.v_head_dim),
+                dtype=q.dtype,
+                device=q.device,
+            )
+
+        if attn_metadata is None:
+            return output.fill_(0)
+
+        # Write KV to cache first (outside backend)
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c_normed,
+                k_pe.squeeze(1) if k_pe.dim() > 2 else k_pe,
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=self._k_scale,
+            )
+
+        # Tensorized decode/prefill split
+        total_toks = q.shape[0]
+        n_decode_tokens_t = torch.ops.vllm.mla_split_batch(q, self.layer_name)
+        n_decode_tokens_t = torch.clamp(n_decode_tokens_t, min=0, max=total_toks)
+
+        # Create masks for partitioning
+        idx = torch.arange(total_toks, device=q.device)
+        decode_mask = idx < n_decode_tokens_t
+        prefill_mask = ~decode_mask
+
+        # Partition tensors
+        decode_q = q[decode_mask]
+        prefill_q = q[prefill_mask]
+        prefill_k_c = kv_c_normed[prefill_mask]
+        prefill_k_pe = k_pe[prefill_mask]
+
+        # Always call both codepaths
+        decode_out = None
+        prefill_out = None
+
+        # Decode branch
+        if decode_q.shape[0] > 0:
+            decode_out = self.impl.forward_decode(
+                self, decode_q, kv_cache, attn_metadata
+            )
+
+        # Prefill branch
+        if prefill_q.shape[0] > 0:
+            prefill_out = self.impl.forward_prefill(
+                self, prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
+            )
+
+        # Concatenate results in decode-then-prefill order
+        if decode_out is not None and prefill_out is not None:
+            output = torch.cat([decode_out, prefill_out], dim=0)
+        elif decode_out is not None:
+            output = decode_out
+        elif prefill_out is not None:
+            output = prefill_out
+        else:
+            output = output.fill_(0)
+
+        return output
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
