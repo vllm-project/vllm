@@ -984,17 +984,17 @@ __global__ void gather_and_maybe_dequant_cache(
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                      \
-  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,    \
-                                       thread_block_size>                   \
-      <<<grid, block, 0, stream>>>(                                         \
-          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                 \
-          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                      \
-          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
-          token_to_seq.data_ptr<int32_t>(), num_tokens, block_size,         \
-          entry_size, block_table_stride, cache_block_stride,               \
-          cache_entry_stride, dst_entry_stride,                             \
-          reinterpret_cast<const float*>(scale.data_ptr()), seq_starts_ptr);
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                        \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,      \
+                                       thread_block_size>                     \
+      <<<grid, block, 0, stream>>>(                                           \
+          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                   \
+          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                        \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(),   \
+          token_to_seq.data_ptr<int32_t>(), num_tokens, block_size,           \
+          block_table_stride, cache_block_stride, cache_entry_stride,         \
+          dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()), \
+          seq_starts_ptr);
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -1015,7 +1015,6 @@ void gather_and_maybe_dequant_cache(
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   int32_t block_size = src_cache.size(1);
-  int32_t entry_size = src_cache.flatten(2, -1).size(2);
   int32_t head_dim = dst.size(-1);
 
   TORCH_CHECK(block_table.dtype() == torch::kInt32,
