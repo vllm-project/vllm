@@ -2469,6 +2469,7 @@ class GPUModelRunner(
         num_scheduled_tokens_np: np.ndarray,
         max_num_scheduled_tokens: int,
         use_cascade_attn: bool,
+        allow_microbatching: bool = True,
         force_eager: bool = False,
         force_uniform_decode: bool | None = None,
     ) -> tuple[
@@ -2478,9 +2479,6 @@ class GPUModelRunner(
         uniform_decode = (
             (
                 (max_num_scheduled_tokens == self.uniform_decode_query_len)
-                # TODO(lucas): sequence parallelism padding can force us out of
-                # uniform decode and as a result FULL cudagraphs; we should
-                # add a warning to users when this occurs.
                 and (num_tokens_padded == max_num_scheduled_tokens * num_reqs)
             )
             if force_uniform_decode is None
@@ -2516,7 +2514,7 @@ class GPUModelRunner(
             ubatch_slices, num_tokens_across_dp = coordinate_batch_across_dp(
                 num_tokens_unpadded=num_tokens_padded,
                 parallel_config=self.parallel_config,
-                allow_microbatching=True,
+                allow_microbatching=allow_microbatching,
                 allow_dp_padding=allow_dp_padding,
                 num_tokens_padded=num_tokens_padded,
                 uniform_decode=uniform_decode,
