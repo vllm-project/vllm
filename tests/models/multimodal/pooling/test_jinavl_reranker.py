@@ -5,7 +5,7 @@ import pytest
 from transformers import AutoModel
 
 from vllm.entrypoints.chat_utils import ChatCompletionContentPartImageParam
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.score.protocol import ScoreMultiModalParam
 
 from ....conftest import HfRunner, VllmRunner
 

@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, TypeAlias, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from torch.nn import CosineSimilarity
-from typing_extensions import Required, TypedDict
 
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
-    ChatCompletionContentPartImageEmbedsParam,
-    ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
     MultiModalItemTracker,
     _ContentPart,
@@ -25,23 +22,10 @@ from vllm.transformers_utils.tokenizer import (
     PreTrainedTokenizerFast,
 )
 
-ScoreContentPartParam: TypeAlias = (
-    ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
-)
-
-
-class ScoreMultiModalParam(TypedDict, total=False):
-    """
-    A specialized parameter type for scoring multimodal content
-
-    The reasons why don't reuse `CustomChatCompletionMessageParam` directly:
-    1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions
-    2. Including chat-specific fields would confuse users about their purpose in scoring
-    3. This is a more focused interface that only exposes what's needed for scoring
-    """  # noqa: E501
-
-    content: Required[list[ScoreContentPartParam]]
-    """The multimodal contents"""
+if TYPE_CHECKING:
+    from vllm.entrypoints.pooling.score.protocol import ScoreContentPartParam
+else:
+    ScoreContentPartParam = object
 
 
 def _cosine_similarity(

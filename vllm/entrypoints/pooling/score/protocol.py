@@ -1,107 +1,65 @@
-from typing import Annotated, Any
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TypeAlias
 
 from pydantic import (
     BaseModel,
-    Field,
+)
+from typing_extensions import Required, TypedDict
+
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionContentPartImageEmbedsParam,
+    ChatCompletionContentPartImageParam,
+)
+from vllm.entrypoints.openai.protocol_base import (
+    ClassifyRequestMixin,
+    MM_ProcessorRequestMixin,
+    OpenAIBaseModel,
+    PriorityRequestMixin,
 )
 
-from vllm import PoolingParams
-from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.openai.protocol_base import OpenAIBaseModel
-from vllm.entrypoints.score_utils import ScoreContentPartParam, ScoreMultiModalParam
+ScoreContentPartParam: TypeAlias = (
+    ChatCompletionContentPartImageParam | ChatCompletionContentPartImageEmbedsParam
+)
 
 
-class ScoreRequest(OpenAIBaseModel):
+class ScoreMultiModalParam(TypedDict, total=False):
+    """
+    A specialized parameter type for scoring multimodal content
+
+    The reasons why don't reuse `CustomChatCompletionMessageParam` directly:
+    1. Score tasks don't need the 'role' field (user/assistant/system) that's required in chat completions
+    2. Including chat-specific fields would confuse users about their purpose in scoring
+    3. This is a more focused interface that only exposes what's needed for scoring
+    """  # noqa: E501
+
+    content: Required[list[ScoreContentPartParam]]
+    """The multimodal contents"""
+
+
+class ScoreRequest(
+    ClassifyRequestMixin, PriorityRequestMixin, MM_ProcessorRequestMixin
+):
     model: str | None = None
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
 
-    # --8<-- [start:score-extra-params]
+    text_1: list[str] | str | ScoreMultiModalParam | None = None
+    text_2: list[str] | str | ScoreMultiModalParam | None = None
 
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
+    data_1: list[str] | str | ScoreMultiModalParam | None = None
+    data_2: list[str] | str | ScoreMultiModalParam | None = None
 
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
-    )
-    # --8<-- [end:score-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
-        )
+    def __post_init__(self):
+        self.data_1 = self.data_1 if self.data_1 is not None else self.text_1
+        self.data_2 = self.data_2 if self.data_2 is not None else self.text_2
 
 
-class RerankRequest(OpenAIBaseModel):
+class RerankRequest(
+    ClassifyRequestMixin, PriorityRequestMixin, MM_ProcessorRequestMixin
+):
     model: str | None = None
     query: str | ScoreMultiModalParam
     documents: list[str] | ScoreMultiModalParam
-    top_n: int = Field(default_factory=lambda: 0)
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
-
-    # --8<-- [start:rerank-extra-params]
-
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."
-        ),
-    )
-
-    softmax: bool | None = Field(
-        default=None,
-        description="softmax will be deprecated, please use use_activation instead.",
-    )
-
-    activation: bool | None = Field(
-        default=None,
-        description="activation will be deprecated, please use use_activation instead.",
-    )
-
-    use_activation: bool | None = Field(
-        default=None,
-        description="Whether to use activation for classification outputs. "
-        "Default is True.",
-    )
-    # --8<-- [end:rerank-extra-params]
-
-    def to_pooling_params(self):
-        return PoolingParams(
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
-            use_activation=get_use_activation(self),
-        )
+    top_n: int = 0
 
 
 class RerankDocument(BaseModel):
