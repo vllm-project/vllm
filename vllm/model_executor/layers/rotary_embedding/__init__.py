@@ -26,24 +26,19 @@ def get_rope(
     head_size: int,
     rotary_dim: int,
     max_position: int,
-    base: float,
+    rope_parameters: dict[str, Any],
     is_neox_style: bool = True,
-    rope_parameters: dict[str, Any] | None = None,
     dtype: torch.dtype | None = None,
     partial_rotary_factor: float = 1.0,
     dual_chunk_attention_config: dict[str, Any] | None = None,
 ) -> RotaryEmbedding:
     if dtype is None:
         dtype = torch.get_default_dtype()
-    if rope_parameters is not None:
-        # Transforms every value that is a list into a tuple for caching calls
-        rope_parameters_tuple = {
-            k: tuple(v) if isinstance(v, list) else v
-            for k, v in rope_parameters.items()
-        }
-        rope_parameters_args = tuple(rope_parameters_tuple.items())
-    else:
-        rope_parameters_args = None
+    # Transforms every value that is a list into a tuple for caching calls
+    rope_parameters_tuple = {
+        k: tuple(v) if isinstance(v, list) else v for k, v in rope_parameters.items()
+    }
+    rope_parameters_args = tuple(rope_parameters_tuple.items())
 
     if dual_chunk_attention_config is not None:
         dual_chunk_attention_tuple = {
@@ -61,15 +56,15 @@ def get_rope(
         head_size,
         rotary_dim,
         max_position,
-        base,
-        is_neox_style,
         rope_parameters_args,
+        is_neox_style,
         dual_chunk_attention_args,
         dtype,
     )
     if key in _ROPE_DICT:
         return _ROPE_DICT[key]
 
+    base = rope_parameters["rope_theta"]
     if dual_chunk_attention_config is not None:
         extra_kwargs = {
             k: v
@@ -84,10 +79,6 @@ def get_rope(
             is_neox_style,
             dtype,
             **extra_kwargs,
-        )
-    elif not rope_parameters:
-        rotary_emb = RotaryEmbedding(
-            head_size, rotary_dim, max_position, base, is_neox_style, dtype
         )
     else:
         scaling_type = rope_parameters["rope_type"]
@@ -147,7 +138,7 @@ def get_rope(
             )
         elif scaling_type == "ntk":
             scaling_factor = rope_parameters["factor"]
-            mixed_b = rope_parameters.get("mixed_b", None)
+            mixed_b = rope_parameters.get("mixed_b")
             rotary_emb = NTKScalingRotaryEmbedding(
                 head_size,
                 rotary_dim,

@@ -157,7 +157,6 @@ class BambaAttentionDecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        rope_theta = getattr(config, "rope_theta", 10000)
         rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.hidden_size = config.hidden_size
@@ -179,7 +178,6 @@ class BambaAttentionDecoderLayer(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         if hasattr(config, "partial_rotary_factor"):
@@ -194,7 +192,6 @@ class BambaAttentionDecoderLayer(nn.Module):
             rotary_dim=rotary_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            base=rope_theta,
             is_neox_style=True,
             dtype=torch.get_default_dtype(),  # see impl of get_rope
         )

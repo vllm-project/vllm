@@ -120,7 +120,6 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
         rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
@@ -157,7 +156,6 @@ class LlamaAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         llama_4_scaling_config = getattr(config, "llama_4_scaling", None)
@@ -270,7 +268,6 @@ class LlamaAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
             rope_parameters=rope_parameters,
             is_neox_style=is_neox_style,
             partial_rotary_factor=self.partial_rotary_factor,
