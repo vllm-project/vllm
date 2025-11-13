@@ -32,7 +32,8 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.utils import FlexibleArgumentParser, random_uuid
+from vllm.utils import random_uuid
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -333,13 +334,13 @@ async def run_request(
 
 
 def validate_run_batch_args(args):
-    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
-    ) and reasoning_parser not in valid_reasoning_parses:
+    ) and reasoning_parser not in valid_reasoning_parsers:
         raise KeyError(
             f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
 
 
