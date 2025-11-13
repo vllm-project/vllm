@@ -479,7 +479,7 @@ steps:
   - pytest -v -s compile/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
     # Limit to no custom ops to reduce running time
     # Wrap with quotes to escape yaml and avoid starting -k string with a -
-  - "pytest -v -s compile/test_fusions_e2e.py -k 'TRITON and not +quant_fp8' and not Llama-4"
+  - "pytest -v -s compile/test_fusions_e2e.py -k 'TRITON and not +quant_fp8 and not Llama-4'"
 
 - label: Cudagraph test
   timeout_in_minutes: 20
