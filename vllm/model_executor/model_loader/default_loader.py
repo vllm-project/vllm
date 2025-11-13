@@ -105,7 +105,7 @@ class DefaultModelLoader(BaseModelLoader):
                 "mistral"
                 if len(
                     list_files_from_hf_or_path(
-                        model_name_or_path, ["*/consolidated*.safetensors"], revision
+                        model_name_or_path, ["consolidated*.safetensors"], revision
                     )
                 )
                 > 0

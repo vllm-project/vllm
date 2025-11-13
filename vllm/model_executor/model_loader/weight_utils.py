@@ -414,7 +414,15 @@ def list_files_from_hf_or_path(
         hf_api = HfApi()
         all_files = hf_api.list_repo_files(model_name_or_path, revision=revision)
     for pattern in allow_patterns:
-        file_list.extend(fnmatch.filter(all_files, pattern))
+        file_list.extend(
+            [
+                file
+                for file in all_files
+                if fnmatch.fnmatch(
+                    os.path.basename(file), pattern
+                )  # Patterns are on file names.
+            ]
+        )
     return file_list
 
 
