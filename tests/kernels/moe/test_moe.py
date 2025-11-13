@@ -59,7 +59,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
-from vllm.scalar_type import scalar_types
+from vllm.scalar_type import ScalarType, scalar_types
 
 NUM_EXPERTS = [8, 64, 192]
 EP_SIZE = [1, 4]
@@ -651,11 +651,11 @@ class MarlinMoEWeightData:
     @staticmethod
     def make(
         w: torch.Tensor,
-        quant_type: scalar_types.ScalarType,
+        quant_type: ScalarType,
         group_size: int,
         act_order: bool | None = None,
         bias: torch.Tensor | None = None,
-        input_type: scalar_types.ScalarType = None,
+        input_type: ScalarType = None,
     ) -> "MarlinMoEWeightData":
         assert w.ndim == 3
 
