@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict
 from functools import cache, partial
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -26,7 +27,6 @@ from huggingface_hub.utils import (
 )
 from packaging.version import Version
 from transformers import DeepseekV3Config, GenerationConfig, PretrainedConfig
-from transformers import __version__ as TRANSFORMERS_VERSION
 from transformers.configuration_utils import ALLOWED_LAYER_TYPES
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -396,7 +396,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     text_config = config.get_text_config()
 
-    if Version(TRANSFORMERS_VERSION) >= Version("5.0.0.dev0"):
+    if Version(version("transformers")) >= Version("5.0.0.dev0"):
         from transformers.modeling_rope_utils import RopeParameters
 
         rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
