@@ -351,8 +351,7 @@ class ClientGuard:
         fault_receiver_addr: str,
         cmd_addr: str,
         engine_registry: list[bytes],
-        engine_exception_q: asyncio.Queue[FaultInfo],
-        engine_exception_q_lock: asyncio.Lock,
+        engine_exception_q: queue.Queue[FaultInfo],
         fault_pub_addr: str,
         engine_status_dict: ThreadSafeDict[int, str],
     ):
@@ -372,9 +371,7 @@ class ClientGuard:
             ctx=self.zmq_ctx, path=fault_pub_addr, socket_type=zmq.PUB, bind=True
         )
 
-        self.engine_exception_q: asyncio.Queue[FaultInfo] = engine_exception_q
-
-        self.engine_exception_q_lock = engine_exception_q_lock
+        self.engine_exception_q: queue.Queue[FaultInfo] = engine_exception_q
 
         self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
 
@@ -382,7 +379,6 @@ class ClientGuard:
             self.cmd_socket,
             self.engine_registry,
             self.engine_exception_q,
-            self.engine_exception_q_lock,
             self.engine_status_dict,
         )
 
@@ -449,7 +445,7 @@ class ClientGuard:
                 )
 
                 # Pause healthy engines on fault.
-                # Pause will be invoked again during fault-tolerance handling,
+                # Pause can be invoked again during fault-tolerance handling,
                 # so it's unnecessary to track whether all engines are currently
                 # paused.
                 self.fault_handler.submit_fault("pause", 5, soft_pause=False)
@@ -684,7 +680,7 @@ class MPClient(EngineCoreClient):
                 self.start_engine_core_monitor()
 
             if vllm_config.fault_tolerance_config.enable_fault_tolerance:
-                self.engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+                self.engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
                 assert addresses.fault_report_addr is not None, (
                     "addresses.fault_report_addr should not be None at fault tolerance"
                     " scenario"
@@ -694,7 +690,6 @@ class MPClient(EngineCoreClient):
                     " scenario"
                 )
                 self.engine_registry = addresses.engine_core_guard_identities
-                self.engine_exception_q_lock = asyncio.Lock()
                 assert self.engine_registry is not None
                 assert addresses.fault_pub_socket_addr is not None, (
                     "addresses.fault_pub_socket_addr should not be None at"
@@ -708,7 +703,6 @@ class MPClient(EngineCoreClient):
                     addresses.client_cmd_addr,
                     self.engine_registry,
                     self.engine_exception_q,
-                    self.engine_exception_q_lock,
                     addresses.fault_pub_socket_addr,
                     self.engine_status_dict,
                 )
@@ -758,7 +752,7 @@ class MPClient(EngineCoreClient):
             if not all_actors:
                 return
             while True:
-                for actor in all_actors:
+                for actor in all_actors[:]:
                     actor_id = actor._actor_id.hex()
                     if actor in engine_manager.local_engine_actors:
                         actor_index = engine_manager.local_engine_actors.index(actor)

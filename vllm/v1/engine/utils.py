@@ -5,6 +5,7 @@ import contextlib
 import json
 import multiprocessing
 import os
+import queue
 import time
 import uuid
 import weakref
@@ -1233,20 +1234,6 @@ def generate_identity_group(peer1, peer2, use, n):
     return identitys
 
 
-async def get_queue_snapshot(queue: asyncio.Queue, queue_lock: asyncio.Lock) -> list:
-    """Thread-safe snapshot of the exception queue."""
-    async with queue_lock:
-        items = []
-        # get item at first
-        while not queue.empty():
-            item = queue.get_nowait()
-            items.append(item)
-        # put item into queue again
-        for item in items:
-            queue.put_nowait(item)
-    return items
-
-
 def broadcast_instruction(
     cmd_socket,
     target_identities: set[bytes] | list[bytes],
@@ -1355,13 +1342,11 @@ class FaultHandler:
         self,
         cmd_socket: zmq.Socket,
         client_cmd_registry: list[bytes],
-        engine_exception_q: asyncio.Queue[FaultInfo],
-        engine_exception_q_lock: asyncio.Lock,
+        engine_exception_q: queue.Queue[FaultInfo],
         engine_status_dict: ThreadSafeDict[int, str],
     ) -> None:
         self.cmd_socket = cmd_socket
         self.engine_exception_q = engine_exception_q
-        self.engine_exception_q_lock = engine_exception_q_lock
         self.engine_status_dict: ThreadSafeDict[int, str] = engine_status_dict
         self.engine_identity_to_index: dict[bytes, int] = {
             identity: i for i, identity in enumerate(client_cmd_registry)
@@ -1403,9 +1388,8 @@ class FaultHandler:
     def retry(self, **kwargs):
         if "Dead" in self.engine_status_dict.values():
             self.logger(
-                "engine_core dead unexpectedly, retry is impossible,"
-                "shutdown will be performed",
-                level="info",
+                "Engine core is dead; retry won't work.",
+                level="warning",
             )
             return False, set(), kwargs
 
@@ -1481,7 +1465,12 @@ class FaultHandler:
         if instruction == "retry" and all_success:
             for engine_index, _ in self.engine_status_dict.items():
                 self.engine_status_dict[engine_index] = "Healthy"
-            # todo: should we also clear the engine_exception_q here?
+            while not self.engine_exception_q.empty():
+                try:
+                    self.engine_exception_q.get_nowait()
+                except queue.Empty:
+                    break
+
         return all_success
 
     async def handle_fault(self, instruction: str, timeout: int, **kwargs) -> bool:
