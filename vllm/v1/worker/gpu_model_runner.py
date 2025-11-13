@@ -2775,7 +2775,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     spec_decode_common_attn_metadata,
                 )
 
-        # Always run the drafter if speculative decoding is enabled
         use_padded_batch_for_eagle = (
             self.speculative_config is not None
             and self.speculative_config.use_eagle()
