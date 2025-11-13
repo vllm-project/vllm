@@ -51,6 +51,7 @@ class XPUPlatform(Platform):
         use_mla: bool,
         has_sink: bool,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
