@@ -575,6 +575,21 @@ class Processor:
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
 
+        if (
+            prompt_len == max_prompt_len
+            and prompt_type == "decoder"
+            and not model_config.is_multimodal_model
+        ):
+            suggestion = (
+                "Make sure that `max_model_len` is no smaller than the "
+                "number of text tokens (prompt + requested output tokens)."
+            )
+            raise ValueError(
+                f"The {prompt_type} prompt (length {prompt_len}) plus the number of "
+                f"requested output tokens (at least 1) is longer than the maximum "
+                f"model length of {max_prompt_len}. {suggestion}"
+            )
+
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()
 
