@@ -358,7 +358,7 @@ class LLM:
         self.io_processor = self.llm_engine.io_processor
 
         if envs.VLLM_NUM_PREPROCESSOR > 0:
-            self.pool = ThreadPool(4)
+            self.pool = ThreadPool(envs.VLLM_NUM_PREPROCESSOR)
             self.processor = ProcessorPool(self.llm_engine.processor)
         else:
             self.pool = None
