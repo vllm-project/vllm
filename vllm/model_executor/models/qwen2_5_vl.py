@@ -62,7 +62,7 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.multi_modal import get_conv_layer
+from vllm.model_executor.layers.multi_modal.conv import Conv3dLayer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -552,17 +552,19 @@ class Qwen2_5_VisionPatchEmbed(nn.Module):
         self.temporal_patch_size = temporal_patch_size
         self.hidden_size = hidden_size
 
-        self.proj = get_conv_layer(
-            in_channels=in_channels,
-            out_channels=hidden_size,
-            kernel_size=(temporal_patch_size, patch_size, patch_size),
-            stride=patch_size,
-            enable_bias=False,
-            conv_type="conv3d",
+        kernel_size = (temporal_patch_size, patch_size, patch_size)
+        self.proj = Conv3dLayer(
+            in_channels,
+            hidden_size,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
+        L, C = x.shape
+        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
+        x = self.proj(x).view(L, self.hidden_size)
         return x
 
 
