@@ -1328,10 +1328,10 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
             inputs_embeds = None
 
         elif inputs_embeds is None:
-            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
+            vision_embeddings = self.embed_multimodal(**kwargs)
             is_multimodal = kwargs.pop("is_multimodal", None)
             handle_oov_mm_token = kwargs.pop("handle_oov_mm_token", False)
-            inputs_embeds = self.get_input_embeddings(
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 vision_embeddings,
                 is_multimodal=is_multimodal,
@@ -1391,7 +1391,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
         image_embeds = self.mlp_AR(vision_outputs, image_grid_thw)
         return image_embeds
 
-    def get_multimodal_embeddings(self, **kwargs) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return ()

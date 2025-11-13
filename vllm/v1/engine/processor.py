@@ -270,6 +270,12 @@ class Processor:
             raise ValueError(
                 f"Choice '{params.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
+        # Reject empty string grammar early to avoid engine-side crashes
+        if (
+            isinstance(params.structured_outputs.grammar, str)
+            and params.structured_outputs.grammar.strip() == ""
+        ):
+            raise ValueError("structured_outputs.grammar cannot be an empty string")
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback

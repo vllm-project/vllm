@@ -570,7 +570,7 @@ class WhisperDecoder(nn.Module):
         positions: torch.Tensor,
         encoder_hidden_states: torch.Tensor | None,
     ):
-        inputs_embeds = self.get_input_embeddings(input_ids)
+        inputs_embeds = self.embed_input_ids(input_ids)
         positions = self.embed_positions(positions)
         hidden_states = inputs_embeds + positions
 
@@ -583,7 +583,7 @@ class WhisperDecoder(nn.Module):
         hidden_states = self.layer_norm(hidden_states)
         return hidden_states
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
 
@@ -907,12 +907,12 @@ class WhisperForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.model.decoder
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         return [self.model.get_encoder_outputs(audio_input["input_features"])]
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -922,7 +922,7 @@ class WhisperForConditionalGeneration(
     ) -> torch.Tensor:
         # This method just returns the decoder sequence embeddings since
         # Whisper does not have encoder text tokens.
-        return self.model.decoder.get_input_embeddings(input_ids)
+        return self.model.decoder.embed_input_ids(input_ids)
 
     def _parse_and_validate_audio_input(self, **kwargs: object) -> WhisperAudioInputs:
         input_features = kwargs.pop("input_features", None)

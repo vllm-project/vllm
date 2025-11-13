@@ -617,7 +617,7 @@ class Ovis2_5(nn.Module, SupportsMultiModal, SupportsPP):
 
         return modalities
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return []

@@ -385,7 +385,7 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
 
         _init_parameters(module, dtype)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
         if self.embed_scale is not None:
             inputs_embeds *= self.embed_scale
@@ -416,7 +416,7 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
             and input_ids is not None
             and inputs_embeds is None
         ):
-            inputs_embeds = self.get_input_embeddings(input_ids)
+            inputs_embeds = self.embed_input_ids(input_ids)
             input_ids = None
 
         if self.model_config.uses_mrope:

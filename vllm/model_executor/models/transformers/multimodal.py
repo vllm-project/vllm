@@ -330,7 +330,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         return LanguageModel(self)
 
-    def get_multimodal_embeddings(self, **kwargs):
+    def embed_multimodal(self, **kwargs):
         pixel_values: torch.Tensor | None = kwargs.pop("pixel_values", None)
         image_embeds: torch.Tensor | None = kwargs.pop("image_embeds", None)
         # Model might use `image_patches` instead of `pixel_values`
