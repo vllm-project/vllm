@@ -72,16 +72,21 @@ spec:
         {{ toYaml . | nindent 8 }}
         {{- end }}
 
-      {{-   if .Values.extraInit  }}
+      {{- if and .Values.extraInit (or .Values.extraInit.modelDownload.enabled .Values.extraInit.initContainers) }}
       initContainers:
+      {{- if .Values.extraInit.modelDownload.enabled }}
       - name: wait-download-model
-        image: {{ include "chart.extraInitImage" . }}
-        command: 
-          - /bin/bash
+        image: {{ .Values.extraInit.modelDownload.image.repository }}:{{ .Values.extraInit.modelDownload.image.tag }}
+        imagePullPolicy: {{ .Values.extraInit.modelDownload.image.pullPolicy }}
+        command: {{ .Values.extraInit.modelDownload.waitContainer.command | toJson }}
         args:
-          - -eucx
-          - while aws --endpoint-url $S3_ENDPOINT_URL s3 sync --dryrun s3://$S3_BUCKET_NAME/$S3_PATH /data | grep -q download; do sleep 10; done
-        env: {{- include "chart.extraInitEnv" . | nindent 10 }}
+        {{- toYaml .Values.extraInit.modelDownload.waitContainer.args | nindent 10 }}
+        env:
+        {{- if .Values.extraInit.modelDownload.waitContainer.env }}
+        {{- toYaml .Values.extraInit.modelDownload.waitContainer.env | nindent 10 }}
+        {{- else }}
+        {{- include "chart.extraInitEnv" . | nindent 10 }}
+        {{- end }}
         resources:
           requests:
             cpu: 200m
@@ -92,6 +97,10 @@ spec:
         volumeMounts:
         - name: {{ .Release.Name }}-storage
           mountPath: /data
+      {{- end }}
+      {{- with .Values.extraInit.initContainers }}
+      {{- toYaml . | nindent 6 }}
+      {{- end }}
       {{- end }}
       volumes:
         - name: {{ .Release.Name }}-storage

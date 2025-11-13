@@ -67,6 +67,15 @@ class StructuredOutputManager:
             reasoning_parser = (
                 self.vllm_config.structured_outputs_config.reasoning_parser
             )
+            reasoning_parser_plugin = (
+                self.vllm_config.structured_outputs_config.reasoning_parser_plugin
+            )
+            if reasoning_parser_plugin and len(reasoning_parser_plugin) > 3:
+                ReasoningParserManager.import_reasoning_parser(reasoning_parser_plugin)
+
+            reasoning_parser = (
+                self.vllm_config.structured_outputs_config.reasoning_parser
+            )
             if reasoning_parser:
                 reasoner_cls = ReasoningParserManager.get_reasoning_parser(
                     reasoning_parser
@@ -260,9 +269,10 @@ class StructuredOutputManager:
                         and token is not None
                         and not structured_output_request.grammar.is_terminated()
                     ):
-                        assert structured_output_request.grammar.accept_tokens(
+                        accepted = structured_output_request.grammar.accept_tokens(
                             req_id, [token]
                         )
+                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
                         state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:

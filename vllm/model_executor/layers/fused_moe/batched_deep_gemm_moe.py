@@ -100,6 +100,7 @@ def persistent_masked_m_silu_mul_quant(
     tokens_per_expert: torch.Tensor,  # (E,) number of valid tokens per expert
     num_parallel_tokens=16,
     group_size: int = 128,
+    use_ue8m0: bool | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize silu(y[..., :H]) * y[..., H:] to FP8 with group per-token scales
     y has shape (E, T, 2*H). The first half of the last dimension is
@@ -164,7 +165,7 @@ def persistent_masked_m_silu_mul_quant(
         device=y.device,
     )
 
-    use_ue8m0 = is_deep_gemm_e8m0_used()
+    use_ue8m0 = use_ue8m0 if use_ue8m0 is not None else is_deep_gemm_e8m0_used()
 
     cuda_arch = current_platform.get_device_capability(
         device_id=y.device.index
@@ -231,6 +232,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         super().__init__(quant_config)
         assert self.block_shape == get_mk_alignment_for_contiguous_layout()
+        assert self.quant_config.use_fp8_w8a8
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
@@ -248,6 +250,12 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     def supports_expert_map(self) -> bool:
         return False
+
+    def supports_packed_ue8m0_act_scales(self) -> bool:
+        """
+        DeepGemm supports packed ue8m0 activation scales format in devices == sm100
+        """
+        return current_platform.is_device_capability(100)
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.

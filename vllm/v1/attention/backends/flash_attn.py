@@ -3,6 +3,7 @@
 """Attention layer with FlashAttention."""
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -11,7 +12,6 @@ from vllm import envs
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     MultipleOf,
     is_quantized_kv_cache,
@@ -27,21 +27,25 @@ from vllm.attention.utils.fa_utils import (
 
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (
+        flash_attn_supports_sinks,
         flash_attn_varlen_func,
         get_scheduler_metadata,
         reshape_and_cache_flash,
     )
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    get_dcp_local_seq_lens,
     get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -51,30 +55,12 @@ logger = init_logger(__name__)
 
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.float16, torch.bfloat16]
-
-    @classmethod
-    def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 96, 128, 160, 192, 224, 256]
-
-    @staticmethod
-    def get_supported_kernel_block_size() -> list[int | MultipleOf]:
-        return [MultipleOf(16)]
-
-    @classmethod
-    def validate_head_size(cls, head_size: int) -> None:
-        supported_head_sizes = cls.get_supported_head_sizes()
-        if head_size not in supported_head_sizes:
-            attn_type = cls.__name__.removesuffix("Backend")
-            raise ValueError(
-                f"Head size {head_size} is not supported by {attn_type}. "
-                f"Supported head sizes are: {supported_head_sizes}. "
-                "Set VLLM_ATTENTION_BACKEND=FLEX_ATTENTION to use "
-                "FlexAttention backend which supports all head sizes."
-            )
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    # NOTE(tdoublep): while in principle, FA supports
+    # MultipleOf(16), these are the block sizes that do not
+    # suffer from the NaN propagation problem described here:
+    # https://github.com/Dao-AILab/flash-attention/issues/1974
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [16, 32, 64]
 
     @staticmethod
     def get_name() -> str:
@@ -83,10 +69,6 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["AttentionMetadata"]:
-        return FlashAttentionMetadata
 
     @staticmethod
     def get_builder_cls() -> type["FlashAttentionMetadataBuilder"]:
@@ -123,6 +105,38 @@ class FlashAttentionBackend(AttentionBackend):
             return torch.float8_e4m3fn
         else:
             raise ValueError(f"Unrecognized FP8 dtype: {kv_cache_dtype}")
+
+    @classmethod
+    def get_supported_head_sizes(cls) -> list[int]:
+        return [32, 64, 96, 128, 160, 192, 224, 256]
+
+    @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        if kv_cache_dtype is None:
+            return True
+        if kv_cache_dtype.startswith("fp8"):
+            return flash_attn_supports_fp8()
+        return kv_cache_dtype in ["auto"]
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability >= DeviceCapability(8, 0)
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if has_sink and device_capability < DeviceCapability(9, 0):
+            return "sink not supported on compute capability < 9.0"
+        return None
 
 
 @dataclass
@@ -193,7 +207,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    cudagraph_support = (
+    _cudagraph_support = (
         AttentionCGSupport.ALWAYS
         if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH
@@ -233,19 +247,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
+        self.dcp_kv_cache_interleave_size = (
+            self.parallel_config.dcp_kv_cache_interleave_size
+        )
+
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         )
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.aot_schedule:
-            if self.max_cudagraph_size > 992:
-                # This condition derives from FA3's internal heuristic.
-                # TODO(woosuk): Support larger cudagraph sizes.
-                raise ValueError(
-                    "Capture size larger than 992 is not supported for full cuda graph."
-                )
-
             self.scheduler_metadata = torch.zeros(
                 vllm_config.scheduler_config.max_num_seqs + 1,
                 dtype=torch.int32,
@@ -354,8 +365,12 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                 - common_attn_metadata.query_start_loc_cpu[:-1]
             )
             dcp_context_kv_lens_cpu = seq_lens_cpu - query_kv_lens_cpu
-            dcp_context_kv_lens_cpu = dcp_context_kv_lens_cpu // self.dcp_world_size + (
-                self.dcp_rank <= (dcp_context_kv_lens_cpu - 1) % self.dcp_world_size
+
+            dcp_context_kv_lens_cpu = get_dcp_local_seq_lens(
+                dcp_context_kv_lens_cpu,
+                self.dcp_world_size,
+                self.dcp_rank,
+                self.dcp_kv_cache_interleave_size,
             )
             dcp_context_kv_lens = dcp_context_kv_lens_cpu.to(self.device)
             max_dcp_context_kv_len = dcp_context_kv_lens.max().item()
@@ -479,8 +494,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        FlashAttentionBackend.validate_head_size(head_size)
-
         self.attn_type = attn_type
         self.vllm_flash_attn_version = get_flash_attn_version()
         # Cache the batch invariant result for use in forward passes
@@ -493,7 +506,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.sinks = sinks
         if self.sinks is not None:
-            assert self.vllm_flash_attn_version == 3, (
+            assert flash_attn_supports_sinks(), (
                 "Sinks are only supported in FlashAttention 3"
             )
             assert self.sinks.shape[0] == num_heads, (

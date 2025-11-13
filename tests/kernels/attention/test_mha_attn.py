@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.layer import MultiHeadAttention
 from vllm.attention.selector import _cached_get_attn_backend
 from vllm.platforms import current_platform
@@ -43,14 +43,14 @@ def test_mha_attn_platform(device: str):
             patch("vllm.model_executor.models.vision.current_platform", CpuPlatform()),
         ):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.TORCH_SDPA
+            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     elif device == "hip":
         with (
             patch("vllm.attention.layer.current_platform", RocmPlatform()),
             patch("vllm.model_executor.models.vision.current_platform", RocmPlatform()),
         ):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.TORCH_SDPA
+            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
     else:
         # Test CUDA with head_size=64 (divisible by 32)
         # - should use vLLM's FlashAttention
@@ -59,7 +59,7 @@ def test_mha_attn_platform(device: str):
             patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
         ):
             attn = MultiHeadAttention(16, 64, scale=1)
-            assert attn.attn_backend == _Backend.FLASH_ATTN
+            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
         # Test CUDA with head_size=72 (not divisible by 32)
         # - with upstream FA not available
@@ -73,7 +73,7 @@ def test_mha_attn_platform(device: str):
             ),
         ):
             attn = MultiHeadAttention(16, 72, scale=1)
-            assert attn.attn_backend == _Backend.XFORMERS
+            assert attn.attn_backend == AttentionBackendEnum.XFORMERS
 
         # Test CUDA with head_size=72 (not divisible by 32)
         # - with upstream FA available
@@ -96,7 +96,7 @@ def test_mha_attn_platform(device: str):
             ),
         ):
             attn = MultiHeadAttention(16, 72, scale=1)
-            assert attn.attn_backend == _Backend.FLASH_ATTN
+            assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
 
 
 def ref_attention(

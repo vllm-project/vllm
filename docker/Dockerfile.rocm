@@ -75,7 +75,6 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 RUN cd /vllm-workspace \
     && rm -rf vllm \
     && python3 -m pip install -e tests/vllm_test_utils \
-    && python3 -m pip install lm-eval[api]==0.4.4 \
     && python3 -m pip install pytest-shard
 
 # -----------------------

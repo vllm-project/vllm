@@ -5,16 +5,17 @@ image, embedding, and video support for different VLMs in vLLM.
 """
 
 import math
-import os
 from collections import defaultdict
 from pathlib import PosixPath
 
 import pytest
+from packaging.version import Version
 from transformers import (
     AutoModel,
     AutoModelForImageTextToText,
     AutoModelForTextToWaveform,
 )
+from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.platforms import current_platform
 from vllm.utils.func_utils import identity
@@ -37,13 +38,6 @@ from .vlm_utils.types import (
     VLMTestInfo,
     VLMTestType,
 )
-
-# This hack is needed for phi3v & paligemma models
-# ROCm Triton FA can run into shared memory issues with these models,
-# use other backends in the meantime
-# FIXME (mattwong, gshtrasb, hongxiayan)
-if current_platform.is_rocm():
-    os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 COMMON_BROADCAST_SETTINGS = {
     "test_type": VLMTestType.IMAGE,
@@ -857,6 +851,12 @@ VLM_TEST_SETTINGS = {
                     formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
                 ),
                 limit_mm_per_prompt={"image": 4},
+            )
+        ],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) == Version("4.57.1"),
+                reason="This model is broken in Transformers v4.57.1",
             )
         ],
     ),

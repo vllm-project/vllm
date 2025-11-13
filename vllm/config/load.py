@@ -40,6 +40,8 @@ class LoadConfig:
     more information.\n
     - "runai_streamer" will load the Safetensors weights using Run:ai Model
     Streamer.\n
+    - "runai_streamer_sharded" will load weights from pre-sharded checkpoint
+    files using Run:ai Model Streamer.\n
     - "bitsandbytes" will load the weights using bitsandbytes quantization.\n
     - "sharded_state" will load weights from pre-sharded checkpoint files,
     supporting efficient loading of tensor-parallel models.\n

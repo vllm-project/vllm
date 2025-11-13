@@ -9,7 +9,6 @@ from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
@@ -137,11 +136,10 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         if not do_pan_and_scan:
             return 0
 
-        if envs.VLLM_USE_V1:
-            logger.warning_once(
-                "`do_pan_and_scan=True` has suboptimal results on V1 "
-                "because of the simplified attention pattern being used."
-            )
+        logger.warning_once(
+            "`do_pan_and_scan=True` has suboptimal results on V1 "
+            "because of the simplified attention pattern being used."
+        )
 
         # Based on Gemma3ImageProcessor.pan_and_scan
         if image_width >= image_height:
@@ -403,7 +401,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
 
         def get_repl_toks(tok: int) -> list[int]:
             if tok == newline_3:
-                return [newline_2, newline_1]
+                return [newline_1, newline_2]
             if tok == newline_4:
                 return [newline_2, newline_2]
 
@@ -598,7 +596,7 @@ class Gemma3ForConditionalGeneration(
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
