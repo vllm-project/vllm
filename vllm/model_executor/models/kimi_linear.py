@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Iterable
-from typing import Any
 
 import torch
 from torch import nn
@@ -190,7 +189,6 @@ class KimiMLAAttention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int | None,
         kv_lora_rank: int,
-        rope_parameters: dict[str, Any],
         use_nope: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -212,7 +210,6 @@ class KimiMLAAttention(nn.Module):
         self.use_nope = use_nope
         assert self.use_nope is True
         assert self.q_lora_rank is None
-        assert rope_parameters is None
         assert num_heads % tp_size == 0
         self.kv_a_proj_with_mqa = ReplicatedLinear(
             self.hidden_size,

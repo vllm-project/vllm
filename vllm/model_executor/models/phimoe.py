@@ -304,11 +304,11 @@ class PhiMoEAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_parameters: dict,
         head_dim: int | None = None,
         max_position: int = 4096 * 32,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_parameters: dict | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -333,7 +333,6 @@ class PhiMoEAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_parameters = rope_parameters
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
@@ -355,7 +354,7 @@ class PhiMoEAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position,
-            rope_parameters=self.rope_parameters,
+            rope_parameters=rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(

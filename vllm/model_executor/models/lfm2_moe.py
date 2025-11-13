@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -189,7 +188,6 @@ class Lfm2MoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -240,7 +238,7 @@ class Lfm2MoeAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=True,
         )
         self.attn = Attention(
@@ -290,8 +288,6 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
 
-        if ompe := getattr(config, "original_max_position_embeddings", None):
-            config.rope_parameters["original_max_position_embeddings"] = ompe
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
         self.self_attn = Lfm2MoeAttention(
@@ -300,7 +296,6 @@ class Lfm2MoeAttentionDecoderLayer(nn.Module):
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
-            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,

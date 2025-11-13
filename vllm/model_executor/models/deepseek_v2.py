@@ -27,7 +27,6 @@
 import typing
 from collections.abc import Callable, Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
@@ -111,7 +110,6 @@ class DeepseekAttention(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         num_heads: int,
-        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -160,7 +158,7 @@ class DeepseekAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
         )
         self.attn = Attention(
             self.num_heads,
@@ -406,7 +404,6 @@ class DeepseekV2Attention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int,
         kv_lora_rank: int,
-        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -480,20 +477,20 @@ class DeepseekV2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if rope_parameters:
-            rope_parameters["rope_type"] = "deepseek_yarn"
+        if config.rope_parameters:
+            config.rope_parameters["rope_type"] = "deepseek_yarn"
 
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=False,
         )
 
-        if rope_parameters:
-            mscale_all_dim = rope_parameters.get("mscale_all_dim", False)
-            scaling_factor = rope_parameters["factor"]
+        if config.rope_parameters:
+            mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
+            scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 

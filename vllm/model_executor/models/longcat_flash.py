@@ -163,11 +163,9 @@ class FlashConfig(PretrainedConfig):
         self.use_cache = use_cache
         # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
         rope_scaling = kwargs.pop("rope_scaling", None)
-        rope_parameters = rope_scaling or rope_parameters
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
         rope_theta = kwargs.pop("rope_theta", 1000000.0)
-        if rope_parameters is None:
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
-        elif "rope_theta" not in rope_parameters:
+        if "rope_theta" not in rope_parameters:
             rope_parameters["rope_theta"] = rope_theta
         self.rope_parameters = rope_parameters
         self.attention_bias = attention_bias
@@ -343,8 +341,6 @@ class FlashDecoderLayer(nn.Module):
         self.layer_idx = int(prefix.split(sep=".")[-1])
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-        if ompe := getattr(config, "original_max_position_embeddings", None):
-            config.rope_parameters["original_max_position_embeddings"] = ompe
 
         # Dual attention structure
         self.self_attn = nn.ModuleList(

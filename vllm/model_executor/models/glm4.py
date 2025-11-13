@@ -59,7 +59,6 @@ class Glm4Attention(nn.Module):
         qkv_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        rope_parameters: tuple | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
     ) -> None:

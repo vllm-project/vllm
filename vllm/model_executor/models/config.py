@@ -77,16 +77,14 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
-            rope_parameters = getattr(config, "rope_parameters", None) or {}
-            rope_theta = getattr(config, "rope_theta", config.rotary_emb_base)
-            rope_parameters["rope_theta"] = rope_theta
+            if "rope_theta" not in config.rope_parameters:
+                config.rope_parameters["rope_theta"] = config.rotary_emb_base
 
             config.rotary_kwargs = {
                 "head_size": head_dim,
                 "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
                 "max_position": max_position,
-                "base": rope_parameters["rope_theta"],
-                "rope_parameters": rope_parameters,
+                "rope_parameters": config.rope_parameters,
             }
 
 
@@ -120,15 +118,15 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         head_dim = config.hidden_size // config.num_attention_heads
         rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
-        rope_parameters = getattr(config, "rope_parameters", None) or {}
-        rope_theta = getattr(config, "rope_theta", config.rotary_emb_base)
-        rope_parameters["rope_theta"] = rope_theta
+
+        if "rope_theta" not in config.rope_parameters:
+            config.rope_parameters["rope_theta"] = config.rotary_emb_base
+
         config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": rotary_emb_dim,
             "max_position": max_trained_positions,
-            "base": rope_parameters["rope_theta"],
-            "rope_parameters": rope_parameters,
+            "rope_parameters": config.rope_parameters,
         }
 
         # we ignore config.rotary_scaling_factor so that for datasets shorter

@@ -64,11 +64,9 @@ class FlexOlmoConfig(PretrainedConfig):
         self.use_cache = use_cache
         # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
         rope_scaling = kwargs.pop("rope_scaling", None)
-        rope_parameters = rope_scaling or rope_parameters
+        rope_parameters = rope_scaling or rope_parameters or {"rope_type": "default"}
         rope_theta = kwargs.pop("rope_theta", 500000.0)
-        if rope_parameters is None:
-            rope_parameters = {"rope_type": "default", "rope_theta": rope_theta}
-        elif "rope_theta" not in rope_parameters:
+        if "rope_theta" not in rope_parameters:
             rope_parameters["rope_theta"] = rope_theta
         self.rope_parameters = rope_parameters
         self.attention_bias = attention_bias

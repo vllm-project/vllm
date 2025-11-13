@@ -337,6 +337,7 @@ class OpenPanguMLAAttention(nn.Module):
 
         # TODO: remove hard coding
         rope_parameters = {
+            "rope_theta": config.rope_parameters.get("rope_theta", 10000),
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 1,

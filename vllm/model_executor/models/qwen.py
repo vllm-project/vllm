@@ -151,12 +151,11 @@ class QWenBlock(nn.Module):
         super().__init__()
         self.ln_1 = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
 
-        rope_parameters = getattr(config, "rope_parameters", None)
         self.attn = QWenAttention(
             config.hidden_size,
             config.num_attention_heads,
             config.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",

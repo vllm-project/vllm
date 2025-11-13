@@ -173,28 +173,22 @@ class CohereAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=self.max_position_embeddings,
+            rope_parameters=config.rope_scaling,
+            is_neox_style=False,
+        )
 
         # Model v2 has interleaved sliding windows, v1 does not
         self.v1 = isinstance(config, CohereConfig)
 
         self.sliding_window = None
-        rope_parameters = config.rope_parameters
         if not self.v1:
             layer_idx = extract_layer_index(prefix)
-            layer_type = config.layer_types[layer_idx]
-            if layer_type == "sliding_attention":
+            if config.layer_types[layer_idx] == "sliding_attention":
                 self.sliding_window = config.sliding_window
-            if layer_type in rope_parameters:
-                # Transformers v5
-                rope_parameters = rope_parameters[layer_type]
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            rotary_dim=self.head_dim,
-            max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
-            is_neox_style=False,
-        )
 
         self.attn = Attention(
             self.num_heads,

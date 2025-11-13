@@ -122,14 +122,10 @@ class Olmo2Attention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         sliding_window = None
-        rope_parameters = {"rope_theta": self.config.rope_parameters["rope_theta"]}
-        if layer_types := getattr(self.config, "layer_types", None):
-            layer_type = layer_types[layer_idx]
-            if layer_type == "sliding_attention":
-                sliding_window = self.config.sliding_window
-            elif layer_type == "full_attention":
-                # Rope scaling is only applied on full attention layers.
-                rope_parameters.update(self.config.rope_parameters)
+        if (
+            layer_types := getattr(self.config, "layer_types", None)
+        ) is not None and layer_types[layer_idx] == "sliding_attention":
+            sliding_window = self.config.sliding_window
 
         self.attn = Attention(
             self.num_heads,
@@ -143,11 +139,14 @@ class Olmo2Attention(nn.Module):
         )
 
         # Rotary embeddings.
+        # TODO: Rope scaling should only be applied on full attention layers. Original
+        # implementation was setting the rope_parameters to None for sliding attention
+        # layers, but that does not disable rope scaling in vLLM.
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=self.config.rope_parameters,
         )
 
         # Attention output projection.

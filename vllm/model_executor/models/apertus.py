@@ -27,7 +27,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
@@ -118,7 +117,6 @@ class ApertusAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -174,9 +172,7 @@ class ApertusAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(
-            config, rope_parameters=rope_parameters, quant_config=quant_config
-        )
+        self._init_rotary_emb(config, quant_config=quant_config)
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
@@ -222,7 +218,6 @@ class ApertusAttention(nn.Module):
     def _init_rotary_emb(
         self,
         config: ApertusConfig,
-        rope_parameters: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
@@ -234,7 +229,7 @@ class ApertusAttention(nn.Module):
             self.head_dim,
             rotary_dim=int(self.partial_rotary_factor * self.head_dim),
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
             partial_rotary_factor=self.partial_rotary_factor,
         )
@@ -250,8 +245,6 @@ class ApertusDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        if ompe := getattr(config, "original_max_position_embeddings", None):
-            config.rope_parameters["original_max_position_embeddings"] = ompe
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
@@ -279,7 +272,6 @@ class ApertusDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,

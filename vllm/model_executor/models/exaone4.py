@@ -222,8 +222,6 @@ class Exaone4DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        if ompe := getattr(config, "original_max_position_embeddings", None):
-            config.rope_parameters["original_max_position_embeddings"] = ompe
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias

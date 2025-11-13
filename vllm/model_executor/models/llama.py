@@ -283,8 +283,6 @@ class LlamaDecoderLayer(nn.Module):
         quant_config = self.get_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
-        if ompe := getattr(config, "original_max_position_embeddings", None):
-            config.rope_parameters["original_max_position_embeddings"] = ompe
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Support abacusai/Smaug-72B-v0.1 with attention_bias
         # Support internlm/internlm-7b with bias
@@ -312,7 +310,6 @@ class LlamaDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,

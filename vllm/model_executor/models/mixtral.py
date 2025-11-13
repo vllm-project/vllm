@@ -246,7 +246,6 @@ class MixtralDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
         self.self_attn = MixtralAttention(
             config=config,
             hidden_size=self.hidden_size,

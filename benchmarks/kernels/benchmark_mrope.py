@@ -6,9 +6,9 @@
 #
 # The CSV file (named with current date/time) contains these columns:
 # model_name, tp_size, num_tokens, num_heads, num_kv_heads, head_dim, max_position,
-# rope_theta, is_neox_style, rope_parameters, dtype, torch_mean, torch_median,
-# torch_p99, torch_min, torch_max, triton_mean, triton_median, triton_p99, triton_min,
-# triton_max, speedup
+# is_neox_style, rope_parameters, dtype, torch_mean, torch_median, torch_p99,
+# torch_min, torch_max, triton_mean, triton_median, triton_p99, triton_min, triton_max,
+# speedup
 #
 # == Usage Examples ==
 #
@@ -252,7 +252,6 @@ if __name__ == "__main__":
             "num_kv_heads",
             "head_dim",
             "max_position",
-            "rope_theta",
             "is_neox_style",
             "rope_parameters",
             "dtype",

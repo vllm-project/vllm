@@ -411,6 +411,11 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         if rope_theta is not None:
             rope_parameters = rope_parameters or {"rope_type": "default"}
             rope_parameters["rope_theta"] = rope_theta
+        # Add original_max_position_embeddings if present
+        if rope_parameters and (
+            ompe := getattr(config, "original_max_position_embeddings", None)
+        ):
+            rope_parameters["original_max_position_embeddings"] = ompe
         # Write back to text_config
         text_config.rope_parameters = rope_parameters
         # Delete legacy attributes

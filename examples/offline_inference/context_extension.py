@@ -19,8 +19,8 @@ def create_llm():
 
     # Use yarn to extend context
     hf_overrides = {
-        "rope_theta": rope_theta,
         "rope_parameters": {
+            "rope_theta": rope_theta,
             "rope_type": "yarn",
             "factor": factor,
             "original_max_position_embeddings": original_max_position_embeddings,

@@ -103,8 +103,6 @@ class ArceeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        if ompe := getattr(config, "original_max_position_embeddings", None):
-            config.rope_parameters["original_max_position_embeddings"] = ompe
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         # Determine if attention bias is needed (some variants use bias terms)
         attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -126,7 +124,6 @@ class ArceeDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,

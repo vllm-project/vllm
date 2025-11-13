@@ -2069,15 +2069,15 @@ def _get_and_verify_max_len(
         )
         derived_max_model_len = default_max_len
 
+    # In Transformers v5 rope_parameters could be TypedDict or dict[str, TypedDict].
+    # To simplify the verification, we convert it to dict[str, TypedDict].
     rope_parameters = getattr(hf_config, "rope_parameters", None)
+    if not set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
+        rope_parameters = {"": rope_parameters}
+
     # NOTE(woosuk): Gemma3's max_model_len (128K) is already scaled by RoPE
     # scaling, so we skip applying the scaling factor again.
     if rope_parameters is not None and "gemma3" not in hf_config.model_type:
-        # In Transformers v5 rope_parameters could be RopeParameters or
-        # dict[str, RopeParameters] where RopeParameters is a TypedDict. To simplify
-        # the verification, we convert any RopeParameters to dict[str, RopeParameters]
-        if not set(rope_parameters.keys()).issubset(ALLOWED_LAYER_TYPES):
-            rope_parameters = {"": rope_parameters}
         scaling_factor = 1.0
         for rp in rope_parameters.values():
             # No need to consider "type" key because of patch_rope_parameters when
@@ -2099,7 +2099,7 @@ def _get_and_verify_max_len(
 
                 if rope_type == "yarn":
                     derived_max_model_len = rp["original_max_position_embeddings"]
-        # Do this outside loop since all layers should have the same scaling
+        # Do this outside loop since all layer types should have the same scaling
         derived_max_model_len *= scaling_factor
 
     if encoder_config and "max_seq_length" in encoder_config:

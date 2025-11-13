@@ -136,7 +136,7 @@ class BaiChuanAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         position_embedding: str,
-        rope_parameters: dict | None = None,
+        rope_parameters: dict,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -228,13 +228,12 @@ class BaiChuanDecoderLayer(nn.Module):
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_parameters = getattr(config, "rope_parameters", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.self_attn = BaiChuanAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             position_embedding=position_embedding,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
