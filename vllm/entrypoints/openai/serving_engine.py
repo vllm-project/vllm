@@ -1098,13 +1098,13 @@ class OpenAIServing:
         )
 
         if should_parse_tools:
-            if not isinstance(request, ChatCompletionRequest):
-                msg = "Tool usage is only supported for Chat Completions API"
+            if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
+                msg = (
+                    "Tool usage is only supported for Chat Completions API "
+                    "or Responses API requests."
+                )
                 raise NotImplementedError(msg)
-
-            request = tool_parser(tokenizer).adjust_request(  # type: ignore
-                request=request
-            )
+            request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore
 
         if tokenizer is None:
             assert isinstance(request_prompt, str), (
@@ -1227,7 +1227,7 @@ class OpenAIServing:
 
             # Call the tool and update the context with the result.
             tool_output = await context.call_tool()
-            context.append_output(tool_output)
+            context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
             # yield context
@@ -1375,6 +1375,8 @@ class OpenAIServing:
                     for tool_call in tool_call_info.tool_calls
                 )
                 content = tool_call_info.content
+                if content and content.strip() == "":
+                    content = None
             else:
                 # No tool calls.
                 return None, content
