@@ -53,11 +53,11 @@ from vllm.distributed import parallel_state, tensor_model_parallel_all_gather
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import QuickGELU
+from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
-from vllm.model_executor.layers.multi_modal import get_conv_layer
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     dispatch_rotary_emb_function,
@@ -574,17 +574,19 @@ class Qwen2VisionPatchEmbed(nn.Module):
         self.temporal_patch_size = temporal_patch_size
         self.embed_dim = embed_dim
 
-        self.proj = get_conv_layer(
-            in_channels=in_channels,
-            out_channels=embed_dim,
-            kernel_size=(temporal_patch_size, patch_size, patch_size),
-            stride=patch_size,
-            enable_bias=False,
-            conv_type="conv3d",
+        kernel_size = (temporal_patch_size, patch_size, patch_size)
+        self.proj = Conv3dLayer(
+            in_channels,
+            embed_dim,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=False,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.proj(x)
+        L, C = x.shape
+        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
+        x = self.proj(x).view(L, self.embed_dim)
         return x
 
 
