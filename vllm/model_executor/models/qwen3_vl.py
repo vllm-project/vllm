@@ -1100,7 +1100,7 @@ class Qwen3LLMModel(Qwen3Model):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -1136,10 +1136,8 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         super(Qwen3ForCausalLM, self).__init__()
         config = vllm_config.model_config.hf_config.text_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        self.lora_config = lora_config
 
         self.quant_config = quant_config
         self.model = Qwen3LLMModel(vllm_config=vllm_config, prefix=prefix)
@@ -1434,13 +1432,11 @@ class Qwen3VLForConditionalGeneration(
         vision_start_token_id = hf_config.vision_start_token_id
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
 
-        input_tokens_tensor = torch.tensor(input_tokens)
-        vision_start_indices = torch.argwhere(
-            input_tokens_tensor == vision_start_token_id
-        ).squeeze(1)
-        vision_tokens = input_tokens_tensor[vision_start_indices + 1]
-        image_nums = (vision_tokens == image_token_id).sum()
-        video_nums = (vision_tokens == video_token_id).sum()
+        input_tokens_array = np.array(input_tokens)
+        vision_start_mask = input_tokens_array == vision_start_token_id
+        vision_tokens = input_tokens_array[vision_start_mask.nonzero()[0] + 1]
+        image_nums = np.count_nonzero(vision_tokens == image_token_id)
+        video_nums = np.count_nonzero(vision_tokens == video_token_id)
         llm_pos_ids_list: list = []
 
         st = 0
@@ -1476,50 +1472,28 @@ class Qwen3VLForConditionalGeneration(
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
-                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
             )
 
-            t_index = (
-                torch.arange(llm_grid_t)
-                .view(-1, 1)
-                .expand(-1, llm_grid_h * llm_grid_w)
-                .flatten()
-            )
-            h_index = (
-                torch.arange(llm_grid_h)
-                .view(1, -1, 1)
-                .expand(llm_grid_t, -1, llm_grid_w)
-                .flatten()
-            )
-            w_index = (
-                torch.arange(llm_grid_w)
-                .view(1, 1, -1)
-                .expand(llm_grid_t, llm_grid_h, -1)
-                .flatten()
-            )
-            llm_pos_ids_list.append(
-                torch.stack([t_index, h_index, w_index]) + text_len + st_idx
-            )
+            grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
+            llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
             st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             text_len = len(input_tokens) - st
             llm_pos_ids_list.append(
-                torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx
+                np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx
             )
 
-        llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
+        llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
-
-        return llm_positions, mrope_position_delta
+        return torch.from_numpy(llm_positions), mrope_position_delta
 
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(
-        self, **kwargs: object
-    ) -> MultiModalEmbeddings | None:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings | None:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return None
@@ -1581,7 +1555,7 @@ class Qwen3VLForConditionalGeneration(
 
         return deepstack_input_embeds, multimodal_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1589,9 +1563,9 @@ class Qwen3VLForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self._get_text_embeddings(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            self.language_model.get_input_embeddings,
+            self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
@@ -1601,7 +1575,7 @@ class Qwen3VLForConditionalGeneration(
 
         if is_multimodal is None:
             raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "`embed_input_ids` now requires `is_multimodal` arg, "
                 "please update your model runner according to "
                 "https://github.com/vllm-project/vllm/pull/16229."
             )

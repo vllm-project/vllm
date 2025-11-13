@@ -38,6 +38,7 @@ from vllm.config import (
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    ECTransferConfig,
     EPLBConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -527,6 +528,8 @@ class EngineArgs:
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
+    ec_transfer_config: ECTransferConfig | None = None
+
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
     override_generation_config: dict[str, Any] = get_field(
@@ -554,6 +557,8 @@ class EngineArgs:
     """Custom logitproc types"""
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
+
+    stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
@@ -1064,6 +1069,9 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
+        scheduler_group.add_argument(
+            "--stream-interval", **scheduler_kwargs["stream_interval"]
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1105,6 +1113,9 @@ class EngineArgs:
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument(
+            "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
+        )
         vllm_group.add_argument(
             "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
         )
@@ -1556,6 +1567,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            stream_interval=self.stream_interval,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -1625,40 +1637,39 @@ class EngineArgs:
             )
 
         observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=(self.show_hidden_metrics_for_version),
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
         # Compilation config overrides
+        compilation_config = copy.deepcopy(self.compilation_config)
         if self.cuda_graph_sizes is not None:
             logger.warning(
                 "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
                 "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
                 "instead."
             )
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
                     "cuda_graph_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-            self.compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
+            compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
         if self.cudagraph_capture_sizes is not None:
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
                     "cudagraph_capture_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-            self.compilation_config.cudagraph_capture_sizes = (
-                self.cudagraph_capture_sizes
-            )
+            compilation_config.cudagraph_capture_sizes = self.cudagraph_capture_sizes
         if self.max_cudagraph_capture_size is not None:
-            if self.compilation_config.max_cudagraph_capture_size is not None:
+            if compilation_config.max_cudagraph_capture_size is not None:
                 raise ValueError(
                     "max_cudagraph_capture_size and compilation_config."
                     "max_cudagraph_capture_size are mutually exclusive"
                 )
-            self.compilation_config.max_cudagraph_capture_size = (
+            compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
 
@@ -1673,9 +1684,10 @@ class EngineArgs:
             load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
-            compilation_config=self.compilation_config,
+            compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
         )
 
@@ -1725,9 +1737,6 @@ class EngineArgs:
                     "launcher"
                 )
                 _raise_unsupported_error(feature_name=name)
-
-        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
-            _raise_unsupported_error(feature_name="sliding window (CPU backend)")
 
     def _set_default_args(
         self, usage_context: UsageContext, model_config: ModelConfig

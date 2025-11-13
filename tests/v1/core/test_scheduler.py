@@ -8,6 +8,7 @@ import torch
 
 from vllm.config import (
     CacheConfig,
+    ECTransferConfig,
     KVTransferConfig,
     ModelConfig,
     SchedulerConfig,
@@ -20,6 +21,9 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.utils.hashing import sha256
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.kv_cache_interface import (
@@ -872,7 +876,10 @@ def _step_until_done(
         for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
             # We should be in the decode phase now.
             assert num_scheduled_tokens == 1
-        assert len(output.kv_connector_metadata.requests) == 0
+        if scheduler.connector is not None:
+            assert len(output.kv_connector_metadata.requests) == 0
+        if scheduler.ec_connector is not None:
+            assert len(output.ec_connector_metadata.mm_datas) == 0
         ecos = scheduler.update_from_output(output, model_runner_output)[0]
         all_done = True
         for eco in ecos.outputs:
@@ -1066,7 +1073,10 @@ def test_external_prefix_cache_metrics():
     assert external_stats.preempted_requests == 0
 
 
-def test_kv_connector_unable_to_allocate():
+@pytest.mark.parametrize(
+    "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
+)
+def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
     """
     Test whether scheduler with KVConnector is able to handle
     unable to allocate (run out of blocks in allocate_slots().
@@ -1080,6 +1090,9 @@ def test_kv_connector_unable_to_allocate():
         use_kv_connector=True,
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
+        # encoder connector should not affect test results
+        use_ec_connector=use_ec_connector,
+        ec_role=ec_role,
     )
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE * 2
     scheduler.connector.get_num_new_matched_tokens = Mock(name="method")
@@ -1148,7 +1161,10 @@ def test_kv_connector_unable_to_allocate():
     assert len(scheduler.waiting) == 0
 
 
-def test_kv_connector_handles_preemption():
+@pytest.mark.parametrize(
+    "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
+)
+def test_kv_connector_handles_preemption(use_ec_connector, ec_role):
     """
     Test whether scheduler with KVConnector is able to handle
     unable to allocate (run out of blocks in allocate_slots().
@@ -1163,6 +1179,9 @@ def test_kv_connector_handles_preemption():
         use_kv_connector=True,
         block_size=BLOCK_SIZE,
         num_blocks=NUM_BLOCKS,
+        # encoder connector should not affect test results
+        use_ec_connector=use_ec_connector,
+        ec_role=ec_role,
     )
 
     NUM_MATCHED_NEW_TOKENS = BLOCK_SIZE
@@ -1379,6 +1398,8 @@ def create_scheduler_with_priority(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    use_ec_connector: bool = False,
+    ec_role: str | None = None,
 ) -> Scheduler:
     """Create scheduler with priority policy enabled.
 
@@ -1439,12 +1460,23 @@ def create_scheduler_with_priority(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
 
+    ec_transfer_config = (
+        ECTransferConfig(
+            ec_connector="ECSharedStorageConnector",
+            ec_role=ec_role,
+            ec_connector_extra_config={"shared_storage_path": "/tmp/ec_test"},
+        )
+        if use_ec_connector
+        else None
+    )
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
+        ec_transfer_config=ec_transfer_config,
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
@@ -1465,16 +1497,23 @@ def create_scheduler_with_priority(
     )
 
 
+_none_hash_initialized = False
+
+
 def create_requests_with_priority(
     num_requests: int,
     priorities: list[int],
     arrival_times: list[float] | None = None,
     num_tokens: int = 10,
+    mm_hashes_list: list[list[str]] | None = None,
     mm_positions: list[list[PlaceholderRange]] | None = None,
     max_tokens: int = 16,
     stop_token_ids: list[int] | None = None,
     prompt_logprobs: int | None = None,
     starting_idx: int = 0,
+    same_prompt: bool = False,
+    block_size: int = 16,
+    req_ids: list[str] | None = None,
 ):
     """Create requests with specified priorities and arrival times."""
     assert len(priorities) == num_requests
@@ -1483,6 +1522,12 @@ def create_requests_with_priority(
     else:
         arrival_times = [float(i) for i in range(num_requests)]
 
+    global _none_hash_initialized
+    if not _none_hash_initialized:
+        init_none_hash(sha256)
+        _none_hash_initialized = True
+
+    block_hasher = get_request_block_hasher(block_size, sha256)
     sampling_params = SamplingParams(
         ignore_eos=False,
         max_tokens=max_tokens,
@@ -1490,29 +1535,70 @@ def create_requests_with_priority(
         prompt_logprobs=prompt_logprobs,
     )
     requests = []
+
+    if mm_hashes_list is not None:
+        # NOTE: allow manual input; some mm items can have the same identifier
+        # no. of mm_hashes and mm_positions for each request should be identical
+        assert mm_positions is not None, (
+            "mm_positions must be provided when mm_hashes_list is provided"
+        )
+        assert len(mm_hashes_list) == len(mm_positions) == num_requests
+        assert [len(h) for h in mm_hashes_list] == [len(p) for p in mm_positions]
+
+        # Since same identifier would imply they are identical encoder output
+        # Verify mm items with identical identifier are having mm_position.length
+        seen_hashes: dict[str, int] = {}
+
+    if req_ids:
+        assert len(req_ids) == num_requests
+    else:
+        req_ids = [f"{i + starting_idx}" for i in range(num_requests)]
+
     for i in range(num_requests):
         mm_features = []
-        if mm_positions is not None:
-            mm_position = mm_positions[i]
-            for j, position in enumerate(mm_position):
-                identifier = f"hash{i}_{j}"
-                mm_feature = MultiModalFeatureSpec(
-                    data=MultiModalKwargsItem.dummy("dummy_m"),
-                    mm_position=position,
-                    identifier=identifier,
-                    modality="image",
-                )
-                mm_features.append(mm_feature)
 
+        for j, position in enumerate(
+            mm_positions[i] if mm_positions is not None else []
+        ):
+            if mm_hashes_list is not None:
+                identifier = mm_hashes_list[i][j]
+
+                # Verify if position length is identical
+                position_length = position.length
+                if identifier in seen_hashes:
+                    assert seen_hashes[identifier] == position_length, (
+                        f"mm_hash '{identifier}' has inconsistent position lengths: "
+                        f"previously {seen_hashes[identifier]}, now {position_length} "
+                        f"at request {i}, position {j}"
+                    )
+                else:
+                    seen_hashes[identifier] = position_length
+            else:
+                # Unique dummy hash for each mm item
+                identifier = f"hash{i}_{j}"
+            mm_feature = MultiModalFeatureSpec(
+                data=MultiModalKwargsItem.dummy("dummy_m"),
+                mm_position=position,
+                identifier=identifier,
+                modality="image",
+            )
+            mm_features.append(mm_feature)
+
+        prompt_token_ids = (
+            [starting_idx] * num_tokens
+            if same_prompt
+            else [i + starting_idx] * num_tokens
+        )
         request = Request(
-            request_id=f"{i + starting_idx}",
-            prompt_token_ids=[i + starting_idx] * num_tokens,
+            request_id=req_ids[i],
+            prompt_token_ids=prompt_token_ids,
             sampling_params=sampling_params,
             pooling_params=None,
             mm_features=mm_features if mm_features else None,
             eos_token_id=EOS_TOKEN_ID,
             arrival_time=arrival_times[i],
             priority=priorities[i],
+            block_hasher=block_hasher,
         )
         requests.append(request)
     return requests
@@ -1999,7 +2085,12 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     assert len(scheduler.waiting) == 1
 
 
-def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
+@pytest.mark.parametrize(
+    "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]
+)
+def test_priority_scheduling_preemption_and_resumption_when_out_of_kv(
+    use_ec_connector, ec_role
+):
     """Test that priority scheduling preempts lower priority requests
     when out of KV cache space."""
     # Create scheduler with very limited memory to force preemption
@@ -2009,6 +2100,9 @@ def test_priority_scheduling_preemption_and_resumption_when_out_of_kv():
         num_blocks=5,  # Can hold 64 tokens (first block is null)
         block_size=16,  # Standard block size
         use_kv_connector=True,
+        # encoder connector should not affect test results
+        use_ec_connector=use_ec_connector,
+        ec_role=ec_role,
     )
 
     # Create a request and schedule it
@@ -2168,3 +2262,976 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
         assert scheduler_config.disable_chunked_mm_input is not expect_enabled
     if is_encoder_decoder and not expect_enabled:
         assert scheduler_config.long_prefill_token_threshold == 0
+
+
+# ==============================================================================
+# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests start
+# NOTE: In E->P->D disagg case, both KV and EC Connector works in P instance
+# Unless specify, the existence of KV Connector should not affect any test results
+# ==============================================================================
+
+
+def _assert_right_encoder_cache_allocated(
+    scheduler: Scheduler,
+    hashes_to_check: list[str] | None = None,
+    requests: list[Request] | None = None,
+    expected_total_allocated: int | None = None,
+):
+    """Check whether encoder cache is allocated correctly."""
+    encoder_cache_manager = scheduler.encoder_cache_manager
+
+    # Verify encoder cache manager exists
+    assert encoder_cache_manager is not None, "Encoder cache manager should exist"
+
+    # Verify number of cache
+    if expected_total_allocated is not None:
+        assert len(encoder_cache_manager.cached) == expected_total_allocated
+        if expected_total_allocated == 0:
+            return
+
+    # Verify each request with MM data is in cache
+    cached_hashes = set(encoder_cache_manager.cached.keys())
+
+    if hashes_to_check:
+        missed_hashes = set(hashes_to_check) - cached_hashes
+        assert not missed_hashes, (
+            f"Miss hashes: {missed_hashes} "
+            f"Existing encoder cache: {encoder_cache_manager.cached}"
+        )
+
+    for req in requests if requests is not None else []:
+        if req.mm_features:
+            mm_hashes = [f.identifier for f in req.mm_features]
+            req_hashes = set(mm_hashes)  # unique hashes set
+            missed_hashes = req_hashes - cached_hashes
+            assert not missed_hashes, (
+                f"Miss hashes in cache for request {req.request_id}: {missed_hashes} "
+                f"Existing encoder cache: {encoder_cache_manager.cached}"
+            )
+
+
+def _assert_right_ec_connector_metadata(
+    output: SchedulerOutput,
+    mm_features_list: list[MultiModalFeatureSpec],
+):
+    """Verify that ECConnector metadata EXACTLY matches the input MM data"""
+    # Get the connector metadata
+    metadata = output.ec_connector_metadata
+
+    # Create lookup dictionaries for efficient access
+    metadata_dict = {mm_data.mm_hash: mm_data for mm_data in metadata.mm_datas}
+
+    # Check all required identifiers exist in metadata; and no extra
+    # In ECSharedStorageConnector format
+    # NOTE: even having same identifier, the mm_features can be different
+    # since their mm_position can be in different offsets, etc
+    identifiers_dict = {f.identifier for f in mm_features_list}
+    assert set(metadata_dict.keys()) == identifiers_dict
+
+    # Verify the info matches
+    for i, mm_feature in enumerate(mm_features_list):
+        identifier = mm_feature.identifier
+        assert metadata_dict[identifier].mm_hash == identifier
+        assert metadata_dict[identifier].num_token == mm_feature.mm_position.length
+
+
+def _assert_right_encoder_inputs(
+    output: SchedulerOutput,
+    check_exist: bool | None = True,
+    requests: list[Request] | None = None,
+    expected_encoder_inputs: list[list[int]] | None = None,
+    expected_total_reqs: int | None = None,
+):
+    """Verify that requests/mm_hashes should (not) in scheduled encoder input
+    If check_exist is False, this function returns True
+    if requests are NOT in encoder inputs"""
+
+    # Get the scheduled encoder inputs
+    # NOTE: scheduled_encoder_inputs is a dictionary with request id as key
+    scheduled_encoder_inputs = output.scheduled_encoder_inputs
+
+    # Check if scheduled_encoder_inputs is empty as expected
+    if expected_total_reqs is not None:
+        assert len(scheduled_encoder_inputs) == expected_total_reqs
+        if expected_total_reqs == 0:
+            return
+
+    # Number of expected enocder inputs should match number of requests
+    if expected_encoder_inputs:
+        assert check_exist and requests is not None  # only support expect input exist
+        assert len(requests) == len(expected_encoder_inputs)
+
+    # Check request (not) exist as expected
+    for i, request in enumerate(requests if requests is not None else []):
+        assert (request.request_id in scheduled_encoder_inputs) is check_exist, (
+            f"Request {request.id} presence mismatch: expected {check_exist}, "
+            f"got {request.id in scheduled_encoder_inputs}"
+        )
+        if expected_encoder_inputs:
+            scheduled_encoder_input = scheduled_encoder_inputs[request.request_id]
+            assert scheduled_encoder_input == expected_encoder_inputs[i]
+
+
+def test_scheduler_no_ec_connector_by_default():
+    """Test scheduler doesn't have EC connector by default."""
+    scheduler = create_scheduler()
+    assert scheduler.ec_connector is None
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_text_only_request(use_kv_connector):
+    """Test text-only requests don't allocate encoder cache."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    NUM_PROMPT_TOKENS = 100
+
+    # Create text-only request (no mm_positions)
+    requests = create_requests(
+        num_requests=1,
+        num_tokens=NUM_PROMPT_TOKENS,
+    )
+    assert not requests[0].mm_features  # No MM data
+
+    scheduler.add_request(requests[0])
+    output = scheduler.schedule()
+
+    # Should schedule
+    assert len(output.scheduled_new_reqs) == 1
+
+    # Scheduled tokens should equal prompt tokens exactly
+    scheduled = output.num_scheduled_tokens[requests[0].request_id]
+    assert scheduled == NUM_PROMPT_TOKENS, (
+        f"Text-only should schedule {NUM_PROMPT_TOKENS}, got {scheduled}"
+    )
+
+    # Encoder cache should be empty
+    _assert_right_encoder_cache_allocated(scheduler, expected_total_allocated=0)
+
+    # ECConnector should carry no metadata
+    _assert_right_ec_connector_metadata(output, mm_features_list=[])
+
+    # Scheduled encoder input should be empty; no mm to compute
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_cache_hit_external_load(use_kv_connector):
+    """Test ec_consumer loads from external cache when hit.
+    A normal basic operation for EPD disaggrgation"""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        # kv connector should not effect test results
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    # Create MM request
+    NUM_TOKENS = 200  # NOTE: includes mm tokens
+    NUM_ENCODER_TOKENS = 100
+    mm_hashes_list = [["hash_test1"]]
+    mm_positions = [[PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS)]]
+
+    request = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS,
+        mm_hashes_list=mm_hashes_list,
+        mm_positions=mm_positions,
+    )[0]
+
+    # Mock cache hit - encoder cache exists externally
+    scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    scheduler.ec_connector.update_state_after_alloc = Mock(
+        wraps=scheduler.ec_connector.update_state_after_alloc
+    )
+
+    scheduler.add_request(request)
+    output = scheduler.schedule()
+
+    # Should schedule prompt tokens
+    scheduled_tokens = output.num_scheduled_tokens[request.request_id]
+    assert scheduled_tokens == NUM_TOKENS
+
+    # Should called update_state_after_alloc for external load
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request, 0)
+
+    # Encoder cache should contain mm items from request
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request])
+
+    # ECConnector should carry metadata of request
+    _assert_right_ec_connector_metadata(output, mm_features_list=request.mm_features)
+
+    # Scheduled encoder input should be empty; no mm to compute
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_cache_miss_computes_locally(use_kv_connector):
+    """Test consumer can compute encoder locally when cache miss (fallback)."""
+    # encoder cache itself if it doesn't receive it from external storage
+
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    # Verify consumer role
+    assert scheduler.ec_connector is not None
+    assert not scheduler.ec_connector.is_producer
+
+    # Create MM request
+    request_mm_missed = create_requests(
+        num_requests=1,
+        num_tokens=200,  # Total (including 100 MM)
+        mm_positions=[[PlaceholderRange(offset=0, length=100)]],  # 100 MM tokens
+    )[0]
+
+    # Mock cache miss - encoder cache doesn't exist externally
+    scheduler.ec_connector.has_caches = Mock(return_value=[False])
+
+    scheduler.add_request(request_mm_missed)
+    output = scheduler.schedule()
+
+    # SCHEDULER should decide to compute encoder locally (fallback)
+    assert len(output.scheduled_new_reqs) == 1
+
+    # Should schedule full prompt tokens
+    scheduled_tokens = output.num_scheduled_tokens[request_mm_missed.request_id]
+    assert scheduled_tokens == 200, (
+        f"Expected 200 tokens on cache miss, got {scheduled_tokens}"
+    )
+
+    # Encoder cache should contain mm items from request
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request_mm_missed])
+
+    # ECConnector should carry no metadata (missed cache)
+    _assert_right_ec_connector_metadata(output, mm_features_list=[])
+
+    # Scheduled encoder input contain mm for request_mm_missed
+    _assert_right_encoder_inputs(
+        output,
+        requests=[request_mm_missed],
+        expected_encoder_inputs=[[0]],  # index 0 of the mm item
+        expected_total_reqs=1,
+    )
+
+    # Then MODEL_RUNNER will execute the encoder and cache the result
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
+    """Test consumer with partial cache hit (local & connector) with 2 requests."""
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    # Create MM request
+    NUM_TOKENS_1 = 300  # NOTE: includes mm tokens
+    NUM_ENCODER_TOKENS_1 = 50
+    mm_hashes_list_1 = [["hash1_A", "hash1_B", "hash1_A", "hash1_F"]]
+    mm_positions_1 = [
+        [
+            PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS_1),
+            PlaceholderRange(offset=100, length=NUM_ENCODER_TOKENS_1),
+            PlaceholderRange(offset=200, length=NUM_ENCODER_TOKENS_1),
+            PlaceholderRange(offset=250, length=NUM_ENCODER_TOKENS_1),
+        ]
+    ]
+
+    # Create request with 4 MM items, with 2 identical items
+    request1 = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS_1,
+        mm_hashes_list=mm_hashes_list_1,
+        mm_positions=mm_positions_1,
+        max_tokens=1,  # For simplicity
+    )[0]
+
+    # Mock partial cache hit: 1st and 3rd missing, 2nd and 4th exist
+    scheduler.ec_connector.has_caches = Mock(return_value=[False, True, False, True])
+    scheduler.ec_connector.update_state_after_alloc = Mock(
+        wraps=scheduler.ec_connector.update_state_after_alloc
+    )
+
+    scheduler.add_request(request1)
+    output = scheduler.schedule()
+
+    # Should schedule all tokens
+    scheduled_tokens = output.num_scheduled_tokens[request1.request_id]
+    assert scheduled_tokens == NUM_TOKENS_1
+
+    # Encoder cache should contain all mm items from request
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request1])
+
+    # Should have called update_state_after_alloc for external load
+    scheduler.ec_connector.update_state_after_alloc.assert_called()
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # ECConnector should carry metadata for 2nd and 4th mm item
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=[request1.mm_features[1], request1.mm_features[3]]
+    )
+
+    # Should schedule ONLY 1 encoder input (index 0), no repeat for identical items
+    _assert_right_encoder_inputs(
+        output,
+        requests=[request1],
+        expected_encoder_inputs=[[0]],  # index 0 of the mm item ONLY
+        expected_total_reqs=1,
+    )
+
+    # Simulate model execution 1 step
+    model_output = ModelRunnerOutput(
+        req_ids=[request1.request_id],
+        req_id_to_index={request1.request_id: 0},
+        sampled_token_ids=[[100]],
+        # spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # request1 is finished after outputing 1 token
+    # Finish request
+    scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
+
+    # Create another request with 4 MM items
+    NUM_TOKENS_2 = 400
+    NUM_ENCODER_TOKENS_2 = 50
+    mm_hashes_list_2 = [["hash1_C", "hash1_D", "hash1_E", "hash1_A"]]
+    mm_positions_2 = [
+        [
+            PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS_2),
+            PlaceholderRange(offset=100, length=NUM_ENCODER_TOKENS_2),
+            PlaceholderRange(offset=200, length=NUM_ENCODER_TOKENS_2),
+            PlaceholderRange(offset=250, length=NUM_ENCODER_TOKENS_2),
+        ]
+    ]
+
+    request2 = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS_2,
+        mm_hashes_list=mm_hashes_list_2,
+        mm_positions=mm_positions_2,
+        max_tokens=1,  # For simplicity
+    )[0]
+
+    # Mock partial cache hit: only hash1_A and hash1_C exist in connector
+    scheduler.ec_connector.has_caches = Mock(return_value=[True, False, False, True])
+
+    scheduler.add_request(request2)
+    output = scheduler.schedule()
+
+    # Check
+    # Should schedule all tokens
+    scheduled_tokens = output.num_scheduled_tokens[request2.request_id]
+    assert scheduled_tokens == 400
+
+    # Encoder cache should contain all mm items from request2
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request2])
+
+    # Should call update_state_after_alloc for hash1_C, ONLY
+    # hash1_A should not be loaded from connector
+    # since it's computed in last request & exist in local cache
+    # Order of getting encoder cache should be: local cache -> connector-> compute
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request2, 0)
+    scheduler.ec_connector.update_state_after_alloc.assert_called_once()
+
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # ECConnector should carry metadata for hash1_C only (index 0)
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=[request2.mm_features[0]]
+    )
+
+    # Should schedule 2 encoder input hash1_D and hash1_E (index 1, 2)
+    _assert_right_encoder_inputs(
+        output,
+        requests=[request2],
+        expected_encoder_inputs=[[1, 2]],
+        expected_total_reqs=1,
+    )
+
+
+@pytest.mark.parametrize("cache_exist", ["local", "connector_only", "no_where"])
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_schedule_multiple_requests(cache_exist, use_kv_connector):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_seqs=10,  # allow multiple requests
+        max_num_batched_tokens=2048,
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+    mm_hashes_list = [[f"hash_{i}"] for i in range(10)]
+    mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]
+    requests = create_requests(
+        num_requests=10,
+        num_tokens=200,
+        mm_hashes_list=mm_hashes_list,
+        mm_positions=mm_positions,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    # Set up to test different encoder cache exsistence scenario after preemption
+    # Order of getting encoder cache should be: local cache -> connector-> compute
+    scheduler.ec_connector.update_state_after_alloc = Mock(
+        wraps=scheduler.ec_connector.update_state_after_alloc
+    )
+
+    if cache_exist == "local":
+        # Allocate cache to cache manager manually to mimick
+        for req in requests:
+            scheduler.encoder_cache_manager.allocate(req, 0)
+    else:
+        # Make sure local encoder cache empty
+        scheduler.encoder_cache_manager.cached = {}
+
+    if cache_exist == "connector_only":
+        # Cache exist in ec_connector
+        scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    elif cache_exist == "no_where":
+        scheduler.ec_connector.has_caches = Mock(return_value=[False])
+
+    output = scheduler.schedule()
+    assert len(output.scheduled_new_reqs) == len(requests)
+    assert output.scheduled_cached_reqs.num_reqs == 0
+    assert len(output.finished_req_ids) == 0
+    for req_id, num_tokens in output.num_scheduled_tokens.items():
+        assert num_tokens == len(requests[int(req_id)].prompt_token_ids)
+
+    ## Encoder-cache-specific checks:
+    # mm_hashes of requests exist in cache after scheduling for all scenario
+    _assert_right_encoder_cache_allocated(scheduler, requests=requests)
+
+    # Should only call update_state_after_alloc when loaded externally
+    if cache_exist == "connector_only":
+        scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+            requests[-1], 0
+        )
+
+        # Concat mm_features for the 10 requests together
+        mm_features_list = [feature for req in requests for feature in req.mm_features]
+
+        # Check metadata should contain mm data for all 10 requests
+        _assert_right_ec_connector_metadata(output, mm_features_list=mm_features_list)
+    else:
+        scheduler.ec_connector.update_state_after_alloc.assert_not_called()
+        # ECConnector should carry no metadata
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
+
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # Should only schedule encoder input when cache is not found anywhere
+    if cache_exist == "no_where":
+        _assert_right_encoder_inputs(
+            output,
+            requests=requests,
+            expected_encoder_inputs=[[0] for _ in range(10)],
+            expected_total_reqs=10,
+        )
+    else:
+        _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_unable_to_allocate(use_kv_connector):
+    """
+    Test whether scheduler with ECConnector is able to handle
+    unable to allocate (run out of blocks).
+    """
+
+    # Setup Scheduler With Mock External Cache Hit.
+    BLOCK_SIZE = 4
+    NUM_BLOCKS = 10
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        block_size=BLOCK_SIZE,
+        num_blocks=NUM_BLOCKS,
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    # Mock ec_connector load external cache behavior
+    scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    scheduler.ec_connector.update_state_after_alloc = Mock(
+        wraps=scheduler.ec_connector.update_state_after_alloc
+    )
+
+    # Create two requests. The second request will not be able to
+    # allocate slots because it will not have enough blocks.
+    NUM_REQUESTS = 2
+    NUM_TOKENS = (NUM_BLOCKS // 2 + 1) * BLOCK_SIZE
+    MAX_TOKENS = 2
+    requests = create_requests(
+        num_requests=NUM_REQUESTS,
+        num_tokens=NUM_TOKENS,
+        mm_hashes_list=[["hash_1"], ["hash_2"]],
+        mm_positions=[
+            [PlaceholderRange(offset=1, length=10)] for _ in range(NUM_REQUESTS)
+        ],
+        max_tokens=MAX_TOKENS,
+        block_size=BLOCK_SIZE,
+    )
+    req_ids = []
+    req_to_index = {}
+    for i, request in enumerate(requests):
+        scheduler.add_request(request)
+        req_ids.append(request.request_id)
+        req_to_index[request.request_id] = i
+
+    # Setup MODEL_RUNNER_OUTPUT to be run in _step_until_done later
+    MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index=req_to_index,
+        sampled_token_ids=[[1000]] * len(req_ids),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Just one request should be running.
+    output = scheduler.schedule()
+    scheduled_tokens = output.num_scheduled_tokens[scheduler.running[0].request_id]
+    assert scheduled_tokens == NUM_TOKENS
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 1
+
+    # Should have called update_state_after_alloc for external load
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+        scheduler.running[0], 0
+    )
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # All memory should be freed, with one request waiting.
+    _step_until_done(scheduler, output, MODEL_RUNNER_OUTPUT)
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == NUM_BLOCKS - 1
+    assert len(scheduler.running) == 0
+    assert len(scheduler.waiting) == 1
+
+    # Just one request should be running.
+    output = scheduler.schedule()
+    scheduled_tokens = output.num_scheduled_tokens[scheduler.running[0].request_id]
+    assert scheduled_tokens == NUM_TOKENS
+    assert len(scheduler.running) == 1
+    assert len(scheduler.waiting) == 0
+
+    # update_state_after_alloc should be called for loading external cache
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+        scheduler.running[0], 0
+    )
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # All memory should be freed, with no requests waiting / running.
+    _step_until_done(scheduler, output, MODEL_RUNNER_OUTPUT)
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == NUM_BLOCKS - 1
+    assert len(scheduler.running) == 0
+    assert len(scheduler.waiting) == 0
+
+
+@pytest.mark.parametrize("cache_exist", ["local", "connector_only", "no_where"])
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_priority_scheduling_ec_connector_preemption_and_resumption(
+    cache_exist, use_kv_connector
+):
+    """Test that priority scheduling preempts lower priority requests
+    when out of KV cache space."""
+    # Create scheduler with very limited memory to force preemption
+    scheduler = create_scheduler_with_priority(
+        model="llava-hf/llava-1.5-7b-hf",
+        enable_prefix_caching=True,
+        max_num_seqs=2,  # allow multiple requests
+        # kv connector should not effect test results
+        use_kv_connector=use_kv_connector,
+        num_blocks=15,  # can hold 244 tokens with 14 blocks (first block is null)
+        block_size=16,  # standard block size
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    # Mock cache hit: Both cache exist in connector (at E->PD initially)
+    scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    scheduler.ec_connector.update_state_after_alloc = Mock(
+        wraps=scheduler.ec_connector.update_state_after_alloc
+    )
+
+    # Create a request and schedule it (and to be preempted)
+    request_low = create_requests_with_priority(
+        num_requests=1,
+        priorities=[1],
+        arrival_times=[0.0],
+        num_tokens=94,
+        mm_hashes_list=[["hash_low"]],
+        # NOTE: this test only preempt the last block.
+        # Setting mm_position at the last block can force to recompute encoding
+        mm_positions=[[PlaceholderRange(offset=82, length=10)]],
+        starting_idx=0,
+    )[0]
+    scheduler.add_request(request_low)
+    # 1st schedule
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 1
+    scheduled_tokens = output.num_scheduled_tokens[request_low.request_id]
+    assert scheduled_tokens == 94
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 1
+
+    ## Encoder-cache-specific checks:
+    # Encoder cache should contain mm items from request
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request_low])
+
+    # Verify update_state_after_alloc called (external load)
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request_low, 0)
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # ECConnector should carry metadata of request
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=request_low.mm_features
+    )
+
+    # Scheduled encoder input should be empty; no mm to compute
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+    # Simulate model execution - 1st decode
+    model_output = ModelRunnerOutput(
+        req_ids=[request_low.request_id],
+        req_id_to_index={request_low.request_id: 0},
+        sampled_token_ids=[[100]],
+        # spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Create a high priority request and schedule it
+    request_high = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[1.0],
+        num_tokens=128,
+        mm_hashes_list=[["hash_high"]],
+        mm_positions=[[PlaceholderRange(offset=1, length=10)]],
+        max_tokens=2,
+        starting_idx=1,
+    )[0]
+    scheduler.add_request(request_high)
+    # 2nd schedule
+    output = scheduler.schedule()
+
+    # KV cache should be full at this point
+    assert scheduler.kv_cache_manager.block_pool.get_num_free_blocks() == 0
+    assert len(output.scheduled_new_reqs) == 1
+    assert output.scheduled_cached_reqs.num_reqs == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 2
+
+    ## Encoder-cache-specific checks:
+    # Encoder cache should contain mm items from request
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request_high])
+
+    # Verify update_state_after_alloc called (external load)
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request_high, 0)
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # ECConnector should carry metadata of request
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=request_high.mm_features
+    )
+
+    # Scheduled encoder input should be empty; no mm to compute
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+    # Simulate model execution - 2nd decode
+    requests = [request_low, request_high]
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[100] for _ in requests],
+        # spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # 3rd schedule - - this should trigger preemption
+    # req_low needs 96 tokens = 6 blocks
+    # req_high needs 129 tokens = 9 blocks
+    # so doesn't fit in 14 blocks.
+    output = scheduler.schedule()
+
+    # Should have preempted req_low
+    assert len(output.scheduled_new_reqs) == 0
+    assert output.scheduled_cached_reqs.num_reqs == 1
+    assert output.scheduled_cached_reqs.req_ids[0] == request_high.request_id
+    assert scheduler.requests[request_low.request_id].status == RequestStatus.PREEMPTED
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.running) == 1
+
+    ## Encoder-cache-specific checks:
+    # request_high is in decode phase now
+    # ECConnector should carry no metadata
+    _assert_right_ec_connector_metadata(output, mm_features_list=[])
+
+    # Scheduled encoder input should be empty; no mm to compute
+    _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+    # Simulate model execution - 3rd decode, after req_low was preempted
+    requests = [request_low, request_high]
+    model_output = ModelRunnerOutput(
+        req_ids=[req.request_id for req in requests],
+        req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
+        sampled_token_ids=[[100], [100, 200]],
+        # spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    # Finish the requests to make room for the preempted requests to resume
+    # req_high is finished after outputing 2 tokens
+    scheduler.update_from_output(output, model_output)
+    scheduler.finish_requests(
+        request_high.request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+    )
+
+    # Set up to test different encoder cache exsistence scenario after preemption
+    # Order of getting encoder cache should be: local cache -> connector-> compute
+    # By default, the cache should still exist in local in this test case
+    if cache_exist != "local":
+        # Make local encoder cache empty
+        scheduler.encoder_cache_manager.cached = {}
+
+    if cache_exist == "connector_only":
+        # Cache exist in ec_connector
+        scheduler.ec_connector.has_caches = Mock(return_value=[True])
+    elif cache_exist == "no_where":
+        scheduler.ec_connector.has_caches = Mock(return_value=[False])
+
+    # 4th Schedule - this should trigger req_low resumption from waiting
+    output = scheduler.schedule()
+    scheduled_cached_reqs = output.scheduled_cached_reqs
+    resumed_from_preemption = scheduled_cached_reqs.resumed_from_preemption
+
+    assert len(output.scheduled_new_reqs) == 0
+    assert scheduled_cached_reqs.num_reqs == 1
+    assert len(scheduler.waiting) == 0
+    assert len(scheduler.running) == 1
+
+    # Preempted request resumed in scheduled_cached_reqs
+    assert len(resumed_from_preemption) == 1
+    assert len(scheduled_cached_reqs.resumed_req_token_ids) == 1
+    assert resumed_from_preemption[0]
+    assert scheduled_cached_reqs.req_ids[0] == request_low.request_id
+    assert scheduled_cached_reqs.resumed_req_token_ids[0] is not None
+    ## Resumed tokens include 94 prompt tokens and 2 decoded tokens
+    assert len(scheduled_cached_reqs.resumed_req_token_ids[0]) == 96
+    assert scheduled_cached_reqs.resumed_req_token_ids[0][95] == 100
+    assert scheduler.running[0].request_id == request_low.request_id
+    assert request_high.request_id in output.finished_req_ids
+
+    ## Encoder-cache-specific checks:
+    # mm_hash of request_low exists in cache after scheduling for all scenario
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request_low])
+
+    # Should only call update_state_after_alloc when loaded externally
+    if cache_exist == "connector_only":
+        scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+            request_low, 0
+        )
+        _assert_right_ec_connector_metadata(
+            output, mm_features_list=request_low.mm_features
+        )
+    else:
+        scheduler.ec_connector.update_state_after_alloc.assert_not_called()
+        # ECConnector should carry no metadata
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
+
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # Should only schedule encoder input when cache is not found anywhere
+    if cache_exist == "no_where":
+        _assert_right_encoder_inputs(
+            output,
+            requests=[request_low],
+            expected_encoder_inputs=[[0]],
+            expected_total_reqs=1,
+        )
+    else:
+        _assert_right_encoder_inputs(output, expected_total_reqs=0)
+
+
+@pytest.mark.parametrize("use_kv_connector", [False, True])
+def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connector):
+    """
+    Scenario:
+      - Encoder cache size: 32
+      - Request A: 1 feature (12 tokens) → NOT cached remotely.
+      - Request B: 3 features (3 x 10 tokens) → ALL cached remotely.
+
+    Steps:
+      1. Schedule Request A (locally uses 12 tokens).
+      2. Schedule Request B (remote cache) - only schedule 1st and 2nd
+      3. Free A's cache, then schedule B again (continuation) - schedule 3rd image
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_prefix_caching=True,
+        use_kv_connector=use_kv_connector,
+        block_size=16,
+        num_blocks=11,  # Can hold 160 tokens (first block is null)
+        use_ec_connector=True,
+        ec_role="ec_consumer",
+    )
+
+    # Limit the number of availiable slots of EncoderCacheManager
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=32)
+
+    # Create MM request1
+    NUM_TOKENS_1 = 50  # NOTE: includes mm tokens
+    NUM_ENCODER_TOKENS_1 = 12
+    mm_hashes_list_1 = [["hash1_1"]]
+    mm_positions_1 = [[PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS_1)]]
+
+    request1 = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS_1,
+        mm_hashes_list=mm_hashes_list_1,
+        mm_positions=mm_positions_1,
+        max_tokens=1,  # For simplicity
+        req_ids=["req1"],
+    )[0]
+
+    # Create MM request1 with 3 MM items
+    NUM_TOKENS_2 = 40
+    NUM_ENCODER_TOKENS_2 = 10
+    mm_hashes_list_2 = [["hash2_1", "hash2_2", "hash2_3"]]
+    mm_positions_2 = [
+        [
+            PlaceholderRange(offset=0, length=NUM_ENCODER_TOKENS_2),
+            PlaceholderRange(offset=12, length=NUM_ENCODER_TOKENS_2),
+            PlaceholderRange(offset=24, length=NUM_ENCODER_TOKENS_2),
+        ]
+    ]
+
+    request2 = create_requests(
+        num_requests=1,
+        num_tokens=NUM_TOKENS_2,
+        mm_hashes_list=mm_hashes_list_2,
+        mm_positions=mm_positions_2,
+        max_tokens=10,
+        req_ids=["req2"],
+    )[0]
+
+    # Mock cache hit: MM of request1 NOT cached remotely, request2 cached remotely
+    scheduler.ec_connector.has_caches = Mock(
+        side_effect=lambda req: [True, True, True] if req == request2 else [False]
+    )
+    scheduler.ec_connector.update_state_after_alloc = Mock(
+        wraps=scheduler.ec_connector.update_state_after_alloc
+    )
+
+    scheduler.add_request(request1)
+    scheduler.add_request(request2)
+    output = scheduler.schedule()
+
+    # Now, since encoder cache manager can only store 32 tokens
+    # It should allocated mm item hash1_1, hash2_1 and hash2_2
+    scheduled_tokens = output.num_scheduled_tokens[request1.request_id]
+    assert scheduled_tokens == NUM_TOKENS_1
+    assert scheduler.get_num_unfinished_requests() == 2
+
+    # Encoder cache should contain mm item from request1
+    _assert_right_encoder_cache_allocated(
+        scheduler, hashes_to_check=["hash1_1", "hash2_1", "hash2_2"]
+    )
+
+    # request2's 2nd mm item is the last call of update_state_after_alloc
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request2, 1)
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # ECConnector should carry metadata of hash2_1 and hash2_2 ONLY
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=[request2.mm_features[0], request2.mm_features[1]]
+    )
+
+    # Should schedule ONLY 1 encoder input
+    _assert_right_encoder_inputs(
+        output,
+        requests=[request1],
+        expected_encoder_inputs=[[0]],  # index 0 of the mm item of request1
+        expected_total_reqs=1,
+    )
+
+    # Simulate model execution 1 step
+    model_output = ModelRunnerOutput(
+        req_ids=[request1.request_id, request2.request_id],
+        req_id_to_index={request1.request_id: 0, request2.request_id: 1},
+        sampled_token_ids=[[100], [121]],
+        # spec_token_ids=None,
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # request1 is finished after outputing 1 token
+    # Finish request
+    scheduler.finish_requests(request1.request_id, RequestStatus.FINISHED_LENGTH_CAPPED)
+    assert scheduler.get_num_unfinished_requests() == 1
+
+    # Schedule again; Now request1's encoder cache should be freed
+    # -> hash2_3 can be scheduled and allocated
+    output = scheduler.schedule()
+
+    # Check
+    # Should schedule all tokens
+    scheduled_tokens = output.num_scheduled_tokens[request2.request_id]
+    print(f"Hero: scheduled_tokens for req2: {scheduled_tokens}")
+    print(f"hero: num_scheduled_tokens 2: {output.num_scheduled_tokens}")
+
+    # Encoder cache should contain all mm items from request2
+    _assert_right_encoder_cache_allocated(scheduler, requests=[request2])
+
+    # request2's 3rd mm item is the ONLY call of update_state_after_alloc
+    scheduler.ec_connector.update_state_after_alloc.assert_called_with(request2, 2)
+    scheduler.ec_connector.update_state_after_alloc.assert_called_once()
+
+    scheduler.ec_connector.update_state_after_alloc.reset_mock()
+
+    # ECConnector should carry metadata for hash2_3 ONLY
+    _assert_right_ec_connector_metadata(
+        output, mm_features_list=[request2.mm_features[2]]
+    )
+
+    # Should schedule no encoder input
+    _assert_right_encoder_inputs(
+        output,
+        expected_total_reqs=0,
+    )
+
+
+# ==============================================================================
+# EPD (Encoder-Prefill-Decode) Encoder-cache-specific tests end
+# ==============================================================================
