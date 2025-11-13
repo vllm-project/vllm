@@ -48,6 +48,7 @@ def _lora_expand_kernel(
     SLICE_NUM: tl.constexpr,
     SAME_STRIDE: tl.constexpr,
     USE_GDC: tl.constexpr,
+    launch_pdl: tl.constexpr,
 ):
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
