@@ -1006,8 +1006,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
 
     def maybe_make_prepare_finalize(self) -> mk.FusedMoEPrepareAndFinalize | None:
         if (
-            self.rocm_aiter_moe_enabled
-            or self.use_marlin
+            self.use_marlin
             or self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
         ):
             return None
@@ -1026,14 +1025,13 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ) -> FusedMoEPermuteExpertsUnpermute:
         from vllm.model_executor.layers.fused_moe import (
+            AiterExperts,
             BatchedDeepGemmExperts,
             BatchedTritonExperts,
             TritonOrDeepGemmExperts,
         )
 
-        assert not self.use_marlin and not self.rocm_aiter_moe_enabled, (
-            "Marlin and ROCm AITER are not supported with all2all yet."
-        )
+        assert not self.use_marlin, "Marlin is not supported with all2all yet."
 
         assert self.moe_quant_config is not None
 
@@ -1058,6 +1056,15 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             return experts_impl(
                 max_num_tokens=max_num_tokens_per_rank,
                 num_dispatchers=prepare_finalize.num_dispatchers(),
+                quant_config=self.moe_quant_config,
+            )
+        elif self.rocm_aiter_moe_enabled:
+            logger.debug(
+                "AiterExperts(%s): per_act_token=%s",
+                self.__class__.__name__,
+                False,
+            )
+            return AiterExperts(
                 quant_config=self.moe_quant_config,
             )
 

@@ -123,6 +123,7 @@ class ParallelConfig:
             "pplx",
             "deepep_high_throughput",
             "deepep_low_latency",
+            "mori",
             "allgather_reducescatter",
             "flashinfer_all2allv",
         ]
@@ -135,6 +136,7 @@ class ParallelConfig:
     - "pplx": Use pplx kernels
     - "deepep_high_throughput": Use deepep high-throughput kernels
     - "deepep_low_latency": Use deepep low-latency kernels
+    - "mori": Use mori kernels
     - "flashinfer_all2allv": Use flashinfer alltoallv kernels for mnnvl"""
     num_redundant_experts: int | None = None
     """`num_redundant_experts` is deprecated and has been replaced with
@@ -381,6 +383,7 @@ class ParallelConfig:
                 "naive",
                 "deepep_high_throughput",
                 "deepep_low_latency",
+                "mori",
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
