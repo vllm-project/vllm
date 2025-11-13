@@ -14,7 +14,10 @@ import torch.nn as nn
 from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 
 if is_flash_attn_varlen_func_available():
-    from vllm.attention.utils.fa_utils import flash_attn_varlen_func
+    from vllm.attention.utils.fa_utils import (
+        flash_attn_varlen_func,
+        reshape_and_cache_flash,
+    )
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -62,6 +65,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         dropout: float = 0.0,
         scale: float | None = None,
         causal: bool = True,
+        prefix: str = "",
     ):
         super().__init__()
 
@@ -91,107 +95,149 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         # Output projection
         self.o_proj = nn.Linear(num_heads * self.head_dim, hidden_size, bias=False)
 
+        # KV cache - will be populated by vLLM during model loading
+        # For V1 engine, this is a list[torch.Tensor] indexed by virtual_engine
+        self.kv_cache: list[torch.Tensor] | None = None
+
+        # Register layer in vLLM's static forward context for KV cache detection
+        if prefix:
+            from vllm.config import get_current_vllm_config
+
+            compilation_config = get_current_vllm_config().compilation_config
+            if prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            compilation_config.static_forward_context[prefix] = self
+            self.layer_name = prefix
+
     def forward(
         self,
         hidden_states: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        cu_seqlens_q: torch.Tensor | None = None,
-        cu_seqlens_k: torch.Tensor | None = None,
-        max_seqlen_q: int | None = None,
-        max_seqlen_k: int | None = None,
         **kwargs,  # Accept any additional vLLM-specific kwargs
     ) -> torch.Tensor:
         """
         Forward pass with flash attention.
 
+        Supports both training (full sequences) and vLLM inference (with KV cache).
+
         Args:
-            hidden_states: Input tensor of shape [batch, seq_len, hidden_size]
+            hidden_states: Input tensor of shape [total_tokens, hidden_size]
             attention_mask: Optional attention mask (not yet fully supported)
-            cu_seqlens_q: Optional cumulative sequence lengths for queries (for vLLM varlen)
-            cu_seqlens_k: Optional cumulative sequence lengths for keys (for vLLM varlen)
-            max_seqlen_q: Optional max sequence length for queries (for vLLM varlen)
-            max_seqlen_k: Optional max sequence length for keys (for vLLM varlen)
+            **kwargs: Additional vLLM-specific kwargs (intermediate_tensors, etc.)
 
         Returns:
-            output: Attention output of shape [batch, seq_len, hidden_size]
+            output: Attention output of same shape as hidden_states
         """
-        batch_size, seq_len, _ = hidden_states.shape
+        total_tokens = hidden_states.shape[0]
 
         # Project to Q, K, V
         qkv = self.qkv(hidden_states)
 
         # Split into Q, K, V
-        # qkv shape: [batch, seq_len, (num_heads + 2*num_kv_heads) * head_dim]
+        # qkv shape: [total_tokens, (num_heads + 2*num_kv_heads) * head_dim]
         q_size = self.num_heads * self.head_dim
         k_size = self.num_kv_heads * self.head_dim
         v_size = self.num_kv_heads * self.head_dim
 
-        q = qkv[:, :, :q_size]
-        k = qkv[:, :, q_size : q_size + k_size]
-        v = qkv[:, :, q_size + k_size : q_size + k_size + v_size]
+        q = qkv[:, :q_size]
+        k = qkv[:, q_size : q_size + k_size]
+        v = qkv[:, q_size + k_size : q_size + k_size + v_size]
 
-        # Reshape for attention: [batch, seq_len, num_heads, head_dim]
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        # Reshape for attention: [total_tokens, num_heads, head_dim]
+        q = q.view(total_tokens, self.num_heads, self.head_dim)
+        k = k.view(total_tokens, self.num_kv_heads, self.head_dim)
+        v = v.view(total_tokens, self.num_kv_heads, self.head_dim)
 
-        # Use different paths for training vs inference:
-        # - Training: Use PyTorch SDPA (has full backward support)
-        # - Inference: Use FA v3 (faster, avoids PTX issues)
+        # Try vLLM KV-cached path first (for inference performance)
+        if not self.training and self.kv_cache is not None:
+            try:
+                from vllm.forward_context import get_forward_context
+
+                forward_ctx = get_forward_context()
+
+                # Get attention metadata for this layer
+                # V1 engine: attn_metadata is a dict[layer_name, metadata]
+                # Get the first available metadata
+                # (all layers share same metadata for this model)
+                if (
+                    isinstance(forward_ctx.attn_metadata, dict)
+                    and len(forward_ctx.attn_metadata) > 0
+                ):
+                    attn_meta = next(iter(forward_ctx.attn_metadata.values()))
+                    kv_cache = self.kv_cache[forward_ctx.virtual_engine]
+
+                    # Cache K and V using vLLM's caching function
+                    # For non-quantized cache, k_scale and v_scale are 1.0
+                    from vllm.config import get_current_vllm_config
+
+                    current_config = get_current_vllm_config()
+                    kv_cache_dtype = current_config.cache_config.cache_dtype
+
+                    reshape_and_cache_flash(
+                        k,
+                        v,
+                        kv_cache[0],  # key cache
+                        kv_cache[1],  # value cache
+                        attn_meta.slot_mapping,
+                        kv_cache_dtype,
+                        k_scale=torch.tensor(1.0, dtype=torch.float32, device=k.device),
+                        v_scale=torch.tensor(1.0, dtype=torch.float32, device=v.device),
+                    )
+
+                    # Use flash attention with KV cache
+                    attn_output = torch.ops.vllm.flash_attn_varlen_func(
+                        q=q,
+                        k=kv_cache[0],  # Cached keys
+                        v=kv_cache[1],  # Cached values
+                        cu_seqlens_q=attn_meta.query_start_loc,
+                        # For self-attention
+                        cu_seqlens_k=attn_meta.query_start_loc,
+                        max_seqlen_q=attn_meta.max_query_len,
+                        max_seqlen_k=attn_meta.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=self.causal,
+                        block_table=attn_meta.block_table,
+                    )
+
+                    # Flatten and project output
+                    attn_output = attn_output.reshape(total_tokens, -1)
+                    return self.o_proj(attn_output)
+            except (ImportError, AssertionError, AttributeError):
+                # Fall through to regular attention if vLLM context not available
+                pass
+
+        # Training mode or fallback: use regular flash attention (no KV cache)
         if not self.training and hidden_states.is_cuda:
-            # Flatten batch dimension for varlen format
-            # flash_attn_varlen_func expects [total_tokens, num_heads, head_dim]
-            q_flat = q.reshape(batch_size * seq_len, self.num_heads, self.head_dim)
-            k_flat = k.reshape(batch_size * seq_len, self.num_kv_heads, self.head_dim)
-            v_flat = v.reshape(batch_size * seq_len, self.num_kv_heads, self.head_dim)
+            # Inference without KV cache: use flash attention varlen
+            # Create simple cu_seqlens for single sequence
+            cu_seqlens_q = torch.tensor(
+                [0, total_tokens],
+                dtype=torch.int32,
+                device=hidden_states.device,
+            )
 
-            # Use provided cu_seqlens if available (for vLLM dynamic batching)
-            # Otherwise create equal-length cu_seqlens for standard training
-            if cu_seqlens_q is not None:
-                # vLLM is providing variable-length sequence info
-                _cu_seqlens_q = cu_seqlens_q
-                _cu_seqlens_k = (
-                    cu_seqlens_k if cu_seqlens_k is not None else cu_seqlens_q
-                )
-                _max_seqlen_q = max_seqlen_q if max_seqlen_q is not None else seq_len
-                _max_seqlen_k = max_seqlen_k if max_seqlen_k is not None else seq_len
-            else:
-                # Standard training: assume all sequences have same length
-                _cu_seqlens_q = torch.arange(
-                    0,
-                    (batch_size + 1) * seq_len,
-                    step=seq_len,
-                    dtype=torch.int32,
-                    device=hidden_states.device,
-                )
-                _cu_seqlens_k = _cu_seqlens_q
-                _max_seqlen_q = seq_len
-                _max_seqlen_k = seq_len
-
-            # Call flash attention varlen func
-            # This supports backprop automatically via autograd
-            # Force FA v3 to avoid PTX compilation issues
             attn_output = flash_attn_varlen_func(
-                q=q_flat,
-                k=k_flat,
-                v=v_flat,
-                cu_seqlens_q=_cu_seqlens_q,
-                cu_seqlens_k=_cu_seqlens_k,
-                max_seqlen_q=_max_seqlen_q,
-                max_seqlen_k=_max_seqlen_k,
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=cu_seqlens_q,
+                cu_seqlens_k=cu_seqlens_q,
+                max_seqlen_q=total_tokens,
+                max_seqlen_k=total_tokens,
                 softmax_scale=self.scale,
                 causal=self.causal,
-                dropout_p=self.dropout if self.training else 0.0,
+                dropout_p=0.0,
                 fa_version=3,
             )
-
-            # Reshape back: [batch, seq_len, num_heads, head_dim]
-            attn_output = attn_output.view(
-                batch_size, seq_len, self.num_heads, self.head_dim
-            )
-
         else:
-            # CPU or evaluation mode: use PyTorch's SDPA as fallback
+            # Training mode with CPU: use PyTorch SDPA
+            batch_size = 1
+            seq_len = total_tokens
+
+            q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
+            k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+            v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+
             q = q.transpose(1, 2)  # [batch, num_heads, seq_len, head_dim]
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
@@ -211,12 +257,13 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                 is_causal=self.causal and attention_mask is None,
             )
 
-            attn_output = attn_output.transpose(
-                1, 2
-            )  # Back to [batch, seq_len, heads, dim]
+            attn_output = attn_output.transpose(1, 2)  # [batch, seq_len, heads, dim]
+            attn_output = attn_output.reshape(
+                total_tokens, self.num_heads, self.head_dim
+            )
 
         # Flatten heads and project output
-        attn_output = attn_output.reshape(batch_size, seq_len, -1)
+        attn_output = attn_output.reshape(total_tokens, -1)
         output = self.o_proj(attn_output)
 
         return output
@@ -230,7 +277,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         this layer manages its own attention computation.
         """
         # Import here to avoid circular dependency
-        from vllm.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
         return FlashAttentionBackend
 

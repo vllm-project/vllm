@@ -84,7 +84,7 @@ class MegatronTransformer(nn.Module):
             use_cpu_initialization=True,
         )
 
-        for _ in range(num_layers):
+        for i in range(num_layers):
             # Build transformer layer with vLLM attention + Megatron MLP
             layer = nn.ModuleDict(
                 {
@@ -96,6 +96,8 @@ class MegatronTransformer(nn.Module):
                         num_heads=num_attention_heads,
                         dropout=0.0,
                         causal=True,
+                        # Register layer name for vLLM KV cache
+                        prefix=f"layers.{i}.attn",
                     ),
                     "attn_norm": nn.LayerNorm(hidden_size),
                     # === MLP BLOCK ===
@@ -137,17 +139,29 @@ class MegatronTransformer(nn.Module):
         input_ids: torch.Tensor,
         **kwargs,
     ) -> torch.Tensor:
-        """Required by vLLM."""
-        # Handle both 2D [batch, seq_len] and 1D [total_tokens] input shapes
-        if input_ids.dim() == 1:
-            # V1 engine passes flattened tokens
-            input_ids = input_ids.unsqueeze(0)  # [total_tokens] -> [1, total_tokens]
+        """Required by vLLM.
+
+        Args:
+            input_ids: Token IDs, shape [total_tokens] for V1 or [batch, seq_len] for V0
+            **kwargs: Additional vLLM kwargs (intermediate_tensors, etc.)
+
+        Returns:
+            hidden_states: Shape [total_tokens, hidden_size]
+        """
+        # vLLM V1 passes flattened tokens: [total_tokens]
+        # vLLM V0 passes batched tokens: [batch, seq_len]
+        # Embeddings support both, so we can pass input_ids directly
 
         # Clamp input_ids to valid range for embedding lookup
         # (warmup may pass out-of-bounds values)
         input_ids = input_ids.clamp(0, self.vocab_size - 1)
 
         hidden_states = self.embeddings(input_ids)
+
+        # Ensure flattened format: [total_tokens, hidden_size]
+        if hidden_states.dim() == 3:
+            # [batch, seq_len, hidden_size] -> [total_tokens, hidden_size]
+            hidden_states = hidden_states.view(-1, self.hidden_size)
 
         for layer_idx, layer in enumerate(self.layers):
             # === ATTENTION BLOCK ===
@@ -174,12 +188,7 @@ class MegatronTransformer(nn.Module):
 
         hidden_states = self.final_norm(hidden_states)
 
-        # CRITICAL: vLLM V1 expects [total_num_tokens, hidden_size]
-        # NOT [batch, seq_len, hidden_size]
-        # Flatten the output if it's 3D
-        if hidden_states.dim() == 3:
-            hidden_states = hidden_states.view(-1, self.hidden_size)
-
+        # Output shape: [total_tokens, hidden_size]
         return hidden_states
 
     def compute_logits(
@@ -220,7 +229,8 @@ class MegatronTransformer(nn.Module):
                 tp_rank = vllm_parallel_state.get_tensor_model_parallel_rank()
                 print(f"[Worker] Sharding weights for TP rank {tp_rank}/{self.tp_size}")
 
-                # Shard the fc1 (ColumnParallelLinear) and fc2 (RowParallelLinear) weights
+                # Shard the fc1 (ColumnParallelLinear) and
+                # fc2 (RowParallelLinear) weights
                 sharded_state_dict = {}
                 for key, value in state_dict.items():
                     if ".fc1.weight" in key:
@@ -232,7 +242,8 @@ class MegatronTransformer(nn.Module):
                         end = (tp_rank + 1) * chunk_size
                         sharded_state_dict[key] = value[start:end, :].clone()
                         print(
-                            f"[Worker] Sharding {key}: {value.shape} -> {sharded_state_dict[key].shape}"
+                            f"[Worker] Sharding {key}: "
+                            f"{value.shape} -> {sharded_state_dict[key].shape}"
                         )
                     elif ".fc2.weight" in key:
                         # RowParallelLinear: split input dimension (dim 1)
@@ -243,7 +254,8 @@ class MegatronTransformer(nn.Module):
                         end = (tp_rank + 1) * chunk_size
                         sharded_state_dict[key] = value[:, start:end].clone()
                         print(
-                            f"[Worker] Sharding {key}: {value.shape} -> {sharded_state_dict[key].shape}"
+                            f"[Worker] Sharding {key}: "
+                            f"{value.shape} -> {sharded_state_dict[key].shape}"
                         )
                     else:
                         # Non-sharded weights (embeddings, LayerNorm, lm_head, etc.)
@@ -254,7 +266,9 @@ class MegatronTransformer(nn.Module):
             # Check lm_head before loading
             lm_head_before = self.lm_head.weight.data.clone()
             print(
-                f"[Worker] lm_head BEFORE load: mean={lm_head_before.mean().item():.6f}, std={lm_head_before.std().item():.6f}"
+                f"[Worker] lm_head BEFORE load: "
+                f"mean={lm_head_before.mean().item():.6f}, "
+                f"std={lm_head_before.std().item():.6f}"
             )
 
             # Load and check what matched
@@ -265,19 +279,25 @@ class MegatronTransformer(nn.Module):
             # Check lm_head after loading
             lm_head_after = self.lm_head.weight.data
             print(
-                f"[Worker] lm_head AFTER load: mean={lm_head_after.mean().item():.6f}, std={lm_head_after.std().item():.6f}"
+                f"[Worker] lm_head AFTER load: "
+                f"mean={lm_head_after.mean().item():.6f}, "
+                f"std={lm_head_after.std().item():.6f}"
             )
             print(
-                f"[Worker] lm_head changed: {not torch.equal(lm_head_before, lm_head_after)}"
+                f"[Worker] lm_head changed: "
+                f"{not torch.equal(lm_head_before, lm_head_after)}"
             )
 
             # Check against reference
             ref_lm_head = state_dict["lm_head.weight"]
             print(
-                f"[Worker] Reference lm_head: mean={ref_lm_head.mean().item():.6f}, std={ref_lm_head.std().item():.6f}"
+                f"[Worker] Reference lm_head: "
+                f"mean={ref_lm_head.mean().item():.6f}, "
+                f"std={ref_lm_head.std().item():.6f}"
             )
             print(
-                f"[Worker] lm_head matches reference: {torch.equal(lm_head_after, ref_lm_head)}"
+                f"[Worker] lm_head matches reference: "
+                f"{torch.equal(lm_head_after, ref_lm_head)}"
             )
 
             if len(result.missing_keys) == 0 and len(result.unexpected_keys) == 0:
@@ -465,28 +485,38 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
         input_tensor = torch.tensor([input_ids], dtype=torch.long, device="cuda")
 
         print(
-            f"[Reference] Input shape: {input_tensor.shape}, values: {input_tensor[0].tolist()}"
+            f"[Reference] Input shape: {input_tensor.shape}, "
+            f"values: {input_tensor[0].tolist()}"
         )
         print(
-            f"[Reference] lm_head weight sample [0,:5]: {model.lm_head.weight[0, :5].tolist()}"
+            f"[Reference] lm_head weight sample [0,:5]: "
+            f"{model.lm_head.weight[0, :5].tolist()}"
         )
         print(
-            f"[Reference] lm_head weight sample [511,:5]: {model.lm_head.weight[511, :5].tolist()}"
+            f"[Reference] lm_head weight sample [511,:5]: "
+            f"{model.lm_head.weight[511, :5].tolist()}"
         )
 
         hidden_states = model(input_tensor)
         print(f"[Reference] Hidden states shape: {hidden_states.shape}")
         print(
-            f"[Reference] Hidden states (last token): mean={hidden_states[-1].mean().item():.6f}, std={hidden_states[-1].std().item():.6f}"
+            f"[Reference] Hidden states (last token): "
+            f"mean={hidden_states[-1].mean().item():.6f}, "
+            f"std={hidden_states[-1].std().item():.6f}"
         )
         print(
-            f"[Reference] Hidden states (last token, first 5 dims): {hidden_states[-1, :5].tolist()}"
+            f"[Reference] Hidden states (last token, first 5 dims): "
+            f"{hidden_states[-1, :5].tolist()}"
         )
 
         logits = model.compute_logits(hidden_states)
         print(f"[Reference] Logits shape: {logits.shape}")
         print(
-            f"[Reference] Logits (last token) stats: mean={logits[-1].mean().item():.6f}, std={logits[-1].std().item():.6f}, min={logits[-1].min().item():.6f}, max={logits[-1].max().item():.6f}"
+            f"[Reference] Logits (last token) stats: "
+            f"mean={logits[-1].mean().item():.6f}, "
+            f"std={logits[-1].std().item():.6f}, "
+            f"min={logits[-1].min().item():.6f}, "
+            f"max={logits[-1].max().item():.6f}"
         )
         print(f"[Reference] Logit for token 377: {logits[-1, 377].item():.6f}")
         print(f"[Reference] Logit for token 511: {logits[-1, 511].item():.6f}")
@@ -502,7 +532,8 @@ def run_reference_forward(config_dict, input_ids, seed=42, save_weights_path=Non
 
     # Test full model backward pass (attention + MLP)
     print(
-        "[Training] Testing full model backward pass (TrainableFlashAttention + Megatron MLP)..."
+        "[Training] Testing full model backward pass "
+        "(TrainableFlashAttention + Megatron MLP)..."
     )
 
     # Create a dummy input matching the model's expected format
@@ -722,7 +753,8 @@ if __name__ == "__main__":
             print(f"  - Reference logit for this token: {vllm_token_ref_logit:.4f}")
             if logprobs:
                 print(
-                    f"  - vLLM log probability: {logprobs[single_query_token].logprob:.4f}"
+                    f"  - vLLM log probability: "
+                    f"{logprobs[single_query_token].logprob:.4f}"
                 )
 
             # Validate: vLLM token should be in top-K reference tokens
@@ -731,7 +763,8 @@ if __name__ == "__main__":
                 rank = topk_tokens.index(single_query_token) + 1
                 print("\n✅ VALIDATION PASSED!")
                 print(
-                    f"   vLLM token {single_query_token} is in reference top-{K} (rank {rank})"
+                    f"   vLLM token {single_query_token} is in reference "
+                    f"top-{K} (rank {rank})"
                 )
                 if single_query_token == reference_greedy:
                     print("   ✨ Exact match with reference greedy token!")
@@ -739,10 +772,12 @@ if __name__ == "__main__":
                 print("\n❌ VALIDATION FAILED!")
                 print(f"   vLLM token {single_query_token} NOT in reference top-{K}")
                 print(
-                    "   This suggests a correctness issue (not just numerical differences)"
+                    "   This suggests a correctness issue "
+                    "(not just numerical differences)"
                 )
                 raise AssertionError(
-                    f"vLLM output ({single_query_token}) not in reference top-{K} tokens {topk_tokens}"
+                    f"vLLM output ({single_query_token}) not in reference "
+                    f"top-{K} tokens {topk_tokens}"
                 )
 
         print("\n" + "=" * 70)
@@ -775,22 +810,26 @@ if __name__ == "__main__":
             prompt_len = len(batch_prompts[i]["prompt_token_ids"])
             batch_generated_id = output.outputs[0].token_ids[0]
             print(
-                f"  Prompt {i + 1}: {prompt_len} tokens -> generated token {batch_generated_id}"
+                f"  Prompt {i + 1}: {prompt_len} tokens -> "
+                f"generated token {batch_generated_id}"
             )
 
         # Verify the batched result matches the single-query result
         batched_token = batch_outputs[1].outputs[0].token_ids[0]  # Middle prompt
         if batched_token == single_query_token:
             print(
-                f"\n✓ Batched query matches single query! Both generated token {single_query_token}"
+                f"\n✓ Batched query matches single query! Both generated "
+                f"token {single_query_token}"
             )
         else:
             print(
-                f"\n⚠️  Batched token {batched_token} != single query token {single_query_token}"
+                f"\n⚠️  Batched token {batched_token} != single query "
+                f"token {single_query_token}"
             )
 
         print(
-            "\n✓ Dynamic batching works! Sequences of different lengths handled correctly."
+            "\n✓ Dynamic batching works! Sequences of different lengths "
+            "handled correctly."
         )
 
         # Clean up vLLM engine to avoid shutdown errors
