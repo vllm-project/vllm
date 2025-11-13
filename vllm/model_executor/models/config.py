@@ -42,13 +42,11 @@ class GteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rope_parameters = getattr(config, "rope_parameters", None)
         config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": rope_parameters["rope_theta"],
-            "rope_parameters": rope_parameters,
+            "rope_parameters": config.rope_parameters,
         }
 
 
@@ -250,13 +248,11 @@ class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
         config.hidden_act = "geglu"
 
         head_dim = config.hidden_size // config.num_attention_heads
-        rope_parameters = getattr(config, "rope_parameters", None)
         config.rotary_kwargs = {
             "head_size": head_dim,
             "rotary_dim": getattr(config, "rotary_emb_dim", head_dim),
             "max_position": config.max_position_embeddings,
-            "base": rope_parameters["rope_theta"],
-            "rope_parameters": rope_parameters,
+            "rope_parameters": config.rope_parameters,
         }
 
 

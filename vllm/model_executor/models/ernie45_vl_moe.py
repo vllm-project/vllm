@@ -91,9 +91,8 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
+        rope_parameters: dict[str, Any],
         head_dim: int | None = None,
-        rope_theta: float = 500000,
-        rope_parameters: dict[str, Any] | None = None,
         freq_allocation: int = 20,
         max_position_embeddings: int = 131072,
         rms_norm_eps: float = 1e-05,
@@ -126,7 +125,6 @@ class Ernie4_5_VLMoeAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -155,7 +153,7 @@ class Ernie4_5_VLMoeAttention(nn.Module):
             head_size=self.head_dim,
             rotary_dim=self.head_dim,
             max_position_embeddings=max_position_embeddings,
-            base=rope_theta,
+            rope_parameters=rope_parameters,
             is_neox_style=False,
             dtype=torch.get_default_dtype(),
             mrope_section=[h_rope, w_rope, t_rope],
@@ -413,8 +411,6 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 500000)
-        rope_parameters = getattr(config, "rope_parameters", None)
         freq_allocation = getattr(config, "freq_allocation", 20)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
 
@@ -423,8 +419,7 @@ class Ernie4_5_VLMoeDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
             head_dim=getattr(config, "head_dim", None),
-            rope_theta=rope_theta,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             freq_allocation=freq_allocation,
             max_position_embeddings=max_position_embeddings,
             rms_norm_eps=config.rms_norm_eps,

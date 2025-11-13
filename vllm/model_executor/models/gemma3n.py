@@ -340,17 +340,14 @@ class Gemma3nAttention(nn.Module):
         if config.rope_parameters and layer_type in config.rope_parameters:
             # Transformers v5
             rope_parameters = config.rope_parameters[layer_type]
-            base = rope_parameters["rope_theta"]
         else:
             # Transformers v4
+
+            # Global attention. Use the values in config.json.
+            rope_parameters = config.rope_parameters
+            # Local attention. Override the values in config.json.
             if is_sliding:
-                # Local attention. Override the values in config.json.
-                base = config.rope_local_base_freq
-                rope_parameters = {"rope_type": "default"}
-            else:
-                # Global attention. Use the values in config.json.
-                base = config.rope_parameters["rope_theta"]
-                rope_parameters = config.rope_parameters
+                rope_parameters["rope_theta"] = config.rope_local_base_freq
 
         first_kv_shared_layer_idx = (
             config.num_hidden_layers - config.num_kv_shared_layers
@@ -390,9 +387,8 @@ class Gemma3nAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=base,
-            is_neox_style=True,
             rope_parameters=rope_parameters,
+            is_neox_style=True,
         )
 
         self.attn = Attention(

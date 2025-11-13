@@ -163,25 +163,21 @@ class Gemma3Attention(nn.Module):
         if config.rope_parameters and layer_type in config.rope_parameters:
             # Transformers v5
             rope_parameters = config.rope_parameters[layer_type]
-            base = rope_parameters["rope_theta"]
         else:
             # Transformers v4
+
+            # Global attention. Use the values in config.json.
+            rope_parameters = config.rope_parameters
+            # Local attention. Override the values in config.json.
             if self.is_sliding:
-                # Local attention. Override the values in config.json.
-                base = config.rope_local_base_freq
-                rope_parameters = {"rope_type": "default"}
-            else:
-                # Global attention. Use the values in config.json.
-                base = config.rope_parameters["rope_theta"]
-                rope_parameters = config.rope_parameters
+                rope_parameters["rope_theta"] = config.rope_local_base_freq
 
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=base,
-            is_neox_style=True,
             rope_parameters=rope_parameters,
+            is_neox_style=True,
         )
 
         if getattr(config, "is_causal", True):

@@ -111,8 +111,7 @@ class DeepseekAttention(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         hidden_size: int,
         num_heads: int,
-        rope_theta: float = 10000,
-        rope_parameters: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -139,7 +138,6 @@ class DeepseekAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -162,7 +160,6 @@ class DeepseekAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
             rope_parameters=rope_parameters,
         )
         self.attn = Attention(
@@ -409,8 +406,7 @@ class DeepseekV2Attention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_parameters: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -430,7 +426,6 @@ class DeepseekV2Attention(nn.Module):
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         assert topk_indices_buffer is None, (
             "topk_indices_buffer is not \
@@ -492,7 +487,6 @@ class DeepseekV2Attention(nn.Module):
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
             rope_parameters=rope_parameters,
             is_neox_style=False,
         )
@@ -903,8 +897,7 @@ class DeepseekV2MLAAttention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int | None,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
-        rope_parameters: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
@@ -927,7 +920,6 @@ class DeepseekV2MLAAttention(nn.Module):
         self.num_local_heads = num_heads // tp_size
 
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
         if self.q_lora_rank is not None:
@@ -987,7 +979,6 @@ class DeepseekV2MLAAttention(nn.Module):
             qk_rope_head_dim,
             rotary_dim=qk_rope_head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
             rope_parameters=rope_parameters,
             is_neox_style=False,
         )
@@ -1105,7 +1096,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             v_head_dim=v_head_dim,
             q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=kv_lora_rank,
-            rope_theta=config.rope_parameters["rope_theta"],
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
