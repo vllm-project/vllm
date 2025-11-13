@@ -32,7 +32,7 @@ def create_chunked_local_attention_backend(
     underlying_builder = underlying_attn_backend.get_builder_cls()
 
     class ChunkedLocalAttentionBuilder(underlying_builder):  # type: ignore
-        cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+        _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
 
         def build(
             self,

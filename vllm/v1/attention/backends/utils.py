@@ -244,7 +244,8 @@ class AttentionCGSupport(enum.Enum):
 
 class AttentionMetadataBuilder(abc.ABC, Generic[M]):
     # Does this backend/builder support CUDA Graphs for attention (default: no).
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
+    # Do not access directly. Call get_cudagraph_support() instead.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.NEVER
     # Does this backend/builder reorder the batch?
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
@@ -262,6 +263,15 @@ class AttentionMetadataBuilder(abc.ABC, Generic[M]):
         self.layer_names = layer_names
         self.vllm_config = vllm_config
         self.device = device
+
+    @classmethod
+    def get_cudagraph_support(
+        cls: type["AttentionMetadataBuilder"],
+        vllm_config: VllmConfig,
+        kv_cache_spec: AttentionSpec,
+    ) -> AttentionCGSupport:
+        """Get the cudagraph support level of this builder class."""
+        return cls._cudagraph_support
 
     def _init_reorder_batch_threshold(
         self,
