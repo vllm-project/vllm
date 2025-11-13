@@ -179,7 +179,7 @@ class RayTrainingActor:
         s = self.zmq_context.socket(zmq.DEALER)
         s.connect(self.zmq_handle)
         s.send_pyobj(handles)
-        _ = s.recv_pyobj()
+        s.recv_multipart()  # ACK for handles
 
         # === Partition tensors into buffers ===
         offset = 0
@@ -238,17 +238,16 @@ class RayTrainingActor:
             # Receive buffer-free ACKs
             try:
                 while s.getsockopt(zmq.EVENTS) & zmq.POLLIN:
-                    ack = s.recv_pyobj(flags=zmq.NOBLOCK)
-                    if isinstance(ack, int):
-                        free_buffers.append(ack)
-                        inflight -= 1
-                        print(f"[Training] Ack received: buffer {ack} now free.")
+                    ack = int(s.recv_multipart(flags=zmq.NOBLOCK)[0].decode())
+                    free_buffers.append(ack)
+                    inflight -= 1
+                    print(f"[Training] Ack received: buffer {ack} now free.")
             except zmq.Again:
                 pass
 
         # Signal done
         s.send_pyobj((None, None))
-        _ = s.recv_pyobj()
+        s.recv_multipart()  # DONE ack
         s.close()
         del buffers
         gc.collect()

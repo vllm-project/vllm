@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
-import pickle
 from ast import Dict, Tuple
 from collections.abc import Callable
 from enum import Enum
@@ -193,7 +192,7 @@ class ColocateWorkerExtension:
                     handles: list[tuple[Callable, tuple]] = payload
                     for i, h in enumerate(handles):
                         buffers[i] = rebuild_ipc(h, self.device.index)
-                    socket.send_multipart([identity, pickle.dumps("ACK_HANDLES")])
+                    socket.send_multipart([identity, b"ACK_HANDLES"])
                     continue
 
                 # === HANDLE BUFFERED MODEL UPDATES ===
@@ -216,14 +215,11 @@ class ColocateWorkerExtension:
 
                     self.model_runner.model.load_weights(weights=weights)
                     torch.cuda.synchronize()
-                    # # --- Added verify step here ---
-                    # if self.verify_weights_enabled:
-                    #     self.verify_weights(weights)
-                    socket.send_multipart([identity, pickle.dumps(buf_id)])
+                    socket.send_multipart([identity, str(buf_id).encode()])
 
                 # === DONE SIGNAL ===
                 elif payload_type == PayloadType.DONE:
-                    socket.send_multipart([identity, pickle.dumps("DONE")])
+                    socket.send_multipart([identity, b"DONE"])
                     break
                 else:
                     continue
