@@ -21,7 +21,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used, is_deep_gemm_supported
+from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
+    is_deep_gemm_supported,
+)
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
 
 from ...utils import multi_gpu_test
@@ -413,19 +417,16 @@ NUM_EXPERTS = [32]
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 @requires_deep_gemm
-@pytest.mark.skipif(
-    is_deep_gemm_e8m0_used(), reason="Skipping test for Blackwell DeepGEMM"
-)
 def test_ht_deepep_deepgemm_moe(
     mnk: tuple[int, int, int],
     num_experts: int,
     topk: int,
     world_dp_size: tuple[int, int],
+    disable_deepgemm_ue8m0,
 ):
     """
     Tests for High-Throughput DeepEP + DeepGemm integration.
     """
-    import deep_gemm
 
     m, n, k = mnk
     current_platform.seed_everything(7)
@@ -433,7 +434,7 @@ def test_ht_deepep_deepgemm_moe(
     if topk > num_experts:
         pytest.skip(f"Skipping test: topk={topk} > E={num_experts}")
 
-    block_m = deep_gemm.get_m_alignment_for_contiguous_layout()
+    block_m = get_mk_alignment_for_contiguous_layout()[0]
     block_size = [block_m, block_m]
 
     world_size, dp_size = world_dp_size
@@ -487,9 +488,6 @@ USE_FP8_DISPATCH = [False]
 @multi_gpu_test(num_gpus=2)
 @requires_deep_ep
 @requires_deep_gemm
-@pytest.mark.skipif(
-    is_deep_gemm_e8m0_used(), reason="Skipping test for Blackwell DeepGEMM"
-)
 def test_ll_deepep_deepgemm_moe(
     mnk: tuple[int, int, int],
     num_experts: int,
@@ -497,10 +495,12 @@ def test_ll_deepep_deepgemm_moe(
     use_fp8_dispatch: bool,
     block_size: list[int],
     world_dp_size: tuple[int, int],
+    disable_deepgemm_ue8m0,
 ):
     """
     Tests for Low-Latency DeepEP + DeepGemm integration.
     """
+    assert not is_deep_gemm_e8m0_used()
 
     m, n, k = mnk
     current_platform.seed_everything(7)
