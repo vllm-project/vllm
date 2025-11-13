@@ -73,7 +73,10 @@ async def transfer_run_periodically(
                 continue
             logger.info("async worker model_state.model_name: %s, model_state.model.num_moe_layers %d", model_state.model_name, model_state.model.num_moe_layers)
             current_num_layers = model_state.model.num_moe_layers
-            while model_state.layer_to_transfer < current_num_layers:
+            while (
+                model_state.rebalanced
+                and model_state.layer_to_transfer < current_num_layers
+            ):
                 if (
                     not model_state.ep_buffer_ready
                     and model_state.rebalanced
@@ -107,6 +110,8 @@ async def transfer_run_periodically(
                     finally:
                         model_state.buffer_lock.release()
                 else:
+                    if not model_state.rebalanced:
+                        break
                     await asyncio.sleep(0.001)
 
         logger.info("async worker completed current EPLB pass, clearing event")
