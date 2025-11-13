@@ -52,7 +52,6 @@ def test_accuracy():
         model="local-completions",
         model_args=model_args,
         tasks=TASK,
-        limit=256,
     )
 
     measured_value = results["results"][TASK][FILTER]

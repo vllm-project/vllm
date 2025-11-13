@@ -732,15 +732,11 @@ class NixlConnectorWorker:
             """
             Calculate the block size ratio between local and remote TP.
             """
-            assert (
-                self.block_size % remote_block_size == 0
-                or remote_block_size % self.block_size == 0
-            ), (
+            assert self.block_size % remote_block_size == 0, (
                 f"Local block size {self.block_size} is not divisible "
                 f"by remote block size {remote_block_size} or vice versa."
             )
-            ret = self.block_size / remote_block_size
-            return ret if ret < 0 else int(ret)
+            return self.block_size // remote_block_size
 
         def tp_ratio_from_engine_id(
             self,
