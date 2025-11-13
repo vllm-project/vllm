@@ -33,7 +33,9 @@ class DeepGemmQuantScaleFMT(Enum):
     UE8M0 = 2
 
     @staticmethod
-    def from_target_arch():
+    def from_oracle() -> "DeepGemmQuantScaleFMT":
+        if not is_deep_gemm_e8m0_used():
+            return DeepGemmQuantScaleFMT.FLOAT32
         return (
             DeepGemmQuantScaleFMT.UE8M0
             if current_platform.is_device_capability(100)
@@ -197,12 +199,9 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     _lazy_init()
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
-    if "disable_ue8m0_cast" in kwargs:
-        disable_ue8m0_cast = kwargs["disable_ue8m0_cast"]
-        del kwargs["disable_ue8m0_cast"]
-    else:
-        disable_ue8m0_cast = not is_deep_gemm_e8m0_used()
-    return _grouped_masked_impl(*args, disable_ue8m0_cast=disable_ue8m0_cast, **kwargs)
+    return _grouped_masked_impl(
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
+    )
 
 
 def transform_sf_into_required_layout(*args, **kwargs):

@@ -17,6 +17,7 @@ from vllm.utils.deep_gemm import (
     DeepGemmQuantScaleFMT,
     fp8_m_grouped_gemm_nt_masked,
     get_mk_alignment_for_contiguous_layout,
+    is_deep_gemm_e8m0_used,
 )
 from vllm.utils.math_utils import cdiv
 
@@ -285,7 +286,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         DeepGemm supports packed ue8m0 activation scales format in devices == sm100
         """
-        return current_platform.is_device_capability(100)
+        return is_deep_gemm_e8m0_used() and current_platform.is_device_capability(100)
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
@@ -359,22 +360,17 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
             expected_m,
         )
 
-        quant_scale_fmt = DeepGemmQuantScaleFMT.from_target_arch()
+        quant_scale_fmt = DeepGemmQuantScaleFMT.from_oracle()
         a2q, a2q_scale = persistent_masked_m_silu_mul_quant(
             workspace1,
             expert_num_tokens,
             quant_scale_fmt=quant_scale_fmt,
         )
 
-        # If we have committed to the UE8M0 format. This flag must be set so
-        # DeepGEMM does the same to the weights if they are not in UE8M0
-        # format.
-        enable_dg_ue8m0_cast = quant_scale_fmt == DeepGemmQuantScaleFMT.UE8M0
         fp8_m_grouped_gemm_nt_masked(
             (a2q, a2q_scale),
             (w2, self.w2_scale),
             output,
             expert_num_tokens,
             expected_m,
-            disable_ue8m0_cast=not enable_dg_ue8m0_cast,
         )
