@@ -10,7 +10,7 @@ peft
 pytest-asyncio
 tensorizer==2.10.1
 packaging>=24.2
-setuptools>=77.0.3,<81.0.0
+setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
 runai-model-streamer[s3,gcs]==0.15.0
 conch-triton-kernels==1.2.1
