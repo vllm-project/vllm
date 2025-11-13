@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionLayer,
@@ -18,7 +19,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBaseImpl,
-    is_rocm_aiter_fp8bmm_enabled,
 )
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     triton_convert_req_index_to_global_index,
@@ -34,18 +34,13 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 logger = init_logger(__name__)
 
-if is_rocm_aiter_fp8bmm_enabled():
-    from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (  # noqa: E501
-        batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,  # noqa: E501
-    )
-
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
-        return "ROCMAITERMLA_SPARSE"
+        return "ROCM_AITER_MLA_SPARSE"
 
     @staticmethod
     def get_metadata_cls() -> type[AttentionMetadata]:
@@ -229,6 +224,7 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer = indexer.topk_indices_buffer
+        self.is_fp8bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
 
     def _forward_bf16_kv(
         self,
@@ -287,9 +283,9 @@ class ROCMAiterMLASparseImpl(MLACommonBaseImpl[ROCMAiterMLASparseMetadata]):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         # Convert from (B, N, P) to (N, B, P)
         q_nope = q_nope.transpose(0, 1)
-        if is_rocm_aiter_fp8bmm_enabled():
+        if self.is_fp8bmm_enabled:
             # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
-            ql_nope = aiter_triton_fp8_bmm(
+            ql_nope = rocm_aiter_ops.triton_fp8_bmm(
                 q_nope, self.W_K, self.W_K_scale, group_size=128, transpose_bm=True
             )
         else:
