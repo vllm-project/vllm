@@ -116,7 +116,9 @@ def kernel_unified_attention_2d(
         q_block_global_idx = tl.program_id(0)
         kv_head_idx = tl.program_id(1)
 
-        seq_idx = find_seq_idx(block_q_seq_boundaries_ptr, q_block_global_idx, num_seqs, BLOCK_Q, False)
+        seq_idx = find_seq_idx(
+            block_q_seq_boundaries_ptr, q_block_global_idx, num_seqs, BLOCK_Q, False
+        )
 
         q_block_start_idx = tl.load(block_q_seq_boundaries_ptr + seq_idx)
 
@@ -909,7 +911,7 @@ def unified_attention(
             # for initial version, NUM_SEGMENTS = 16 is chosen as a default
             # value that showed good performance in tests
             NUM_SEGMENTS = 16
-    
+
             segm_output = torch.empty(
                 q.shape[0],
                 num_query_heads,
@@ -932,8 +934,10 @@ def unified_attention(
                 dtype=torch.float32,
                 device=q.device,
             )
-    
-            kernel_unified_attention_3d[(total_num_q_blocks, num_kv_heads, NUM_SEGMENTS)](
+
+            kernel_unified_attention_3d[
+                (total_num_q_blocks, num_kv_heads, NUM_SEGMENTS)
+            ](
                 segm_output_ptr=segm_output,
                 segm_max_ptr=segm_max,
                 segm_expsum_ptr=segm_expsum,

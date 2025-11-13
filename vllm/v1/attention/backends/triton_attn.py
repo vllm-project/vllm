@@ -139,7 +139,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 else:
                     self.seq_threshold_3D = 0
 
-
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> TritonAttentionMetadata:
