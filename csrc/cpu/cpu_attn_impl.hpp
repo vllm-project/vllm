@@ -741,9 +741,15 @@ class AttentionScheduler {
 
   static int64_t get_available_l2_size() {
     static int64_t size = []() {
+#if defined(__APPLE__)
+      // macOS doesn't have _SC_LEVEL2_CACHE_SIZE, use a reasonable default
+      // M1/M2/M3 typically have 128KB-256KB L2 per core
+      return 128 * 1024 >> 1;  // use 50% of 128KB
+#else
       long l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
       TORCH_CHECK_NE(l2_cache_size, -1);
       return l2_cache_size >> 1;  // use 50% of L2 cache
+#endif
     }();
     return size;
   }
@@ -816,10 +822,12 @@ struct VecTypeTrait<float> {
   using vec_t = vec_op::FP32Vec16;
 };
 
+#ifdef ARM_BF16_SUPPORT
 template <>
 struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
+#endif
 
 #if !defined(__powerpc__)
 template <>
@@ -1588,9 +1596,17 @@ class AttentionMainLoop {
 
               if (use_sink) {
                 alignas(64) float s_aux_fp32[16];
+#ifdef ARM_BF16_SUPPORT
                 vec_op::BF16Vec16 vec_bf16(curr_s_aux);
                 vec_op::FP32Vec16 vec_fp32(vec_bf16);
                 vec_fp32.save(s_aux_fp32);
+#else
+                // Fallback for systems without BF16 support
+                // Convert BFloat16 to float manually
+                for (int i = 0; i < 16; ++i) {
+                  s_aux_fp32[i] = static_cast<float>(curr_s_aux[i]);
+                }
+#endif
 
                 float* __restrict__ curr_sum_buffer = sum_buffer;
                 float* __restrict__ curr_max_buffer = max_buffer;
