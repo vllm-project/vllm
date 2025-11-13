@@ -1536,7 +1536,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         mm_processor_kwargs={
             "min_pixels": 28 * 28,
             "max_pixels": 1280 * 28 * 28,
-            "fps": [1],
+            "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
     )
