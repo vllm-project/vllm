@@ -1214,13 +1214,13 @@ class FlashInferImpl(AttentionImpl):
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._context._sm_scale == self.scale
-                    assert not prefill_wrapper._context.causal
+                    assert not prefill_wrapper._context._causal
                     assert prefill_wrapper._new_tokens._window_left == self.window_left
                     assert prefill_wrapper._new_tokens._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._new_tokens._sm_scale == self.scale
-                    assert prefill_wrapper._new_tokens.causal
+                    assert prefill_wrapper._new_tokens._causal
 
                     prefill_wrapper.run(
                         layer,
