@@ -1277,6 +1277,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
+            if not self.block_quant:
+                assert not renormalize and custom_routing_function is not None
+                assert scoring_func == "sigmoid", (
+                    f"Expected 'sigmoid' scoring func but got {scoring_func}"
+                )
             # Delegate to CUTLASS FlashInfer path; function already bound with
             # use_deepseek_fp8_block_scale for block-quant when applicable
             result = self.flashinfer_moe_fn(
