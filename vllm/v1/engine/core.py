@@ -203,7 +203,9 @@ class EngineCoreGuard(threading.Thread):  # changed
             pause_method = "pause_by_abort_communicators"
             self.communicator_aborted = True
 
-        success = self._execute_worker_method(pause_method, timeout=timeout)
+        success = self._execute_worker_method(
+            pause_method, timeout=timeout, worker_timeout=timeout
+        )
         return success
 
     def _execute_worker_method(self, method_name, timeout: int = 5, **kwargs) -> bool:
@@ -242,18 +244,19 @@ class EngineCoreGuard(threading.Thread):  # changed
         try:
             success = run_method(self, method, args=(), kwargs=method_params)
             self.logger("Command (%s) succeeded: %s", method, success, level="info")
-
+            reason = None
         except Exception as e:
             self.logger(
-                "Error executing method %s: %s %s",
+                "Error executing method %s: %s, %s",
                 method,
                 type(e).__name__,
                 e,
                 level="error",
             )
             success = False
+            reason = f"{type(e).__name__}: {e}"
 
-        self._send_execution_result(success, method_uuid)
+        self._send_execution_result(success, method_uuid, reason)
 
     def pause(self, timeout: int = 1, soft_pause: bool = True) -> bool:
         """
@@ -301,6 +304,9 @@ class EngineCoreGuard(threading.Thread):  # changed
         This instruction tells the EngineCore to continue its busy loop
         after being suspended due to an exception.
         """
+        if self.engine_running:
+            return True
+
         start_time = time.monotonic()
 
         success = self._execute_worker_method("restore_worker", timeout=timeout)
@@ -324,14 +330,19 @@ class EngineCoreGuard(threading.Thread):  # changed
         remaining_timeout = max(0, timeout - elapsed)
         success = self.busy_loop_active.wait(timeout=remaining_timeout)
         self.engine_running = success
+        assert self.cmd_q.empty(), "cmd_q must be empty after execution"
         return success
 
-    def _send_execution_result(self, success: bool, method_uuid: str):
+    def _send_execution_result(
+        self, success: bool, method_uuid: str, reason: str | None
+    ):
         msg = {
             "engine_index": self.engine_index,
             "success": success,
             "method_uuid": method_uuid,
         }
+        if not success and reason is not None:
+            msg["reason"] = reason
         msg_bytes = json.dumps(msg).encode("utf-8")
         self.client_cmd_socket.send_multipart([b"", msg_bytes])
 
@@ -1143,7 +1154,7 @@ class EngineCoreProc(EngineCore):
                 # Track whether the busy loop is currently active.
                 self.busy_loop_active = threading.Event()
                 self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
-                self.cmd_q: queue.Queue[str | None] = queue.Queue()
+                self.cmd_q: queue.Queue[str | None] = queue.Queue(maxsize=1)
                 self.engine_recovery_timeout = ft_config.engine_recovery_timeout
                 engine_core_guard_ids = addresses.engine_core_guard_identities
                 assert engine_core_guard_ids is not None

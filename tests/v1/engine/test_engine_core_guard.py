@@ -113,7 +113,9 @@ def test_run_handle_instruction(instruction):
     elif instruction == "retry":
         busy_loop_active.set()
 
-    threading.Thread(target=mock_worker_receiver, args=(worker_cmd_socket,)).start()
+    threading.Thread(
+        target=mock_worker_receiver, args=(worker_cmd_socket,), daemon=True
+    ).start()
 
     time.sleep(0.1)
     identity, _, msg = client_socket.recv_multipart()

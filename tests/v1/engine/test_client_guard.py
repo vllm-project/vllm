@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import asyncio
 import json
+import queue
 import threading
 import time
 from unittest.mock import AsyncMock
@@ -32,21 +32,20 @@ def create_test_thread_safe_dict(initial_data=None):
 
 
 def create_client_guard(
-    engine_exception_q: asyncio.Queue, engine_status_dict: ThreadSafeDict[int, str]
+    engine_exception_q: queue.Queue, engine_status_dict: ThreadSafeDict[int, str]
 ):
     return ClientGuard(
         fault_receiver_addr=FAULT_RECEIVER_ADDR,
         cmd_addr=CMD_ADDR,
         engine_registry=[b"engine_identity"],
         engine_exception_q=engine_exception_q,
-        engine_exception_q_lock=asyncio.Lock(),
         fault_pub_addr=FAULT_PUB_ADDR,
         engine_status_dict=engine_status_dict,
     )
 
 
 def test_client_guard_initialization():
-    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+    engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -64,7 +63,7 @@ def test_client_guard_initialization():
 
 @pytest.mark.asyncio
 async def test_handle_fault():
-    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+    engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -82,7 +81,7 @@ async def test_handle_fault():
 
 
 def test_fault_receiver():
-    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+    engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -97,7 +96,7 @@ def test_fault_receiver():
         socket.close()
         ctx.term()
 
-    sender_thread = threading.Thread(target=send_test_message)
+    sender_thread = threading.Thread(target=send_test_message, daemon=True)
     sender_thread.start()
 
     def check_published_message():
@@ -114,7 +113,7 @@ def test_fault_receiver():
         assert prefix == FAULT_PUB_TOPIC
         assert json.loads(data) == {"1": "Dead"}
 
-    check_thread = threading.Thread(target=check_published_message)
+    check_thread = threading.Thread(target=check_published_message, daemon=True)
     check_thread.start()
 
     time.sleep(0.1)
@@ -130,7 +129,7 @@ def test_fault_receiver():
 
 
 def test_fault_receiver_unhealthy():
-    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+    engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -145,7 +144,7 @@ def test_fault_receiver_unhealthy():
         socket.close()
         ctx.term()
 
-    threading.Thread(target=send_unhealthy_message).start()
+    threading.Thread(target=send_unhealthy_message, daemon=True).start()
     time.sleep(0.1)
 
     assert engine_status_dict[1] == "Unhealthy"
@@ -154,7 +153,7 @@ def test_fault_receiver_unhealthy():
 
 
 def test_shutdown_guard():
-    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+    engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({1: "Healthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -181,7 +180,7 @@ def test_shutdown_guard():
 
 @pytest.mark.asyncio
 async def test_handle_fault_async():
-    engine_exception_q: asyncio.Queue[FaultInfo] = asyncio.Queue()
+    engine_exception_q: queue.Queue[FaultInfo] = queue.Queue()
     engine_status_dict = create_test_thread_safe_dict({0: "Unhealthy"})
     guard = create_client_guard(engine_exception_q, engine_status_dict)
 
@@ -190,6 +189,7 @@ async def test_handle_fault_async():
     cmd_socket = ctx.socket(zmq.DEALER)
     cmd_socket.setsockopt(zmq.IDENTITY, b"engine_identity")
     cmd_socket.connect(CMD_ADDR)
+    time.sleep(0.1)
 
     uuid = None
 
@@ -210,8 +210,8 @@ async def test_handle_fault_async():
         execute_result = {"engine_index": 0, "success": True, "method_uuid": uuid}
         cmd_socket.send_multipart([b"", json.dumps(execute_result).encode("utf-8")])
 
-    threading.Thread(target=receive_cmd, args=(cmd_socket,)).start()
-    threading.Thread(target=response_cmd, args=(cmd_socket,)).start()
+    threading.Thread(target=receive_cmd, args=(cmd_socket,), daemon=True).start()
+    threading.Thread(target=response_cmd, args=(cmd_socket,), daemon=True).start()
 
     result = await guard.handle_fault("retry", 3)
 
@@ -219,4 +219,5 @@ async def test_handle_fault_async():
     assert engine_status_dict[0] == "Healthy"
 
     cmd_socket.close()
+    ctx.term()
     guard.shutdown_guard()

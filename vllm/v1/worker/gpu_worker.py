@@ -9,7 +9,7 @@ import threading
 import time
 import traceback
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
 from functools import partial
@@ -170,7 +170,8 @@ class WorkerGuard:
                 if has_msg:
                     assert cmd_str is not None
                     method, method_uuid, params = deserialize_method_call(cmd_str)
-                    self.logger("Executing command: %s", method)
+                    self.logger("Executing command: %s, %s", method, params)
+
                     try:
                         success = run_method(self, method, args=(), kwargs=params)
                     except Exception as e:
@@ -196,7 +197,7 @@ class WorkerGuard:
         self.logger("Pause signal sent.")
         return True
 
-    def pause_by_abort_communicators(self, timeout=5):
+    def pause_by_abort_communicators(self, worker_timeout=5):
         """
         Abort all NCCL communicators and process groups in parallel using a thread pool.
         """
@@ -206,7 +207,6 @@ class WorkerGuard:
         torch.cuda.set_device(self.device)
         model_groups = get_all_model_groups()
         futures = []
-        start_time = time.time()
 
         def _abort_nccl_comm(group: GroupCoordinator):
             if group.device_communicator is not None:
@@ -218,48 +218,41 @@ class WorkerGuard:
             backend = group.device_group._get_backend(device)
             backend.abort()
 
-        with ThreadPoolExecutor(max_workers=len(model_groups) * 2) as executor:
+        executor = ThreadPoolExecutor(max_workers=len(model_groups) * 2)
+        try:
             for group in model_groups:
                 futures.append(executor.submit(_abort_nccl_comm, group))
                 futures.append(executor.submit(_abort_process_group, group))
 
-            done, not_done = [], []
-            for future in as_completed(futures):
-                elapsed = time.time() - start_time
-                remaining = max(timeout - elapsed, 0)
-                if remaining == 0:
-                    self.logger(
-                        "Timeout while waiting for abort operations", level="warning"
-                    )
-                    break
-                try:
-                    # Wait at most 'remaining' seconds for this future
-                    future.result(timeout=remaining)
-                    done.append(future)
-                except TimeoutError:
-                    not_done.append(future)
-                except Exception as e:
-                    self.logger("Abort call raised exception: %s", e, level="warning")
-                    not_done.append(future)
-
-            # Add any futures that were not processed yet
-            not_done.extend([f for f in futures if f not in done and f not in not_done])
+            done, not_done = wait(
+                futures, timeout=worker_timeout, return_when=FIRST_EXCEPTION
+            )
             if not_done:
                 self.logger(
                     "%d abort calls did not finish in total %s seconds",
                     len(not_done),
-                    timeout,
+                    worker_timeout,
                     level="warning",
                 )
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
-        self.communicator_aborted = True
-        success = len(not_done) == 0
-        if success:
+        exception_count = sum(1 for f in done if f.exception() is not None)
+        self.communicator_aborted = len(not_done) == 0 and exception_count == 0
+        if self.communicator_aborted:
             cleanup_dist_env_and_memory()
             self.logger("Communicators are aborted.")
         else:
-            self.logger("Communicators did not abort in time.", level="warning")
-        return success
+            self.logger(
+                "Communicator abort failed: %d NCCL comm abort calls timed out,"
+                " %d tasks threw exceptions. This may leave NCCL communicators "
+                "or process groups in an inconsistent state. Subsequent "
+                "distributed operations could be unsafe.",
+                len(not_done),
+                exception_count,
+                level="error",
+            )
+        return self.communicator_aborted
 
     def _set_device_communicator_status(self, active: bool):
         model_groups = get_all_model_groups()
