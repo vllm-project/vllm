@@ -190,9 +190,8 @@ class KimiMLAAttention(nn.Module):
         v_head_dim: int,
         q_lora_rank: int | None,
         kv_lora_rank: int,
-        rope_theta: float = 10000,
+        rope_parameters: dict[str, Any],
         use_nope: bool = False,
-        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -210,7 +209,6 @@ class KimiMLAAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         self.num_local_heads = num_heads // tp_size
         self.scaling = self.qk_head_dim**-0.5
-        self.rope_theta = rope_theta
         self.use_nope = use_nope
         assert self.use_nope is True
         assert self.q_lora_rank is None

@@ -150,8 +150,7 @@ class NemotronAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_parameters: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -181,7 +180,6 @@ class NemotronAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.rope_theta = rope_theta
         self.partial_rotary_factor = config.partial_rotary_factor
         self.max_position_embeddings = max_position_embeddings
 
@@ -206,7 +204,6 @@ class NemotronAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
-            base=rope_theta,
             rope_parameters=rope_parameters,
             partial_rotary_factor=self.partial_rotary_factor,
         )
@@ -243,7 +240,6 @@ class NemotronDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        rope_theta = getattr(config, "rope_theta", 10000)
         rope_parameters = getattr(config, "rope_parameters", None)
         if rope_parameters is not None and getattr(
             config, "original_max_position_embeddings", None
@@ -264,7 +260,6 @@ class NemotronDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_theta=rope_theta,
             rope_parameters=rope_parameters,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,

@@ -26,7 +26,6 @@
 
 from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
 from torch import nn
@@ -120,7 +119,6 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,
@@ -184,9 +182,7 @@ class LlamaAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        self._init_rotary_emb(
-            config, rope_parameters=rope_parameters, quant_config=quant_config
-        )
+        self._init_rotary_emb(config, quant_config=quant_config)
 
         sliding_window = None
         if layer_types := getattr(config, "layer_types", None):
@@ -256,7 +252,6 @@ class LlamaAttention(nn.Module):
     def _init_rotary_emb(
         self,
         config: LlamaConfig,
-        rope_parameters: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
@@ -268,7 +263,7 @@ class LlamaAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            rope_parameters=rope_parameters,
+            rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
             partial_rotary_factor=self.partial_rotary_factor,
         )
@@ -317,7 +312,6 @@ class LlamaDecoderLayer(nn.Module):
             num_kv_heads=getattr(
                 config, "num_key_value_heads", config.num_attention_heads
             ),
-            rope_theta=config.rope_parameters["rope_theta"],
             rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,

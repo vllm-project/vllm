@@ -121,7 +121,6 @@ class Lfm2MoeConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.intermediate_size = intermediate_size
         self.num_hidden_layers = num_hidden_layers
-        self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
         self.use_cache = use_cache
         self.norm_eps = norm_eps

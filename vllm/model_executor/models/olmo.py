@@ -105,7 +105,6 @@ class OlmoAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(

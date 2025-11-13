@@ -264,7 +264,7 @@ class ChameleonAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_parameters: dict[str, Any] | None = None,
+        rope_parameters: dict[str, Any],
         max_position_embeddings: int = 4096,
         quant_config: QuantizationConfig | None = None,
         bias: bool = False,

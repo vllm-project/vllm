@@ -68,8 +68,6 @@ class EagleMiniCPMDecoderLayer(nn.Module):
         self.cache_config = cache_config
         self.quant_config = quant_config
         self.hidden_size = config.hidden_size
-        self.rope_theta = getattr(config, "rope_theta", 10000)
-        self.rope_parameters = getattr(config, "rope_parameters", None)
         self.max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.prefix = prefix
         self._init_attn_block()
@@ -83,8 +81,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             num_heads=self.config.num_attention_heads,
             num_kv_heads=self.config.num_key_value_heads,
-            rope_theta=self.rope_theta,
-            rope_parameters=self.rope_parameters,
+            rope_parameters=self.config.rope_parameters,
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,

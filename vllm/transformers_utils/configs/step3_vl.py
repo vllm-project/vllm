@@ -130,7 +130,6 @@ class Step3TextConfig(PretrainedConfig):
         self.moe_intermediate_size = moe_intermediate_size
         self.moe_num_experts = moe_num_experts
         self.moe_top_k = moe_top_k
-        self.rope_theta = rope_theta
         # Try to set `rope_scaling` if available, otherwise use `rope_parameters`
         rope_scaling = kwargs.pop("rope_scaling", None)
         self.rope_parameters = rope_scaling or rope_parameters

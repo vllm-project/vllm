@@ -138,7 +138,6 @@ class PersimmonAttention(nn.Module):
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta,
             partial_rotary_factor=self.partial_rotary_factor,
         )
         self.scaling = self.head_dim**-0.5
