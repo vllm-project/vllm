@@ -6,8 +6,14 @@ from typing import ClassVar
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm.attention.backends.abstract import AttentionLayer, AttentionType, MultipleOf
+from vllm.attention.backends.abstract import (
+    AttentionLayer,
+    AttentionType,
+    MultipleOf,
+)
+from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
@@ -15,7 +21,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonMetadataBuilder,
     QueryLenSupport,
 )
-from vllm.v1.attention.backends.utils import AttentionCGSupport
+from vllm.v1.attention.backends.utils import AttentionCGSupport, KVCacheLayoutType
 
 logger = init_logger(__name__)
 
@@ -23,11 +29,19 @@ FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
 class FlashInferMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
 
 
 class FlashInferMLABackend(MLACommonBackend):
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
+    supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [32, 64]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+    ]
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA"
@@ -41,8 +55,12 @@ class FlashInferMLABackend(MLACommonBackend):
         return FlashInferMLAMetadataBuilder
 
     @classmethod
-    def get_supported_kernel_block_size(cls) -> list[int | MultipleOf]:
-        return [32, 64]
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 10
+
+    @classmethod
+    def get_required_kv_cache_layout(cls) -> "KVCacheLayoutType | None":
+        return "HND"
 
 
 g_fi_workspace = torch.zeros(

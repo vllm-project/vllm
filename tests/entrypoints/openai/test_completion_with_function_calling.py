@@ -180,8 +180,8 @@ async def test_function_tool_use(
             extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
         )
         if enable_thinking:
-            assert chat_completion.choices[0].message.reasoning_content is not None
-            assert chat_completion.choices[0].message.reasoning_content != ""
+            assert chat_completion.choices[0].message.reasoning is not None
+            assert chat_completion.choices[0].message.reasoning != ""
         assert chat_completion.choices[0].message.tool_calls is not None
         assert len(chat_completion.choices[0].message.tool_calls) > 0
     else:
@@ -200,9 +200,9 @@ async def test_function_tool_use(
         async for chunk in output_stream:
             if chunk.choices:
                 if enable_thinking and getattr(
-                    chunk.choices[0].delta, "reasoning_content", None
+                    chunk.choices[0].delta, "reasoning", None
                 ):
-                    reasoning.append(chunk.choices[0].delta.reasoning_content)
+                    reasoning.append(chunk.choices[0].delta.reasoning)
                 if chunk.choices[0].delta.tool_calls:
                     output.extend(chunk.choices[0].delta.tool_calls)
 
