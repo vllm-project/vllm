@@ -15,6 +15,20 @@ RUN apt-get update -q -y && apt-get install -q -y \
 # Remove sccache
 RUN python3 -m pip install --upgrade pip
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
+
+# Install UV
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# Activate virtual environment and add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
+
+# This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
+# Reference: https://github.com/astral-sh/uv/pull/1694
+ENV UV_HTTP_TIMEOUT=500
+ENV UV_INDEX_STRATEGY="unsafe-best-match"
+# Use copy mode to avoid hardlink failures with Docker cache mounts
+ENV UV_LINK_MODE=copy
+
 ARG COMMON_WORKDIR
 WORKDIR ${COMMON_WORKDIR}
 
@@ -59,13 +73,15 @@ FROM base AS test
 
 RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 
-# Install vLLM
+# Install vLLM using uv (inherited from base stage)
+# Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && pip install -U -r requirements/rocm.txt \
-    && pip install -U -r requirements/rocm-test.txt \
+    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --system -r requirements/rocm-test.txt \
     && pip uninstall -y vllm \
-    && pip install *.whl
+    && uv pip install --system *.whl
 
 WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
@@ -89,14 +105,17 @@ RUN case "$(which python3)" in \
             rm -rf /opt/conda/envs/py_3.9/lib/python3.9/site-packages/numpy-1.20.3.dist-info/;; \
         *) ;; esac
 
-RUN python3 -m pip install --upgrade huggingface-hub[cli]
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system --upgrade huggingface-hub[cli]
 
-# Install vLLM
+# Install vLLM using uv (inherited from base stage)
+# Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
+    --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && pip install -U -r requirements/rocm.txt \
+    && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
-    && pip install *.whl
+    && uv pip install --system *.whl
 
 ARG COMMON_WORKDIR
 
