@@ -80,6 +80,7 @@ class EplbState:
     This is a sparse matrix, where -1 indicates no mapping.
 
     Shape: (num_moe_layers, num_logical_experts, num_redundant_experts + 1)
+    where num_redundant_experts + 1 is the maximum possible replicas per logical expert
 
     # Example
 
@@ -162,6 +163,12 @@ class EplbState:
     Interval for expert rearrangement steps.
     This is a constant and is taken from the config.
     """
+    
+    global_step: int = 0
+    """
+    Global step counter that never resets. Used for mask_out_gpu_after feature.
+    Incremented on every step() call.
+    """
 
     expert_latency_window: torch.Tensor | None = None
     """
@@ -187,6 +194,20 @@ class EplbState:
     Direct references to MoE layer instances for calling measure_and_update_latency().
     This avoids requiring each model to implement measure_and_update_all_latencies().
     Populated from model.moe_layers during build().
+    """
+
+    mask_out_gpu_after: list[int] = field(default_factory=list)
+    """
+    List of step counts after which to mask out each GPU rank.
+    For example, [100, 200] will mask out rank 0 after 100 steps
+    and rank 1 after 200 steps. Empty list means no GPUs will be masked out.
+    From EPLBConfig, used for testing fault tolerance.
+    """
+
+    masked_ranks: set[int] = field(default_factory=set)
+    """
+    Set of ranks that have been masked out via mask_out_gpu_after.
+    Used to track which ranks are already masked to avoid re-masking.
     """
 
     @staticmethod
@@ -410,6 +431,7 @@ class EplbState:
             expert_health_mask=expert_health_mask,
             health_timeout_threshold=eplb_config.health_timeout_threshold,
             moe_layer_instances=moe_layer_instances,
+            mask_out_gpu_after=eplb_config.mask_out_gpu_after,
         )
 
     def step(
@@ -520,9 +542,73 @@ class EplbState:
         # rearrangement step and perform rearrangement to ensure all ranks are
         # performing collective communication.
         self.expert_rearrangement_step += 1
+        self.global_step += 1
+        
+        # Check if any ranks should be masked out (for fault tolerance testing)
+        rank_mapping_to_apply, has_new_mask = self._check_mask_out_gpu()
+        
         if self.expert_rearrangement_step >= self.expert_rearrangement_step_interval:
             self.expert_rearrangement_step = 0
-            self.rearrange(model)
+            # Use health masking if we have masked ranks
+            self.rearrange(model, rank_mapping=rank_mapping_to_apply, 
+                          is_health_masking=rank_mapping_to_apply is not None)
+        elif has_new_mask:
+            # Only trigger immediate rearrangement when NEW ranks are masked
+            self.rearrange(model, rank_mapping=rank_mapping_to_apply, 
+                          is_health_masking=True)
+
+    def _check_mask_out_gpu(self) -> tuple[dict[int, int] | None, bool]:
+        """
+        Check if any GPU ranks should be masked out based on mask_out_gpu_after config.
+        
+        This is used for testing fault tolerance by simulating GPU failures/timeouts at specific steps.
+        
+        The mask_out_gpu_after list uses indices as rank IDs and values as global step counts:
+        - mask_out_gpu_after[0] = 100 means rank 0 will be masked at global step 100
+        - mask_out_gpu_after[1] = 200 means rank 1 will be masked at global step 200
+        
+        Returns:
+            (rank_mapping, has_new_mask):
+            - rank_mapping: dict if any ranks are currently masked, None otherwise
+              Example: {0: 0, 1: -1, 2: 1, 3: 2} means rank 1 is masked
+            - has_new_mask: True if new ranks were masked in this step
+        """
+        if not self.mask_out_gpu_after:
+            return None, False
+        
+        ep_group = get_ep_group().device_group
+        ep_size = ep_group.size()
+        
+        # Check if any ranks should be masked at this global step
+        newly_masked_ranks = set()
+        for rank_idx, mask_step in enumerate(self.mask_out_gpu_after):
+            if rank_idx >= ep_size:
+                break  # Invalid rank index
+            if (self.global_step >= mask_step and 
+                rank_idx not in self.masked_ranks):
+                # Mask out this rank starting from this step
+                newly_masked_ranks.add(rank_idx)
+                self.masked_ranks.add(rank_idx)
+                logger.warning(
+                    "Simulating timeout: Masking out GPU rank %d at global step %d "
+                    "(configured via mask_out_gpu_after[%d]=%d)",
+                    rank_idx, self.global_step, rank_idx, mask_step
+                )
+        
+        if not self.masked_ranks:
+            return None, False
+        
+        # Build rank_mapping with all currently masked ranks
+        rank_mapping = {}
+        active_rank = 0
+        for rank_idx in range(ep_size):
+            if rank_idx in self.masked_ranks:
+                rank_mapping[rank_idx] = -1  # Masked (simulating timeout/failure)
+            else:
+                rank_mapping[rank_idx] = active_rank
+                active_rank += 1
+        
+        return rank_mapping, len(newly_masked_ranks) > 0
 
     def _update_health_mask(
         self, current_latency: torch.Tensor, log_stats: bool = False

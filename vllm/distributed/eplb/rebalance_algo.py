@@ -12,7 +12,6 @@ Please find at [#12](https://github.com/deepseek-ai/EPLB/issues/12) an example
 on how the EPLB algorithm works.
 """
 
-import numpy as np
 import torch
 
 
@@ -64,7 +63,9 @@ def rebalance_masked_experts(
     Returns:
         Tensors with full ep_size representation (masked slots filled with -1):
         - physical_to_logical_map: [layers, full_num_replicas] e.g., (layers, 8)
-        - logical_to_physical_map: [layers, num_logical, X] (unchanged)
+        - logical_to_physical_map: [layers, num_logical, num_redundant_experts + 1]
+          where num_redundant_experts + 1 is the maximum possible replicas per logical expert
+          (unchanged, e.g., (layers, 4, 3) for 2 redundant experts)
         - logical_replica_count: [layers, num_logical] (counts active replicas only)
     """
     # Calculate active counts (EXCLUDING masked ranks)
@@ -77,7 +78,7 @@ def rebalance_masked_experts(
     (
         active_phy2log,   # (layers, active_num_replicas=6)
         active_log2phy,   # (layers, num_logical, max_replicas_per_expert)
-                         # where max = num_redundant_experts + 1
+                          # where max = num_redundant_experts + 1
         active_logcnt,    # (layers, num_logical) - actual replica count per expert
     ) = rebalance_experts(
         weight,                  # [layers, num_logical] - unchanged
@@ -142,44 +143,29 @@ def balanced_packing(
     assert num_groups % num_packs == 0
     groups_per_pack = num_groups // num_packs
 
-    device = weight.device
-
     if groups_per_pack == 1:
         pack_index = torch.arange(
-            weight.size(-1), dtype=torch.int64, device=device
+            weight.size(-1), dtype=torch.int64, device=weight.device
         ).expand(weight.shape)
-        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64, device=device)
+        rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
         return pack_index, rank_in_pack
 
-    weight_np = weight.cpu().numpy()
-
-    # Sort and get indices in decending order
-    indices_np = np.argsort(-weight_np, axis=-1)
-
-    pack_index_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
-    rank_in_pack_np = np.full((num_layers, num_groups), -1, dtype=np.int64)
-
-    # Run the packing algorithm
+    indices = weight.float().sort(-1, descending=True).indices.cpu()
+    pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device="cpu")
+    rank_in_pack = torch.full_like(pack_index, fill_value=-1)
     for i in range(num_layers):
-        pack_weights = [0.0] * num_packs
+        pack_weights = [0] * num_packs
         pack_items = [0] * num_packs
-
-        for group in indices_np[i]:
-            # Find a pack with capacity that has the lowest weight
+        for group in indices[i]:
             pack = min(
-                (j for j in range(num_packs) if pack_items[j] < groups_per_pack),
+                (i for i in range(num_packs) if pack_items[i] < groups_per_pack),
                 key=pack_weights.__getitem__,
             )
-
             assert pack_items[pack] < groups_per_pack
-            pack_index_np[i, group] = pack
-            rank_in_pack_np[i, group] = pack_items[pack]
-            pack_weights[pack] += weight_np[i, group]
+            pack_index[i, group] = pack
+            rank_in_pack[i, group] = pack_items[pack]
+            pack_weights[pack] += weight[i, group]
             pack_items[pack] += 1
-
-    pack_index = torch.from_numpy(pack_index_np).to(device)
-    rank_in_pack = torch.from_numpy(rank_in_pack_np).to(device)
-
     return pack_index, rank_in_pack
 
 
@@ -328,14 +314,15 @@ def rebalance_experts(
         physical_to_logical_map:
             [layers, num_replicas], the expert index of each replica
         logical_to_physical_map:
-            [layers, num_logical_experts, X], the replica indices for each
-            expert
+            [layers, num_logical_experts, num_redundant_experts + 1],
+            the replica indices for each expert, where num_redundant_experts + 1
+            is the maximum possible replicas per logical expert (padded with -1)
         expert_count:
-            [layers, num_logical_experts], number of physical
+            [layers, num_logical_experts], number of actual physical
             replicas for each logical expert
     """
     num_layers, num_logical_experts = weight.shape
-    weight = weight.float()
+    weight = weight.float().cpu()
     if num_groups % num_nodes == 0:
         # use hierarchical load-balance policy
         phy2log, phyrank, logcnt = rebalance_experts_hierarchical(
