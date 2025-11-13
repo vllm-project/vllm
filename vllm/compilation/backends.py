@@ -321,9 +321,10 @@ def split_graph(
         if node.op == "call_function" and node.target == operator.getitem:
             # Assign this getitem to the same subgraph as its input
             input_node = node.args[0]
-            assert input_node in node_to_subgraph_id
-            node_to_subgraph_id[node] = node_to_subgraph_id[input_node]
-            continue
+            if input_node.op != "placeholder":
+                assert input_node in node_to_subgraph_id
+                node_to_subgraph_id[node] = node_to_subgraph_id[input_node]
+                continue
 
         if should_split(node, splitting_ops):
             subgraph_id += 1
