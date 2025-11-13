@@ -2100,3 +2100,7 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         )
         self._v_up_proj(attn_out, out=out)
         return out
+
+    def supports_compiled_split(self) -> bool:
+        """MLACommonImpl supports the compiled split path."""
+        return True
