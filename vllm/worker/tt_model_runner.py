@@ -446,6 +446,19 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             else:
                 query_lens = [1 for x in seq_lens]
             generators = self.get_generators(finished_requests_ids)
+
+            # SamplingMetadata.prepare() creates random generators,
+            # but it only does so when running prefill.
+            # We need to handle it ourselves in case prefill was run
+            # without compat sampling.
+            if not is_prompt:
+                for seq_group_metadata in seq_group_metadata_list:
+                    request_id = seq_group_metadata.request_id
+                    seed = seq_group_metadata.sampling_params.seed
+                    if request_id not in generators and seed is not None:
+                        generators[request_id] = torch.Generator(
+                            device="cpu").manual_seed(seed)
+
             sampling_metadata = SamplingMetadata.prepare(
                 seq_group_metadata_list,
                 seq_lens,
