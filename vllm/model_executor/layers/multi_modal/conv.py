@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.utils.torch_utils import is_torch_equal
 
 
@@ -60,29 +59,19 @@ class ConvLayerBase(CustomOp):
             and not any(self.padding)
             and self.groups == 1
         )
+        self.input_size = in_channels * math.prod(self.kernel_size)
 
-        if self.enable_linear:
-            self.weight = nn.Parameter(
-                torch.empty(
-                    out_channels,
-                    in_channels * math.prod(self.kernel_size),
-                    dtype=params_dtype,
-                ),
-            )
-        else:
-            self.weight = nn.Parameter(
-                torch.empty(
-                    out_channels,
-                    in_channels // groups,
-                    *kernel_size,
-                    dtype=params_dtype,
-                ),
-            )
-        set_weight_attrs(self.weight, {"weight_loader": self.weight_loader})
+        self.weight = nn.Parameter(
+            torch.empty(
+                out_channels,
+                in_channels // groups,
+                *kernel_size,
+                dtype=params_dtype,
+            ),
+        )
 
         if bias:
             self.bias = nn.Parameter(torch.empty(self.out_channels, dtype=params_dtype))
-            set_weight_attrs(self.bias, {"weight_loader": self.weight_loader})
         else:
             self.register_parameter("bias", None)
 
@@ -94,9 +83,6 @@ class ConvLayerBase(CustomOp):
         s += f"padding={self.padding}, "
         s += f"bias={self.bias is not None}"
         return s
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        param.data.copy_(loaded_weight.view(param.shape))
 
 
 @CustomOp.register("conv2d")
@@ -111,10 +97,12 @@ class Conv2dLayer(ConvLayerBase):
         K1, K2 = self.kernel_size
         H, W = H // K1, W // K2
         x = x.unfold(2, K1, K1).unfold(3, K2, K2)
-        x = x.permute(0, 2, 3, 1, 4, 5).reshape(
-            -1, self.in_channels * math.prod(self.kernel_size)
+        x = x.permute(0, 2, 3, 1, 4, 5).reshape(-1, self.input_size)
+        x = F.linear(
+            x,
+            self.weight.view(self.out_channels, self.input_size),
+            self.bias,
         )
-        x = F.linear(x, self.weight, self.bias)
         x = x.view(B, H, W, self.out_channels).permute(0, 3, 1, 2)
         return x
 
@@ -208,10 +196,12 @@ class Conv3dLayer(ConvLayerBase):
         K1, K2, K3 = self.kernel_size
         T, H, W = T // K1, H // K2, W // K3
         x = x.unfold(2, K1, K1).unfold(3, K2, K2).unfold(4, K3, K3)
-        x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(
-            -1, self.in_channels * math.prod(self.kernel_size)
+        x = x.permute(0, 2, 3, 4, 1, 5, 6, 7).reshape(-1, self.input_size)
+        x = F.linear(
+            x,
+            self.weight.view(self.out_channels, self.input_size),
+            self.bias,
         )
-        x = F.linear(x, self.weight, self.bias)
         x = x.view(B, T, H, W, self.out_channels).permute(0, 4, 1, 2, 3)
         return x
 
