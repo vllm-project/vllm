@@ -254,19 +254,20 @@ def test_rope_customization():
     LONGCHAT_ROPE_SCALING = {"rope_type": "linear", "factor": 8.0}
 
     llama_model_config = ModelConfig("meta-llama/Meta-Llama-3-8B-Instruct")
-    assert getattr(llama_model_config.hf_config, "rope_scaling", None) is None
+    assert getattr(llama_model_config.hf_config, "rope_parameters", None) is None
     assert getattr(llama_model_config.hf_config, "rope_theta", None) == 500_000
     assert llama_model_config.max_model_len == 8192
 
     llama_model_config = ModelConfig(
         "meta-llama/Meta-Llama-3-8B-Instruct",
         hf_overrides={
-            "rope_scaling": TEST_ROPE_SCALING,
+            "rope_parameters": TEST_ROPE_SCALING,
             "rope_theta": TEST_ROPE_THETA,
         },
     )
     assert (
-        getattr(llama_model_config.hf_config, "rope_scaling", None) == TEST_ROPE_SCALING
+        getattr(llama_model_config.hf_config, "rope_parameters", None)
+        == TEST_ROPE_SCALING
     )
     assert getattr(llama_model_config.hf_config, "rope_theta", None) == TEST_ROPE_THETA
     assert llama_model_config.max_model_len == 16384
@@ -274,7 +275,7 @@ def test_rope_customization():
     longchat_model_config = ModelConfig("lmsys/longchat-13b-16k")
     # Check if LONGCHAT_ROPE_SCALING entries are in longchat_model_config
     assert all(
-        longchat_model_config.hf_config.rope_scaling.get(key) == value
+        longchat_model_config.hf_config.rope_parameters.get(key) == value
         for key, value in LONGCHAT_ROPE_SCALING.items()
     )
     assert longchat_model_config.max_model_len == 16384
@@ -282,11 +283,11 @@ def test_rope_customization():
     longchat_model_config = ModelConfig(
         "lmsys/longchat-13b-16k",
         hf_overrides={
-            "rope_scaling": TEST_ROPE_SCALING,
+            "rope_parameters": TEST_ROPE_SCALING,
         },
     )
     assert (
-        getattr(longchat_model_config.hf_config, "rope_scaling", None)
+        getattr(longchat_model_config.hf_config, "rope_parameters", None)
         == TEST_ROPE_SCALING
     )
     assert longchat_model_config.max_model_len == 4096

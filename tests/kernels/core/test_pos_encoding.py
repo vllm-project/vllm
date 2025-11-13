@@ -121,7 +121,7 @@ def test_rotary_embedding(
 def test_rope_module_cache():
     MAX_POSITIONS = [123, 1234]
     BASES = [10000, 1000000]
-    ROPE_SCALINGS = (
+    ROPE_PARAMETERS = (
         None,
         {"rope_type": "linear", "factor": (1,)},
         {"rope_type": "dynamic", "factor": 1},
@@ -132,7 +132,7 @@ def test_rope_module_cache():
         MAX_POSITIONS,
         BASES,
         IS_NEOX_STYLE,
-        ROPE_SCALINGS,
+        ROPE_PARAMETERS,
         DTYPES,
     )
     rope_setting_id_map: dict[str, int] = {}
@@ -142,8 +142,8 @@ def test_rope_module_cache():
             rotary_dim,
             max_position,
             base,
-            is_neox_stype,
-            rope_scaling,
+            is_neox_style,
+            rope_parameters,
             dtype,
         ) = setting
         if rotary_dim is None:
@@ -153,8 +153,8 @@ def test_rope_module_cache():
             rotary_dim,
             max_position,
             base,
-            is_neox_stype,
-            rope_scaling,
+            is_neox_style,
+            rope_parameters,
             dtype,
         )
         # different settings cannot share the same rope module
@@ -169,8 +169,8 @@ def test_rope_module_cache():
             rotary_dim,
             max_position,
             base,
-            is_neox_stype,
-            rope_scaling,
+            is_neox_style,
+            rope_parameters,
             dtype,
         ) = setting
         if rotary_dim is None:
@@ -180,8 +180,8 @@ def test_rope_module_cache():
             rotary_dim,
             max_position,
             base,
-            is_neox_stype,
-            rope_scaling,
+            is_neox_style,
+            rope_parameters,
             dtype,
         )
         # check if cache take effect
