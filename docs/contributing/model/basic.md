@@ -54,6 +54,35 @@ The initialization code should look like this:
             self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
     ```
 
+!!! note "Auto-Registering Attention Layers"
+    Some vLLM attention layers support automatic registration for KV cache allocation and don't require the `prefix` argument. These layers automatically register themselves during initialization:
+
+    - **`TrainableFlashAttention`**: A training-compatible flash attention layer that supports both PyTorch backward passes (for fine-tuning/RL) and vLLM's KV cache (for inference). This layer automatically registers itself when used in a vLLM context and works seamlessly in third-party models.
+
+    Example usage:
+
+    ```python
+    from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
+
+    class MyDecoderLayer(nn.Module):
+        def __init__(self, hidden_size: int, num_heads: int):
+            super().__init__()
+            # No prefix needed - auto-registers for KV cache
+            self.attn = TrainableFlashAttention(
+                hidden_size=hidden_size,
+                num_heads=num_heads,
+                dropout=0.0,
+                causal=True,
+            )
+    ```
+
+    This layer is particularly useful when:
+    - You want to use external parallelism libraries (e.g., Megatron-LM) for other components
+    - You need both training (backward pass) and inference (KV cache) support in the same model
+    - You're integrating vLLM attention into third-party models without extensive modifications
+
+    For a complete example, see [custom_model_with_megatron.py](../../../examples/offline_inference/custom_model_with_megatron.py).
+
 ### Computation Code
 
 - Add a `embed_input_ids` method inside `MyModel` module that returns the text embeddings given `input_ids`. This is equivalent to directly calling the text embedding layer, but provides a unified interface in case `MyModel` is used within a composite multimodal model.

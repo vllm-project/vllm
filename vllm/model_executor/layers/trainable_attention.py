@@ -121,7 +121,8 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
             compilation_config = config.compilation_config
 
             # Generate unique layer name using class counter
-            layer_name = f"trainable_attn_{TrainableFlashAttention._layer_counter}"
+            # Format: "layers.{index}" for compatibility with extract_layer_index()
+            layer_name = f"layers.{TrainableFlashAttention._layer_counter}"
             TrainableFlashAttention._layer_counter += 1
 
             # Register this layer in static forward context

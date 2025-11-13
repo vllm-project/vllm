@@ -317,9 +317,11 @@ def build_megatron_model(vllm_config, parallel_context: ParallelContext):
     2. Get vLLM's tensor parallel process group
     3. Pass the process group to Megatron layers
     """
-    # Import Megatron here to avoid CUDA initialization before fork
+    # Import Megatron here to avoid CUDA initialization before fork,
+    # purely for testing purposes
     global ColumnParallelLinear, RowParallelLinear, TransformerConfig
 
+    import megatron.core.parallel_state as megatron_parallel_state
     from megatron.core.tensor_parallel import (
         ColumnParallelLinear,
         RowParallelLinear,
@@ -328,74 +330,45 @@ def build_megatron_model(vllm_config, parallel_context: ParallelContext):
         TransformerConfig,
     )
 
-    tp_rank = parallel_context.get_tensor_parallel_rank()
-    tp_size = parallel_context.get_tensor_parallel_world_size()
-
-    print(f"\n{'=' * 60}")
-    print(f"Building Megatron model on TP rank {tp_rank}/{tp_size}")
-    print(f"{'=' * 60}\n")
-
     # Get vLLM's tensor parallel process group
+    # Set Megatron's global tensor parallel group to vLLM's group
+    # Megatron layers require this even though they also accept tp_group as parameter
     from vllm.distributed import parallel_state as vllm_parallel_state
 
     tp_coordinator = vllm_parallel_state.get_tp_group()
     tp_group = tp_coordinator.device_group
+    tp_rank = parallel_context.get_tensor_parallel_rank()
+    tp_size = parallel_context.get_tensor_parallel_world_size()
 
     assert tp_group is not None, "Failed to get TP process group from vLLM!"
-    print(f"✓ Got vLLM's TP device group: {tp_group}")
 
-    # Set Megatron's global tensor parallel group to vLLM's group
-    # Megatron layers require this even though they also accept tp_group as parameter
-    import megatron.core.parallel_state as megatron_parallel_state
-
-    # Set the minimum required global variables for Megatron to work
     megatron_parallel_state._TENSOR_MODEL_PARALLEL_GROUP = tp_group
-    megatron_parallel_state._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = list(range(tp_size))
-
-    # Also set the cached rank/world_size values that Megatron uses
     megatron_parallel_state._MPU_TENSOR_MODEL_PARALLEL_RANK = tp_rank
+    megatron_parallel_state._TENSOR_MODEL_PARALLEL_GLOBAL_RANKS = list(range(tp_size))
     megatron_parallel_state._MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = tp_size
 
-    print(f"✓ Set Megatron's TP group to vLLM's group (rank={tp_rank}, size={tp_size})")
-
     # Extract config from vLLM's config
-    if hasattr(vllm_config, "model_config") and hasattr(
-        vllm_config.model_config, "hf_config"
-    ):
-        hf_config = vllm_config.model_config.hf_config
-        vocab_size = getattr(hf_config, "vocab_size", 32000)
-        hidden_size = getattr(hf_config, "hidden_size", 4096)
-        num_attention_heads = getattr(hf_config, "num_attention_heads", 32)
-        num_hidden_layers = getattr(hf_config, "num_hidden_layers", 4)
-    else:
-        # Fallback to defaults
-        vocab_size = 32000
-        hidden_size = 4096
-        num_attention_heads = 32
-        num_hidden_layers = 4
+    assert hasattr(vllm_config, "model_config")
+    assert hasattr(vllm_config.model_config, "hf_config")
 
-    # Build model with Megatron TP support
+    hf_config = vllm_config.model_config.hf_config
+    vocab_size = getattr(hf_config, "vocab_size", 32000)
+    hidden_size = getattr(hf_config, "hidden_size", 4096)
+    num_attention_heads = getattr(hf_config, "num_attention_heads", 32)
+    num_hidden_layers = getattr(hf_config, "num_hidden_layers", 4)
+
     model = MegatronTransformer(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
         intermediate_size=hidden_size * 4,
-        num_layers=num_hidden_layers,  # Use from config
+        num_layers=num_hidden_layers,
         num_attention_heads=num_attention_heads,
         tp_size=tp_size,
         tp_group=tp_group,
     )
 
-    # Convert model to vLLM's dtype
-    if hasattr(vllm_config, "model_config") and hasattr(
-        vllm_config.model_config, "dtype"
-    ):
+    if hasattr(vllm_config.model_config, "dtype"):
         model = model.to(dtype=vllm_config.model_config.dtype)
-        print(f"✓ Converted model to {vllm_config.model_config.dtype}")
-
-    print("✓ Using Megatron-LM tensor parallel layers!")
-    print(f"  TP size: {tp_size}")
-    print("  Attention: vLLM's TrainableFlashAttention (with backward pass)")
-    print("  MLP: Megatron ColumnParallelLinear + RowParallelLinear")
 
     return model
 
