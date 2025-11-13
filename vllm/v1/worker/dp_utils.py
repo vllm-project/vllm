@@ -123,10 +123,7 @@ def _synchronize_dp_ranks(
         parallel_config=parallel_config,
     )
 
-    should_dp_pad = bool(torch.all(tensor[3] == 1).item())
-
-    # DP ranks should all have the same value for should_attempt_dp_padding.
-    assert should_attempt_dp_padding == should_dp_pad
+    should_dp_pad = bool(torch.any(tensor[3] == 1).item())
 
     # Check conditions for microbatching
     should_ubatch = _post_process_ubatch(tensor)
