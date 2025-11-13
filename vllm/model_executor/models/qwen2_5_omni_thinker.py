@@ -1132,7 +1132,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
         return llm_positions, mrope_position_delta
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
@@ -1158,7 +1158,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
     # TODO (ywang96): support overlapping modality embeddings so that
     # `use_audio_in_video` will work on V1.
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -1168,16 +1168,16 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
     ) -> torch.Tensor:
         # This is to satisfy the type checker for each overload
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
 
-    def get_multimodal_embeddings_v0(self, **kwargs: object) -> NestedTensors | None:
+    def embed_multimodal_v0(self, **kwargs: object) -> NestedTensors | None:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
         image_input = self._parse_and_validate_image_input(**kwargs)
         video_input = self._parse_and_validate_video_input(**kwargs)
