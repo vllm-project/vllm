@@ -780,6 +780,10 @@ class DotsOCRForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA
             architectures=["Qwen2ForCausalLM"],
         )
 
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> DotsOCRImageInputs | None:
