@@ -1085,7 +1085,7 @@ class EngineArgs:
             **scheduler_kwargs["enable_schedule_capacity_profiling"],
         )
         scheduler_group.add_argument(
-          "--stream-interval", **scheduler_kwargs["stream_interval"]
+            "--stream-interval", **scheduler_kwargs["stream_interval"]
         )
 
         # Compilation arguments
