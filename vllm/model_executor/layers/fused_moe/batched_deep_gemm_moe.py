@@ -19,7 +19,7 @@ from vllm.utils.deep_gemm import (
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
-from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import cdiv, round_up
 
 logger = init_logger(__name__)
 
@@ -319,17 +319,20 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         from vllm.forward_context import get_forward_context
 
         dp_meta = get_forward_context().dp_metadata
-        assert dp_meta is not None, (
-            f"{self.__class__.__name__} expects is expected to be run "
-            "in a DP/EP scenario. But can't find DP Metadata"
-        )
+        if dp_meta is None:
+            logger.warning_once(
+                "DPMetadata unavailable. Defaulting expected_m to "
+                f"{max_tokens_per_expert}",
+                scope="local",
+            )
+            return max_tokens_per_expert
+
         total_num_tokens = dp_meta.num_tokens_across_dp_cpu.sum().item()
         total_num_tokens_replicated = total_num_tokens * topk
 
         # Assume even load balancing
-        estimate = next_power_of_2(
-            int(total_num_tokens_replicated // global_num_experts)
-        )
+        assert global_num_experts != 0
+        estimate = round_up(int(total_num_tokens_replicated // global_num_experts), 16)
         # clamp estimate
         estimate = max(estimate, 16)
         estimate = min(max_tokens_per_expert, estimate)
