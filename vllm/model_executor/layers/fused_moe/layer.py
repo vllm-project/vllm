@@ -1749,14 +1749,16 @@ class FusedMoE(CustomOp):
 
         with sp_ctx:
             if do_naive_dispatch_combine:
-                hidden_states, router_logits = get_ep_group().dispatch(
+                hidden_states_combined, router_logits = get_ep_group().dispatch(
                     hidden_states, router_logits, self.is_sequence_parallel
                 )
 
             # Matrix multiply.
             final_hidden_states = self.quant_method.apply(
                 layer=self,
-                x=hidden_states,
+                x=hidden_states_combined
+                if do_naive_dispatch_combine
+                else hidden_states,
                 router_logits=router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
