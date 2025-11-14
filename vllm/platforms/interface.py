@@ -17,8 +17,9 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config import VllmConfig
+    from vllm.config.cache import CacheDType
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -57,6 +58,31 @@ class CpuArchEnum(enum.Enum):
 class DeviceCapability(NamedTuple):
     major: int
     minor: int
+
+    def __lt__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) < (other.major, other.minor)
+
+    def __le__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) <= (other.major, other.minor)
+
+    def __eq__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) == (other.major, other.minor)
+
+    def __ge__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) >= (other.major, other.minor)
+
+    def __gt__(self, other: Any) -> bool:
+        if not isinstance(other, DeviceCapability):
+            return NotImplemented
+        return (self.major, self.minor) > (other.major, other.minor)
 
     def as_version_str(self) -> str:
         return f"{self.major}.{self.minor}"
@@ -145,7 +171,11 @@ class Platform:
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     def is_sleep_mode_available(self) -> bool:
-        return self._enum == PlatformEnum.CUDA
+        # TODO: Actually only mi3xx has the sleep mode support now
+        # for ROCm, but currently we don't have a way to detect the
+        # exact GPU model statelessly here. So we return True for
+        # all ROCm platforms for now.
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
@@ -173,24 +203,26 @@ class Platform:
             import vllm._moe_C  # noqa: F401
 
     @classmethod
-    def get_vit_attn_backend(cls, head_size: int, dtype: torch.dtype) -> "_Backend":
-        # Import _Backend here to avoid circular import.
-        from vllm.attention.backends.registry import _Backend
+    def get_vit_attn_backend(
+        cls, head_size: int, dtype: torch.dtype
+    ) -> "AttentionBackendEnum":
+        # Import AttentionBackendEnum here to avoid circular import.
+        from vllm.attention.backends.registry import AttentionBackendEnum
 
-        return _Backend.TORCH_SDPA
+        return AttentionBackendEnum.TORCH_SDPA
 
     @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "_Backend",
+        selected_backend: "AttentionBackendEnum",
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int,
-        use_v1: bool,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
+        attn_type: str | None = None,
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
@@ -513,13 +545,6 @@ class Platform:
         if cls._global_graph_pool is None:
             cls._global_graph_pool = self.graph_pool_handle()
         return cls._global_graph_pool
-
-    @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        """
-        Returns the total number of compute units (CU) on single GPU.
-        """
-        raise NotImplementedError
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
