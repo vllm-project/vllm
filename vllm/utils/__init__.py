@@ -3,7 +3,7 @@
 
 import uuid
 import warnings
-from typing import Any, TypeVar
+from typing import Any
 
 import torch
 
@@ -52,9 +52,6 @@ STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
-
-
-T = TypeVar("T")
 
 
 def random_uuid() -> str:
