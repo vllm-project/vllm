@@ -425,6 +425,7 @@ class ParallelConfig:
             "data_parallel_master_ip",
             "data_parallel_rpc_port",
             "data_parallel_master_port",
+            "_data_parallel_master_port_list",
             "data_parallel_backend",
             "data_parallel_external_lb",
             "data_parallel_hybrid_lb",
