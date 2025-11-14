@@ -77,6 +77,8 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
+            if getattr(config, "rope_parameters", None) is None:
+                config.rope_parameters = {"rope_type": "default"}
             if "rope_theta" not in config.rope_parameters:
                 config.rope_parameters["rope_theta"] = config.rotary_emb_base
 
@@ -119,6 +121,8 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
 
+        if getattr(config, "rope_parameters", None) is None:
+            config.rope_parameters = {"rope_type": "default"}
         if "rope_theta" not in config.rope_parameters:
             config.rope_parameters["rope_theta"] = config.rotary_emb_base
 

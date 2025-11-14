@@ -576,6 +576,8 @@ class Plamo2AttentionMixer(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
+        if getattr(config, "rope_parameters", None) is None:
+            config.rope_parameters = {"rope_type": "default"}
         if "rope_theta" not in config.rope_parameters:
             config.rope_parameters["rope_theta"] = 10000
 

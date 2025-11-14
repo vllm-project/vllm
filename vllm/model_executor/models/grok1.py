@@ -234,9 +234,10 @@ class Grok1DecoderLayer(nn.Module):
             if not self.use_fp8 and hasattr(quant_config, "is_fp8"):
                 self.use_fp8 = quant_config.is_fp8
 
-        # Requires transformers > 4.32.0
-        # Default rope_theta value if not in config
+        if getattr(config, "rope_parameters", None) is None:
+            config.rope_parameters = {"rope_type": "default"}
         if "rope_theta" not in config.rope_parameters:
+            # Default rope_theta value if not in config
             config.rope_parameters["rope_theta"] = 10000
         self.attn = Grok1Attention(
             hidden_size=self.hidden_size,
