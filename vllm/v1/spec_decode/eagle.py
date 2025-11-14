@@ -385,11 +385,20 @@ class EagleProposer:
         common_attn_metadata.query_start_loc_cpu = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
+        # Initialize continue mask for confidence-based early stopping
+        self.continue_mask[:batch_size] = True
         for token_index in range(self.num_speculative_tokens - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
             input_ids = draft_token_ids_list[-1].int()
+            # Mask stopped sequences to PAD token for early stopping
+            if token_index > 0:
+                input_ids = torch.where(
+                    self.continue_mask[:batch_size],
+                    input_ids,
+                    self.pad_token_id
+                )
             if self.uses_mrope:
                 positions += 1
                 # NOTE(woosuk): We should handle the case where the draft model
@@ -452,6 +461,10 @@ class EagleProposer:
             common_attn_metadata.slot_mapping.masked_fill_(
                 exceeds_max_model_len, PADDING_SLOT_ID
             )
+            # Gate K/V writes for stopped sequences (confidence-based early stopping)
+            if token_index > 0:
+                stopped_mask = ~self.continue_mask[:batch_size]
+                common_attn_metadata.slot_mapping[stopped_mask] = PADDING_SLOT_ID
 
             # Rebuild attention metadata
             attn_metadata = attn_metadata_builder.build_for_drafting(  # type: ignore
@@ -494,6 +507,10 @@ class EagleProposer:
             hidden_states = hidden_states[:batch_size]
             logits = self.model.compute_logits(last_hidden_states[:batch_size])
             draft_token_ids = logits.argmax(dim=-1)
+            # Compute confidence and update continue mask for early stopping
+            probs = logits.softmax(dim=-1, dtype=torch.float32)
+            confidence = probs.max(dim=-1).values
+            self.continue_mask[:batch_size] &= (confidence >= self.confidence_threshold)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
