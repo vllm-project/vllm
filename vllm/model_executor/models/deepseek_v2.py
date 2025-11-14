@@ -1092,7 +1092,6 @@ class DeepseekV2DecoderLayer(nn.Module):
             v_head_dim=v_head_dim,
             q_lora_rank=config.q_lora_rank if hasattr(config, "q_lora_rank") else None,
             kv_lora_rank=kv_lora_rank,
-            rope_parameters=config.rope_parameters,
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
