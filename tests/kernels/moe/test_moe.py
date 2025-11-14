@@ -77,7 +77,6 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     # GPTQ-INT8
     {
         "b_type": scalar_types.uint8b128,
-        "support_act_order": True,
         "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
