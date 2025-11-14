@@ -418,11 +418,6 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             rope_parameters["original_max_position_embeddings"] = ompe
         # Write back to text_config
         text_config.rope_parameters = rope_parameters
-        # Delete legacy attributes
-        if hasattr(text_config, "rope_theta"):
-            delattr(text_config, "rope_theta")
-        if hasattr(text_config, "rope_scaling"):
-            delattr(text_config, "rope_scaling")
 
     # No RoPE parameters to patch
     if rope_parameters is None:
