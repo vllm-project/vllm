@@ -192,7 +192,7 @@ class CpuPlatform(Platform):
 
         scheduler_config = vllm_config.scheduler_config
         if (
-            scheduler_config.chunked_prefill_enabled
+            scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
         ) and cache_config.cache_dtype != "auto":
             raise RuntimeError(
