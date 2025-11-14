@@ -10,7 +10,7 @@ import time
 import traceback
 import weakref
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, InvalidStateError
 from contextlib import suppress
 from dataclasses import dataclass
@@ -172,6 +172,7 @@ class MultiprocExecutor(Executor):
             # Start background thread to monitor worker health if not in headless mode.
             if self.monitor_workers:
                 self.start_worker_monitor()
+
             self.response_mqs = []
             # Only leader node have remote response mqs
             if self.parallel_config.node_rank_within_dp == 0:
@@ -186,6 +187,7 @@ class MultiprocExecutor(Executor):
                         ]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
+
             # Ensure message queues are ready. Will deadlock if re-ordered
             # Must be kept consistent with the WorkerProc.
 
@@ -280,22 +282,6 @@ class MultiprocExecutor(Executor):
             "take_draft_token_ids", unique_reply_rank=self.output_rank
         )
 
-    def get_response_mqs(
-        self, unique_reply_rank: int | None = None
-    ) -> list[MessageQueue]:
-        message_queues = []
-        for rank in range(self.world_size):
-            if rank < self.local_world_size:
-                local_message_queue = self.workers[rank].worker_response_mq
-                message_queues.append(local_message_queue)
-            else:
-                remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
-                assert remote_message_queue is not None
-                message_queues.append(remote_message_queue)
-        if unique_reply_rank is not None:
-            message_queues = [message_queues[unique_reply_rank]]
-        return message_queues
-
     def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
@@ -332,9 +318,9 @@ class MultiprocExecutor(Executor):
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
 
-        response_mqs = self.response_mqs
-        if unique_reply_rank is not None:
-            response_mqs = [self.response_mqs[unique_reply_rank]]
+        response_mqs: Sequence[MessageQueue] = self.response_mqs
+        if output_rank is not None:
+            response_mqs = (response_mqs[output_rank],)
 
         shutdown_event = self.shutdown_event
 
