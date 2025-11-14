@@ -965,12 +965,6 @@ def reshape_attn_output_for_spec_decode(attn_output: torch.Tensor) -> torch.Tens
     return attn_output.view(total_tokens, attn_output.shape[2], attn_output.shape[3])
 
 
-KV_SHARING_FAST_PREFILL_METADATA_FIELDS = [
-    ("logits_indices_padded", torch.Tensor | None, None),
-    ("num_logits_indices", int, 0),
-]
-
-
 def subclass_attention_metadata(
     name_prefix: str,
     metadata_cls: Any,
@@ -986,8 +980,8 @@ def subclass_attention_metadata(
 
 @runtime_checkable
 class KVSharingFastPrefillMetadata(Protocol):
-    logits_indices_padded: torch.Tensor
-    num_logits_indices: int
+    logits_indices_padded: torch.Tensor | None = None
+    num_logits_indices: int | None = None
 
 
 def create_fast_prefill_custom_backend(
@@ -1019,11 +1013,6 @@ def create_fast_prefill_custom_backend(
                     for _field in fields(metadata.__class__):
                         setattr(self, _field.name, getattr(metadata, _field.name))
 
-                    # Set additional fields that will be used in model code
-                    assert (
-                        common_attn_metadata.logits_indices_padded is not None
-                        and common_attn_metadata.num_logits_indices is not None
-                    )
                     self.logits_indices_padded = (
                         common_attn_metadata.logits_indices_padded
                     )
