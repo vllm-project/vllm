@@ -123,7 +123,7 @@ def test_rope_module_cache():
     MAX_POSITIONS = [123, 1234]
     ROPE_THETAS = [10000, 1000000]
     ROPE_PARAMETERS = (
-        None,
+        {"rope_type": "default"},
         {"rope_type": "linear", "factor": (1,)},
         {"rope_type": "dynamic", "factor": 1},
     )
