@@ -3618,9 +3618,11 @@ class GPUModelRunner(
             draft_length for CUDA graph key, or 0 if not specializing
         """
         # Only specialize if draft_length_options is configured (adaptive mode)
+        # and specialization is explicitly enabled
         if (
             self.speculative_config is None
             or not self.speculative_config.draft_length_options
+            or not self.speculative_config.enable_draft_length_cudagraph_specialization
         ):
             return 0
 
@@ -4277,12 +4279,14 @@ class GPUModelRunner(
             if (
                 self.speculative_config is not None
                 and self.speculative_config.draft_length_options
+                and self.speculative_config.enable_draft_length_cudagraph_specialization
             ):
                 # Capture graphs for each configured draft length option
                 draft_length_cases = [0] + sorted(
                     set(self.speculative_config.draft_length_options) - {0}
                 )
             else:
+                # Use only draft_length=0 (saves 3-4x CUDA graph memory)
                 draft_length_cases = [0]
 
             if cudagraph_mode.mixed_mode() != CUDAGraphMode.NONE:

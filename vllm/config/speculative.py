@@ -114,6 +114,14 @@ class SpeculativeConfig:
     defaults to [2, 5, 8]. The system will dynamically select the optimal
     draft length based on recent acceptance rates to balance compute cost
     vs. speculation benefit."""
+    enable_draft_length_cudagraph_specialization: bool = False
+    """Enable CUDA graph specialization by draft_length for adaptive speculation.
+    When enabled, captures separate CUDA graphs for each draft_length in
+    draft_length_options (typically [0, 5, 8, 10]), resulting in ~4x more graphs.
+    This provides 10-20% speedup for small-to-medium batches but consumes
+    significant additional GPU memory (200MB-3GB depending on model size).
+    Default: False (use single draft_length=0 graph, saves memory).
+    Recommended: Enable only if gpu_memory_utilization < 0.85 and batch_size <= 16."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
