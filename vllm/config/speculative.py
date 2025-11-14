@@ -101,12 +101,12 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
-    draft_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    draft_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     """Confidence threshold for early stopping in EAGLE draft token generation.
     When a draft token's confidence (max softmax probability) falls below this
     threshold, subsequent tokens will not write to KV cache, saving memory
     bandwidth. Set to 0.0 to disable early stopping (always write all tokens).
-    Set to 1.0 to stop after any non-certain prediction. Default: 0.5."""
+    Set to 1.0 to stop after any non-certain prediction. Default: 0.0 (disabled)."""
     draft_length_options: list[int] | None = None
     """List of draft lengths to capture as CUDA graphs for adaptive speculative
     decoding. If None, auto-computed as [n//2, n, min(8, n*2)] where
@@ -470,14 +470,30 @@ class SpeculativeConfig:
 
         # Auto-compute draft_length_options if not specified
         if self.draft_length_options is None and self.num_speculative_tokens is not None:
-            n = self.num_speculative_tokens
-            self.draft_length_options = [
-                max(2, n // 2),  # Half
-                n,               # Target
-                min(8, n * 2),   # Double (capped at 8)
-            ]
-            # Remove duplicates and sort
-            self.draft_length_options = sorted(set(self.draft_length_options))
+            # Check VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH to enable/disable adaptive draft length
+            if envs.VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH:
+                # Adaptive draft length enabled: compute draft length options
+                n = self.num_speculative_tokens
+                self.draft_length_options = [
+                    max(2, n // 2),  # Half
+                    n,               # Target
+                    min(8, n * 2),   # Double (capped at 8)
+                ]
+                # Remove duplicates and sort
+                self.draft_length_options = sorted(set(self.draft_length_options))
+            # else: keep draft_length_options as None (fixed draft length)
+
+        # Override confidence threshold from environment if set
+        # This allows independent control of batch early exit
+        env_confidence = envs.VLLM_NWOR_CONFIDENCE_THRESHOLD
+        if env_confidence < 0.0 or env_confidence > 1.0:
+            raise ValueError(
+                f"VLLM_NWOR_CONFIDENCE_THRESHOLD must be in [0.0, 1.0], "
+                f"got {env_confidence}"
+            )
+        if env_confidence != 0.0:
+            # Environment variable overrides default when explicitly set
+            self.draft_confidence_threshold = env_confidence
 
         return self
 
