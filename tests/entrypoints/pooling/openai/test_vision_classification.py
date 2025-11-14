@@ -9,27 +9,13 @@ import requests
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.protocol import ClassificationResponse
 
-VLM_MODEL_NAME = "google/gemma-3-4b-it"
-DTYPE = "float32"
+VLM_MODEL_NAME = "muziyongshixin/Qwen2.5-VL-7B-for-VideoCls"
 MAXIMUM_VIDEOS = 1
-TEST_VIDEO_URL = (
-    "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
-)
+TEST_VIDEO_URL = "https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4"
 
-GEMMA_CLASSIFIER_TEXT_OVERRIDES = {
-    # Mirror the gemma classification conversion used in
-    # tests/models/language/pooling/test_mm_classifier_conversion.py
+HF_OVERRIDES = {
     "text_config": {
-        "architectures": ["Gemma3ForSequenceClassification"],
-        "classifier_from_token": ["A", "B", "C", "D", "E"],
-        "method": "no_post_processing",
-        "id2label": {
-            "A": "Chair",
-            "B": "Couch",
-            "C": "Table",
-            "D": "Bed",
-            "E": "Cupboard",
-        },
+        "architectures": ["Qwen2_5_VLForSequenceClassification"],
     },
 }
 
@@ -39,23 +25,15 @@ def server_vlm_classify():
     args = [
         "--runner",
         "pooling",
-        "--task",
-        "classify",
-        "--convert",
-        "classify",
         "--max-model-len",
-        "512",
-        "--dtype",
-        DTYPE,
+        "5000",
         "--enforce-eager",
-        "--pooler-config",
-        json.dumps({"pooling_type": "LAST"}),
         "--limit-mm-per-prompt",
         json.dumps({"video": MAXIMUM_VIDEOS}),
     ]
 
     with RemoteOpenAIServer(
-        VLM_MODEL_NAME, args, override_hf_configs=GEMMA_CLASSIFIER_TEXT_OVERRIDES
+        VLM_MODEL_NAME, args, override_hf_configs=HF_OVERRIDES
     ) as remote_server:
         yield remote_server
 
@@ -84,15 +62,11 @@ def test_classify_accepts_chat_text_only(
     assert output.object == "list"
     assert output.model == model_name
     assert len(output.data) == 1
-    assert hasattr(output.data[0], "probs")
-    assert output.usage is not None
+    assert len(output.data[0].probs) == 2
+    assert output.usage.prompt_tokens == 22
 
 
 @pytest.mark.parametrize("model_name", [VLM_MODEL_NAME])
-@pytest.mark.xfail(
-    reason="Gemma classifier does not yet support video inputs via /classify",
-    strict=True,
-)
 def test_classify_accepts_chat_video_url(
     server_vlm_classify: RemoteOpenAIServer, model_name: str
 ) -> None:
@@ -117,5 +91,5 @@ def test_classify_accepts_chat_video_url(
     assert output.object == "list"
     assert output.model == model_name
     assert len(output.data) == 1
-    assert hasattr(output.data[0], "probs")
-    assert output.usage is not None
+    assert len(output.data[0].probs) == 2
+    assert output.usage.prompt_tokens == 4807
