@@ -46,12 +46,12 @@ And install [Docker](https://docs.docker.com/engine/install/) and [Docker Compos
     - **Model Name for API Endpoint**: `Qwen/Qwen1.5-7B-Chat`
     - **Completion Mode**: `Completion`
 
-    ![](../../assets/deployment/dify-settings.png)
+    ![Dify settings screen](../../assets/deployment/dify-settings.png)
 
 1. To create a test chatbot, go to `Studio → Chatbot → Create from Blank`, then select Chatbot as the type:
 
-    ![](../../assets/deployment/dify-create-chatbot.png)
+    ![Dify create chatbot screen](../../assets/deployment/dify-create-chatbot.png)
 
 1. Click the chatbot you just created to open the chat interface and start interacting with the model:
 
-    ![](../../assets/deployment/dify-chat.png)
+    ![Dify chat screen](../../assets/deployment/dify-chat.png)

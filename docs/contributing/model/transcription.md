@@ -249,7 +249,7 @@ No extra registration is required beyond having your model class available via t
 ## Examples in-tree
 
 - Whisper encoder–decoder (audio-only): [vllm/model_executor/models/whisper.py](../../../vllm/model_executor/models/whisper.py)
-- Voxtral decoder-only (audio embeddings + LLM): [vllm/model_executor/models/voxtral.py](../../../vllm/model_executor/models/voxtral.py)
+- Voxtral decoder-only (audio embeddings + LLM): [vllm/model_executor/models/voxtral.py](../../../vllm/model_executor/models/voxtral.py). Make sure to have installed `mistral-common[audio]`.
 - Gemma3n decoder-only with fixed instruction prompt: [vllm/model_executor/models/gemma3n_mm.py](../../../vllm/model_executor/models/gemma3n_mm.py)
 
 ## Test with the API

@@ -1314,7 +1314,7 @@ class GPUModelRunner(
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
         logits_indices_padded = None
-        num_logits_indices = 0
+        num_logits_indices = None
         if logits_indices is not None:
             num_logits_indices = logits_indices.size(0)
             if self.cache_config.kv_sharing_fast_prefill:
@@ -2031,7 +2031,7 @@ class GPUModelRunner(
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if self.scheduler_config.chunked_prefill_enabled:
+        if self.scheduler_config.enable_chunked_prefill:
             if "token_embed" in supported_tasks:
                 supported_tasks.remove("token_embed")
             if "token_classify" in supported_tasks:
@@ -2590,28 +2590,28 @@ class GPUModelRunner(
                     )
                 )
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            if ubatch_slices:
-                assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            else:
-                num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens
-                )
+                dp_rank = self.parallel_config.data_parallel_rank
+                if ubatch_slices:
+                    assert num_tokens_across_dp is not None
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                    self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+                elif num_tokens_across_dp is not None:
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                else:
+                    num_input_tokens = self._get_num_input_tokens(
+                        scheduler_output.total_num_scheduled_tokens
+                    )
 
-            (
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-                ec_connector_output,
-            ) = self._preprocess(
-                scheduler_output, num_input_tokens, intermediate_tensors
-            )
+                (
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                    ec_connector_output,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
+                )
 
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len
@@ -3825,7 +3825,7 @@ class GPUModelRunner(
         supported_pooling_tasks = self.get_supported_pooling_tasks()
 
         if not supported_pooling_tasks:
-            if self.scheduler_config.chunked_prefill_enabled:
+            if self.scheduler_config.enable_chunked_prefill:
                 raise RuntimeError(
                     f"Model {self.model_config.model} does not support "
                     "any pooling tasks with chunked prefill enabled. "
