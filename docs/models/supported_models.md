@@ -15,9 +15,9 @@ These models are what we list in [supported text models](#list-of-text-only-lang
 
 ### Transformers
 
-vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <5% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers backend".
+vLLM also supports model implementations that are available in Transformers. You should expect the performance of a Transformers model implementation used in vLLM to be within <5% of the performance of a dedicated vLLM model implementation. We call this feature the "Transformers modeling backend".
 
-Currently, the Transformers backend works for the following:
+Currently, the Transformers modeling backend works for the following:
 
 - Modalities: embedding models, language models and vision-language models*
 - Architectures: encoder-only, decoder-only, mixture-of-experts
@@ -25,7 +25,7 @@ Currently, the Transformers backend works for the following:
 
 _*Vision-language models currently accept only image inputs. Support for video inputs will be added in a future release._
 
-If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers backend, it will be compatible with the following features of vLLM:
+If the Transformers model implementation follows all the steps in [writing a custom model](#writing-custom-models) then, when used with the Transformers modeling backend, it will be compatible with the following features of vLLM:
 
 - All the features listed in the [compatibility matrix](../features/README.md#feature-x-feature)
 - Any combination of the following vLLM parallelisation schemes:
@@ -44,7 +44,7 @@ llm.apply_model(lambda model: print(type(model)))
 
 If the printed type starts with `Transformers...` then it's using the Transformers model implementation!
 
-If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/openai_compatible_server.md).
+If a model has a vLLM implementation but you would prefer to use the Transformers implementation via the Transformers modeling backend, set `model_impl="transformers"` for [offline inference](../serving/offline_inference.md) or `--model-impl transformers` for the [online serving](../serving/openai_compatible_server.md).
 
 !!! note
     For vision-language models, if you are loading with `dtype="auto"`, vLLM loads the whole model with config's `dtype` if it exists. In contrast the native Transformers will respect the `dtype` attribute of each backbone in the model. That might cause a slight difference in performance.
@@ -53,12 +53,12 @@ If a model has a vLLM implementation but you would prefer to use the Transformer
 
 If a model is neither supported natively by vLLM nor Transformers, it can still be used in vLLM!
 
-For a model to be compatible with the Transformers backend for vLLM it must:
+For a model to be compatible with the Transformers modeling backend for vLLM it must:
 
 - be a Transformers compatible custom model (see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)):
     - The model directory must have the correct structure (e.g. `config.json` is present).
     - `config.json` must contain `auto_map.AutoModel`.
-- be a Transformers backend for vLLM compatible model (see [Writing custom models](#writing-custom-models)):
+- be a Transformers modeling backend for vLLM compatible model (see [Writing custom models](#writing-custom-models)):
     - Customisation should be done in the base model (e.g. in `MyModel`, not `MyModelForCausalLM`).
 
 If the compatible model is:
@@ -66,13 +66,13 @@ If the compatible model is:
 - on the Hugging Face Model Hub, simply set `trust_remote_code=True` for [offline-inference](../serving/offline_inference.md) or `--trust-remote-code` for the [openai-compatible-server](../serving/openai_compatible_server.md).
 - in a local directory, simply pass directory path to `model=<MODEL_DIR>` for [offline-inference](../serving/offline_inference.md) or `vllm serve <MODEL_DIR>` for the [openai-compatible-server](../serving/openai_compatible_server.md).
 
-This means that, with the Transformers backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
+This means that, with the Transformers modeling backend for vLLM, new models can be used before they are officially supported in Transformers or vLLM!
 
 #### Writing custom models
 
-This section details the necessary modifications to make to a Transformers compatible custom model that make it compatible with the Transformers backend for vLLM. (We assume that a Transformers compatible custom model has already been created, see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)).
+This section details the necessary modifications to make to a Transformers compatible custom model that make it compatible with the Transformers modeling backend for vLLM. (We assume that a Transformers compatible custom model has already been created, see [Transformers - Customizing models](https://huggingface.co/docs/transformers/en/custom_models)).
 
-To make your model compatible with the Transformers backend, it needs:
+To make your model compatible with the Transformers modeling backend, it needs:
 
 1. `kwargs` passed down through all modules from `MyModel` to `MyAttention`.
     - If your model is encoder-only:
@@ -134,7 +134,7 @@ Here is what happens in the background when this model is loaded:
 
 1. The config is loaded.
 2. `MyModel` Python class is loaded from the `auto_map` in config, and we check that the model `is_backend_compatible()`.
-3. `MyModel` is loaded into one of the Transformers backend classes in [vllm/model_executor/models/transformers](../../vllm/model_executor/models/transformers) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
+3. `MyModel` is loaded into one of the Transformers modeling backend classes in [vllm/model_executor/models/transformers](../../vllm/model_executor/models/transformers) which sets `self.config._attn_implementation = "vllm"` so that vLLM's attention layer is used.
 
 That's it!
 
@@ -182,7 +182,7 @@ To determine whether a given model is natively supported, you can check the `con
 If the `"architectures"` field contains a model architecture listed below, then it should be natively supported.
 
 Models do not _need_ to be natively supported to be used in vLLM.
-The [Transformers backend](#transformers) enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
+The [Transformers modeling backend](#transformers) enables you to run models directly using their Transformers implementation (or even remote code on the Hugging Face Model Hub!).
 
 !!! tip
     The easiest way to check if your model is really supported at runtime is to run the program below:
@@ -451,7 +451,7 @@ th {
 | `Zamba2ForCausalLM` | Zamba2 | `Zyphra/Zamba2-7B-instruct`, `Zyphra/Zamba2-2.7B-instruct`, `Zyphra/Zamba2-1.2B-instruct`, etc. | | |
 | `LongcatFlashForCausalLM` | LongCat-Flash | `meituan-longcat/LongCat-Flash-Chat`, `meituan-longcat/LongCat-Flash-Chat-FP8` | ✅︎ | ✅︎ |
 
-Some models are supported only via the [Transformers backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
+Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 |--------------|--------|-------------------|----------------------|---------------------------|
@@ -720,7 +720,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `TarsierForConditionalGeneration` | Tarsier | T + I<sup>E+</sup> | `omni-search/Tarsier-7b`, `omni-search/Tarsier-34b` | | ✅︎ |
 | `Tarsier2ForConditionalGeneration`<sup>^</sup> | Tarsier2 | T + I<sup>E+</sup> + V<sup>E+</sup> | `omni-research/Tarsier2-Recap-7b`, `omni-research/Tarsier2-7b-0115` | | ✅︎ |
 
-Some models are supported only via the [Transformers backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
+Some models are supported only via the [Transformers modeling backend](#transformers). The purpose of the table below is to acknowledge models which we officially support in this way. The logs will say that the Transformers modeling backend is being used, and you will see no warning that this is fallback behaviour. This means that, if you have issues with any of the models listed below, please [make an issue](https://github.com/vllm-project/vllm/issues/new/choose) and we'll do our best to fix it!
 
 | Architecture | Models | Inputs | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 |--------------|--------|--------|-------------------|-----------------------------|-----------------------------------------|
