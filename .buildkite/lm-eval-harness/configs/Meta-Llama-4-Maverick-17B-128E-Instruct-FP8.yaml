@@ -8,4 +8,8 @@ tasks:
     value: 0.80
 limit: 250 # will run on 250 * 14 subjects = 3500 samples
 num_fewshot: 5
+enforce_eager: false # we use false to speed up the eval process
+kv_cache_dtype: fp8 # we use fp8 to speed up the eval process
+max_model_len: 8192
+gen_kwargs: "temperature=0,top_p=1,top_k=0,max_gen_toks=5632,until=<|ENDANSWER|>"
 rtol: 0.05
