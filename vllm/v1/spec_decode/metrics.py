@@ -27,6 +27,9 @@ class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
+    # Global acceptance rate tracking for adaptive draft length
+    acceptance_rate_ewma: float = 0.5  # Bootstrap at 50%
+    num_requests_tracked: int = 0
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -42,6 +45,52 @@ class SpecDecodingStats:
         assert num_accepted_tokens <= self.num_spec_tokens
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
+
+        # Update global acceptance rate EWMA
+        if num_draft_tokens > 0:
+            current_rate = num_accepted_tokens / num_draft_tokens
+            # Use alpha=0.1 for smoothing (90% history, 10% current)
+            self.acceptance_rate_ewma = (
+                0.9 * self.acceptance_rate_ewma + 0.1 * current_rate
+            )
+            self.num_requests_tracked += 1
+
+    def compute_optimal_draft_length(
+        self, draft_length_options: list[int]
+    ) -> int:
+        """Compute optimal draft length based on acceptance rate.
+
+        Uses threshold-based selection:
+        - High acceptance (>0.7): Use longest draft length
+        - Medium acceptance (0.5-0.7): Use medium draft length
+        - Low acceptance (0.3-0.5): Use shorter draft length
+        - Very low acceptance (<0.3): Use shortest draft length
+
+        Args:
+            draft_length_options: Sorted list of available draft lengths
+
+        Returns:
+            Optimal draft length for current acceptance rate
+        """
+        if not draft_length_options:
+            return self.num_spec_tokens
+
+        # Sort to ensure consistent ordering
+        sorted_options = sorted(draft_length_options)
+
+        # Threshold-based selection
+        if self.acceptance_rate_ewma > 0.7:
+            return sorted_options[-1]  # Longest
+        elif self.acceptance_rate_ewma > 0.5:
+            # Medium: use middle option
+            mid_idx = len(sorted_options) // 2
+            return sorted_options[mid_idx]
+        elif self.acceptance_rate_ewma > 0.3:
+            # Short: use second option if available
+            idx = min(1, len(sorted_options) - 1)
+            return sorted_options[idx]
+        else:
+            return sorted_options[0]  # Shortest
 
 
 class SpecDecodingLogging:
