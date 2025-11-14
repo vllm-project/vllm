@@ -1005,12 +1005,11 @@ class EagleProposer:
                 )
 
             share_embeddings = False
-            reason = ""
             if hasattr(self.model, "has_own_embed_tokens"):
-                # EAGLE-{1,2,3} model
+                # EAGLE model
                 if not self.model.has_own_embed_tokens:
                     share_embeddings = True
-                    reason = (
+                    logger.info(
                         "Detected EAGLE model without its own embed_tokens in the"
                         " checkpoint. Sharing target model embedding weights with the"
                         " draft model."
@@ -1023,7 +1022,7 @@ class EagleProposer:
                     )
                 ):
                     share_embeddings = True
-                    reason = (
+                    logger.info(
                         "Detected EAGLE model with embed_tokens identical to the target"
                         " model. Sharing target model embedding weights with the draft"
                         " model."
@@ -1036,13 +1035,12 @@ class EagleProposer:
             else:
                 # MTP model
                 share_embeddings = True
-                reason = (
+                logger.info(
                     "Detected MTP model. "
                     "Sharing target model embedding weights with the draft model."
                 )
 
             if share_embeddings:
-                logger.info(reason)
                 if hasattr(self.model.model, "embed_tokens"):
                     del self.model.model.embed_tokens
                 self.model.model.embed_tokens = target_embed_tokens
@@ -1054,12 +1052,11 @@ class EagleProposer:
 
         # share lm_head with the target model if needed
         share_lm_head = False
-        reason = ""
         if hasattr(self.model, "has_own_lm_head"):
-            # EAGLE-{1,2,3} model
+            # EAGLE model
             if not self.model.has_own_lm_head:
                 share_lm_head = True
-                reason = (
+                logger.info(
                     "Detected EAGLE model without its own lm_head in the checkpoint. "
                     "Sharing target model lm_head weights with the draft model."
                 )
@@ -1072,7 +1069,7 @@ class EagleProposer:
                 )
             ):
                 share_lm_head = True
-                reason = (
+                logger.info(
                     "Detected EAGLE model with lm_head identical to the target model. "
                     "Sharing target model lm_head weights with the draft model."
                 )
@@ -1084,13 +1081,12 @@ class EagleProposer:
         else:
             # MTP model
             share_lm_head = True
-            reason = (
+            logger.info(
                 "Detected MTP model. "
                 "Sharing target model lm_head weights with the draft model."
             )
 
         if share_lm_head and hasattr(target_language_model, "lm_head"):
-            logger.info(reason)
             if hasattr(self.model, "lm_head"):
                 del self.model.lm_head
             self.model.lm_head = target_language_model.lm_head
