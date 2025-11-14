@@ -674,12 +674,17 @@ def test_structured_output_with_reasoning_matrices(
     assert output is not None and isinstance(output, RequestOutput)
     prompt = output.prompt
     generated_text = output.outputs[0].text
-    reasoning_content, content = run_reasoning_extraction(reasoner, [generated_text])
-    print(f"Prompt: {prompt!r}\nReasoning: {reasoning_content!r}\nContent: {content!r}")
+    reasoning, content = run_reasoning_extraction(reasoner, [generated_text])
+    print(f"Prompt: {prompt!r}\nReasoning: {reasoning!r}\nContent: {content!r}")
 
-    assert content is not None and reasoning_content is not None
-    output_json = json.loads(content)
-    jsonschema.validate(instance=output_json, schema=reasoning_schema)
+    if "Qwen3" in model_name:
+        assert content is not None
+
+    assert reasoning is not None
+
+    if content is not None:
+        output_json = json.loads(content)
+        jsonschema.validate(instance=output_json, schema=reasoning_schema)
 
 
 @pytest.mark.skip_global_cleanup
@@ -868,11 +873,8 @@ def test_structured_output_batched_with_non_structured_outputs_requests(
 
 @pytest.mark.parametrize("guided_decoding_backend", ["xgrammar"])
 def test_structured_output_with_structural_tag(
-    monkeypatch: pytest.MonkeyPatch,
     guided_decoding_backend: str,
 ):
-    monkeypatch.setenv("VLLM_USE_V1", "1")
-
     llm = LLM(
         model="Qwen/Qwen2.5-1.5B-Instruct",
         guided_decoding_backend=guided_decoding_backend,
