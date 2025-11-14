@@ -1314,7 +1314,7 @@ class GPUModelRunner(
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
         logits_indices_padded = None
-        num_logits_indices = 0
+        num_logits_indices = None
         if logits_indices is not None:
             num_logits_indices = logits_indices.size(0)
             if self.cache_config.kv_sharing_fast_prefill:
