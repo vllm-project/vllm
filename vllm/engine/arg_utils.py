@@ -32,12 +32,13 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    ECTransferConfig,
     EPLBConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -385,6 +386,7 @@ class EngineArgs:
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
+    dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -461,7 +463,7 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
-    mm_encoder_attn_backend: _Backend | str | None = (
+    mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
@@ -513,7 +515,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     override_pooler_config: dict | PoolerConfig | None = (
@@ -525,6 +527,8 @@ class EngineArgs:
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
+
+    ec_transfer_config: ECTransferConfig | None = None
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -552,7 +556,9 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool = SchedulerConfig.async_scheduling
+    async_scheduling: bool | None = SchedulerConfig.async_scheduling
+
+    stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
@@ -749,6 +755,10 @@ class EngineArgs:
             "--decode-context-parallel-size",
             "-dcp",
             **parallel_kwargs["decode_context_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--dcp-kv-cache-interleave-size",
+            **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
         parallel_group.add_argument(
             "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
@@ -1059,6 +1069,9 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
+        scheduler_group.add_argument(
+            "--stream-interval", **scheduler_kwargs["stream_interval"]
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1100,6 +1113,9 @@ class EngineArgs:
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
+        vllm_group.add_argument(
+            "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
+        )
         vllm_group.add_argument(
             "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
         )
@@ -1479,20 +1495,6 @@ class EngineArgs:
             else ParallelConfig.data_parallel_rpc_port
         )
 
-        if self.async_scheduling:
-            if self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not supported with pipeline-parallel-size > 1."
-                )
-
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling."
-                )
-
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
@@ -1532,19 +1534,10 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
-
-        if self.async_scheduling and (
-            parallel_config.distributed_executor_backend
-            not in ("mp", "uni", "external_launcher")
-        ):
-            raise ValueError(
-                "Currently, async scheduling only supports `mp`, `uni` or "
-                "`external_launcher` distributed executor backend, but you choose "
-                f"`{parallel_config.distributed_executor_backend}`."
-            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1574,6 +1567,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            stream_interval=self.stream_interval,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -1597,6 +1591,20 @@ class EngineArgs:
             if self.enable_lora
             else None
         )
+
+        if (
+            lora_config is not None
+            and speculative_config is not None
+            and scheduler_config.max_num_batched_tokens
+            < (
+                scheduler_config.max_num_seqs
+                * (speculative_config.num_speculative_tokens + 1)
+            )
+        ):
+            raise ValueError(
+                "Consider increasing max_num_batched_tokens or "
+                "decreasing num_speculative_tokens"
+            )
 
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
@@ -1629,40 +1637,39 @@ class EngineArgs:
             )
 
         observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=(self.show_hidden_metrics_for_version),
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
         # Compilation config overrides
+        compilation_config = copy.deepcopy(self.compilation_config)
         if self.cuda_graph_sizes is not None:
             logger.warning(
                 "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
                 "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
                 "instead."
             )
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
                     "cuda_graph_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-            self.compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
+            compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
         if self.cudagraph_capture_sizes is not None:
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
                     "cudagraph_capture_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-            self.compilation_config.cudagraph_capture_sizes = (
-                self.cudagraph_capture_sizes
-            )
+            compilation_config.cudagraph_capture_sizes = self.cudagraph_capture_sizes
         if self.max_cudagraph_capture_size is not None:
-            if self.compilation_config.max_cudagraph_capture_size is not None:
+            if compilation_config.max_cudagraph_capture_size is not None:
                 raise ValueError(
                     "max_cudagraph_capture_size and compilation_config."
                     "max_cudagraph_capture_size are mutually exclusive"
                 )
-            self.compilation_config.max_cudagraph_capture_size = (
+            compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
 
@@ -1677,9 +1684,10 @@ class EngineArgs:
             load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
-            compilation_config=self.compilation_config,
+            compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
         )
 
@@ -1729,9 +1737,6 @@ class EngineArgs:
                     "launcher"
                 )
                 _raise_unsupported_error(feature_name=name)
-
-        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
-            _raise_unsupported_error(feature_name="sliding window (CPU backend)")
 
     def _set_default_args(
         self, usage_context: UsageContext, model_config: ModelConfig

@@ -45,7 +45,7 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    _Backend = Any
+    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -264,7 +264,8 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
-    """Enable sleep mode for the engine (only cuda platform is supported)."""
+    """Enable sleep mode for the engine (only cuda and
+    hip platforms are supported)."""
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
@@ -302,7 +303,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
-    mm_encoder_attn_backend: InitVar[_Backend | str | None] = None
+    mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -420,7 +421,7 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
-        mm_encoder_attn_backend: _Backend | str | None,
+        mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -1341,7 +1342,8 @@ class ModelConfig:
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
             return num_experts[0]
-        return num_experts
+        # Coerce to 0 if explicitly set to None
+        return num_experts or 0
 
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig
@@ -1619,6 +1621,13 @@ class ModelConfig:
 
     @property
     def is_hybrid(self) -> bool:
+        # Handle granite-4.0-micro case which uses hybrid config but does not
+        # actually contain any non-attention layers.
+        layer_types = getattr(self.hf_config, "layer_types", None)
+        if layer_types is not None and all(
+            layer == "attention" for layer in layer_types
+        ):
+            return False
         return self._model_info.is_hybrid
 
     @property
