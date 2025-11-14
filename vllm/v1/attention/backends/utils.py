@@ -109,8 +109,8 @@ class CommonAttentionMetadata:
     # Needed by CrossAttentionBuilder
     encoder_seq_lens: np.ndarray | None = None
 
-    dcp_local_seq_lens: torch.Tensor | None = None
-    """Sequence lengths of the local rank in decode context parallelism world"""
+    cp_local_seq_lens: torch.Tensor | None = None
+    """Sequence lengths of the local rank in prefill/decode context parallelism world"""
     
     pcp_metadata: PrefillContextParallelMetadata | None = None
 
