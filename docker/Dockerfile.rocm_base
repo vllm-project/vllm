@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.0-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.1-complete
 ARG TRITON_BRANCH="57c693b6"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="1c57644d"
@@ -7,7 +7,7 @@ ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
 ARG FA_BRANCH="0e60e394"
 ARG FA_REPO="https://github.com/Dao-AILab/flash-attention.git"
-ARG AITER_BRANCH="9716b1b8"
+ARG AITER_BRANCH="59bd8ff2"
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
 
 FROM ${BASE_IMAGE} AS base
@@ -18,6 +18,9 @@ ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
 ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 ENV AITER_ROCM_ARCH=gfx942;gfx950
+
+# Required for RCCL in ROCm7.1
+ENV HSA_NO_SCRATCH_RECLAIM=1
 
 ARG PYTHON_VERSION=3.12
 
