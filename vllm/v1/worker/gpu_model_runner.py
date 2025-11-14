@@ -2031,7 +2031,7 @@ class GPUModelRunner(
 
         supported_tasks = list(model.pooler.get_supported_tasks())
 
-        if self.scheduler_config.chunked_prefill_enabled:
+        if self.scheduler_config.enable_chunked_prefill:
             if "token_embed" in supported_tasks:
                 supported_tasks.remove("token_embed")
             if "token_classify" in supported_tasks:
@@ -3825,7 +3825,7 @@ class GPUModelRunner(
         supported_pooling_tasks = self.get_supported_pooling_tasks()
 
         if not supported_pooling_tasks:
-            if self.scheduler_config.chunked_prefill_enabled:
+            if self.scheduler_config.enable_chunked_prefill:
                 raise RuntimeError(
                     f"Model {self.model_config.model} does not support "
                     "any pooling tasks with chunked prefill enabled. "
