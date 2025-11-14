@@ -144,11 +144,6 @@ class AfmoeMoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.n_shared_experts > 0:
-            shared_output = self.shared_experts(hidden_states)
-        else:
-            shared_output = torch.zeros_like(hidden_states)
-
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
 
         fused_moe_out = self.experts(
