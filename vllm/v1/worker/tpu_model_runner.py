@@ -21,7 +21,7 @@ from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
     ParallelConfig,
     VllmConfig,
@@ -1895,12 +1895,14 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
-        if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
+        if isinstance(compiled_model, TorchCompileWithNoGuardsWrapper):
             logger.info("Clear dynamo cache and cached dynamo bytecode.")
             torch._dynamo.eval_frame.remove_from_cache(
-                compiled_model.original_code_object
+                compiled_model.original_code_object()
             )
-            compiled_model.compiled_codes.clear()
+            # Reset the wrapper to re-initialize.
+            compiled_model.compiled = False
+            TorchCompileWithNoGuardsWrapper.__init__(compiled_model)
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
