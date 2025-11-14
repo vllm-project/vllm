@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 import asyncio
-import gc
 import hashlib
 import importlib
 import inspect
@@ -21,6 +19,7 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
+import model_hosting_container_standards.sagemaker as sagemaker_standards
 import prometheus_client
 import pydantic
 import regex as re
@@ -66,8 +65,9 @@ from vllm.entrypoints.openai.protocol import (
     EmbeddingResponse,
     ErrorInfo,
     ErrorResponse,
+    GenerateRequest,
+    GenerateResponse,
     IOProcessorResponse,
-    LoadLoRAAdapterRequest,
     PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
@@ -84,7 +84,6 @@ from vllm.entrypoints.openai.protocol import (
     TranscriptionResponse,
     TranslationRequest,
     TranslationResponse,
-    UnloadLoRAAdapterRequest,
 )
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import ServingClassification
@@ -99,6 +98,7 @@ from vllm.entrypoints.openai.serving_pooling import OpenAIServingPooling
 from vllm.entrypoints.openai.serving_responses import OpenAIServingResponses
 from vllm.entrypoints.openai.serving_score import ServingScores
 from vllm.entrypoints.openai.serving_tokenization import OpenAIServingTokenization
+from vllm.entrypoints.openai.serving_tokens import ServingTokens
 from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranscription,
     OpenAIServingTranslation,
@@ -118,6 +118,7 @@ from vllm.reasoning import ReasoningParserManager
 from vllm.tasks import POOLING_TASKS
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import is_valid_ipv6_address
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError
@@ -153,8 +154,7 @@ async def lifespan(app: FastAPI):
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
-        gc.collect()
-        gc.freeze()
+        freeze_gc_heap()
         try:
             yield
         finally:
@@ -220,14 +220,8 @@ async def build_async_engine_client_from_engine_args(
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    # V1 AsyncLLM.
-    assert envs.VLLM_USE_V1
-
     if disable_frontend_multiprocessing:
-        logger.warning(
-            "V1 is enabled, but got --disable-frontend-multiprocessing. "
-            "To disable frontend multiprocessing, set VLLM_USE_V1=0."
-        )
+        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -366,6 +360,10 @@ def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
+def generate_tokens(request: Request) -> ServingTokens | None:
+    return request.app.state.serving_tokens
+
+
 @router.get("/health", response_class=Response)
 async def health(raw_request: Request) -> Response:
     """Health check."""
@@ -393,13 +391,6 @@ async def get_server_load_metrics(request: Request):
     # - /v1/rerank
     # - /v2/rerank
     return JSONResponse(content={"server_load": request.app.state.server_load_metrics})
-
-
-@router.get("/ping", response_class=Response)
-@router.post("/ping", response_class=Response)
-async def ping(raw_request: Request) -> Response:
-    """Ping check. Endpoint required for SageMaker"""
-    return await health(raw_request)
 
 
 @router.post(
@@ -654,10 +645,9 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return translate_error_response(generator)
 
     elif isinstance(generator, AnthropicMessagesResponse):
-        logger.debug(
-            "Anthropic Messages Response: %s", generator.model_dump(exclude_none=True)
-        )
-        return JSONResponse(content=generator.model_dump(exclude_none=True))
+        resp = generator.model_dump(exclude_none=True)
+        logger.debug("Anthropic Messages Response: %s", resp)
+        return JSONResponse(content=resp)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -1246,51 +1236,51 @@ INVOCATION_VALIDATORS = [
 
 
 @router.post(
-    "/invocations",
+    "/inference/v1/generate",
     dependencies=[Depends(validate_json_request)],
     responses={
+        HTTPStatus.OK.value: {"content": {"text/event-stream": {}}},
         HTTPStatus.BAD_REQUEST.value: {"model": ErrorResponse},
-        HTTPStatus.UNSUPPORTED_MEDIA_TYPE.value: {"model": ErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": ErrorResponse},
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
-async def invocations(raw_request: Request):
-    """For SageMaker, routes requests based on the request type."""
+@with_cancellation
+@load_aware_call
+async def generate(request: GenerateRequest, raw_request: Request):
+    handler = generate_tokens(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support generate tokens API"
+        )
     try:
-        body = await raw_request.json()
-    except json.JSONDecodeError as e:
+        generator = await handler.serve_tokens(request, raw_request)
+    except Exception as e:
         raise HTTPException(
-            status_code=HTTPStatus.BAD_REQUEST.value, detail=f"JSON decode error: {e}"
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value, detail=str(e)
         ) from e
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(
+            content=generator.model_dump(), status_code=generator.error.code
+        )
 
-    valid_endpoints = [
-        (validator, endpoint)
-        for validator, (get_handler, endpoint) in INVOCATION_VALIDATORS
-        if get_handler(raw_request) is not None
-    ]
+    elif isinstance(generator, GenerateResponse):
+        return JSONResponse(content=generator.model_dump())
 
-    for request_validator, endpoint in valid_endpoints:
-        try:
-            request = request_validator.validate_python(body)
-        except pydantic.ValidationError:
-            continue
-
-        return await endpoint(request, raw_request)
-
-    type_names = [
-        t.__name__ if isinstance(t := validator._type, type) else str(t)
-        for validator, _ in valid_endpoints
-    ]
-    msg = f"Cannot find suitable handler for request. Expected one of: {type_names}"
-    res = base(raw_request).create_error_response(message=msg)
-    return JSONResponse(content=res.model_dump(), status_code=res.error.code)
+    return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
 if envs.VLLM_TORCH_PROFILER_DIR:
-    logger.warning(
+    logger.warning_once(
         "Torch Profiler is enabled in the API server. This should ONLY be "
         "used for local development!"
     )
+elif envs.VLLM_TORCH_CUDA_PROFILE:
+    logger.warning_once(
+        "CUDA Profiler is enabled in the API server. This should ONLY be "
+        "used for local development!"
+    )
+if envs.VLLM_TORCH_PROFILER_DIR or envs.VLLM_TORCH_CUDA_PROFILE:
 
     @router.post("/start_profile")
     async def start_profile(raw_request: Request):
@@ -1305,39 +1295,6 @@ if envs.VLLM_TORCH_PROFILER_DIR:
         await engine_client(raw_request).stop_profile()
         logger.info("Profiler stopped.")
         return Response(status_code=200)
-
-
-if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
-    logger.warning(
-        "LoRA dynamic loading & unloading is enabled in the API server. "
-        "This should ONLY be used for local development!"
-    )
-
-    @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
-    async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
-        handler = models(raw_request)
-        response = await handler.load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.error.code
-            )
-
-        return Response(status_code=200, content=response)
-
-    @router.post(
-        "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
-    )
-    async def unload_lora_adapter(
-        request: UnloadLoRAAdapterRequest, raw_request: Request
-    ):
-        handler = models(raw_request)
-        response = await handler.unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(
-                content=response.model_dump(), status_code=response.error.code
-            )
-
-        return Response(status_code=200, content=response)
 
 
 def load_log_config(log_config_file: str | None) -> dict | None:
@@ -1578,8 +1535,7 @@ def _log_streaming_response(response, response_body: list) -> None:
                             full_content = full_content[:2048] + ""
                             "...[truncated]"
                         logger.info(
-                            "response_body={streaming_complete: "
-                            "content='%s', chunks=%d}",
+                            "response_body={streaming_complete: content=%r, chunks=%d}",
                             full_content,
                             chunk_count,
                         )
@@ -1610,6 +1566,20 @@ def build_app(args: Namespace) -> FastAPI:
         )
     else:
         app = FastAPI(lifespan=lifespan)
+
+    if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        logger.warning(
+            "LoRA dynamic loading & unloading is enabled in the API server. "
+            "This should ONLY be used for local development!"
+        )
+        from vllm.entrypoints.dynamic_lora import register_dynamic_lora_routes
+
+        register_dynamic_lora_routes(router)
+
+    from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
+
+    register_sagemaker_routes(router)
+
     app.include_router(router)
     app.root_path = args.root_path
 
@@ -1699,6 +1669,33 @@ def build_app(args: Namespace) -> FastAPI:
             raise ValueError(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
+
+    app = sagemaker_standards.bootstrap(app)
+    # Optional endpoints
+    if args.tokens_only:
+
+        @app.post("/abort_requests")
+        async def abort_requests(raw_request: Request):
+            """
+            Abort one or more requests. To be used in a
+            Disaggregated Everything setup.
+            """
+            try:
+                body = await raw_request.json()
+            except json.JSONDecodeError as e:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail=f"JSON decode error: {e}",
+                ) from e
+            request_ids = body.get("request_ids")
+            if request_ids is None:
+                raise HTTPException(
+                    status_code=HTTPStatus.BAD_REQUEST.value,
+                    detail="Missing 'request_ids' in request body",
+                )
+            # Abort requests in background
+            asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            return Response(status_code=200)
 
     return app
 
@@ -1854,6 +1851,9 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
@@ -1918,6 +1918,20 @@ async def init_app_state(
         if "generate" in supported_tasks
         else None
     )
+    state.serving_tokens = (
+        ServingTokens(
+            engine_client,
+            state.openai_serving_models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=args.return_tokens_as_token_ids,
+            log_error_stack=args.log_error_stack,
+            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
+            enable_log_outputs=args.enable_log_outputs,
+            force_no_detokenize=args.tokens_only,
+        )
+        if "generate" in supported_tasks
+        else None
+    )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -1950,13 +1964,13 @@ def validate_api_server_args(args):
             f"(chose from {{ {','.join(valid_tool_parses)} }})"
         )
 
-    valid_reasoning_parses = ReasoningParserManager.reasoning_parsers.keys()
+    valid_reasoning_parsers = ReasoningParserManager.list_registered()
     if (
         reasoning_parser := args.structured_outputs_config.reasoning_parser
-    ) and reasoning_parser not in valid_reasoning_parses:
+    ) and reasoning_parser not in valid_reasoning_parsers:
         raise KeyError(
             f"invalid reasoning parser: {reasoning_parser} "
-            f"(chose from {{ {','.join(valid_reasoning_parses)} }})"
+            f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
         )
 
 
@@ -1969,6 +1983,9 @@ def setup_server(args):
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     validate_api_server_args(args)
 
@@ -2018,6 +2035,9 @@ async def run_server_worker(
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
         ToolParserManager.import_tool_parser(args.tool_parser_plugin)
+
+    if args.reasoning_parser_plugin and len(args.reasoning_parser_plugin) > 3:
+        ReasoningParserManager.import_reasoning_parser(args.reasoning_parser_plugin)
 
     # Load logging config for uvicorn if specified
     log_config = load_log_config(args.log_config_file)
