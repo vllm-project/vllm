@@ -43,6 +43,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
     ClassificationRequest,
     ClassificationResponse,
     CompletionRequest,
@@ -56,6 +58,8 @@ from vllm.entrypoints.openai.protocol import (
     ErrorResponse,
     FunctionCall,
     FunctionDefinition,
+    GenerateRequest,
+    GenerateResponse,
     IOProcessorRequest,
     PoolingResponse,
     RerankRequest,
@@ -114,13 +118,16 @@ CompletionLikeRequest: TypeAlias = (
     | DetokenizeRequest
     | EmbeddingCompletionRequest
     | RerankRequest
-    | ClassificationRequest
+    | ClassificationCompletionRequest
     | ScoreRequest
     | TokenizeCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+    ChatCompletionRequest
+    | EmbeddingChatRequest
+    | TokenizeChatRequest
+    | ClassificationChatRequest
 )
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
 AnyRequest: TypeAlias = (
@@ -129,6 +136,7 @@ AnyRequest: TypeAlias = (
     | SpeechToTextRequest
     | ResponsesRequest
     | IOProcessorRequest
+    | GenerateRequest
 )
 
 AnyResponse: TypeAlias = (
@@ -140,6 +148,7 @@ AnyResponse: TypeAlias = (
     | PoolingResponse
     | ClassificationResponse
     | ScoreResponse
+    | GenerateResponse
 )
 
 
@@ -814,7 +823,11 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        for message in request.messages:
+        messages = request.messages
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
             if (
                 isinstance(message, dict)
                 and "content" in message
@@ -907,7 +920,8 @@ class OpenAIServing:
                 EmbeddingCompletionRequest,
                 ScoreRequest,
                 RerankRequest,
-                ClassificationRequest,
+                ClassificationCompletionRequest,
+                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -915,7 +929,8 @@ class OpenAIServing:
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(
@@ -1227,7 +1242,7 @@ class OpenAIServing:
 
             # Call the tool and update the context with the result.
             tool_output = await context.call_tool()
-            context.append_output(tool_output)
+            context.append_tool_output(tool_output)
 
             # TODO: uncomment this and enable tool output streaming
             # yield context
