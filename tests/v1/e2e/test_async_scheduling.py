@@ -7,7 +7,6 @@ import pytest
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
-from vllm.config import SpeculativeConfig
 from vllm.logprobs import Logprob
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.metrics.reader import Metric
