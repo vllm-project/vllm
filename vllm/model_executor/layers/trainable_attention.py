@@ -160,8 +160,11 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         # Handle both batched [batch, seq, hidden] and flattened [total_tokens, hidden]
         input_is_batched = hidden_states.dim() == 3
         if input_is_batched:
-            batch_size, seq_len, _ = hidden_states.shape
+            original_batch_size, original_seq_len, _ = hidden_states.shape
             hidden_states = hidden_states.view(-1, self.hidden_size)
+        else:
+            original_batch_size = None
+            original_seq_len = None
 
         total_tokens = hidden_states.shape[0]
 
@@ -303,7 +306,9 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
         # Restore original shape if input was batched
         if input_is_batched:
-            output = output.view(batch_size, seq_len, self.hidden_size)
+            output = output.view(
+                original_batch_size, original_seq_len, self.hidden_size
+            )
 
         return output
 
