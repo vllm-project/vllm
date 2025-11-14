@@ -10,14 +10,13 @@ import torch
 from vllm.attention.backends.abstract import (
     AttentionBackend,
     AttentionImpl,
-    AttentionMetadata,
     AttentionType,
     MultipleOf,
 )
+from vllm.attention.ops.helion_unified_attention import helion_unified_attention
 from vllm.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.attention.ops.helion_unified_attention import helion_unified_attention
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -353,9 +352,14 @@ class HelionAttentionImpl(AttentionImpl):
 
         descale_shape = (cu_seqlens_q.shape[0] - 1, key.shape[1])
 
-        if attn_metadata.max_seq_len < 64 or len(seqused_k) < 4: 
-            print(f"DEBUG: calling triton attention for seq lens {attn_metadata.max_query_len} and batch size {len(seqused_k)}.")
-            from vllm.attention.ops.triton_unified_attention import unified_attention as triton_unified_attention
+        if attn_metadata.max_seq_len < 64 or len(seqused_k) < 4:
+            print(
+                f"DEBUG: calling triton attention for seq lens {attn_metadata.max_query_len} and batch size {len(seqused_k)}."
+            )
+            from vllm.attention.ops.triton_unified_attention import (
+                unified_attention as triton_unified_attention,
+            )
+
             triton_unified_attention(
                 q=query[:num_actual_tokens],
                 k=key_cache,
