@@ -14,7 +14,7 @@ from typing import Any, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
+from typing_extensions import Self, deprecated
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -273,6 +273,11 @@ class SchedulerConfig:
                 self.external_parameters = json.load(f)
 
     @property
+    @deprecated(
+        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
+        "`SchedulerConfig.enable_chunked_prefill`. "
+        "The old name will be removed in v0.12."
+    )
     def chunked_prefill_enabled(self) -> bool:
         return self.enable_chunked_prefill
 
@@ -284,7 +289,7 @@ class SchedulerConfig:
     def _verify_args(self) -> Self:
         if (
             self.max_num_batched_tokens < self.max_model_len
-            and not self.chunked_prefill_enabled
+            and not self.enable_chunked_prefill
         ):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
@@ -311,7 +316,7 @@ class SchedulerConfig:
             )
 
         if self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
+            if not self.enable_chunked_prefill:
                 raise ValueError(
                     "Chunked prefill must be enabled to set "
                     "max_num_partial_prefills > 1."
