@@ -10,6 +10,7 @@ import torch
 from flashinfer import (
     BatchDecodeWithPagedKVCacheWrapper,
     BatchPrefillWithPagedKVCacheWrapper,
+    BatchPrefillWithRaggedKVCacheWrapper,
     MultiLevelCascadeAttentionWrapper,
 )
 from flashinfer.decode import _get_range_buf, trtllm_batch_decode_with_kv_cache
@@ -24,8 +25,11 @@ from vllm.attention.backends.abstract import (
     AttentionType,
     MultipleOf,
 )
+from vllm.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.distributed.parallel_state import get_pcp_group, get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -38,22 +42,23 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
+from vllm.utils import cdiv, is_pin_memory_available
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
     flashinfer_disable_q_quantization,
     use_trtllm_attention,
 )
-from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     KVCacheLayoutType,
+    get_cp_local_seq_lens,
     get_kv_cache_layout,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
+    PrefillContextParallelMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -288,6 +293,9 @@ class FlashInferMetadata:
     qo_indptr_gpu: torch.Tensor | None = None
     paged_kv_indptr_gpu: torch.Tensor | None = None
 
+    # For context parallel
+    pcp_metadata: PrefillContextParallelMetadata | None = None
+
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     reorder_batch_threshold: int = 1
@@ -341,8 +349,29 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.compilation_config.max_cudagraph_capture_size,
             )
 
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            self.vllm_config.parallel_config
+        try:
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            # PCP might not be initialized in testing
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+
+        try:
+            self.dcp_world_size = get_dcp_group().world_size
+            self.dcp_rank = get_dcp_group().rank_in_group
+            self.dcp_kv_cache_interleave_size = vllm_config.parallel_config.dcp_kv_cache_interleave_size
+        except AssertionError:
+            # DCP might not be initialized in testing
+            self.dcp_world_size = 1
+            self.dcp_rank = 0
+            self.dcp_kv_cache_interleave_size = 1
+
+        self.total_cp_world_size = self.pcp_world_size * self.dcp_world_size
+        self.total_cp_rank = self.pcp_rank * self.dcp_world_size + self.dcp_rank
+
+        self.num_qo_heads = (
+            self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
         )
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
@@ -457,9 +486,24 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _get_prefill_wrapper(self):
         if self._prefill_wrapper is None:
-            self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
-                self._get_workspace_buffer(), get_kv_cache_layout()
-            )
+            if self.total_cp_world_size > 1:
+                self._prefill_wrapper = dict()
+                self._prefill_wrapper["context"] = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout()
+                )
+                if self.pcp_world_size > 1:
+                    for key in ["head", "tail"]:
+                        self._prefill_wrapper[key] = BatchPrefillWithRaggedKVCacheWrapper(
+                            self._get_workspace_buffer(), get_kv_cache_layout()
+                        )
+                else:
+                    self._prefill_wrapper["query"] = BatchPrefillWithRaggedKVCacheWrapper(
+                        self._get_workspace_buffer(), get_kv_cache_layout()
+                    )
+            else:
+                self._prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                    self._get_workspace_buffer(), get_kv_cache_layout()
+                )
         return self._prefill_wrapper
 
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
@@ -526,8 +570,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         max_seq_len = common_attn_metadata.max_seq_len
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-        seq_lens_np = seq_lens_cpu.numpy()
+        
         block_table_tensor = common_attn_metadata.block_table_tensor
+        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
+
+        if self.total_cp_world_size > 1:
+            if num_prefills > 0:
+                qo_indptr_prefill_cpu = (
+                    qo_indptr_cpu[num_decodes:] - qo_indptr_cpu[num_decodes]
+                )
+                query_lens_prefill_cpu = qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
+                seq_lens_cpu[num_decodes:] = seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
+
+            seq_lens_cpu = get_cp_local_seq_lens(
+                seq_lens_cpu,
+                self.total_cp_world_size,
+                self.total_cp_rank,
+                self.dcp_kv_cache_interleave_size,
+            )
+        seq_lens_np = seq_lens_cpu.numpy()
 
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
 
@@ -589,7 +650,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # write self.paged_kv_last_page_len_cpu inplace
         paged_kv_last_page_len_np = seq_lens_np % page_size
         self.paged_kv_last_page_len_np[:num_reqs] = np.where(
-            paged_kv_last_page_len_np == 0,
+            (paged_kv_last_page_len_np == 0) & (seq_lens_np != 0),
             page_size,
             paged_kv_last_page_len_np,
         )
@@ -607,6 +668,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             has_spec=uses_spec_reorder,
         )
         decode_use_trtllm = self.use_trtllm_decode_attention
+        if self.total_cp_world_size > 1 \
+            and (prefill_use_trtllm or decode_use_trtllm):
+            raise NotImplementedError(
+                "Trtllm not support lse, please use flash attention "
+                "or disable attention sinks."
+            )
 
         if not (prefill_use_trtllm and decode_use_trtllm):
             if self.has_sinks:
@@ -649,9 +716,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             use_cascade=use_cascade,
+            pcp_metadata=common_attn_metadata.pcp_metadata,
         )
 
-        qo_indptr_cpu = common_attn_metadata.query_start_loc_cpu
         paged_kv_indptr_cpu = self.paged_kv_indptr_cpu[: 1 + num_reqs]
         paged_kv_last_page_len_cpu = self.paged_kv_last_page_len_cpu[:num_reqs]
 
@@ -703,24 +770,81 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.max_q_len_prefill = int(query_lens_prefill.max().item())
 
                 if not attn_metadata.prefill_use_trtllm:
-                    attn_metadata.prefill_wrapper.plan(
-                        qo_indptr_cpu,
-                        paged_kv_indptr_cpu,
-                        paged_kv_indices,
-                        paged_kv_last_page_len_cpu[prefill_start:],
-                        self.num_qo_heads,
+                    common_args = [
                         self.num_kv_heads,
                         self.head_dim,
-                        self.page_size,
-                        causal=True,
-                        sm_scale=self.sm_scale,
-                        window_left=self.window_left,
-                        logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
-                        kv_data_type=self.kv_cache_dtype,
-                        fixed_split_size=self.prefill_fixed_split_size,
-                        disable_split_kv=self.disable_split_kv,
-                    )
+                    ]
+                    common_kwargs = {
+                        "sm_scale": self.sm_scale,
+                        "window_left": self.window_left,
+                        "logits_soft_cap": self.logits_soft_cap,
+                        "q_data_type": self.q_data_type,
+                        "kv_data_type": self.kv_cache_dtype,
+                    }
+                    paged_kwargs = {
+                        "page_size": self.page_size,
+                        "fixed_split_size": self.prefill_fixed_split_size,
+                        "disable_split_kv": self.disable_split_kv,
+                    }
+                    if self.total_cp_world_size > 1:
+                        assert type(attn_metadata.prefill_wrapper) == dict
+                        attn_metadata.prefill_wrapper["context"].plan(
+                            qo_indptr_cpu,
+                            paged_kv_indptr_cpu,
+                            paged_kv_indices,
+                            paged_kv_last_page_len_cpu[prefill_start:],
+                            self.num_qo_heads * self.dcp_world_size,
+                            *common_args,
+                            causal=False,  # This is contxet run
+                            **common_kwargs,
+                            **paged_kwargs,
+                        )
+                        if self.pcp_world_size > 1:
+                            assert common_attn_metadata.pcp_metadata is not None
+
+                            pcp_metadata = common_attn_metadata.pcp_metadata
+                            qo_indptr_cpu = pcp_metadata.q_head_start_loc
+                            kv_for_head_indptr = pcp_metadata.kv_for_head_indptr
+                            kv_for_tail_indptr = pcp_metadata.kv_for_tail_indptr
+
+                            attn_metadata.prefill_wrapper["head"].plan(
+                                qo_indptr_cpu,
+                                kv_for_head_indptr,
+                                self.num_qo_heads,
+                                *common_args,
+                                causal=True,
+                                **common_kwargs,
+                            )
+                            attn_metadata.prefill_wrapper["tail"].plan(
+                                qo_indptr_cpu,
+                                kv_for_tail_indptr,
+                                self.num_qo_heads,
+                                *common_args,
+                                causal=True,
+                                **common_kwargs,
+                            )
+                        elif self.dcp_world_size > 1:
+                            kv_query_indptr_cpu = qo_indptr_cpu.clone()
+                            attn_metadata.prefill_wrapper["query"].plan(
+                                qo_indptr_cpu,
+                                kv_query_indptr_cpu,
+                                self.num_qo_heads,
+                                *common_args,
+                                causal=True,
+                                **common_kwargs,
+                            )
+                    else:
+                        attn_metadata.prefill_wrapper.plan(
+                            qo_indptr_cpu
+                            paged_kv_indptr_cpu
+                            paged_kv_indices,
+                            paged_kv_last_page_len_cpu[prefill_start:]
+                            self.num_qo_heads,
+                            *common_args,
+                            causal=True,
+                            **common_kwargs,
+                            **paged_kwargs,
+                        )
                 else:
                     attn_metadata.qo_indptr_gpu = qo_indptr_cpu.to(
                         self.device, non_blocking=True
@@ -770,7 +894,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         paged_kv_indices,
                         self.paged_kv_last_page_len_cpu[:num_input_tokens],
                         seq_lens_cpu[:num_input_tokens],
-                        self.num_qo_heads,
+                        self.num_qo_heads * self.dcp_world_size,
                         self.num_kv_heads,
                         self.head_dim,
                         self.page_size,
@@ -791,12 +915,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # TODO: The cascade wrapper currently does not support setting
             # kv cache dtype to something different from query dtype.
             return False
+        if self.pcp_world_size > 1:
+            return False
         # TODO: Cascade attention doesn't work, disable it for now
         # return use_cascade_attention(*args, **kwargs)
         return False
 
 
 class FlashInferImpl(AttentionImpl):
+    can_return_lse_for_decode: bool = True
+
     def __init__(
         self,
         num_heads: int,
@@ -871,6 +999,68 @@ class FlashInferImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def _attention_with_head_and_tail(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        prefill_wrapper: dict[str, BatchPrefillWithRaggedKVCacheWrapper],
+        metadata: PrefillContextParallelMetadata,
+        return_lse: bool = False,
+    ):
+        """
+        For prompt with tokens [T0, T1, T2, T3], the query on PCP0 is [Q0, Q3]
+        and we all-gather full K as [K0, K1, K2, K3].
+        There are two attn ops. The "head" is [Q0]x[K0] and the "tail" is 
+        [Q3]x[K0, K1, K2, K3].
+        """
+        q_head_indices = metadata.q_head_indices
+        q_tail_indices = metadata.q_tail_indices
+        kv_for_head_indices = metadata.kv_for_head_indices
+        kv_for_tail_indices = metadata.kv_for_tail_indices
+        q_full_indices = metadata.q_full_indices
+
+        q_head = torch.index_select(query, 0, q_head_indices)
+        q_tail = torch.index_select(query, 0, q_tail_indices)
+        k_head = torch.index_select(key, 0, kv_for_head_indices)
+        v_head = torch.index_select(value, 0, kv_for_head_indices)
+        k_tail = torch.index_select(key, 0, kv_for_tail_indices)
+        v_tail = torch.index_select(value, 0, kv_for_tail_indices)
+
+        output_head = prefill_wrapper["head"].run(
+            q_head,
+            k_head,
+            v_head,
+            return_lse=return_lse,
+        )
+        output_tail = prefill_wrapper["tail"].run(
+            q_tail,
+            k_tail,
+            v_tail,
+            return_lse=return_lse,
+        )
+        if return_lse:
+            output_head, lse_head = output_head
+            output_tail, lse_tail = output_tail
+            output = torch.index_select(
+                torch.cat([output_head, output_tail], dim=0),
+                0,
+                q_full_indices,
+            )
+            lse = torch.index_select(
+                torch.cat([lse_head, lse_tail], dim=0),
+                0,
+                q_full_indices,
+            )
+            return output, lse
+        else:
+            output = torch.index_select(
+                torch.cat([output_head, output_tail], dim=0),
+                0,
+                q_full_indices,
+            )
+            return output
 
     def forward(
         self,
@@ -960,6 +1150,27 @@ class FlashInferImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
 
+        if (self.pcp_world_size > 1):
+            assert attn_metadata.pcp_metadata is not None
+            pcp_allgather_restore_idx = attn_metadata.pcp_metadata.allgather_restore_idx
+            assert pcp_allgather_resotre_idx is not None
+            # NOTE(yyj): we must `slice` key and value because pcp_allgather_restore_idx
+            # ignores the padding from CUDA Graph. To be optimized for performance!
+            key_across_pcp = get_pcp_group().all_gather(
+                key[:num_actual_tokens].contiguous(), dim=0
+            )
+            value_across_pcp = get_pcp_group().all_gather(
+                value[:num_actual_tokens].contiguous(), dim=0
+            )
+            # Reorder kv after pcp allgather.
+            # Note that there are duplicate decoding tokens,
+            # but we only save the first one in kvcache.
+            key = torch.index_select(
+                key_across_pcp, 0, pcp_allgather_restore_idx
+            )
+            value = torch.index_select(
+                value_across_pcp, 0, pcp_allgather_restore_idx
+            )
         if self.kv_sharing_target_layer_name is None:
             # Reshape the input keys and values and store them in the cache.
             # Skip this if sharing KV cache with an earlier attention layer.
@@ -989,6 +1200,8 @@ class FlashInferImpl(AttentionImpl):
 
         # Inputs and outputs may be padded for CUDA graphs
         query = query[:num_actual_tokens]
+        key = key[:num_actual_tokens*self.pcp_world_size]
+        value = value[:num_actual_tokens*self.pcp_world_size]
         output_padded = output
         output = output[:num_actual_tokens]
 
@@ -1015,17 +1228,75 @@ class FlashInferImpl(AttentionImpl):
             assert prefill_wrapper is not None
 
             if not attn_metadata.prefill_use_trtllm:
-                assert prefill_wrapper._causal
-                assert prefill_wrapper._window_left == self.window_left
-                assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
-                assert prefill_wrapper._sm_scale == self.scale
-                prefill_wrapper.run(
-                    prefill_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[num_decode_tokens:],
-                )
+                if self.pcp_world_size > 1:
+                    # TODO(qcs): To adapt chunked prefill, we need to reuse/reference
+                    # DCP's context calculation logic and implement the ring attention 
+                    # algorithm.
+                    assert attn_metadata.pcp_metadata is not None
+                    prefill_key = key[num_decode_tokens * self.pcp_world_size :]
+                    prefill_value = value[num_decode_tokens * self.pcp_world_size :]
+                    output_query, lse_query = self._attention_with_head_and_tail(
+                        prefill_query,
+                        prefill_key,
+                        prefill_value,
+                        prefill_wrapper,
+                        attn_metadata.pcp_metadata,
+                        return_lse=True,
+                    )
+                    output[num_decode_tokens:].copy_(output_query)
+                elif self.dcp_world_size > 1:
+                    assert type(prefill_wrapper) == dict
+                    for _, prefill_wrapper_i in prefill_wrapper.items():
+                        assert prefill_wrapper_i._window_left == self.window_left
+                        assert (
+                            prefill_wrapper_i._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                        )
+                        assert prefill_wrapper_i._sm_scale == self.scale
+                    prefill_query_across_dcp = get_dcp_group().all_gather(
+                        prefill_query.contiguous(), dim=1
+                    )
+                    output_context, lse_context = prefill_wrapper["context"].run(
+                        prefill_query_across_dcp,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        return_lse=True,
+                    )
+                    output_context, lse_context = cp_lse_ag_out_rs(
+                        output_context, lse_context, get_dcp_group(), return_lse=True
+                    )
+                    lse_context = lse_context.transpose(0, 1).contiguous()
+
+                    prefill_key = key[num_decode_tokens:]
+                    prefill_value = value[num_decode_tokens:]
+                    output_query, lse_query = prefill_wrapper["query"].run(
+                        prefill_query,
+                        prefill_key,
+                        prefill_value,
+                        value[num_decode_tokens:],
+                        return_lse=True,
+                    )
+                    lse_query = lse_query.transpose(0, 1).contiguous()
+                        
+                    merge_attn_states(
+                        output[num_decode_tokens:],
+                        output_context,
+                        lse_context,
+                        output_query,
+                        lse_query,
+                    )
+                else:
+                    assert prefill_wrapper._window_left == self.window_left
+                    assert prefill_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
+                    assert prefill_wrapper._sm_scale == self.scale
+                    assert prefill_wrapper._causal
+                    prefill_wrapper.run(
+                        prefill_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[num_decode_tokens:],
+                    )
             else:
                 # prefill_query may be non-contiguous
                 prefill_query = prefill_query.contiguous()
@@ -1101,13 +1372,33 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._window_left == self.window_left
                 assert decode_wrapper._logits_soft_cap == (self.logits_soft_cap or 0.0)
                 assert decode_wrapper._sm_scale == self.scale
-                decode_wrapper.run(
-                    decode_query,
-                    kv_cache_permute,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    out=output[:num_decode_tokens],
-                )
+
+                if self.total_cp_world_size > 1:
+                    decode_query = get_dcp_group().all_gather(
+                        decode_query.contiguous(), dim=1
+                    )
+                    out, lse = decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        return_lse=True,
+                    )
+                    out, lse = cp_lse_ag_out_rs(
+                        out, lse, get_dcp_group(),
+                        return_lse=True,
+                    )
+                    output[:num_decode_tokens] = cp_lse_ag_out_ar(
+                        out, lse, get_pcp_group()
+                    )
+                else:
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output[:num_decode_tokens],
+                    )
             else:
                 # decode_query may be non-contiguous
                 decode_query = decode_query.contiguous()
