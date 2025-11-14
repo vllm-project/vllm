@@ -50,7 +50,7 @@ from openai.types.responses.response_reasoning_item import (
 from openai_harmony import Message as OpenAIHarmonyMessage
 
 from vllm.config.pooler import get_use_activation
-from vllm.entrypoints.openai.protocol_base import OpenAIBaseModel
+from vllm.entrypoints.pooling.base.protocol import OpenAIBaseModel
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     RerankResponse,

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.protocol import ErrorResponse, ScoreResponse
-from vllm.entrypoints.openai.protocol_base import validate_json_request
+from vllm.entrypoints.pooling.base.protocol import validate_json_request
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     RerankResponse,

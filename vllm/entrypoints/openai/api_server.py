@@ -81,7 +81,6 @@ from vllm.entrypoints.openai.protocol import (
     TranslationRequest,
     TranslationResponse,
 )
-from vllm.entrypoints.openai.protocol_base import validate_json_request
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_classification import ServingClassification
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -99,6 +98,7 @@ from vllm.entrypoints.openai.serving_transcription import (
     OpenAIServingTranslation,
 )
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
+from vllm.entrypoints.pooling.base.protocol import validate_json_request
 from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.entrypoints.pooling.score.view import (
     create_score,

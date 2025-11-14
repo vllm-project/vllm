@@ -11,7 +11,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageEmbedsParam,
     ChatCompletionContentPartImageParam,
 )
-from vllm.entrypoints.openai.protocol_base import (
+from vllm.entrypoints.pooling.base.protocol import (
     ClassifyRequestMixin,
     MM_ProcessorRequestMixin,
     OpenAIBaseModel,
