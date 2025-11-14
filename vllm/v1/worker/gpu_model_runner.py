@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import gc
 import itertools
 import time
 from collections import defaultdict
 from collections.abc import Iterator
 from contextlib import contextmanager
-from copy import deepcopy
 from functools import reduce
 from itertools import product
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
@@ -2734,8 +2734,9 @@ class GPUModelRunner(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.execute_model_state is None:
-            # Nothing to do (PP non-final rank case), output isn't used.
-            return None  # noqa
+            return copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            # # Nothing to do (PP non-final rank case), output isn't used.
+            # return None  # noqa
 
         # Unpack ephemeral state.
         (
@@ -4763,7 +4764,7 @@ class GPUModelRunner(
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        kv_cache_config = deepcopy(kv_cache_config)
+        kv_cache_config = copy.deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)

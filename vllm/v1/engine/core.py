@@ -11,7 +11,7 @@ from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from inspect import isclass, signature
 from logging import DEBUG
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 import msgspec
 import zmq
@@ -405,11 +405,7 @@ class EngineCore:
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
-                # Block-wait for execute to return (continues running async on the GPU).
-                with self.log_error_detail(scheduler_output):
-                    exec_result = exec_future.result()
 
-                if exec_result is None:
                     with record_function_or_nullcontext(
                         "core step_with_batch_queue: sample_tokens"
                     ):
@@ -417,9 +413,6 @@ class EngineCore:
                         future = self.model_executor.sample_tokens(
                             grammar_output, non_block=True
                         )
-                else:
-                    # No sampling required (e.g. all requests finished).
-                    future = cast(Future[ModelRunnerOutput], exec_future)
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output))
                 if (
