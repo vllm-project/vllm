@@ -394,18 +394,22 @@ def file_or_path_exists(
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    text_config = config.get_text_config()
-
+    # Handle nested configs (e.g., multi-modal models)
+    if sub_configs := getattr(config, "sub_configs", None):
+        for sub_config in sub_configs:
+            patch_rope_parameters(getattr(config, sub_config))
+        return
+    # Retrieve rope_parameters differently based on Transformers version
     if Version(version("transformers")) >= Version("5.0.0.dev0"):
         from transformers.modeling_rope_utils import RopeParameters
 
         rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
-            text_config, "rope_parameters", None
+            config, "rope_parameters", None
         )
     else:
         # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
-        rope_theta: float | None = getattr(text_config, "rope_theta", None)
-        rope_scaling: dict | None = getattr(text_config, "rope_scaling", None)
+        rope_theta: float | None = getattr(config, "rope_theta", None)
+        rope_scaling: dict | None = getattr(config, "rope_scaling", None)
         rope_parameters = rope_scaling
         # Move rope_theta into rope_parameters
         if rope_theta is not None:
@@ -416,8 +420,8 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             ompe := getattr(config, "original_max_position_embeddings", None)
         ):
             rope_parameters["original_max_position_embeddings"] = ompe
-        # Write back to text_config
-        text_config.rope_parameters = rope_parameters
+        # Write back to config
+        config.rope_parameters = rope_parameters
 
     # No RoPE parameters to patch
     if rope_parameters is None:
