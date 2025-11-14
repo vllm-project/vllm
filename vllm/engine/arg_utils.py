@@ -1863,6 +1863,16 @@ class EngineArgs:
                 "%s chunked prefill by default",
                 "Enabling" if default_chunked_prefill else "Disabling",
             )
+        elif (
+            model_config.runner_type == "pooling"
+            and self.enable_chunked_prefill
+            and not default_chunked_prefill
+        ):
+            logger.warning(
+                "This model does not officially support chunked prefill. "
+                "Enabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
+            )
 
         if self.enable_prefix_caching is None:
             self.enable_prefix_caching = default_prefix_caching
@@ -1870,6 +1880,16 @@ class EngineArgs:
             logger.debug(
                 "%s prefix caching by default",
                 "Enabling" if default_prefix_caching else "Disabling",
+            )
+        elif (
+            model_config.runner_type == "pooling"
+            and self.enable_prefix_caching
+            and not default_prefix_caching
+        ):
+            logger.warning(
+                "This model does not officially support prefix caching. "
+                "Enabling this manually may cause the engine to crash "
+                "or produce incorrect outputs.",
             )
 
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
