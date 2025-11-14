@@ -120,8 +120,9 @@ class AsyncLLM(EngineClient):
         )
 
         # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
+        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats
+            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
@@ -507,6 +508,8 @@ class AsyncLLM(EngineClient):
                         await engine_core.abort_requests_async(
                             processed_outputs.reqs_to_abort
                         )
+
+                    output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
                     # 4) Logging.
                     # TODO(rob): make into a coroutine and launch it in

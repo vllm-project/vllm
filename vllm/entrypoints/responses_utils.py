@@ -10,8 +10,8 @@ from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
 from openai.types.responses import ResponseFunctionToolCall
-from openai.types.responses.tool import Tool
 from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+from openai.types.responses.tool import Tool
 
 from vllm import envs
 from vllm.entrypoints.openai.protocol import (

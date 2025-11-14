@@ -1,10 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
+# Disable DeepGEMM for this benchmark to use CUTLASS
+os.environ["VLLM_USE_DEEP_GEMM"] = "0"
+
 import torch
 
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    apply_w8a8_block_fp8_linear,
+    W8A8BlockFp8LinearOp,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
@@ -39,13 +47,14 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     fp8_info = torch.finfo(torch.float8_e4m3fn)
     fp8_max, fp8_min = fp8_info.max, fp8_info.min
 
-    # Create random FP8 tensors
+    # Create random input tensor (bfloat16, will be quantized by W8A8BlockFp8LinearOp)
     A_ref = (torch.rand(M, K, dtype=torch.bfloat16, device=device) - 0.5) * 2 * fp8_max
 
+    # Create quantized weight tensor
     B_ref = (torch.rand(N, K, dtype=torch.bfloat16, device=device) - 0.5) * 2 * fp8_max
     B = B_ref.clamp(min=fp8_min, max=fp8_max).to(torch.float8_e4m3fn)
 
-    # Create scales
+    # Create weight scales
     block_n, block_k = block_size[0], block_size[1]
     n_tiles = (N + block_n - 1) // block_n
     k_tiles = (K + block_k - 1) // block_k
@@ -55,19 +64,25 @@ def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
         * factor_for_scale
     )
 
-    # SM90 CUTLASS requires row-major format for scales
-    if use_cutlass and current_platform.is_device_capability(90):
-        Bs = Bs.T.contiguous()
+    # Create W8A8BlockFp8LinearOp instance
+    weight_group_shape = GroupShape(block_n, block_k)
+    act_quant_group_shape = GroupShape(1, block_k)  # Per-token, per-group quantization
+
+    linear_op = W8A8BlockFp8LinearOp(
+        weight_group_shape=weight_group_shape,
+        act_quant_group_shape=act_quant_group_shape,
+        cutlass_block_fp8_supported=use_cutlass,
+        use_aiter_and_is_supported=False,
+    )
 
     def run():
-        if use_cutlass:
-            return apply_w8a8_block_fp8_linear(
-                A_ref, B, block_size, Bs, cutlass_block_fp8_supported=True
-            )
-        else:
-            return apply_w8a8_block_fp8_linear(
-                A_ref, B, block_size, Bs, cutlass_block_fp8_supported=False
-            )
+        return linear_op.apply(
+            input=A_ref,
+            weight=B,
+            weight_scale=Bs,
+            input_scale=None,
+            bias=None,
+        )
 
     return run
 

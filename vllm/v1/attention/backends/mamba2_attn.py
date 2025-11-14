@@ -302,7 +302,7 @@ class Mamba2AttentionMetadataBuilder(
 
         elif (
             num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             # Pad state tensor for CUDA graph
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)

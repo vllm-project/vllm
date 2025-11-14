@@ -399,7 +399,7 @@ class VoxtralForConditionalGeneration(
 
         return hidden_states
 
-    def get_multimodal_embeddings(
+    def embed_multimodal(
         self, **kwargs
     ) -> list[torch.Tensor] | torch.Tensor | tuple[torch.Tensor, ...] | None:
         audio_inputs = self._parse_and_validate_audio_arrays(**kwargs)

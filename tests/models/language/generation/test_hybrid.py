@@ -348,9 +348,14 @@ def test_fp32_cache_state(
 
 
 # Helper functions for the APC tests
-def _get_vllm_runner_params(model, max_model_len, tensor_parallel_size=1):
+def _get_vllm_runner_params(
+    model: str,
+    max_model_len: int,
+    tensor_parallel_size: int = 1,
+):
     return {
         "model_name": model,
+        "enable_chunked_prefill": True,
         "enable_prefix_caching": False,
         "max_model_len": max_model_len,
         "tensor_parallel_size": tensor_parallel_size,
