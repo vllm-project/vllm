@@ -1089,8 +1089,8 @@ class EagleProposer:
                 num_input_tokens, num_tokens_across_dp = self._pad_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
                     num_tokens_padded=num_tokens_padded,
-                    # We don't use 'cudagraphs_enabled' because a dummy batch runs 
-                    # in eager mode although we want it to get padded to match the 
+                    # We don't use 'cudagraphs_enabled' because a dummy batch runs
+                    # in eager mode although we want it to get padded to match the
                     # cudagraph-enabled non-dummy dp batch size
                     allow_dp_padding=self.use_cuda_graph,
                 )
