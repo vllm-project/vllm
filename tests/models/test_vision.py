@@ -19,7 +19,8 @@ from vllm.model_executor.models.vision import (
     run_dp_sharded_vision_model,
 )
 from vllm.platforms import current_platform
-from vllm.utils import get_open_port, update_environment_variables
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.system_utils import update_environment_variables
 
 pytestmark = pytest.mark.cpu_test
 

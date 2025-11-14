@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv, next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 
 logger = init_logger(__name__)
 
@@ -107,10 +107,6 @@ class PallasAttentionBackend(AttentionBackend):
     @staticmethod
     def get_impl_cls() -> type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
-
-    @staticmethod
-    def get_metadata_cls() -> type["PallasMetadata"]:
-        return PallasMetadata
 
     @staticmethod
     def get_kv_cache_shape(
