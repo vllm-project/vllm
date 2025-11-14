@@ -232,19 +232,11 @@ class SchedulerConfig:
                 self.long_prefill_token_threshold,
             )
 
-    @property
-    def chunked_prefill_enabled(self) -> bool:
-        return self.enable_chunked_prefill
-
-    @chunked_prefill_enabled.setter
-    def chunked_prefill_enabled(self, value: bool):
-        self.enable_chunked_prefill = value
-
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
         if (
             self.max_num_batched_tokens < self.max_model_len
-            and not self.chunked_prefill_enabled
+            and not self.enable_chunked_prefill
         ):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
@@ -271,7 +263,7 @@ class SchedulerConfig:
             )
 
         if self.max_num_partial_prefills > 1:
-            if not self.chunked_prefill_enabled:
+            if not self.enable_chunked_prefill:
                 raise ValueError(
                     "Chunked prefill must be enabled to set "
                     "max_num_partial_prefills > 1."
