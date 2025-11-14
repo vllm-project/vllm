@@ -43,6 +43,22 @@ def if_aiter_supported(func: Callable) -> Callable:
     return wrapper
 
 
+def if_aiter_supported_class(cls: type) -> type:
+    """Decorator that only defines the class if
+    ROCm AITER package is supported on gfx9 archs.
+    """
+
+    def decorator(cls: type) -> type:
+        if current_platform.is_rocm() and IS_AITER_FOUND:
+            from vllm.platforms.rocm import on_gfx9
+
+            if on_gfx9():
+                return cls
+        return None
+
+    return decorator
+
+
 def _rocm_aiter_fused_moe_impl(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,

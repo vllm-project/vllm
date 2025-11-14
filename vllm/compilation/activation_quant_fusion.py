@@ -93,7 +93,7 @@ if rocm_aiter_ops.is_enabled():
             def pattern(
                 input: torch.Tensor,
             ):
-                at1 = self.silu_and_mul_matcher.forward_custom(input)
+                at1 = self.silu_and_mul_matcher(input)
                 at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, self.use_triton)
                 return at2[0], at2[1]
 
