@@ -5,76 +5,39 @@ HTTP-based batch invariance test: send requests to a running
 vLLM server and compare BS=1 vs BS=N results (tokens and per-step logprobs).
 
 Environment variables:
-  - VLLM_API_BASE: base URL like http://127.0.0.1:9256/v1 (default used)
-  - VLLM_TEST_MODEL: served model name (e.g., Qwen/Qwen3-1.7B)
+  - VLLM_TEST_MODEL: served model name (e.g., Qwen/Qwen3-1.7B / DeepSeek-R1)
+  - VLLM_TP_SIZE: tensor parallelism size (e.g., 4)
 
-Note:
-  - The server must be started beforehand via `vllm serve ...`
-  - Example usage:
-    - `export VLLM_ATTENTION_BACKEND="FLASHINFER_MLA"`
-    - `export VLLM_BATCH_INVARIANT=1`
-    - `vllm serve deepseek-ai/DeepSeek-R1 -dp 8  --enable-expert-parallel --port 9256`
-    - `pytest tests/v1/generation/test_online_batch_invariance.py`
 """
 
 import os
 import random
 import sys
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
-import pytest
+import openai
 from utils import _random_prompt, skip_unsupported
 
-
-def _post_json(
-    url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float
-) -> dict[str, Any]:
-    import json
-
-    data = json.dumps(payload).encode("utf-8")
-    req = Request(url, data=data, headers=headers, method="POST")
-    with urlopen(req, timeout=timeout) as resp:
-        body = resp.read()
-    return json.loads(body.decode("utf-8"))
+from tests.utils import RemoteOpenAIServer
 
 
 def _request_completion(
-    api_base: str,
+    client: openai.OpenAI,
     model: str,
     prompt: Any,
     sp: dict[str, Any],
-    timeout: float = 60.0,
     max_retries: int = 3,
     retry_backoff: float = 0.5,
 ) -> dict[str, Any] | None:
-    url = api_base.rstrip("/") + "/completions"
-    headers = {"Content-Type": "application/json"}
-
     payload: dict[str, Any] = {"model": model, "prompt": prompt}
     payload.update(sp)
 
     for attempt in range(max_retries + 1):
         try:
-            return _post_json(url, headers, payload, timeout)
-        except HTTPError as e:  # type: ignore[reportGeneralTypeIssues]
-            status = getattr(e, "code", None)
-            if status in (429, 500, 502, 503, 504) and attempt < max_retries:
-                import time as _t
-
-                _t.sleep(retry_backoff * (2**attempt))
-                continue
-            sys.stderr.write(f"HTTPError: {e}\n")
-            return None
-        except URLError as e:  # type: ignore[reportGeneralTypeIssues]
-            if attempt < max_retries:
-                import time as _t
-
-                _t.sleep(retry_backoff * (2**attempt))
-                continue
-            sys.stderr.write(f"URLError: {e}\n")
-            return None
+            completion = client.completions.create(**payload)
+            # Convert to plain dict so downstream logic can keep using
+            # dict-style access just like with raw HTTP JSON.
+            return completion.model_dump()
         except Exception as e:  # pragma: no cover
             if attempt < max_retries:
                 import time as _t
@@ -98,30 +61,17 @@ def _extract_tokens_and_logprobs(
     return tokens, token_logprobs
 
 
-def _server_is_up(api_base: str, timeout: float = 2.0) -> tuple[bool, str]:
-    url = api_base.rstrip("/") + "/models"
-    try:
-        req = Request(url, method="GET")
-        with urlopen(req, timeout=timeout) as resp:
-            _ = resp.read()
-        return True, "OK"
-    except URLError as e:  # type: ignore[reportGeneralTypeIssues]
-        return False, f"URLError: {e}"
-    except Exception as e:  # pragma: no cover
-        return False, f"Error: {e}"
-
-
 def _compare_bs1_vs_bsn_single_process(
     prompts: list[str],
     sp_kwargs: dict[str, Any],
-    api_base: str,
+    client: openai.OpenAI,
     model_name: str,
 ) -> None:
     # BS=1
     bs1_tokens_per_prompt: list[list[Any]] = []
     bs1_logprobs_per_prompt: list[list[float] | None] = []
     for p in prompts:
-        resp = _request_completion(api_base, model_name, p, sp_kwargs)
+        resp = _request_completion(client, model_name, p, sp_kwargs)
         if resp is None or not resp.get("choices"):
             raise AssertionError("BS=1 empty/failed response")
         choice = resp["choices"][0]
@@ -136,7 +86,7 @@ def _compare_bs1_vs_bsn_single_process(
     # BS=N
     bsN_tokens_per_prompt: list[list[Any]] = [None] * len(prompts)  # type: ignore[list-item]
     bsN_logprobs_per_prompt: list[list[float] | None] = [None] * len(prompts)
-    resp = _request_completion(api_base, model_name, prompts, sp_kwargs)
+    resp = _request_completion(client, model_name, prompts, sp_kwargs)
     if resp is None or not resp.get("choices"):
         raise AssertionError("BS=N empty/failed batched response")
     choices = resp.get("choices", [])
@@ -183,13 +133,9 @@ def _compare_bs1_vs_bsn_single_process(
 
 
 @skip_unsupported
-def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN_dp_http():
+def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN():
     random.seed(int(os.getenv("VLLM_TEST_SEED", "12345")))
-    api_base = os.getenv("VLLM_API_BASE", "http://127.0.0.1:9256/v1")
-    model_name = os.getenv("VLLM_TEST_MODEL", "deepseek-ai/DeepSeek-R1")
-    up, reason = _server_is_up(api_base)
-    if not up:
-        pytest.skip(f"Server not reachable at {api_base}: {reason}")
+    model_name = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-1.7B")
     prompts_all = [_random_prompt(10, 50) for _ in range(32)]
 
     sp_kwargs: dict[str, Any] = {
@@ -200,9 +146,16 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN_dp_http():
         "logprobs": 5,
     }
 
-    _compare_bs1_vs_bsn_single_process(
-        prompts=prompts_all,
-        sp_kwargs=sp_kwargs,
-        api_base=api_base,
-        model_name=model_name,
-    )
+    tp_size = os.getenv("VLLM_TP_SIZE", "1")
+    server_args: list[str] = []
+    if tp_size:
+        server_args += ["-tp", tp_size]
+
+    with RemoteOpenAIServer(model_name, server_args) as server:
+        client = server.get_client()
+        _compare_bs1_vs_bsn_single_process(
+            prompts=prompts_all,
+            sp_kwargs=sp_kwargs,
+            client=client,
+            model_name=model_name,
+        )
