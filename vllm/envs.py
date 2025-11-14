@@ -105,8 +105,8 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
-    VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH: bool = True
-    VLLM_NWOR_CONFIDENCE_THRESHOLD: float = 0.0
+    VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH: bool = False
+    VLLM_SPEC_CONFIDENCE_THRESHOLD: float = 0.0
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -916,22 +916,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
     ),
-<<<<<<< HEAD
-=======
-    # If set, use the V1 code path.
-    "VLLM_USE_V1": lambda: bool(int(os.getenv("VLLM_USE_V1", "1"))),
-    # Enable or disable adaptive draft length (Multi-Graph Adaptive + Per-Request Predict)
-    # for speculative decoding. When enabled, captures multiple draft lengths as CUDA graphs
-    # and dynamically selects the optimal draft length based on acceptance rates.
-    # Valid values: 1 (enabled, default), 0 (disabled).
-    "VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH": lambda: bool(int(os.getenv("VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH", "1"))),
-    # Confidence threshold for Batch Early Exit in speculative decoding.
+    # Enable or disable adaptive draft length for speculative decoding.
+    # When enabled, captures multiple draft lengths as CUDA graphs and dynamically
+    # selects the optimal draft length based on acceptance rates.
+    # Valid values: 1 (enabled), 0 (disabled, default).
+    "VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH": lambda: bool(int(os.getenv("VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH", "0"))),
+    # Confidence threshold for early exit in speculative decoding.
     # Controls early stopping during EAGLE draft token generation. When a draft token's
     # confidence (max softmax probability) falls below this threshold, subsequent tokens
-    # are masked to PAD, stopping generation early and saving compute and bandwidth.
+    # will not write to KV cache, saving memory bandwidth.
     # Set to 0.0 to disable (default). Valid range: [0.0, 1.0].
-    "VLLM_NWOR_CONFIDENCE_THRESHOLD": lambda: float(os.getenv("VLLM_NWOR_CONFIDENCE_THRESHOLD", "0.0")),
->>>>>>> a7e50322b ([FEATURE] Implement granular NWOR controls + cudagraph dispatcher fix)
+    "VLLM_SPEC_CONFIDENCE_THRESHOLD": lambda: float(os.getenv("VLLM_SPEC_CONFIDENCE_THRESHOLD", "0.0")),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (

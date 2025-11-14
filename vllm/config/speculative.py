@@ -470,8 +470,8 @@ class SpeculativeConfig:
 
         # Auto-compute draft_length_options if not specified
         if self.draft_length_options is None and self.num_speculative_tokens is not None:
-            # Check VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH to enable/disable adaptive draft length
-            if envs.VLLM_NWOR_ADAPTIVE_DRAFT_LENGTH:
+            # Check VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH to enable/disable adaptive draft length
+            if envs.VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH:
                 # Adaptive draft length enabled: compute draft length options
                 n = self.num_speculative_tokens
                 self.draft_length_options = [
@@ -484,11 +484,11 @@ class SpeculativeConfig:
             # else: keep draft_length_options as None (fixed draft length)
 
         # Override confidence threshold from environment if set
-        # This allows independent control of batch early exit
-        env_confidence = envs.VLLM_NWOR_CONFIDENCE_THRESHOLD
+        # This allows independent control of early exit
+        env_confidence = envs.VLLM_SPEC_CONFIDENCE_THRESHOLD
         if env_confidence < 0.0 or env_confidence > 1.0:
             raise ValueError(
-                f"VLLM_NWOR_CONFIDENCE_THRESHOLD must be in [0.0, 1.0], "
+                f"VLLM_SPEC_CONFIDENCE_THRESHOLD must be in [0.0, 1.0], "
                 f"got {env_confidence}"
             )
         if env_confidence != 0.0:
