@@ -252,7 +252,6 @@ class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
     _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    reorder_batch_threshold: int = 1
 
     def __init__(
         self,
@@ -262,6 +261,7 @@ class AiterFlashAttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1)
 
         self.model_config = vllm_config.model_config
         self.parallel_config = vllm_config.parallel_config
@@ -301,9 +301,10 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":
+        assert self._reorder_batch_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,
-            decode_threshold=self.reorder_batch_threshold,
+            decode_threshold=self._reorder_batch_threshold,
         )
 
         (

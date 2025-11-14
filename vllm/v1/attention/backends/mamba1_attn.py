@@ -50,6 +50,7 @@ class Mamba1AttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1)
         assert isinstance(kv_cache_spec, MambaSpec)
 
     def build(
@@ -60,9 +61,10 @@ class Mamba1AttentionMetadataBuilder(
     ) -> Mamba1AttentionMetadata:
         num_reqs = common_attn_metadata.num_reqs
 
+        assert self._reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata, decode_threshold=self._reorder_batch_threshold
             )
         )
 

@@ -61,8 +61,6 @@ class GDNAttentionMetadata:
 class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]):
     _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
-    reorder_batch_threshold: int = 1
-
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -70,17 +68,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         vllm_config: VllmConfig,
         device: torch.device,
     ):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+
         assert isinstance(kv_cache_spec, MambaSpec)
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
         self.speculative_config = vllm_config.speculative_config
         self.kv_cache_spec = kv_cache_spec
+
         if self.speculative_config:
             self.num_spec = self.speculative_config.num_speculative_tokens
         else:
             self.num_spec = 0
         self.use_spec_decode = self.num_spec > 0
-        self._init_reorder_batch_threshold(1, self.use_spec_decode)
 
         self.use_full_cuda_graph = (
             self.compilation_config.cudagraph_mode.has_full_cudagraphs()
