@@ -319,25 +319,13 @@ def sequence_parallelism_pass_on_test_model(
 
         # In pre-nodes, all reduce should be there,
         # reduce scatter and all gather should not
-        pre_ops = [
-            node.target
-            for node in backend.graph_pre_pass.nodes
-            if node.op == "call_function"
-        ]
         for op in model.ops_in_model_before():
-            num_op = len([pre_op for pre_op in pre_ops if pre_op == op])
-            assert num_op == 4
+            assert backend.op_count(op, before=True) == 4
 
         # In post-nodes, reduce scatter and all gather should be there,
         # all reduce should not
-        post_ops = [
-            node.target
-            for node in backend.graph_post_pass.nodes
-            if node.op == "call_function"
-        ]
         for op in model.ops_in_model_after():
-            num_op = len([post_op for post_op in post_ops if post_op == op])
-            assert num_op == 4
+            assert backend.op_count(op, before=False) == 4
 
         for op in model.ops_in_model():
             find_auto_fn(backend.graph_post_pass.nodes, op)
