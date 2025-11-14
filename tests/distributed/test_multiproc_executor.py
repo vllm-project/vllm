@@ -316,8 +316,7 @@ def test_multiproc_executor_properties():
 
         # Test local_world_size calculation
         assert executor.local_world_size == (
-            executor.parallel_config.world_size
-            // executor.parallel_config.nnodes
+            executor.parallel_config.world_size // executor.parallel_config.nnodes
         ), "Local world size should be world_size / nnodes"
 
     finally:

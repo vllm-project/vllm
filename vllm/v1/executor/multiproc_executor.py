@@ -103,9 +103,7 @@ class MultiprocExecutor(Executor):
         self.failure_callback: FailureCallback | None = None
 
         self.world_size = self.parallel_config.world_size
-        assert (
-            self.world_size % self.parallel_config.nnodes_within_dp == 0
-        ), (
+        assert self.world_size % self.parallel_config.nnodes_within_dp == 0, (
             f"global world_size ({self.parallel_config.world_size}) must be "
             f"divisible by nnodes_within_dp "
             f"({self.parallel_config.nnodes_within_dp}). "
@@ -128,8 +126,8 @@ class MultiprocExecutor(Executor):
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
-        self.rpc_broadcast_mq = None
-        scheduler_output_handle = None
+        self.rpc_broadcast_mq: MessageQueue | None = None
+        scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
         # and ModelRunnerOutputs
         if self.parallel_config.node_rank_within_dp == 0:
@@ -150,8 +148,7 @@ class MultiprocExecutor(Executor):
         success = False
         try:
             global_start_rank = (
-                self.local_world_size
-                * self.parallel_config.node_rank_within_dp
+                self.local_world_size * self.parallel_config.node_rank_within_dp
             )
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
@@ -184,7 +181,9 @@ class MultiprocExecutor(Executor):
                         assert local_message_queue is not None
                         self.response_mqs.append(local_message_queue)
                     else:
-                        remote_message_queue = self.workers[0].peer_worker_response_mqs[rank]
+                        remote_message_queue = self.workers[0].peer_worker_response_mqs[
+                            rank
+                        ]
                         assert remote_message_queue is not None
                         self.response_mqs.append(remote_message_queue)
             # Ensure message queues are ready. Will deadlock if re-ordered
@@ -209,6 +208,7 @@ class MultiprocExecutor(Executor):
         self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
+
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers
         self_ref = weakref.ref(self)
@@ -308,7 +308,9 @@ class MultiprocExecutor(Executor):
     ) -> Any | list[Any] | Future[Any | list[Any]]:
         """Returns single result if unique_reply_rank and/or kv_output_aggregator
         is provided, otherwise list."""
-
+        assert self.rpc_broadcast_mq is not None, (
+            "collective_rpc should not be called on follower node"
+        )
         if self.is_failed:
             raise RuntimeError("Executor failed.")
 
@@ -329,7 +331,7 @@ class MultiprocExecutor(Executor):
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
         self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
-        
+
         response_mqs = self.response_mqs
         if unique_reply_rank is not None:
             response_mqs = [self.response_mqs[unique_reply_rank]]
@@ -454,7 +456,9 @@ class WorkerProcHandle:
     rank: int
     # The worker process writes to this MQ in single-node mode
     worker_response_mq: MessageQueue | None
-    # The peer worker process i writes to the `peer_worker_response_mqs[i]` belonging to driver node in multi-node mode
+    # This is only non empty on driver node,
+    # the peer worker process i writes to MQ
+    # `peer_worker_response_mqs[i]`
     peer_worker_response_mqs: list[MessageQueue | None]
     death_writer: Connection | None = None
 
@@ -623,7 +627,9 @@ class WorkerProc:
             for handle in peer_response_handles
         ]
         return WorkerProcHandle.from_unready_handle(
-            proc_handle, worker_response_mq, peer_worker_response_mqs=peer_worker_response_mqs
+            proc_handle,
+            worker_response_mq,
+            peer_worker_response_mqs=peer_worker_response_mqs,
         )
 
     @staticmethod
