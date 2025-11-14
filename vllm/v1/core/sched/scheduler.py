@@ -300,6 +300,20 @@ class Scheduler(SchedulerInterface):
                             ]
                             req_to_new_blocks.pop(preempted_req.request_id)
                             num_scheduled_tokens.pop(preempted_req.request_id)
+                            scheduled_spec_decode_tokens.pop(
+                                preempted_req.request_id, None
+                            )
+                            preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                                preempted_req.request_id, None
+                            )
+                            if preempted_encoder_inputs:
+                                # Restore encoder compute budget if the preempted
+                                # request had encoder inputs scheduled in this step.
+                                num_tokens_to_restore = sum(
+                                    preempted_req.get_num_encoder_tokens(i)
+                                    for i in preempted_encoder_inputs
+                                )
+                                encoder_compute_budget += num_tokens_to_restore
                             req_index -= 1
                     else:
                         preempted_req = self.running.pop()
@@ -483,7 +497,7 @@ class Scheduler(SchedulerInterface):
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if (
-                        not self.scheduler_config.chunked_prefill_enabled
+                        not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
                         self.waiting.pop_request()

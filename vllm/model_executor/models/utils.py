@@ -117,9 +117,10 @@ class AutoWeightsLoader:
     environment variable `VLLM_LOGGING_LEVEL=DEBUG`.
     """
 
-    # Models trained using early version ColossalAI
-    # may include these tensors in checkpoint. Skip them.
+    # Models trained using early version ColossalAI or quantized by
+    # GPTQModel may include these tensors in checkpoint. Skip them.
     ROTARY_EMBEDS_UNUSED_WEIGHTS = [
+        "rotary_pos_emb.inv_freq",
         "rotary_emb.inv_freq",
         "rotary_emb.cos_cached",
         "rotary_emb.sin_cached",
@@ -474,7 +475,7 @@ def _merge_multimodal_embeddings(
 
 @deprecated(
     "`merge_multimodal_embeddings` has been replaced with "
-    "`SupportsMultiModal.get_input_embeddings` and will be "
+    "`SupportsMultiModal.embed_input_ids` and will be "
     "removed in v0.12."
 )
 def merge_multimodal_embeddings(

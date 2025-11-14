@@ -52,6 +52,7 @@ class IPEXConfig(QuantizationConfig):
         modules_to_not_convert: list[str] | None = None,
         desc_act: bool | None = None,
         lm_head_quantized: bool | None = None,
+        is_sym: bool | None = None,
     ) -> None:
         super().__init__()
         self.method = method
@@ -60,6 +61,7 @@ class IPEXConfig(QuantizationConfig):
         self.modules_to_not_convert = modules_to_not_convert or []
         self.desc_act = desc_act
         self.lm_head_quantized = lm_head_quantized
+        self.is_sym = is_sym
         self.pack_factor = 32 // self.weight_bits
 
         if self.weight_bits not in [4]:
@@ -108,15 +110,25 @@ class IPEXConfig(QuantizationConfig):
             modules_to_not_convert = cls.get_from_keys_or(
                 config, ["modules_to_not_convert"], None
             )
+            is_sym = not cls.get_from_keys_or(config, ["zero_point"], default=False)
             return cls(
-                method, weight_bits, group_size, modules_to_not_convert, False, False
+                method,
+                weight_bits,
+                group_size,
+                modules_to_not_convert,
+                False,
+                False,
+                is_sym,
             )
         # otherwise for gptq
         weight_bits = cls.get_from_keys(config, ["bits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"], default=False)
         desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
-        return cls(method, weight_bits, group_size, [], desc_act, lm_head_quantized)
+        is_sym = cls.get_from_keys_or(config, ["sym"], default=True)
+        return cls(
+            method, weight_bits, group_size, [], desc_act, lm_head_quantized, is_sym
+        )
 
     @classmethod
     def override_quantization_method(
@@ -180,6 +192,7 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
         # The float activation will be quantized (dynamic, per-token) to INT8.
         act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH_IC_BLOCK
 
+        assert isinstance(self.quant_config, IPEXConfig)
         qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
             weight_dtype=weight_dtype,
             lowp_mode=lowp_mode,
@@ -200,6 +213,7 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
                 bias=bias,
                 group_size=self.quant_config.group_size,
                 quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"],
+                weight_qscheme="sym" if self.quant_config.is_sym else "asym",
             )
         )
 
@@ -250,6 +264,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
         # The float activation will be quantized (dynamic, per-token) to INT8.
         act_quant_mode = ipex.quantization.WoqActQuantMode.PER_BATCH
 
+        assert isinstance(self.quant_config, IPEXConfig)
         qconfig = ipex.quantization.get_weight_only_quant_qconfig_mapping(
             weight_dtype=weight_dtype,
             lowp_mode=lowp_mode,
@@ -269,6 +284,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
                 bias=bias,
                 group_size=self.quant_config.group_size,
                 quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"],  # type: ignore
+                weight_qscheme="sym" if self.quant_config.is_sym else "asym",
             )
         )
 
