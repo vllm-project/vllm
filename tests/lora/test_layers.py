@@ -135,7 +135,6 @@ def populate_loras(
     id_to_index: list[int | None],
     layer: BaseLayerWithLoRA,
     layer_weights: torch.Tensor,
-    generate_embeddings_tensor: int = 0,
     repeats: int = 1,
 ) -> tuple[dict[int, LoRALayerWeights], dict[int, list[LoRALayerWeights]]]:
     """This method populates the lora layers with lora weights.
@@ -147,8 +146,6 @@ def populate_loras(
         layer: the LoRAlayer to populate.
         layer_weights: the PyTorch tensor containing the layer's
             weights.
-        generate_embeddings_tensor: whether to generate an
-            embeddings tensor for each LoRA.
         repeats: must only be set for column parallel packed
             layers. Indicates the number of loras to compose
             together to create a single lora layer.
@@ -170,7 +167,6 @@ def populate_loras(
                 sublora = DummyLoRAManager(layer_weights.device).init_random_lora(
                     module_name=f"fake_{i}",
                     weight=layer_weights,
-                    generate_embeddings_tensor=generate_embeddings_tensor,
                 )
                 sublora.lora_b = sublora.lora_b[
                     (sublora_len * i) : (sublora_len * (i + 1)), :
@@ -341,7 +337,6 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             id_to_index,
             max_loras,
             vocab_size,
-            0,
         )
 
         lora_result = lora_embedding(torch.cat(inputs))
@@ -372,16 +367,13 @@ def test_lm_head_logits_processor(
 
     def _pretest():
         linear = ParallelLMHead(
-            num_embeddings=vocab_size + lora_config.lora_extra_vocab_size,
+            num_embeddings=vocab_size,
             embedding_dim=1024,
-            org_num_embeddings=vocab_size,
             params_dtype=torch.float16,
         )
         linear.weight.data = torch.rand_like(linear.weight.data)
         linear.weight.data[:, vocab_size:] = 0
-        logits_processor = LogitsProcessor(
-            vocab_size + lora_config.lora_extra_vocab_size, vocab_size
-        )
+        logits_processor = LogitsProcessor(vocab_size)
         lora_logits_processor = LogitsProcessorWithLoRA(
             logits_processor, 1024, linear.weight.dtype, linear.weight.device, None
         )
@@ -395,15 +387,12 @@ def test_lm_head_logits_processor(
         id_to_index = get_random_id_to_index(num_loras, max_loras)
         linear, logits_processor, lora_logits_processor = _pretest()
         lora_logits_processor.set_mapping(punica_wrapper)
-        # NOTE: all the generated loras share the same embeddings tensor.
+
         lora_dict, _ = populate_loras(
             id_to_index,
             layer=lora_logits_processor,
             layer_weights=linear.weight,
-            generate_embeddings_tensor=1024,
         )
-        embeddings_tensor = list(lora_dict.values())[0].embeddings_tensor
-        embeddings_tensor_len = embeddings_tensor.shape[0]
 
         inputs, index_mapping, prompt_mapping = create_random_inputs(
             active_lora_ids=list(lora_dict.keys()),
@@ -428,23 +417,16 @@ def test_lm_head_logits_processor(
 
         original_lm_head = deepcopy(linear)
 
-        linear.weight[
-            logits_processor.org_vocab_size : logits_processor.org_vocab_size
-            + embeddings_tensor_len
-        ] = embeddings_tensor
-
-        logits_processor.org_vocab_size = vocab_size + lora_config.lora_extra_vocab_size
         expected_results: list[torch.Tensor] = []
         for input_, lora_id in zip(inputs, prompt_mapping):
             lora = lora_dict[lora_id]
             result = logits_processor._get_logits(
                 hidden_states=input_, lm_head=linear, embedding_bias=None
             )
-            result[:, vocab_size + embeddings_tensor_len :] = float("-inf")
+
             result += input_ @ lora.lora_a.T @ lora.lora_b.T * lora.scaling
             expected_results.append(result)
         expected_result = torch.cat(expected_results)
-        logits_processor.org_vocab_size = vocab_size
 
         # Check that resetting the lora weights succeeds
 
@@ -577,7 +559,10 @@ def test_linear_replicated(
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
         punica_wrapper.update_metadata(
-            lora_mapping, id_to_index, max_loras, 512, lora_config.lora_extra_vocab_size
+            lora_mapping,
+            id_to_index,
+            max_loras,
+            512,
         )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
@@ -699,7 +684,10 @@ def test_linear_parallel(
         lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
 
         punica_wrapper.update_metadata(
-            lora_mapping, id_to_index, max_loras, 512, lora_config.lora_extra_vocab_size
+            lora_mapping,
+            id_to_index,
+            max_loras,
+            512,
         )
 
         lora_result = lora_linear(torch.cat(inputs))[0]
