@@ -442,7 +442,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
@@ -464,7 +463,6 @@ class CompressedTensorsW4A4MoeMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
-            enable_fused_moe_router=enable_fused_moe_router,
         )
 
         if self.use_marlin:
@@ -1024,7 +1022,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             assert expert_load_view is not None
@@ -1293,7 +1290,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
@@ -1316,7 +1312,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
-            enable_fused_moe_router=enable_fused_moe_router,
         )
 
         return fused_experts(
@@ -1657,7 +1652,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
@@ -1680,7 +1674,6 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
-            enable_fused_moe_router=enable_fused_moe_router,
         )
 
         return fused_marlin_moe(
@@ -1923,7 +1916,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError(
@@ -1946,7 +1938,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
             indices_type=self.topk_indices_dtype,
             num_fused_shared_experts=layer.num_fused_shared_experts,
-            enable_fused_moe_router=enable_fused_moe_router,
         )
 
         return fused_experts(
@@ -2249,7 +2240,6 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor:
         assert not enable_eplb, "EPLB not supported for W4A8-int MoE yet."
         assert activation in ("silu", "swigluoai", "swiglu"), (

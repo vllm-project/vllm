@@ -330,7 +330,6 @@ class FusedMoE(CustomOp):
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         routing_method_type: int | None = None,
-        enable_fused_shared_experts: bool = False,
     ):
         super().__init__()
 
@@ -378,9 +377,8 @@ class FusedMoE(CustomOp):
             dp_size_=dp_size_,
             vllm_parallel_config=vllm_config.parallel_config,
         )
-
-        self.enable_fused_shared_experts = enable_fused_shared_experts
-        if self.enable_fused_shared_experts:
+        enable_fused_shared_experts = envs.VLLM_USE_CUDA_FUSION_SHARED_EXPERTS
+        if enable_fused_shared_experts:
             assert n_shared_experts is not None
             num_experts += n_shared_experts
             top_k += n_shared_experts
@@ -423,15 +421,12 @@ class FusedMoE(CustomOp):
         self.num_fused_shared_experts = (
             n_shared_experts
             if n_shared_experts is not None
-            and (
-                self.aiter_fmoe_shared_expert_enabled
-                or self.enable_fused_shared_experts
-            )
+            and (self.aiter_fmoe_shared_expert_enabled or enable_fused_shared_experts)
             else 0
         )
         if (
             not self.aiter_fmoe_shared_expert_enabled
-            and not self.enable_fused_shared_experts
+            and not enable_fused_shared_experts
             and self.num_fused_shared_experts != 0
         ):
             raise ValueError(
@@ -534,7 +529,6 @@ class FusedMoE(CustomOp):
         self.e_score_correction_bias = e_score_correction_bias
         self.apply_router_weight_on_input = apply_router_weight_on_input
         self.activation = activation
-        self.enable_fused_moe_router = envs.VLLM_USE_FUSED_MOE_ROUTER
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError(
@@ -1355,7 +1349,6 @@ class FusedMoE(CustomOp):
         zero_expert_num: int | None = None,
         zero_expert_type: str | None = None,
         num_fused_shared_experts: int = 0,
-        enable_fused_moe_router: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
@@ -1405,7 +1398,7 @@ class FusedMoE(CustomOp):
                 grouped_topk_impl = grouped_topk
 
             if (
-                enable_fused_moe_router
+                envs.VLLM_USE_FUSED_MOE_ROUTER
                 and e_score_correction_bias is not None
                 and is_power_of_two(e_score_correction_bias.shape[0])
             ):
@@ -1663,7 +1656,6 @@ class FusedMoE(CustomOp):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
-                enable_fused_moe_router=self.enable_fused_moe_router,
             )
 
             if has_separate_shared_experts:
@@ -1832,7 +1824,6 @@ class FusedMoE(CustomOp):
                 expert_load_view=self.expert_load_view,
                 logical_to_physical_map=self.logical_to_physical_map,
                 logical_replica_count=self.logical_replica_count,
-                enable_fused_moe_router=self.enable_fused_moe_router,
             )
 
             if has_separate_shared_experts:
