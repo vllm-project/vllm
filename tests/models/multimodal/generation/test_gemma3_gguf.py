@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 """Gemma3 GGUF multimodal generation tests.
 
@@ -14,7 +12,7 @@ from huggingface_hub import hf_hub_download
 from vllm.assets.image import ImageAsset
 
 # Multimodal test prompt
-PROMPT = "Describe this image in detail:"
+PROMPT = "<start_of_image> Describe this image in detail:"
 
 
 def test_gemma3_4b_gguf_multimodal(vllm_runner):
@@ -36,10 +34,8 @@ def test_gemma3_4b_gguf_multimodal(vllm_runner):
 
     with vllm_runner(
         gguf_file,
+        tokenizer_name="google/gemma-3-4b-it",
         max_model_len=4096,
-        limit_mm_per_prompt={"image": 1},
-        tensor_parallel_size=1,
-        mm_processor_kwargs={"mmproj": mmproj_file},
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(
             [PROMPT],
