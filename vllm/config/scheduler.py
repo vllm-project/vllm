@@ -220,7 +220,7 @@ class SchedulerConfig:
 
         if self.max_num_partial_prefills > 1:
             if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(self.max_model_len * 0.04)
+                self.long_prefill_token_threshold = int(max_model_len * 0.04)
 
             logger.info(
                 "Concurrent partial prefills enabled with "
