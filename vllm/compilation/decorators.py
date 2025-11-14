@@ -34,6 +34,7 @@ from .monitor import start_monitoring_torch_compile
 logger = init_logger(__name__)
 
 IGNORE_COMPILE_KEY = "_ignore_compile_vllm"
+LAST_PIECEWISE_GRAPH_WEAKREF_KEY = "_last_graph_weakref_vllm"
 
 _T = TypeVar("_T", bound=type[nn.Module])
 
@@ -75,6 +76,13 @@ def support_torch_compile(
 @overload
 def support_torch_compile(
     *,
+    no_weak_ref_output: bool = False,
+) -> Callable[[_T], _T]: ...
+
+
+@overload
+def support_torch_compile(
+    *,
     dynamic_arg_dims: dict[str, int | list[int]] | None,
 ) -> Callable[[_T], _T]: ...
 
@@ -104,6 +112,7 @@ def support_torch_compile(
     dynamic_arg_dims: dict[str, int | list[int]] | None = None,
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
+    no_weak_ref_output: bool = False,
 ) -> Callable[[_T], _T] | _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -161,6 +170,32 @@ def support_torch_compile(
     dim to be decorated with `mark_unbacked`.  This is useful if we would like to
     enforce that dynamo do not specialize on 0/1 values in the case of dummy input
     such as for vision model compilation
+
+    If `no_weak_ref_output` is set to `True`, the output of the last graph
+    of each compiled nn.Module will not be converted to a weakref.
+    This conversion saves memory but is only safe when the output of the last
+    graph is not used by any subsequent CUDA graphs in the model forward.
+    In full cudagraph mode, this is ignored as full cudagraphs are always
+    captured for the full model.
+
+    This defaults to `True`, because in most cases the entire model is being
+    compiled, so the assumption that there is no other cuda graph after the last
+    graph holds. However, in rare cases, multiple submodules are compiled within
+    a single model. In this case, only the output of the last graph of the last
+    submodule is safe to be converted to a weakref. For example, if a model has
+    2 submodules mod_A and mod_B that are piecewise compiled + graph captured
+    separately, e.g.:
+
+    def forward(self, x):
+        a_out = self.mod_A(x)
+        b_out = self.mod_B(a_out)
+        return a_out + b_out
+
+    Then the output of mod_A should NOT be converted to a weakref, because the
+    call to mod_B may overwrite `a_out`. This is because vLLM shares a global
+    memory pool for all CUDA graphs, causing PyTorch to re-use memory where
+    possible.  To avoid its output from being overwritten, mod_A should specify
+    `@support_torch_compile(no_weak_ref_output=True)`
     """
 
     def cls_decorator_helper(cls: _T) -> _T:
@@ -199,7 +234,11 @@ def support_torch_compile(
                     f"Argument {k} not found in the forward method of {cls}"
                 )
         return _support_torch_compile(
-            cls, inferred_dynamic_arg_dims, mark_unbacked_dims, enable_if
+            cls,
+            inferred_dynamic_arg_dims,
+            mark_unbacked_dims,
+            enable_if,
+            no_weak_ref_output,
         )
 
     if cls is not None:
@@ -242,6 +281,7 @@ def _support_torch_compile(
     dynamic_arg_dims: dict[str, int | list[int]],
     mark_unbacked_dims: dict[str, int | list[int]] | None = None,
     enable_if: Callable[[VllmConfig], bool] | None = None,
+    no_weak_ref_output: bool = False,
 ) -> _T:
     """
     A decorator to add support for compiling the forward method of a class.
@@ -258,6 +298,9 @@ def _support_torch_compile(
     old_init = cls.__init__
 
     setattr(cls, IGNORE_COMPILE_KEY, False)
+
+    # setting as attribute on cls ensures child class will override parent class
+    setattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, no_weak_ref_output)
 
     def __init__(
         self, *, vllm_config: VllmConfig | None = None, prefix: str = "", **kwargs
@@ -289,9 +332,13 @@ def _support_torch_compile(
         if self.do_not_compile:
             return
 
+        self.no_weak_ref_output = getattr(cls, LAST_PIECEWISE_GRAPH_WEAKREF_KEY, False)
+
         compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
-            self, compilation_mode=vllm_config.compilation_config.mode
+            self,
+            compilation_mode=vllm_config.compilation_config.mode,
+            no_weak_ref_output=self.no_weak_ref_output,
         )
 
     cls.__init__ = __init__
@@ -447,7 +494,9 @@ def _support_torch_compile(
                     InliningInstructionTranslator, "inline_call_", patched_inline_call
                 ),
                 torch._dynamo.config.patch(**dynamo_config_patches),
-                maybe_use_cudagraph_partition_wrapper(self.vllm_config),
+                maybe_use_cudagraph_partition_wrapper(
+                    self.vllm_config, self.no_weak_ref_output
+                ),
                 _torch27_patch_tensor_subclasses(),
             ):
                 if envs.VLLM_USE_AOT_COMPILE:
@@ -482,7 +531,10 @@ def _support_torch_compile(
 
 
 @contextlib.contextmanager
-def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
+def maybe_use_cudagraph_partition_wrapper(
+    vllm_config: VllmConfig,
+    no_weak_ref_output: bool,
+):
     """
     Context manager to set/unset customized cudagraph partition wrappers.
 
@@ -512,6 +564,13 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
         def customized_cudagraph_wrapper(f, metadata: CUDAGraphWrapperMetadata):
             partition_id = metadata.partition_index
             num_partitions = metadata.num_partitions
+
+            # If no_weak_ref_output passed to compile decorator
+            # do not convert last partition's output to a weakref
+            weak_ref_output = (
+                partition_id == num_partitions - 1 and not no_weak_ref_output
+            )
+
             return static_graph_wrapper_class(
                 runnable=f,
                 vllm_config=vllm_config,
@@ -519,7 +578,7 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
                 cudagraph_options=CUDAGraphOptions(
                     debug_log_enable=partition_id == 0,
                     gc_disable=partition_id != 0,
-                    weak_ref_output=partition_id == num_partitions - 1,
+                    weak_ref_output=weak_ref_output,
                 ),
             )
 

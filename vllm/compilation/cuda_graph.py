@@ -181,6 +181,8 @@ class CUDAGraphWrapper:
                         # any other cuda graph.
                         output = weak_ref_tensors(output)
 
+                        compilation_counter.num_weakref_output_graphs += 1
+
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)

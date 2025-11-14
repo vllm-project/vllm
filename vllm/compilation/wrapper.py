@@ -33,7 +33,8 @@ class TorchCompileWrapperWithCustomDispatcher:
     def __init__(
         self,
         compiled_callable: Callable | None = None,
-        compilation_mode: CompilationMode = CompilationMode.NONE,
+        compilation_mode: int = 0,
+        no_weak_ref_output: bool = False,
     ):
         vllm_config = get_current_vllm_config()
         self.vllm_config = vllm_config
@@ -41,7 +42,10 @@ class TorchCompileWrapperWithCustomDispatcher:
             # default compilation settings
             # compiling the forward method
 
-            backend = vllm_config.compilation_config.init_backend(vllm_config)
+            backend = vllm_config.compilation_config.init_backend(
+                vllm_config,
+                no_weak_ref_output,
+            )
             options = None
             if isinstance(backend, str) and backend == "inductor":
                 options = (
