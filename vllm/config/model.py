@@ -2096,7 +2096,7 @@ def _get_and_verify_max_len(
             rope_type = rp["rope_type"]
 
             if rope_type not in ("su", "longrope", "llama3"):
-                if disable_sliding_window:
+                if disable_sliding_window and sliding_window is not None:
                     # TODO(robertgshaw): Find a model that supports rope_parameters
                     # with sliding window to see if this case should be allowed.
                     raise NotImplementedError(
@@ -2141,7 +2141,7 @@ def _get_and_verify_max_len(
         # with model_max_length and allow this override when it's smaller.
         model_max_length = getattr(hf_config, "model_max_length", None)
         if model_max_length is not None and max_model_len <= model_max_length:
-            if disable_sliding_window:
+            if disable_sliding_window and sliding_window is not None:
                 # TODO(robertgshaw): Find a model that has model_max_length
                 # with sliding window to see if this case should be allowed.
                 raise NotImplementedError(
