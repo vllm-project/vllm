@@ -143,9 +143,97 @@ See [CPU Offload Documentation](docs/cpu_offload.md) for complete setup instruct
 
 ---
 
+## 🛠️ Production-Ready Management: vLLM Manager
+
+This fork includes **vLLM Manager**, a comprehensive FastAPI-based service management tool that transforms vLLM into a production-ready, self-healing service with a modern web interface.
+
+### Key Features
+
+**Service Management:**
+- **Systemd Integration**: Full systemd service support with automatic startup and graceful shutdown
+- **Auto-Restart with Crash Loop Detection**: Intelligent health monitoring that automatically restarts failed services while preventing infinite restart loops
+- **Model Hot-Swapping**: Switch between models without manual service reconfiguration
+- **Zero-Downtime Management**: Web-based control panel for start/stop/restart operations
+
+**Real-Time Monitoring:**
+- **Live Log Streaming**: WebSocket-based log viewer with color-coded severity levels (ERROR/WARNING/INFO)
+- **KV Cache Monitoring**: Real-time GPU KV cache usage tracking with visual alerts
+- **Request Queue Visibility**: Monitor running and waiting requests to detect bottlenecks
+- **Throughput Metrics**: Track prompt and generation throughput in real-time
+- **Deadlock Detection**: Automatic alerts when 0 running requests with waiting queue (>30s)
+- **GPU Metrics**: Memory usage, utilization, temperature, and power consumption per GPU
+
+**Operational Tools:**
+- **Manual Cache Control**: Clear KV prefix cache to free GPU memory on demand
+- **Disk Space Management**: Monitor available storage for model downloads
+- **Model Repository**: Download, switch, and delete models through the web interface
+- **Health Checks**: Built-in API health monitoring with automatic recovery
+
+### Why vLLM Manager Matters
+
+1. **Production Operations**: Reduces operational overhead with automated health monitoring and recovery
+2. **Troubleshooting**: Live log streaming and metrics eliminate SSH access requirements for debugging
+3. **Service Reliability**: Crash loop detection prevents runaway restart attempts while maintaining high availability
+4. **Developer Productivity**: Web UI accessible at `http://localhost:7999` provides instant visibility into system state
+
+### Quick Start
+
+```bash
+# Install vLLM Manager (included in this fork)
+python tools/vllm_manager.py
+
+# Access web interface
+# Navigate to http://localhost:7999
+```
+
+The manager integrates seamlessly with systemd, making vLLM a first-class system service alongside the CPU offload optimizations.
+
+---
+
+## 🔧 Technology Stack
+
+This fork leverages a modern technology stack optimized for production deployments:
+
+**Core Infrastructure:**
+- **vLLM Engine**: High-performance LLM inference with PagedAttention and continuous batching
+- **Python 3.x**: Core runtime environment with asyncio for concurrent operations
+- **PyTorch**: Deep learning framework for model execution
+- **CUDA/ROCm**: GPU acceleration for efficient inference
+
+**CPU Offload Layer:**
+- **Custom KV Cache Offloading**: Proprietary connector for seamless GPU-to-RAM context offloading
+- **Multi-Layer Memory Management**: Optimized block allocation across attention layers
+- **System RAM Integration**: Direct memory access for massive context windows without disk I/O
+
+**Management & Operations:**
+- **FastAPI**: High-performance async web framework for the vLLM Manager
+- **Uvicorn**: ASGI server for production-grade HTTP/WebSocket support
+- **Systemd**: Native Linux service integration for reliable daemon management
+- **WebSocket Protocol**: Real-time bidirectional communication for live log streaming
+- **pynvml**: NVIDIA Management Library for GPU monitoring and metrics
+
+**Frontend Technologies:**
+- **Vanilla JavaScript**: Lightweight, dependency-free web interface
+- **WebSocket Client**: Real-time log streaming with auto-reconnect
+- **Responsive CSS**: Mobile-friendly adaptive design
+
+**Development & Deployment:**
+- **HuggingFace Hub**: Model repository integration for downloading and caching
+- **psutil**: Cross-platform system monitoring (CPU, memory, disk)
+- **aiohttp**: Async HTTP client for health checks and API communication
+
+This stack enables:
+- **Zero-dependency deployments** (no Node.js or complex build systems)
+- **Native Linux integration** via systemd
+- **Real-time observability** through WebSocket streaming
+- **Production-grade reliability** with async architecture and automatic recovery
+
+---
+
 *Latest News* 🔥
 
-- **[2025/10] CPU KV Cache Offload Breakthrough**: Fixed critical multi-layer validation bug enabling 256k context with only 24.5GB RAM. Production-ready tooling included.
+- **[2025/11] vLLM Manager Released**: Production-ready service management with web UI, auto-restart, crash loop detection, and real-time monitoring. Transform vLLM into a self-healing systemd service.
+- **[2025/10] CPU KV Cache Offload Breakthrough**: Fixed critical multi-layer validation bug enabling 256k context with only 24.5GB RAM. Also fixed scheduler deadlock after KV cache eviction.
 - [2025/11] We hosted [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/xSrYXjNgr1HbCP4ExYNG1w) focusing on distributed inference and diverse accelerator support with vLLM! Please find the meetup slides [here](https://drive.google.com/drive/folders/1nQJ8ZkLSjKxvu36sSHaceVXtttbLvvu-?usp=drive_link).
 - [2025/10] We hosted [vLLM Shanghai Meetup](https://mp.weixin.qq.com/s/__xb4OyOsImz-9eAVrdlcg) focused on hands-on vLLM inference optimization! Please find the meetup slides [here](https://drive.google.com/drive/folders/1KqwjsFJLfEsC8wlDugnrR61zsWHt94Q6).
 - [2025/09] We hosted [vLLM Toronto Meetup](https://luma.com/e80e0ymm) focused on tackling inference at scale and speculative decoding with speakers from NVIDIA and Red Hat! Please find the meetup slides [here](https://docs.google.com/presentation/d/1IYJYmJcu9fLpID5N5RbW_vO0XLo0CGOR14IXOjB61V8/edit?usp=sharing).
