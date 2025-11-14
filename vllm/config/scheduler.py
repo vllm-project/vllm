@@ -78,7 +78,7 @@ class SchedulerConfig:
     NOTE: This will be replaced by speculative config in the future; it is
     present to enable correctness tests until then."""
 
-    enable_chunked_prefill: bool = False
+    enable_chunked_prefill: bool = True
     """If True, prefill requests can be chunked based
     on the remaining `max_num_batched_tokens`.
 
@@ -209,20 +209,6 @@ class SchedulerConfig:
                 "Encoder-decoder models do not support chunked prefill nor"
                 " prefix caching; disabling both."
             )
-
-        if not self.enable_chunked_prefill:
-            # If max_model_len is too short, use the default for higher throughput.
-            self.max_num_batched_tokens = max(
-                self.max_model_len,
-                self.max_num_batched_tokens,
-            )
-
-        # Ensure max_num_batched_tokens does not exceed model limit.
-        # Some models (e.g., Whisper) have embeddings tied to max length.
-        self.max_num_batched_tokens = min(
-            self.max_num_seqs * self.max_model_len,
-            self.max_num_batched_tokens,
-        )
 
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens

@@ -1879,35 +1879,52 @@ class EngineArgs:
             default_max_num_seqs,
         ) = self.get_batch_defaults(world_size)
 
-        use_context_value = usage_context.value if usage_context else None
-        print("max_num_batched_tokens", self.max_num_batched_tokens)
+        orig_max_num_batched_tokens = self.max_num_batched_tokens
+        orig_max_num_seqs = self.max_num_seqs
+
         if self.max_num_batched_tokens is None:
             self.max_num_batched_tokens = default_max_num_batched_tokens.get(
                 usage_context,
                 SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
-            logger.debug(
-                "Setting max_num_batched_tokens to %d for %s usage context.",
-                self.max_num_batched_tokens,
-                use_context_value,
-            )
-        print("max_num_batched_tokens", self.max_num_batched_tokens)
-
-        print("max_num_seqs", self.max_num_seqs)
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs.get(
                 usage_context,
                 SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
             )
+
+        if orig_max_num_batched_tokens is None:
+            if not self.enable_chunked_prefill:
+                # If max_model_len is too short, use the default for higher throughput.
+                self.max_num_batched_tokens = max(
+                    model_config.max_model_len,
+                    self.max_num_batched_tokens,
+                )
+
+            # When using default settings,
+            # Ensure max_num_batched_tokens does not exceed model limit.
+            # Some models (e.g., Whisper) have embeddings tied to max length.
+            self.max_num_batched_tokens = min(
+                self.max_num_seqs * model_config.max_model_len,
+                self.max_num_batched_tokens,
+            )
+
+            logger.debug(
+                "Defaulting max_num_batched_tokens to %d for %s usage context.",
+                self.max_num_batched_tokens,
+                usage_context.value if usage_context else None,
+            )
+
+        if orig_max_num_seqs is None:
+            assert self.max_num_batched_tokens is not None  # For type checking
             self.max_num_seqs = min(self.max_num_seqs, self.max_num_batched_tokens)
 
             logger.debug(
-                "Setting max_num_seqs to %d for %s usage context.",
+                "Defaulting max_num_seqs to %d for %s usage context.",
                 self.max_num_seqs,
-                use_context_value,
+                usage_context.value if usage_context else None,
             )
-        print("max_num_seqs", self.max_num_seqs)
 
 
 @dataclass
