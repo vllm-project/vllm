@@ -547,18 +547,14 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.pad_token_id = (
             self.config.pad_token_id if self.config.pad_token_id is not None else -1
         )
-        self.unpadded_vocab_size = config.text_config.vocab_size
         self.lm_head = ParallelLMHead(
-            self.unpadded_vocab_size,
+            self.vocab_size,
             config.text_config.hidden_size,
-            org_num_embeddings=self.language_model.org_vocab_size,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         logit_scale = getattr(config, "logit_scale", 1.0)
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, self.vocab_size, logit_scale
-        )
+        self.logits_processor = LogitsProcessor(self.vocab_size, scale=logit_scale)
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
@@ -617,7 +613,7 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -633,8 +629,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
         if inputs_embeds is None:
-            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
-            inputs_embeds = self.get_input_embeddings(
+            multimodal_embeddings = self.embed_multimodal(**kwargs)
+            inputs_embeds = self.embed_input_ids(
                 input_ids,
                 multimodal_embeddings,
                 is_multimodal=input_ids == self.config.image_token_index,

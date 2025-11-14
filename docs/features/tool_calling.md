@@ -407,7 +407,6 @@ Here is a summary of a plugin file:
     # the name list in register_module can be used
     # in --tool-call-parser. you can define as many
     # tool parsers as you want here.
-    @ToolParserManager.register_module(["example"])
     class ExampleToolParser(ToolParser):
         def __init__(self, tokenizer: AnyTokenizer):
             super().__init__(tokenizer)
@@ -439,6 +438,12 @@ Here is a summary of a plugin file:
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=text)
+    # register the tool parser to ToolParserManager
+    ToolParserManager.register_lazy_module(
+        name="example",
+        module_path="vllm.entrypoints.openai.tool_parsers.example",
+        class_name="ExampleToolParser",
+    )
 
     ```
 
