@@ -47,6 +47,7 @@ def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
         max_num_batched_tokens=16,
         max_num_seqs=16,
         max_model_len=128,
+        enable_chunked_prefill=True,
         enforce_eager=True,
         # TODO: enable this once we support it for
         # prompt logprobs.

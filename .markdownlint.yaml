@@ -3,6 +3,8 @@ MD007:
 MD013: false
 MD024:
   siblings_only: true
+MD031:
+  list_items: false
 MD033: false
 MD045: false
 MD046: false
