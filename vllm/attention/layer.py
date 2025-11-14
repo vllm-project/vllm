@@ -15,6 +15,7 @@ from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.attention.ops.common import cp_lse_ag_out_rs
+from vllm.attention.ops.merge_attn_states import merge_attn_states
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
@@ -39,6 +40,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
     kv_cache_dtype_str_to_dtype,
 )
+from vllm.v1.attention.backends.mla.common import reorg_kvcache
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheSpec,
@@ -817,9 +819,179 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         attn_metadata,
     ) -> torch.Tensor:
         """Prefill path orchestration in the layer."""
-        return self.impl._forward_prefill(
-            q, k_c_normed, k_pe, kv_cache, attn_metadata, self._k_scale
+        assert attn_metadata.prefill is not None
+        if self.impl.dcp_world_size is None:
+            self.impl.dcp_world_size = get_dcp_group().world_size
+
+        has_context = attn_metadata.prefill.chunked_context is not None
+
+        # KV projection and splitting
+        kv_nope = self.impl.kv_b_proj(k_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+
+        k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+
+        # Run prefill for new tokens
+        output = self.impl._run_prefill_new_tokens(
+            prefill=attn_metadata.prefill,
+            q=q,
+            k=k,
+            v=v,
+            return_softmax_lse=has_context,
+        )
+
+        # Handle chunked context if present
+        if has_context:
+            suffix_output, suffix_lse = output
+            prefill_metadata = attn_metadata.prefill
+            chunked_context = prefill_metadata.chunked_context
+
+            context_output = None
+            context_lse = None
+            iters = len(chunked_context.seq_tot)
+            workspace = chunked_context.workspace
+
+            for i in range(iters):
+                toks = chunked_context.seq_tot[i]
+
+                if self.impl.dcp_world_size > 1:
+                    # DCP path: use cp_gather_cache and allgather
+                    assert self._k_scale is None or (self._k_scale == 1.0).all(), (
+                        "DCP not support scaled kvcache now."
+                    )
+                    assert chunked_context.padded_local_chunk_seq_lens is not None
+                    assert chunked_context.local_context_lens_allranks is not None
+                    assert chunked_context.padded_local_cu_seq_lens is not None
+                    assert chunked_context.cu_seq_lens_lst is not None
+
+                    ops.cp_gather_cache(
+                        src_cache=kv_cache,
+                        dst=workspace,
+                        block_table=prefill_metadata.block_table,
+                        cu_seq_lens=chunked_context.padded_local_cu_seq_lens[i],
+                        batch_size=attn_metadata.num_prefills,
+                        seq_starts=chunked_context.starts[i],
+                    )
+                    # workspace
+                    # |------- N tokens --------|--------- N*dcp_size tokens ----------|
+                    # |<- use for loca_gather ->|<--------- use for allgather -------->|
+                    allgather_offset = workspace.shape[0] // (
+                        self.impl.dcp_world_size + 1
+                    )
+                    assert (
+                        allgather_offset * (self.impl.dcp_world_size + 1)
+                        == workspace.shape[0]
+                    )
+                    assert toks <= allgather_offset
+                    local_gathered_kvcache = workspace[:toks]
+                    cur_allgather_workspace = workspace[
+                        allgather_offset : allgather_offset
+                        * (1 + self.impl.dcp_world_size)
+                    ]
+                    assert (
+                        toks * self.impl.dcp_world_size
+                        <= cur_allgather_workspace.shape[0]
+                    )
+                    cur_allgather_kvcache = cur_allgather_workspace[
+                        : toks * self.impl.dcp_world_size
+                    ]
+                    cur_allgather_kvcache.copy_(
+                        get_dcp_group().all_gather(local_gathered_kvcache, dim=0)
+                    )
+                    assert (
+                        cur_allgather_kvcache.shape[-1]
+                        == self.impl.kv_lora_rank + self.qk_rope_head_dim
+                    )
+                    allgatered_kv_c_normed, allgatered_k_pe = (
+                        cur_allgather_kvcache.unsqueeze(1).split(
+                            [self.impl.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+                        )
+                    )
+
+                    kv_c_normed, k_pe = reorg_kvcache(
+                        allgatered_kv_c_normed,
+                        allgatered_k_pe,
+                        padded_local_chunk_seq_lens_lst=chunked_context.padded_local_chunk_seq_lens[
+                            i
+                        ],
+                        local_context_lens_allranks=chunked_context.local_context_lens_allranks,
+                        sum_seq_len=chunked_context.cu_seq_lens_lst[i][-1],
+                        max_seq_len=chunked_context.max_seq_lens[i],
+                        toks=toks,
+                    )
+                    k_pe = k_pe.unsqueeze(1)
+                else:
+                    # Non-DCP path: use gather_and_maybe_dequant_cache
+                    ops.gather_and_maybe_dequant_cache(
+                        src_cache=kv_cache,
+                        dst=workspace,
+                        block_table=prefill_metadata.block_table,
+                        cu_seq_lens=chunked_context.cu_seq_lens[i],
+                        batch_size=attn_metadata.num_prefills,
+                        kv_cache_dtype=self.impl.kv_cache_dtype,
+                        scale=self._k_scale,
+                        seq_starts=chunked_context.starts[i],
+                    )
+
+                    kv_c_normed = workspace[:toks][..., : self.impl.kv_lora_rank]
+                    k_pe = workspace[:toks][..., self.impl.kv_lora_rank :].unsqueeze(1)
+
+                # KV projection and splitting
+                kv_nope = self.impl.kv_b_proj(kv_c_normed)[0].view(
+                    -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+                )
+                k_nope, v_chunk = kv_nope.split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+                )
+
+                k_chunk = torch.cat(
+                    (k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1
+                )
+
+                # Run attention kernel for this chunk
+                attn_output, attn_softmax_lse = self.impl._run_prefill_context_chunk(
+                    prefill=prefill_metadata,
+                    chunk_idx=i,
+                    q=q,
+                    k=k_chunk,
+                    v=v_chunk,
+                )
+
+                # Merge with previous chunks
+                if context_output is None:
+                    context_output = attn_output
+                    context_lse = attn_softmax_lse
+                else:
+                    output_tmp = torch.empty_like(context_output)
+                    output_lse_tmp = torch.empty_like(context_lse)
+                    merge_attn_states(
+                        output=output_tmp,
+                        output_lse=output_lse_tmp,
+                        prefix_output=context_output,
+                        prefix_lse=context_lse,
+                        suffix_output=attn_output,
+                        suffix_lse=attn_softmax_lse,
+                    )
+                    context_output = output_tmp
+                    context_lse = output_lse_tmp
+
+            # Merge context with new tokens
+            output = torch.empty_like(suffix_output)
+            merge_attn_states(
+                output=output,
+                prefix_output=context_output,
+                prefix_lse=context_lse,
+                suffix_output=suffix_output,
+                suffix_lse=suffix_lse,
+            )
+
+        # Unpad if necessary
+        if self.impl._pad_v:
+            output = output[..., : v.shape[-1]]
+
+        return output.flatten(start_dim=-2)
 
     def forward_decode(
         self,
@@ -1163,7 +1335,7 @@ def unified_mla_attention(
         kv_c_normed=kv_c_normed,
         k_pe=k_pe,
         kv_cache=kv_cache,
-        attn_metadata=attn_metadata
+        attn_metadata=attn_metadata,
     )
 
     return output

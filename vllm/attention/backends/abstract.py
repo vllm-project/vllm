@@ -372,7 +372,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
     ) -> torch.Tensor:
         raise NotImplementedError
 
-    # split-path interfaces
+    @abstractmethod
     def forward_prefill(
         self,
         layer: AttentionLayer,
@@ -382,8 +382,10 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
     ) -> torch.Tensor:
+        """Prefill path orchestration."""
         raise NotImplementedError
 
+    @abstractmethod
     def forward_decode(
         self,
         layer: AttentionLayer,
@@ -391,6 +393,7 @@ class MLAAttentionImpl(AttentionImpl[T], Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
     ) -> torch.Tensor:
+        """Decode path orchestration."""
         raise NotImplementedError
 
     def supports_compiled_split(self) -> bool:
