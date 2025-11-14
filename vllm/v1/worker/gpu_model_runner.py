@@ -2100,11 +2100,10 @@ class GPUModelRunner(
         """
         if not self.parallel_config.enable_eplb:
             return
-        if is_profile and self.parallel_config.eplb_config.load_path is not None:
+        if is_profile and self.parallel_config.eplb_config.load_initial_load_window: # Maybe we can get rid of that
             return
         if (
-            self.parallel_config.eplb_config.load_path is not None
-            and self.parallel_config.eplb_config.save_dir is None
+            self.parallel_config.eplb_config.static
         ):
             return
 

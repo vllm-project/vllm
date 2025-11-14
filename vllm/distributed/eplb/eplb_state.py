@@ -352,10 +352,8 @@ class EplbState:
             device=self.device,
         )
 
-        eplb_load_path = self.parallel_config.eplb_config.load_path
-        eplb_save_dir = self.parallel_config.eplb_config.save_dir
         eplb_step_interval = self.parallel_config.eplb_config.step_interval
-        if eplb_load_path is not None or eplb_save_dir is not None:
+        if self.parallel_config.eplb_config.load_initial_load_window or self.parallel_config.eplb_config.save_load_window:
             self.expert_rearrangement_step = 0
         else:
             # Set the initial progress of rearrangement to 3/4
@@ -579,7 +577,7 @@ class EplbState:
             # Map the physical expert load to global logical experts
             global_expert_load_windows = []
             should_save_eplb_state = (
-                self.parallel_config.eplb_config.save_dir is not None
+                self.parallel_config.eplb_config.save_load_window
                 and not is_profile
                 and self.expert_rearrangement_step > 0
             )

@@ -1246,7 +1246,7 @@ def eplb_map_to_physical_and_record(
     expert_load_view: torch.Tensor,
     logical_to_physical_map: torch.Tensor,
     logical_replica_count: torch.Tensor,
-    eplb_record_metrics: bool = False,
+    eplb_static: bool = False,
     indices_type: torch.dtype | None = None,
 ) -> torch.Tensor:
     """
@@ -1288,7 +1288,7 @@ def eplb_map_to_physical_and_record(
 
     topk_ids = physical_ids
 
-    if eplb_record_metrics:
+    if eplb_static:
         # 2. Record expert load metrics.
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
