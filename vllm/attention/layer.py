@@ -291,6 +291,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 block_size,
                 use_mla=False,
                 has_sink=self.has_sink,
+                attn_type=attn_type,
             )
         else:
             self.attn_backend = attn_backend
