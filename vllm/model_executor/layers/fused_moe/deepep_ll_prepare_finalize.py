@@ -22,6 +22,8 @@ from vllm.v1.worker.ubatching import (
     dbo_maybe_run_recv_hook,
 )
 
+logger = init_logger(__name__)
+
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
 DEEPEP_QUANT_BLOCK_SHAPE = [DEEPEP_QUANT_BLOCK_SIZE, DEEPEP_QUANT_BLOCK_SIZE]
@@ -97,6 +99,29 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
+
+        # We don't have enough information to determine if we should dispatch
+        # activation scales in a packed ue8m0 format during object construction
+        # time. This setting is handled by post_init_setup.
+        self.use_ue8m0_dispatch = False
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+        if not fused_experts.supports_packed_ue8m0_act_scales():
+            # Early exit.
+            return
+
+        if self.use_fp8_dispatch:
+            logger.debug_once(
+                "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch."
+            )
+            self.use_ue8m0_dispatch = True
+        else:
+            logger.warning_once(
+                "DeepEPLLPrepareAndFinalize is setup to dispatch raw/unquantized "
+                f"activations despite ({fused_experts.__class__.__name__}) being able "
+                "to support quantized activations.",
+                scope="local",
+            )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_

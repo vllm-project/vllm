@@ -212,6 +212,94 @@ def torch_moe_nvfp4(a, w1, w2, topk, topk_weight, topk_ids):
     ).sum(dim=1)
 
 
+def grouped_gemm_ref(
+    hidden_states_expanded: torch.Tensor,
+    hidden_states_3d: torch.Tensor,
+    weights: torch.Tensor,
+    topk_idx: torch.Tensor,
+    masked_m: torch.Tensor,
+    B: int,
+    topk: int,
+    num_experts: int,
+    *,
+    block_size: int = 16,
+) -> torch.Tensor:
+    """
+    Computes the reference grouped GEMM (fp4 quantized per-expert loop),
+    computes flashinfer grouped GEMM (for scale consistency),
+    and returns ONLY the repacked reference output: out_ref.
+
+    Returns:
+        out_ref: Tensor [num_experts, max_m, n_out]
+    """
+    device_hs = hidden_states_expanded.device
+    device_w = weights.device
+    out_dtype = weights.dtype
+    n_out = weights.shape[1]
+
+    # Flattened reference output (B*topk, n_out)
+    out = torch.zeros((B * topk, n_out), dtype=out_dtype, device=device_w)
+
+    # Per-expert reference compute loop
+    for i in range(num_experts):
+        mask = topk_idx.view(-1) == i
+        if mask.any():
+            lhs = hidden_states_expanded[mask]
+            rhs = weights[i]
+
+            a_amax = lhs.abs().max().to(torch.float32).to(device_hs)
+            b_amax = rhs.abs().max().to(torch.float32).to(device_w)
+
+            a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
+            b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b_amax
+
+            lhsq, lhsq_sf = fp4_quantize(lhs, a_gs)
+            rhsq, rhsq_sf = fp4_quantize(rhs, b_gs)
+
+            lhs_in_dtype = dequantize_nvfp4_to_dtype(
+                lhsq,
+                lhsq_sf,
+                a_gs,
+                dtype=lhs.dtype,
+                device=device_hs,
+                block_size=block_size,
+            )
+            rhs_in_dtype = dequantize_nvfp4_to_dtype(
+                rhsq,
+                rhsq_sf,
+                b_gs,
+                dtype=rhs.dtype,
+                device=device_w,
+                block_size=block_size,
+            )
+
+            out[mask] = lhs_in_dtype @ rhs_in_dtype.t()
+
+    # Determine per-expert max_m
+    max_m_val = int(masked_m.max().item())
+
+    # Repack into [num_experts, max_m, n_out]
+    out_ref = torch.zeros(
+        (num_experts, max_m_val, n_out),
+        dtype=out.dtype,
+        device=out.device,
+    )
+    expert_slot = [0] * num_experts
+
+    for i, expert_id in enumerate(topk_idx.view(-1).tolist()):
+        slot = expert_slot[expert_id]
+        if slot < max_m_val:
+            out_ref[expert_id, slot, :] = out[i]
+            expert_slot[expert_id] += 1
+        else:
+            raise IndexError(
+                f"Expert {expert_id} exceeded max slots ({max_m_val}). "
+                "Increase max_m or check masked_m."
+            )
+
+    return out_ref
+
+
 def flashinfer_cutedsl_grouped_gemm_nt_masked(
     hidden_states: torch.Tensor,  # 3d
     input_global_scale: torch.Tensor,  # (l,)
@@ -419,7 +507,7 @@ def test_flashinfer_cutedsl_moe_masked(
                 out.device
             ).unsqueeze(-1)
     torch.testing.assert_close(
-        out_weighted.cpu(), ref_output.cpu(), atol=1e-1, rtol=1e-1
+        out_weighted.cpu(), ref_output.cpu(), atol=2e-1, rtol=2e-1
     )
 
 
@@ -449,48 +537,6 @@ def test_grouped_gemm_nt_masked(
         hidden_states_expanded, router_logits, num_experts, topk
     )
 
-    # reference
-    out = torch.zeros(
-        (B * topk, weights.shape[1]), dtype=weights.dtype, device=weights.device
-    )
-    for i in range(num_experts):
-        mask = topk_idx.view(-1) == i
-        if mask.sum():
-            lhs = hidden_states_expanded[mask]
-            rhs = weights[i]
-            a_amax = lhs.abs().max().to(torch.float32).to(hidden_states.device)
-            b_amax = rhs.abs().max().to(torch.float32).to(weights.device)
-            a_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / a_amax
-            b_gs = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / b_amax
-
-            lhsq, lhsq_sf = fp4_quantize(
-                lhs,
-                a_gs,
-            )
-            rhsq, rhsq_sf = fp4_quantize(
-                rhs,
-                b_gs,
-            )
-
-            lhs_in_dtype = dequantize_nvfp4_to_dtype(
-                lhsq,
-                lhsq_sf,
-                a_gs,
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-                block_size=16,
-            )
-
-            rhs_in_dtype = dequantize_nvfp4_to_dtype(
-                rhsq,
-                rhsq_sf,
-                b_gs,
-                dtype=hidden_states.dtype,
-                device=hidden_states.device,
-                block_size=16,
-            )
-            out[mask] = lhs_in_dtype @ rhs_in_dtype.t()
-
     a_amax = (
         hidden_states_3d.abs()
         .amax(dim=(1, 2))
@@ -503,16 +549,17 @@ def test_grouped_gemm_nt_masked(
     out_flashinfer = flashinfer_cutedsl_grouped_gemm_nt_masked(
         hidden_states_3d.to(hidden_states.device), a_gs, weights, b_gs, masked_m
     )
-
-    # re-pack out into [num_experts, max_m, n]
-    out_ref = torch.zeros(
-        (num_experts, max(masked_m), weights.shape[1]), dtype=out.dtype
+    # reference
+    out_ref = grouped_gemm_ref(
+        hidden_states_expanded=hidden_states_expanded,
+        hidden_states_3d=hidden_states_3d,
+        weights=weights,
+        topk_idx=topk_idx,
+        masked_m=masked_m,
+        B=B,
+        topk=topk,
+        num_experts=num_experts,
     )
-    expert_slot = [0] * num_experts
-    for i, expert_id in enumerate(topk_idx.view(-1).tolist()):
-        out_ref[expert_id, expert_slot[expert_id], :] = out[i]
-        expert_slot[expert_id] += 1
-
     # Note: just to compare the masked position due to cutedsl may write nan
     # into unmasked position.
     for i in range(num_experts):

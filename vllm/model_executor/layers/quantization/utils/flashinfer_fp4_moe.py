@@ -89,7 +89,7 @@ def select_nvfp4_gemm_impl(
     """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
 
     if allow_flashinfer:
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "cutedsl":
+        if envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm":
             return FlashInferCuteDSLExperts(
                 out_dtype=moe.in_dtype,
                 quant_config=moe_quant_config,

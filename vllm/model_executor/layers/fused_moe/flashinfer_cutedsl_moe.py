@@ -221,9 +221,6 @@ def flashinfer_cutedsl_moe_masked(
     """
 
     # === Assertions on dtypes ===
-    #    assert input_global_scale.dtype == torch.float32, (
-    #        f"input_global_scale must be float32, got {input_global_scale.dtype}"
-    #    )
     assert w1.dtype == torch.uint8, f"w1 must be uint8, got {w1.dtype}"
     assert w1_blockscale.dtype == torch.float8_e4m3fn, (
         f"w1_blockscale must be float8_e4m3fn, got {w1_blockscale.dtype}"
@@ -297,7 +294,7 @@ def flashinfer_cutedsl_moe_masked(
     ab_dtype = "float4_e2m1fn"
     sf_dtype = "float8_e4m3fn"
 
-    c_dtype = "bfloat16"
+    c_dtype = get_cute_dtype(hidden_states)
 
     # Gemm1
     flashinfer_cutedsl_grouped_gemm_nt_masked(
