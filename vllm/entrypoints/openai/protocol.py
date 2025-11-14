@@ -2002,7 +2002,7 @@ class ScoreResponse(OpenAIBaseModel):
 
 class ClassificationCompletionRequest(OpenAIBaseModel):
     model: str | None = None
-    input: list[str] | str | None = None
+    input: list[str] | str
     truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     user: str | None = None
 
