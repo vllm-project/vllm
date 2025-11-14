@@ -2282,7 +2282,6 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
 ) -> None:
     """Validate chunked prefill settings in the scheduler config for
     encoder-decoder models."""
-    assert scheduler_config.chunked_prefill_enabled is expect_enabled
     assert scheduler_config.enable_chunked_prefill is expect_enabled
     if is_encoder_decoder:
         # Encoder-decoder models should automatically disable chunked multimodal

@@ -497,7 +497,7 @@ class Scheduler(SchedulerInterface):
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if (
-                        not self.scheduler_config.chunked_prefill_enabled
+                        not self.scheduler_config.enable_chunked_prefill
                         and num_new_tokens > token_budget
                     ):
                         self.waiting.pop_request()

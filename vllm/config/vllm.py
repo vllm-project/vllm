@@ -411,7 +411,7 @@ class VllmConfig:
 
         if (
             self.model_config is not None
-            and self.scheduler_config.chunked_prefill_enabled
+            and self.scheduler_config.enable_chunked_prefill
             and self.model_config.dtype == torch.float32
             and current_platform.get_device_capability() == (7, 5)
         ):
@@ -584,7 +584,7 @@ class VllmConfig:
         ):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
-            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.long_prefill_token_threshold = 0
 
             if self.cache_config is not None:
@@ -1026,7 +1026,7 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )

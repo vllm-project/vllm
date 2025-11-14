@@ -571,7 +571,7 @@ def test_encoder_instance_zero_kv_cache(
         )
 
         # Check 5: Verify chunked prefill is disabled
-        assert not vllm_config.scheduler_config.chunked_prefill_enabled, (
+        assert not vllm_config.scheduler_config.enable_chunked_prefill, (
             "Encoder instance should disable chunked prefill (no KV cache)"
         )
 
