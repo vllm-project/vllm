@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for Mixture of Experts (MoE) models."""
+"""Transformers modeling backend mixin for Mixture of Experts (MoE) models."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 @CustomOp.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
-    """Custom FusedMoE for the Transformers backend."""
+    """Custom FusedMoE for the Transformers modeling backend."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
