@@ -101,6 +101,12 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    draft_confidence_threshold: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Confidence threshold for early stopping in EAGLE draft token generation.
+    When a draft token's confidence (max softmax probability) falls below this
+    threshold, subsequent tokens will not write to KV cache, saving memory
+    bandwidth. Set to 0.0 to disable early stopping (always write all tokens).
+    Set to 1.0 to stop after any non-certain prediction. Default: 0.5."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
