@@ -216,6 +216,7 @@ class RocmPlatform(Platform):
         use_mla,
         has_sink,
         use_sparse,
+        attn_type: str | None = None,
     ) -> str:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.attention.backends.registry import AttentionBackendEnum
@@ -422,10 +423,6 @@ class RocmPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
-
-    @classmethod
-    def get_cu_count(cls, device_id: int = 0) -> int:
-        return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
     def is_navi(cls) -> bool:
