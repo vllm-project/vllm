@@ -199,19 +199,6 @@ class SchedulerConfig:
             return value
         return handler(value)
 
-    @property
-    @deprecated(
-        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
-        "`SchedulerConfig.enable_chunked_prefill`. "
-        "The old name will be removed in v0.12."
-    )
-    def chunked_prefill_enabled(self) -> bool:
-        return self.enable_chunked_prefill
-
-    @chunked_prefill_enabled.setter
-    def chunked_prefill_enabled(self, value: bool):
-        self.enable_chunked_prefill = value
-
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
@@ -244,6 +231,19 @@ class SchedulerConfig:
                 self.max_long_partial_prefills,
                 self.long_prefill_token_threshold,
             )
+
+    @property
+    @deprecated(
+        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
+        "`SchedulerConfig.enable_chunked_prefill`. "
+        "The old name will be removed in v0.12."
+    )
+    def chunked_prefill_enabled(self) -> bool:
+        return self.enable_chunked_prefill
+
+    @chunked_prefill_enabled.setter
+    def chunked_prefill_enabled(self, value: bool):
+        self.enable_chunked_prefill = value
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
