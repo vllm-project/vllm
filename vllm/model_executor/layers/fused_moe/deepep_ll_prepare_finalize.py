@@ -6,6 +6,7 @@ import deep_ep
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
@@ -19,6 +20,8 @@ from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
 )
+
+logger = init_logger(__name__)
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
 DEEPEP_QUANT_BLOCK_SIZE = 128
@@ -50,7 +53,31 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 
     # DeepEP low-latency kernels are compiled only for certain
     # specific hidden sizes.
-    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 4096, 5120, 6144, 7168]
+    # NOTE: Keep this list sorted, maybe_roundup_layer_hidden_size depends
+    # on it.
+    SUPPORTED_HIDDEN_SIZES = [2048, 2560, 3072, 4096, 5120, 6144, 7168, 8192]
+
+    @staticmethod
+    def maybe_roundup_layer_hidden_size(hidden_size: int) -> int:
+        # Round up hidden size to the closest supported hidden size.
+        _supported_hs = DeepEPLLPrepareAndFinalize.SUPPORTED_HIDDEN_SIZES
+        # Check sorted
+        num_supported_hs = len(_supported_hs)
+        assert all(
+            [
+                _supported_hs[i] < _supported_hs[i + 1]
+                for i in range(num_supported_hs - 1)
+            ]
+        )
+
+        for x in _supported_hs:
+            if x >= hidden_size:
+                return x
+
+        raise ValueError(
+            f"Hidden Size {hidden_size} is greater than the "
+            f"maximum supported hidden size {_supported_hs[-1]}"
+        )
 
     def __init__(
         self,
@@ -69,6 +96,29 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         # combine function.
         self.handles: list[tuple | None] = [None, None]
         self.num_dispatchers_ = num_dispatchers
+
+        # We don't have enough information to determine if we should dispatch
+        # activation scales in a packed ue8m0 format during object construction
+        # time. This setting is handled by post_init_setup.
+        self.use_ue8m0_dispatch = False
+
+    def post_init_setup(self, fused_experts: mk.FusedMoEPermuteExpertsUnpermute):
+        if not fused_experts.supports_packed_ue8m0_act_scales():
+            # Early exit.
+            return
+
+        if self.use_fp8_dispatch:
+            logger.debug_once(
+                "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch."
+            )
+            self.use_ue8m0_dispatch = True
+        else:
+            logger.warning_once(
+                "DeepEPLLPrepareAndFinalize is setup to dispatch raw/unquantized "
+                f"activations despite ({fused_experts.__class__.__name__}) being able "
+                "to support quantized activations.",
+                scope="local",
+            )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -182,6 +232,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             self.max_tokens_per_rank,
             num_experts,
             use_fp8=self.use_fp8_dispatch,
+            # round_scale needs to be set to dispatch in ue8m0
+            round_scale=self.use_ue8m0_dispatch,
+            use_ue8m0=self.use_ue8m0_dispatch,
             async_finish=False,
             return_recv_hook=True,
         )

@@ -832,7 +832,7 @@ class MolmoModel(nn.Module, SupportsQuant):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -1264,13 +1264,16 @@ class MolmoMultiModalProcessor(BaseMultiModalProcessor[MolmoProcessingInfo]):
     ) -> list[int]:
         processor = self.info.get_hf_processor()
 
-        # Apply the chat template to the tokens
+        # The chat template is already applied to the prompt tokens
+        # Use message_format="none" to avoid applying it again
+        # Prepend an empty space if `always_start_with_space` is True
         tokens = processor.processor.get_tokens_input(  # type: ignore
             self.info.get_tokenizer().decode(prompt_tokens),
-            message_format=processor.message_format,
+            message_format="none",
             always_start_with_space=processor.always_start_with_space,
         )
 
+        # Prepend a BOS token id to the tokens
         processed_data = self.info.ctx.call_hf_processor(
             processor,  # type: ignore
             dict(tokens=tokens),
@@ -1401,10 +1404,9 @@ class MolmoForCausalLM(
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        lora_config = vllm_config.lora_config
+
         self.config = config
         self.multimodal_config = multimodal_config
-        self.lora_config = lora_config
 
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config, quant_config)
@@ -1489,7 +1491,7 @@ class MolmoForCausalLM(
     def get_language_model(self) -> torch.nn.Module:
         return self.model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []

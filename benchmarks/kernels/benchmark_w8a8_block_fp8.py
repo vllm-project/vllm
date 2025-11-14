@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 mp.set_start_method("spawn", force=True)
 

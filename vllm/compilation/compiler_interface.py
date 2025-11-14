@@ -6,7 +6,7 @@ import hashlib
 import os
 from collections.abc import Callable
 from contextlib import ExitStack
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import patch
 
 import torch
@@ -16,7 +16,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
-from vllm.utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 
 class CompilerInterface:
@@ -163,6 +163,23 @@ def get_inductor_factors() -> list[Any]:
     return factors
 
 
+def is_compile_cache_enabled(
+    vllm_additional_inductor_config: dict[str, Any],
+) -> bool:
+    vllm_inductor_config_disable_cache = vllm_additional_inductor_config.get(
+        "force_disable_caches", False
+    )
+
+    # TODO(gmagogsfm): Replace torch._inductor.config.force_disable_caches
+    # with torch.compiler.config.force_disable_caches when minimum PyTorch
+    # version reaches 2.10
+    return (
+        not envs.VLLM_DISABLE_COMPILE_CACHE
+        and not torch._inductor.config.force_disable_caches
+        and not vllm_inductor_config_disable_cache
+    )
+
+
 class InductorStandaloneAdaptor(CompilerInterface):
     """
     The adaptor for the Inductor compiler.
@@ -174,6 +191,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
     """
 
     name = "inductor_standalone"
+
+    def __init__(self, save_format: Literal["binary", "unpacked"]):
+        self.save_format = save_format
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         factors = get_inductor_factors()
@@ -219,8 +239,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Save the compiled artifact to disk in the specified path
         assert key is not None
         path = os.path.join(self.cache_dir, key)
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
-            compiled_graph.save(path=path, format="unpacked")
+
+        if is_compile_cache_enabled(compiler_config):
+            compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)
 
@@ -237,7 +258,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert isinstance(handle[1], str)
         path = handle[1]
         inductor_compiled_graph = torch._inductor.CompiledArtifact.load(
-            path=path, format="unpacked"
+            path=path, format=self.save_format
         )
         from torch._inductor.compile_fx import graph_returns_tuple
 
@@ -469,10 +490,8 @@ class InductorAdaptor(CompilerInterface):
                 config_patches=current_config,
             )
 
-        # We treat VLLM_DISABLE_COMPILE_CACHE as the overall switch for torch
-        # compilation cache. So turn off the checks if we disable the
-        # compilation cache.
-        if not envs.VLLM_DISABLE_COMPILE_CACHE:
+        # Turn off the checks if we disable the compilation cache.
+        if is_compile_cache_enabled(compiler_config):
             if hash_str is None:
                 raise RuntimeError(
                     "vLLM failed to compile the model. The most "
@@ -575,7 +594,7 @@ class InductorAdaptor(CompilerInterface):
 
         Because it is re-entrant, we always set it (even if entering via Dynamo
         and the context was already entered). We might want to revisit if it
-        should be set at a different level of compilation.
+        should be set at a different mode of compilation.
 
         This is likely a bug in PyTorch: public APIs should not rely on
         manually setting up internal contexts. But we also rely on non-public

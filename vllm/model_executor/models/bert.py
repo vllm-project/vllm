@@ -375,7 +375,7 @@ class BertModel(nn.Module, SupportsQuant):
         self.embeddings = embedding_class(self.config)
         self.encoder = BertEncoder(vllm_config=vllm_config, prefix=f"{prefix}.encoder")
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embeddings.word_embeddings(input_ids)
 
     def forward(
@@ -486,8 +486,8 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
         )
         self.pooler = self._build_pooler(pooler_config)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -521,7 +521,7 @@ class BertEmbeddingModel(nn.Module, SupportsQuant):
     def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
         return DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
                 "embed": Pooler.for_embed(pooler_config),
             }
         )
@@ -724,7 +724,7 @@ class BertSpladeSparseEmbeddingModel(BertEmbeddingModel):
 
         return DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_embed": Pooler.for_token_embed(pooler_config),
                 "embed": SPLADESparsePooler(
                     mlm_head=self.mlm_head,
                     cls_token_id=cls_id,
@@ -821,26 +821,22 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding, SupportsQu
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config, classifier=self.classifier
+                ),
                 "classify": ClassifierPooler(
                     pooling=self.bert.pooler,
                     classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config
-                    ),
+                    act_fn="classify",
                 ),
                 "score": ClassifierPooler(
-                    pooling=self.bert.pooler,
-                    classifier=self.classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config
-                    ),
+                    pooling=self.bert.pooler, classifier=self.classifier, act_fn="score"
                 ),
             }
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.bert.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.bert.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
@@ -891,12 +887,14 @@ class BertForTokenClassification(nn.Module):
 
         self.pooler = DispatchPooler(
             {
-                "encode": Pooler.for_encode(pooler_config),
+                "token_classify": Pooler.for_token_classify(
+                    pooler_config=pooler_config
+                ),
             }
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.bert.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.bert.embed_input_ids(input_ids)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)

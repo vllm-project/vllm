@@ -19,7 +19,7 @@ def test_pre_quantized_model(vllm_runner):
         dtype="bfloat16",
         enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
     assert output
 
 
@@ -39,8 +39,9 @@ def test_opt_125m_int8wo_model_loading_with_params(vllm_runner, pt_load_map_loca
         quantization="torchao",
         dtype="bfloat16",
         pt_load_map_location=pt_load_map_location,
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -54,8 +55,9 @@ def test_opt_125m_int4wo_model_per_module_quant(vllm_runner):
         quantization="torchao",
         dtype="bfloat16",
         pt_load_map_location="cuda:0",
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -69,8 +71,9 @@ def test_qwenvl_int8wo_model_loading_with_params(vllm_runner):
         quantization="torchao",
         dtype="bfloat16",
         pt_load_map_location="cuda:0",
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -90,13 +93,13 @@ def test_opt_125m_awq_int4wo_model_loading_with_params(vllm_runner):
         dtype="bfloat16",
         pt_load_map_location="cuda:0",
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_on_the_fly_quant_config_dict_json(vllm_runner):
+def test_online_quant_config_dict_json(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config dict serialized to json string
     """
@@ -122,14 +125,15 @@ def test_on_the_fly_quant_config_dict_json(vllm_runner):
         pt_load_map_location="cuda:0",
         quantization="torchao",
         hf_overrides=hf_overrides,
+        enforce_eager=True,
     ) as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
 
 @pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
-def test_on_the_fly_quant_config_file(vllm_runner):
+def test_online_quant_config_file(vllm_runner):
     """Testing on the fly quantization, load_weights integration point,
     with config file
     """
@@ -156,8 +160,9 @@ def test_on_the_fly_quant_config_file(vllm_runner):
             pt_load_map_location="cuda:0",
             quantization="torchao",
             hf_overrides=hf_overrides,
+            enforce_eager=True,
         ) as llm:
-            output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+            output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
             assert output
 
@@ -228,7 +233,7 @@ def test_opt_125m_float8_weight_only_safetensors_model_loading_with_params(vllm_
         "torchao-testing/opt-125m-Float8WeightOnlyConfig-v2-0.14.0.dev-safetensors"
     )
     with vllm_runner(model_name=model_name, dtype="bfloat16") as llm:
-        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
 
         assert output
 
@@ -245,6 +250,148 @@ def test_opt_125m_module_fqn_to_config_regex_model(vllm_runner):
     with vllm_runner(
         model_name=model_name, dtype="bfloat16", pt_load_map_location="cuda:0"
     ) as llm:
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+
+    assert output
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skip(
+    reason="since torchao nightly is only compatible with torch nightly"
+    "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
+    "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+def test_opt_125m_int4wo_model_running_preshuffled_kernel(vllm_runner, monkeypatch):
+    """We load a model with Int4Tensor (plain format) linear weights
+    and verify that the weight is updated to Int4PreshuffledTensor
+    after loading in vllm
+    """
+    from torchao.quantization import Int4PreshuffledTensor
+    from torchao.utils import _is_fbgemm_gpu_genai_available, is_sm_at_least_90
+
+    torch._dynamo.reset()
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    model_name = "torchao-testing/opt-125m-Int4WeightOnlyConfig-v2-0.14.0.dev"
+    # Note: using enforce_eager=True because the `bf16i4bf16_shuffled` doesn't
+    # have meta kernel implemented yet, can remove this flag after that is implemented
+    with vllm_runner(
+        model_name=model_name,
+        quantization="torchao",
+        dtype="bfloat16",
+        pt_load_map_location="cuda:0",
+        enforce_eager=True,
+    ) as llm:
+
+        def has_int4_preshuffled_tensor_weight(model):
+            return isinstance(
+                model.model.decoder.layers[0].self_attn.qkv_proj.weight,
+                Int4PreshuffledTensor,
+            )
+
+        def get_weight_attrs(model):
+            weight = model.model.decoder.layers[0].self_attn.qkv_proj.weight
+            return [
+                weight.requires_grad,
+                weight.input_dim,
+                weight.output_dim,
+                hasattr(weight, "weight_loader"),
+            ]
+
+        llm_engine = llm.get_llm().llm_engine
+        has_int4_preshuffled_tensor = any(
+            llm_engine.apply_model(has_int4_preshuffled_tensor_weight)
+        )
+        weight_attrs = llm_engine.apply_model(get_weight_attrs)[0]
+
+        # making sure we are using Int4PreshuffledTensor on H100 GPU, when
+        # fbgemm_gpu_genai
+        # library is installed, otherwise it should be using Int4Tensor
+        if _is_fbgemm_gpu_genai_available() and is_sm_at_least_90():
+            assert has_int4_preshuffled_tensor
+        else:
+            assert not has_int4_preshuffled_tensor
+
+        assert weight_attrs == [False, 1, 0, True]
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
+
+        assert output
+
+
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+@pytest.mark.skip(
+    reason="since torchao nightly is only compatible with torch nightly"
+    "currently https://github.com/pytorch/ao/issues/2919, we'll have to skip "
+    "torchao tests that requires newer versions (0.14.0.dev+) for now"
+)
+def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
+    vllm_runner, monkeypatch
+):
+    """We load a bf16 model and online quantize the model to int4, then verify that
+    the weights are updated to Int4PreshuffledTensor after online quantization
+    """
+    from torchao.quantization import Int4PreshuffledTensor
+    from torchao.utils import _is_fbgemm_gpu_genai_available, is_sm_at_least_90
+
+    torch._dynamo.reset()
+    model_name = "facebook/opt-125m"
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    import json
+
+    from torchao.core.config import config_to_dict
+    from torchao.quantization import Int4WeightOnlyConfig
+
+    torchao_quant_config = Int4WeightOnlyConfig(
+        group_size=128, int4_packing_format="plain"
+    )
+    hf_overrides = {
+        "quantization_config_dict_json": json.dumps(
+            config_to_dict(torchao_quant_config)
+        )
+    }
+
+    # Note: using enforce_eager=True because the `bf16i4bf16_shuffled` doesn't
+    # have meta kernel implemented yet, can remove this flag after that is implemented
+    with vllm_runner(
+        model_name=model_name,
+        quantization="torchao",
+        dtype="bfloat16",
+        pt_load_map_location="cuda:0",
+        hf_overrides=hf_overrides,
+        enforce_eager=True,
+    ) as llm:
+
+        def has_int4_preshuffled_tensor_weight(model):
+            return isinstance(
+                model.model.decoder.layers[0].self_attn.qkv_proj.weight,
+                Int4PreshuffledTensor,
+            )
+
+        def get_weight_attrs(model):
+            weight = model.model.decoder.layers[0].self_attn.qkv_proj.weight
+            return [
+                weight.requires_grad,
+                weight.input_dim,
+                weight.output_dim,
+                hasattr(weight, "weight_loader"),
+            ]
+
+        llm_engine = llm.get_llm().llm_engine
+        has_int4_preshuffled_tensor = any(
+            llm_engine.apply_model(has_int4_preshuffled_tensor_weight)
+        )
+        weight_attrs = llm_engine.apply_model(get_weight_attrs)[0]
+
+        # making sure we are using Int4PreshuffledTensor on H100 GPU, when
+        # fbgemm_gpu_genai
+        # library is installed, otherwise it should be using Int4Tensor
+        if _is_fbgemm_gpu_genai_available() and is_sm_at_least_90():
+            assert has_int4_preshuffled_tensor
+        else:
+            assert not has_int4_preshuffled_tensor
+
+        assert weight_attrs == [False, 1, 0, True]
         output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
 
         assert output

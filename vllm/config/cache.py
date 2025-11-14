@@ -10,7 +10,8 @@ from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes, get_cpu_memory
+from vllm.utils.mem_constants import GiB_bytes
+from vllm.utils.mem_utils import get_cpu_memory
 
 if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
@@ -19,10 +20,19 @@ else:
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "bfloat16", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
+BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
+CacheDType = Literal[
+    "auto",
+    "bfloat16",
+    "fp8",
+    "fp8_e4m3",
+    "fp8_e5m2",
+    "fp8_inc",
+    "fp8_ds_mla",
+]
 MambaDType = Literal["auto", "float32"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor"]
+KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
@@ -89,8 +99,10 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
-    mamba_block_size: int | None = None
-    """Size of a contiguous cache block in number of tokens for mamba cache."""
+    mamba_block_size: int | None = Field(default=None, gt=0)
+    """Size of a contiguous cache block in number of tokens for mamba cache.
+    Can be set only when prefix caching is enabled.
+    Value must be a multiple of 8 to align with causal_conv1d kernel."""
     mamba_cache_dtype: MambaDType = "auto"
     """The data type to use for the Mamba cache (both the conv as well as the
     ssm state). If set to 'auto', the data type will be inferred from the model
@@ -124,6 +136,17 @@ class CacheConfig:
     control of how much memory gets used when compared with using
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
+
+    kv_offloading_size: float | None = None
+    """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
+    the total buffer size summed across all TP ranks. By default, this is set
+    to None, which means no KV offloading is enabled. When set with
+    kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
+
+    kv_offloading_backend: KVOffloadingBackend | None = None
+    """The backend to use for KV cache offloading. Supported backends include
+    'native' (vLLM native CPU offloading), 'lmcache' This option must be used 
+    together with kv_offloading_size."""
 
     def compute_hash(self) -> str:
         """
