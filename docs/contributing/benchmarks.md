@@ -10,8 +10,6 @@ vLLM provides comprehensive benchmarking tools for performance testing and evalu
 - **[Parameter sweeps](#parameter-sweeps)**: Automate `vllm bench` runs for multiple configurations
 - **[Performance benchmarks](#performance-benchmarks)**: Automated CI benchmarks for development
 
-[Benchmark CLI]: #benchmark-cli
-
 ## Benchmark CLI
 
 This section guides you through running benchmark tests with the extensive
