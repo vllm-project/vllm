@@ -75,6 +75,14 @@ def model_name():
     return "meta-llama/Llama-3.1-8B-Instruct"
 
 
+@pytest.fixture(autouse=True)
+def reset_torch_dynamo():
+    """Reset torch dynamo cache before each test"""
+    yield
+    # Cleanup after test
+    torch._dynamo.reset()
+
+
 @pytest.mark.parametrize(
     "speculative_config",
     [

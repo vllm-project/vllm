@@ -21,6 +21,8 @@ from vllm.config import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from ...utils import create_new_process_for_each_test
+
 # This import automatically registers `torch.ops.silly.attention`
 from ..silly_attention import get_global_counter, reset_global_counter
 
@@ -124,6 +126,7 @@ def _run_simple_model(
 
 @pytest.mark.parametrize("use_inductor", [True, False])
 @torch.inference_mode()
+@create_new_process_for_each_test("spawn")
 def test_simple_piecewise_compile(use_inductor):
     _run_simple_model(
         splitting_ops=["silly::attention"],
