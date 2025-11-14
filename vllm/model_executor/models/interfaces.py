@@ -94,7 +94,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """
         Returns multimodal embeddings generated from multimodal kwargs
         to be merged with text embeddings.
@@ -104,7 +104,13 @@ class SupportsMultiModal(Protocol):
             the appearances of their corresponding multimodal data item in the
             input prompt.
         """
-        ...
+        if hasattr(self, "get_multimodal_embeddings"):
+            logger.warning_once(
+                "`get_multimodal_embeddings` for vLLM models is deprecated and will be "
+                "removed in v0.13.0 or v1.0.0, whichever is earlier. Please rename "
+                "this method to `embed_multimodal`."
+            )
+            return self.get_multimodal_embeddings(**kwargs)
 
     def get_language_model(self) -> VllmModel:
         """
@@ -119,10 +125,10 @@ class SupportsMultiModal(Protocol):
         ...
 
     @overload
-    def get_input_embeddings(self, input_ids: Tensor) -> Tensor: ...
+    def embed_input_ids(self, input_ids: Tensor) -> Tensor: ...
 
     @overload
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: Tensor,
         multimodal_embeddings: MultiModalEmbeddings,
@@ -131,17 +137,17 @@ class SupportsMultiModal(Protocol):
         handle_oov_mm_token: bool = False,
     ) -> Tensor: ...
 
-    def _get_text_embeddings(
+    def _embed_text_input_ids(
         self,
         input_ids: Tensor,
-        get_input_embeddings: Callable[[Tensor], Tensor],
+        embed_input_ids: Callable[[Tensor], Tensor],
         *,
         is_multimodal: Tensor | None,
         handle_oov_mm_token: bool,
     ) -> Tensor:
         if handle_oov_mm_token and is_multimodal is not None:
             is_text = ~is_multimodal
-            text_embeds = get_input_embeddings(input_ids[is_text])
+            text_embeds = embed_input_ids(input_ids[is_text])
 
             return torch.empty(
                 (input_ids.shape[0], text_embeds.shape[1]),
@@ -149,9 +155,9 @@ class SupportsMultiModal(Protocol):
                 device=text_embeds.device,
             ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
 
-        return get_input_embeddings(input_ids)
+        return embed_input_ids(input_ids)
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -167,15 +173,15 @@ class SupportsMultiModal(Protocol):
 
         In case the multi-modal token IDs exceed the vocabulary size of
         the language model, you can set `handle_oov_mm_token=False`
-        to avoid calling the language model's `get_input_embeddings` method
+        to avoid calling the language model's `embed_input_ids` method
         on those tokens. Note however that doing so increases memory usage
         as an additional buffer is needed to hold the input embeddings.
         """
         from .utils import _merge_multimodal_embeddings
 
-        inputs_embeds = self._get_text_embeddings(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
-            self.get_language_model().get_input_embeddings,
+            self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
             handle_oov_mm_token=handle_oov_mm_token,
         )
@@ -185,7 +191,7 @@ class SupportsMultiModal(Protocol):
 
         if is_multimodal is None:
             raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "`embed_input_ids` now requires `is_multimodal` arg, "
                 "please update your model runner according to "
                 "https://github.com/vllm-project/vllm/pull/16229."
             )

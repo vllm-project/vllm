@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 from contextlib import nullcontext
+from unittest.mock import patch
 
 import pytest
+from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
@@ -11,7 +13,10 @@ from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.config.compilation import CompilationMode
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import _is_torch_equal_or_newer, is_torch_equal_or_newer
+from vllm.utils.torch_utils import _is_torch_equal_or_newer
+
+# This import automatically registers `torch.ops.silly.attention`
+from . import silly_attention  # noqa: F401
 
 
 def test_version():
@@ -21,14 +26,6 @@ def test_version():
     assert _is_torch_equal_or_newer("2.8.0", "2.8.0.dev")
     assert _is_torch_equal_or_newer("2.8.1", "2.8.0.dev")
     assert not _is_torch_equal_or_newer("2.7.1", "2.8.0.dev")
-
-
-def test_use_cudagraphs_dynamic():
-    vllm_config = VllmConfig()
-    # Default V1 configuration now starts without cudagraphs enabled; the
-    # engine decides when to capture based on runtime settings instead of a
-    # blanket default.
-    assert vllm_config.compilation_config.use_cudagraph
 
 
 def test_copy_pass():
@@ -65,7 +62,7 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", val)
 
     compilation_config = {
-        "use_cudagraph": False,  # speed things up a bit
+        "cudagraph_mode": CUDAGraphMode.NONE,  # speed things up a bit
     }
     with (
         compilation_counter.expect(
@@ -83,20 +80,31 @@ def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-@pytest.mark.parametrize("enabled", [True, False])
-def test_use_cudagraphs(vllm_runner, monkeypatch, enabled):
+@pytest.mark.parametrize(
+    "cudagraph_mode,num_cudagraph_captured",
+    [
+        (CUDAGraphMode.NONE, 0),
+        (CUDAGraphMode.FULL_DECODE_ONLY, 1),
+        (CUDAGraphMode.PIECEWISE, 13),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, 14),
+    ],
+)
+def test_use_cudagraphs(
+    vllm_runner, monkeypatch, cudagraph_mode, num_cudagraph_captured
+):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
     compilation_config = {
         "cudagraph_capture_sizes": [100],
-        "use_cudagraph": enabled,
+        "cudagraph_mode": cudagraph_mode,
     }
+    num_gpu_runner_capture_triggers = 1 if cudagraph_mode != CUDAGraphMode.NONE else 0
     with (
         compilation_counter.expect(
             num_graphs_seen=1,
-            num_gpu_runner_capture_triggers=1 if enabled else 0,
-            num_cudagraph_captured=13 if enabled else 0,
+            num_gpu_runner_capture_triggers=num_gpu_runner_capture_triggers,
+            num_cudagraph_captured=num_cudagraph_captured,
         ),
         # loading the model causes compilation (if enabled) to happen
         vllm_runner(
@@ -168,19 +176,18 @@ def test_splitting_ops_dynamic():
     assert not config.compilation_config.splitting_ops_contain_attention()
 
     # When use_inductor_graph_partition=True
-    if is_torch_equal_or_newer("2.9.0.dev"):
-        config = VllmConfig(
-            compilation_config=CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                use_inductor_graph_partition=True,
-                splitting_ops=["vllm::unified_attention"],
-            )
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=["vllm::unified_attention"],
         )
-        # with inductor partition we use splitting_ops directly for
-        # partition rules
-        assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
+    )
+    # with inductor partition we use splitting_ops directly for
+    # partition rules
+    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
 
-    # When attn_fusion pass enabled, splitting_ops now default to attention ops.
+    # When attn_fusion pass enabled.
     config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
@@ -189,29 +196,41 @@ def test_splitting_ops_dynamic():
             cudagraph_mode=CUDAGraphMode.PIECEWISE,
         )
     )
-    # With the new simplified logic, attention fusion works with splitting_ops
-    assert config.compilation_config.splitting_ops_contain_attention()
-    # cudagraph mode remains PIECEWISE
-    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+    assert config.compilation_config.splitting_ops == []
+    # cudagraph mode also fall back to FULL
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL
 
-    # When both use_inductor_graph_partition and attn_fusion pass enabled.
-    if is_torch_equal_or_newer("2.9.0.dev"):
+    # splitting_ops can not contain attention ops when attn_fusion
+    # pass enabled.
+    with pytest.raises(ValidationError):
         config = VllmConfig(
             compilation_config=CompilationConfig(
                 mode=CompilationMode.VLLM_COMPILE,
-                use_inductor_graph_partition=True,
                 pass_config={"enable_attn_fusion": True, "enable_noop": True},
                 custom_ops=["+quant_fp8"],
                 cudagraph_mode=CUDAGraphMode.PIECEWISE,
+                # work around for accessing all attntion ops
+                splitting_ops=CompilationConfig()._attention_ops,
             )
         )
-        # With inductor graph partition, attn_fusion and splitting_ops
-        # work together. Default splitting_ops include attention ops.
-        assert config.compilation_config.splitting_ops_contain_attention()
-        # enable_attn_fusion is directly supported under
-        # use_inductor_graph_partition=True, and cudagraph_mode
-        # is unchanged.
-        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+    # When both use_inductor_graph_partition and attn_fusion pass enabled.
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            use_inductor_graph_partition=True,
+            pass_config={"enable_attn_fusion": True, "enable_noop": True},
+            custom_ops=["+quant_fp8"],
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        )
+    )
+    # With inductor graph partition, attn_fusion and splitting_ops
+    # work together. Default splitting_ops include attention ops.
+    assert config.compilation_config.splitting_ops_contain_attention()
+    # enable_attn_fusion is directly supported under
+    # use_inductor_graph_partition=True, and cudagraph_mode
+    # is unchanged.
+    assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
 
 
 def test_should_split():
@@ -240,15 +259,6 @@ def test_should_split():
     # supports OpOverload
     splitting_ops = ["aten::add.Tensor"]
     assert not should_split(node, splitting_ops)
-
-    @torch.library.custom_op(
-        "silly::attention",
-        mutates_args=["out"],
-    )
-    def attention(
-        q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor
-    ) -> None:
-        out.copy_(q + k + v)
 
     q, k, v, out = [torch.randn(1)] * 4
 
@@ -293,25 +303,36 @@ def test_should_split():
         "tp_size",
         "enable_sequence_parallelism",
         "max_num_batched_tokens",
-        "use_cudagraph",
+        "cudagraph_mode",
         "expected_max_size",
     ),
     [
-        (None, None, 1, False, 2048, True, 512),
-        ([1, 2, 4], 4, 1, False, 2048, True, 4),
-        ([1, 2, 4], 8, 1, False, 2048, True, RuntimeError),
-        ([1, 256], None, 1, False, 2048, 256),
-        ([], None, 1, False, 2048, False, 0),
-        (None, 0, 1, False, 2048, False, 0),
+        (None, None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        ([1, 2, 4], 4, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        (
+            [1, 2, 4],
+            8,
+            1,
+            False,
+            2048,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            ValidationError,
+        ),
+        ([1, 256], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        ([], None, 1, False, 2048, CUDAGraphMode.NONE, 0),
+        (None, 0, 1, False, 2048, CUDAGraphMode.NONE, 0),
         # truncated to nearest multiple of 8 or 16
-        (None, 257, 1, False, 2048, True, 256),
-        ([1, 2, 4, 15], None, 1, False, 2048, True, 15),  # max from list
-        ([1, 2, 4, 15], None, 2, True, 2048, True, 4),  # filtered out 15 due to SP
-        ([1, 2, 4, 15], None, 1, False, 8, True, 4),  # limited by the max_tokens
+        (None, 257, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 256),
+        # max from list
+        ([1, 2, 4, 15], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 15),
+        # filtered out 15 due to SP
+        ([1, 2, 4, 15], None, 2, True, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
+        # limited by the max_tokens
+        ([1, 2, 4, 15], None, 1, False, 8, CUDAGraphMode.FULL_AND_PIECEWISE, 4),
         # the list should contain at least 1 element when use cudagraph
-        ([], None, 1, False, 2048, True, RuntimeError),
+        ([], None, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
         # the max capturing size should be >= 1 when use cudagraph
-        (None, 0, 1, False, 2048, True, RuntimeError),
+        (None, 0, 1, False, 2048, CUDAGraphMode.FULL_AND_PIECEWISE, ValidationError),
     ],
 )
 def test_cudagraph_sizes_post_init(
@@ -320,15 +341,17 @@ def test_cudagraph_sizes_post_init(
     tp_size,
     enable_sequence_parallelism,
     max_num_batched_tokens,
-    use_cudagraph,
+    cudagraph_mode,
     expected_max_size,
 ):
     ctx = nullcontext()
-    if isinstance(expected_max_size, Exception):
+    if expected_max_size == ValidationError:
         ctx = pytest.raises(expected_max_size)
 
-    cudagraph_mode = CUDAGraphMode.PIECEWISE if use_cudagraph else CUDAGraphMode.NONE
-    with ctx:
+    with (
+        ctx,
+        patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
+    ):
         compilation_config = CompilationConfig(
             cudagraph_capture_sizes=cudagraph_capture_sizes,
             max_cudagraph_capture_size=max_cudagraph_capture_size,
@@ -342,11 +365,13 @@ def test_cudagraph_sizes_post_init(
         engine_args = EngineArgs(
             model="facebook/opt-125m",
             tensor_parallel_size=tp_size,
+            max_num_seqs=min(max_num_batched_tokens, 128),
             max_num_batched_tokens=max_num_batched_tokens,
             compilation_config=compilation_config,
         )
         vllm_config = engine_args.create_engine_config()
 
-    assert (
-        vllm_config.compilation_config.max_cudagraph_capture_size == expected_max_size
-    )
+        assert (
+            vllm_config.compilation_config.max_cudagraph_capture_size
+            == expected_max_size
+        )

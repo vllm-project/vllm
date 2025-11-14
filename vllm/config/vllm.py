@@ -411,7 +411,7 @@ class VllmConfig:
 
         if (
             self.model_config is not None
-            and self.scheduler_config.chunked_prefill_enabled
+            and self.scheduler_config.enable_chunked_prefill
             and self.model_config.dtype == torch.float32
             and current_platform.get_device_capability() == (7, 5)
         ):
@@ -584,7 +584,7 @@ class VllmConfig:
         ):
             for reason in disable_chunked_prefill_reasons:
                 logger.info(reason)
-            self.scheduler_config.chunked_prefill_enabled = False
+            self.scheduler_config.enable_chunked_prefill = False
             self.scheduler_config.long_prefill_token_threshold = 0
 
             if self.cache_config is not None:
@@ -655,14 +655,6 @@ class VllmConfig:
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )
-
-            # final migrate the deprecated flags
-            self.compilation_config.use_cudagraph = (
-                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
-            )
-            self.compilation_config.full_cuda_graph = (
-                self.compilation_config.cudagraph_mode.has_full_cudagraphs()
-            )
 
         if self.parallel_config.enable_dbo:
             a2a_backend = self.parallel_config.all2all_backend
@@ -853,7 +845,9 @@ class VllmConfig:
                 )
                 # de-duplicate the sizes provided by the config
                 dedup_sizes = list(set(self.compilation_config.cudagraph_capture_sizes))
-                cudagraph_capture_sizes = dedup_sizes
+                cudagraph_capture_sizes = [
+                    i for i in dedup_sizes if i <= max_num_tokens
+                ]
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
@@ -1032,7 +1026,7 @@ class VllmConfig:
             f"seed={self.model_config.seed}, "
             f"served_model_name={self.model_config.served_model_name}, "
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
-            f"chunked_prefill_enabled={self.scheduler_config.chunked_prefill_enabled}, "  # noqa
+            f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
