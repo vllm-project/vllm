@@ -9,6 +9,7 @@ from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
+import vllm.envs as envs
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -477,19 +478,21 @@ class SpeculativeConfig:
                 )
 
         # Auto-compute draft_length_options if not specified
-        if self.draft_length_options is None and self.num_speculative_tokens is not None:
-            # Check VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH to enable/disable adaptive draft length
-            if envs.VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH:
-                # Adaptive draft length enabled: compute draft length options
-                n = self.num_speculative_tokens
-                self.draft_length_options = [
-                    max(2, n // 2),  # Half
-                    n,               # Target
-                    min(8, n * 2),   # Double (capped at 8)
-                ]
-                # Remove duplicates and sort
-                self.draft_length_options = sorted(set(self.draft_length_options))
-            # else: keep draft_length_options as None (fixed draft length)
+        if (
+            self.draft_length_options is None
+            and self.num_speculative_tokens is not None
+            and envs.VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH
+        ):
+            # Adaptive draft length enabled: compute draft length options
+            n = self.num_speculative_tokens
+            self.draft_length_options = [
+                max(2, n // 2),  # Half
+                n,  # Target
+                min(8, n * 2),  # Double (capped at 8)
+            ]
+            # Remove duplicates and sort
+            self.draft_length_options = sorted(set(self.draft_length_options))
+        # else: keep draft_length_options as None (fixed draft length)
 
         # Override confidence threshold from environment if set
         # This allows independent control of early exit

@@ -71,7 +71,7 @@ class EagleProposer:
         # Get pad_token_id from draft model config for masking stopped sequences
         self.pad_token_id = (
             self.draft_model_config.hf_config.pad_token_id
-            if hasattr(self.draft_model_config.hf_config, 'pad_token_id')
+            if hasattr(self.draft_model_config.hf_config, "pad_token_id")
             and self.draft_model_config.hf_config.pad_token_id is not None
             else 0
         )
@@ -256,6 +256,9 @@ class EagleProposer:
             # Cap at max configured length
             draft_length = self.num_speculative_tokens
 
+        # After normalization, draft_length is guaranteed to be an int
+        assert draft_length is not None
+
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
 
@@ -423,9 +426,7 @@ class EagleProposer:
             # Mask stopped sequences to PAD token for early stopping
             if token_index > 0:
                 input_ids = torch.where(
-                    self.continue_mask[:batch_size],
-                    input_ids,
-                    self.pad_token_id
+                    self.continue_mask[:batch_size], input_ids, self.pad_token_id
                 )
             if self.uses_mrope:
                 positions += 1
@@ -457,8 +458,9 @@ class EagleProposer:
             length_increments = active_mask.to(common_attn_metadata.seq_lens.dtype)
             common_attn_metadata.seq_lens += length_increments
             # This is an out-of-place operation to avoid modifying the original tensor.
-            common_attn_metadata.seq_lens_cpu = common_attn_metadata.seq_lens_cpu + active_mask.cpu().to(
-                common_attn_metadata.seq_lens_cpu.dtype
+            common_attn_metadata.seq_lens_cpu = (
+                common_attn_metadata.seq_lens_cpu
+                + active_mask.cpu().to(common_attn_metadata.seq_lens_cpu.dtype)
             )
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
@@ -542,7 +544,7 @@ class EagleProposer:
             # Compute confidence and update continue mask for early stopping
             probs = logits.softmax(dim=-1, dtype=torch.float32)
             confidence = probs.max(dim=-1).values
-            self.continue_mask[:batch_size] &= (confidence >= self.confidence_threshold)
+            self.continue_mask[:batch_size] &= confidence >= self.confidence_threshold
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]

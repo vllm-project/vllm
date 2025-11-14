@@ -9,6 +9,7 @@ from transformers import LlamaConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
+from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor

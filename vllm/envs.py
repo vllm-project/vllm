@@ -920,13 +920,17 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # When enabled, captures multiple draft lengths as CUDA graphs and dynamically
     # selects the optimal draft length based on acceptance rates.
     # Valid values: 1 (enabled), 0 (disabled, default).
-    "VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH": lambda: bool(int(os.getenv("VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH", "0"))),
+    "VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH": lambda: bool(
+        int(os.getenv("VLLM_SPEC_ADAPTIVE_DRAFT_LENGTH", "0"))
+    ),
     # Confidence threshold for early exit in speculative decoding.
     # Controls early stopping during EAGLE draft token generation. When a draft token's
     # confidence (max softmax probability) falls below this threshold, subsequent tokens
     # will not write to KV cache, saving memory bandwidth.
     # Set to 0.0 to disable (default). Valid range: [0.0, 1.0].
-    "VLLM_SPEC_CONFIDENCE_THRESHOLD": lambda: float(os.getenv("VLLM_SPEC_CONFIDENCE_THRESHOLD", "0.0")),
+    "VLLM_SPEC_CONFIDENCE_THRESHOLD": lambda: float(
+        os.getenv("VLLM_SPEC_CONFIDENCE_THRESHOLD", "0.0")
+    ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (

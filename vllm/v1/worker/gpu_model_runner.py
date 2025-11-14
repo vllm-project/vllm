@@ -388,6 +388,7 @@ class GPUModelRunner(
             self.rejection_sampler = RejectionSampler(self.sampler)
             # Initialize spec decoding stats for adaptive draft length
             from vllm.v1.spec_decode.metrics import SpecDecodingStats
+
             self.spec_decoding_stats = SpecDecodingStats.new(
                 self.speculative_config.num_speculative_tokens
             )
@@ -2505,7 +2506,9 @@ class GPUModelRunner(
                             batch_count += 1
                     # Update EWMA once with batch-level acceptance rate
                     if batch_count > 0 and batch_total_drafts > 0:
-                        batch_acceptance_rate = batch_total_accepted / batch_total_drafts
+                        batch_acceptance_rate = (
+                            batch_total_accepted / batch_total_drafts
+                        )
                         self.spec_decoding_stats.update_acceptance_ewma(
                             batch_acceptance_rate, batch_count
                         )
@@ -2780,7 +2783,7 @@ class GPUModelRunner(
             draft_length_for_cudagraph = self._resolve_draft_length_for_cudagraph(
                 spec_decode_metadata=spec_decode_metadata
             )
-            batch_descriptor = BatchDescriptor(
+            original_batch_descriptor = BatchDescriptor(
                 num_tokens=num_input_tokens,
                 uniform_decode=uniform_decode,
                 has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
@@ -2788,7 +2791,7 @@ class GPUModelRunner(
             )
             cudagraph_runtime_mode, batch_descriptor = (
                 self.cudagraph_dispatcher.dispatch(
-                    batch_descriptor,
+                    original_batch_descriptor,
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
             )
@@ -3255,6 +3258,7 @@ class GPUModelRunner(
             draft_length = None
             if (
                 hasattr(self, "spec_decoding_stats")
+                and self.speculative_config is not None
                 and self.speculative_config.draft_length_options
             ):
                 draft_length = self.spec_decoding_stats.compute_optimal_draft_length(
@@ -4680,7 +4684,7 @@ class GPUModelRunner(
             else None
         )
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
-            self.compilation_config.cudagraph_mode,
+            cudagraph_mode,
             self.uniform_decode_query_len,
             draft_lengths,
         )

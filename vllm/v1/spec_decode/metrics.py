@@ -67,9 +67,7 @@ class SpecDecodingStats:
         )
         self.num_requests_tracked += batch_count
 
-    def compute_optimal_draft_length(
-        self, draft_length_options: list[int]
-    ) -> int:
+    def compute_optimal_draft_length(self, draft_length_options: list[int]) -> int:
         """Compute optimal draft length based on acceptance rate.
 
         Uses threshold-based selection with empirically-tuned boundaries:
