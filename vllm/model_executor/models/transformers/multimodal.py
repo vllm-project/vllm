@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend mixin for multi-modal models."""
+"""Transformers modeling backend mixin for multi-modal models."""
 
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
@@ -310,9 +310,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         return model_output
 
     def get_language_model(self) -> torch.nn.Module:
-        """Transformers backend multimodal classes do not contain a separate vLLM
-        language model class. Therefore, in order to return a language model vLLM class,
-        we use a wrapper to give `self` the same interface as a text model."""
+        """Transformers modeling backend multimodal classes do not contain a separate
+        vLLM language model class. Therefore, in order to return a language model vLLM
+        class, we use a wrapper to give `self` the same interface as a text model."""
 
         # Exclude self and object
         bases = self.__class__.mro()[1:-1]
@@ -385,7 +385,9 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             for k, v in kwargs.items()
             if k not in {"image_grid_thw", "video_grid_thw"}
         ):
-            raise NotImplementedError("Transformers backend only supports images.")
+            raise NotImplementedError(
+                "Transformers modeling backend only supports images."
+            )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
