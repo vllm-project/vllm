@@ -375,6 +375,8 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         expand_config,
         adapter_enabled: torch.Tensor,
         mul_routed_weight=False,
+        fully_sharded: bool = False,
+        offset: int = 0,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
@@ -408,4 +410,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             expand_config.get("NUM_STAGES", 3),
             expand_config.get("SPLIT_K", 1),
             mul_routed_weight,
+            fully_sharded,
+            offset,
         )
