@@ -251,6 +251,9 @@ class AttentionImpl(ABC, Generic[T]):
 
     dcp_world_size: int
     dcp_rank: int
+    
+    pcp_world_size: int
+    pcp_rank: int
 
     def __new__(cls, *args, **kwargs):
         # use __new__ so that all subclasses will call this
@@ -264,6 +267,15 @@ class AttentionImpl(ABC, Generic[T]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+        try:
+            from vllm.distributed.parallel_state import get_pcp_group
+            
+            self.pcp_world_size = get_pcp_group().world_size
+            self.pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            self.pcp_world_size = 1
+            self.pcp_rank = 0
+        
         self.need_to_return_lse_for_decode = (
             self.dcp_world_size > 1 and self.can_return_lse_for_decode
         )

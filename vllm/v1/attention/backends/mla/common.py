@@ -225,7 +225,7 @@ from vllm.utils.math_utils import cdiv, round_down
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -535,7 +535,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
-        self.dcp_local_block_size = parallel_config.dcp_kv_cache_interleave_size
+        self.dcp_local_block_size = parallel_config.cp_kv_cache_interleave_size
         self.dcp_virtual_block_size = self.dcp_local_block_size * self.dcp_world_size
 
         # Don't try to access the runner on AMD
@@ -830,7 +830,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 )
 
                 if self.dcp_world_size > 1:
-                    local_context_lens_allranks = get_dcp_local_seq_lens(
+                    local_context_lens_allranks = get_cp_local_seq_lens(
                         context_lens_cpu,
                         self.dcp_world_size,
                         None,
@@ -1268,8 +1268,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
                 get_current_vllm_config()
             )
         )
-        self.dcp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.dcp_kv_cache_interleave_size
+        self.cp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
 
     def _flash_attn_varlen_diff_headdims(

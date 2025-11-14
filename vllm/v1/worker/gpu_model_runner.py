@@ -93,7 +93,7 @@ from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     create_fast_prefill_custom_backend,
-    get_dcp_local_seq_lens,
+    get_cp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
     split_attn_metadata,
 )
@@ -412,7 +412,7 @@ class GPUModelRunner(
             # uses output token ids so we set this conservatively.
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
-            dcp_kv_cache_interleave_size=self.parallel_config.dcp_kv_cache_interleave_size,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
         )
 
         self.use_async_scheduling = self.scheduler_config.async_scheduling
@@ -1324,11 +1324,11 @@ class GPUModelRunner(
 
         # update seq_lens of decode reqs under DCP.
         if self.dcp_world_size > 1:
-            self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
+            self.dcp_local_seq_lens.cpu[:num_reqs] = get_cp_local_seq_lens(
                 self.seq_lens.cpu[:num_reqs],
                 self.dcp_world_size,
                 self.dcp_rank,
-                self.parallel_config.dcp_kv_cache_interleave_size,
+                self.parallel_config.cp_kv_cache_interleave_size,
             )
             self.dcp_local_seq_lens.copy_to_gpu(num_reqs)
 
