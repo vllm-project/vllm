@@ -1019,8 +1019,12 @@ class EagleProposer:
                         " checkpoint. Sharing target model embedding weights with the"
                         " draft model."
                     )
-                elif torch.equal(
-                    self.model.model.embed_tokens.weight, target_embed_tokens.weight
+                elif (
+                    isinstance(target_embed_tokens.weight, torch.Tensor)
+                    and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                    and torch.equal(
+                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                    )
                 ):
                     share_embeddings = True
                     reason = (
@@ -1063,8 +1067,13 @@ class EagleProposer:
                     "Detected EAGLE model without its own lm_head in the checkpoint. "
                     "Sharing target model lm_head weights with the draft model."
                 )
-            elif hasattr(target_language_model, "lm_head") and torch.equal(
-                self.model.lm_head.weight, target_language_model.lm_head.weight
+            elif (
+                hasattr(target_language_model, "lm_head")
+                and isinstance(target_language_model.lm_head.weight, torch.Tensor)
+                and isinstance(self.model.lm_head.weight, torch.Tensor)
+                and torch.equal(
+                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                )
             ):
                 share_lm_head = True
                 reason = (
