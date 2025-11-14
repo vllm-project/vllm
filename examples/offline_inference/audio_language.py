@@ -43,6 +43,7 @@ class ModelRequestData(NamedTuple):
 
 
 # Voxtral
+# Make sure to install mistral-common[audio].
 def run_voxtral(question: str, audio_count: int) -> ModelRequestData:
     from mistral_common.audio import Audio
     from mistral_common.protocol.instruct.chunk import (

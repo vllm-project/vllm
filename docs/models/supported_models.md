@@ -785,6 +785,9 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `Gemma3nForConditionalGeneration` | Gemma3n | `google/gemma-3n-E2B-it`, `google/gemma-3n-E4B-it`, etc. | | |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-speech-3.3-2b`, `ibm-granite/granite-speech-3.3-8b`, etc. | ✅︎ | ✅︎ |
 
+!!! note
+    `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
+
 ### Pooling Models
 
 See [this page](./pooling_models.md) for more information on how to use pooling models.
