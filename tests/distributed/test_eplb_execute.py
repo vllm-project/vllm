@@ -29,7 +29,7 @@ def distributed_run(fn, world_size, *args):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        p = mp.Process(target=fn, args=(env, *args))
+        p = mp.Process(target=fn, args=(env, world_size, *args))
         processes.append(p)
         p.start()
 
