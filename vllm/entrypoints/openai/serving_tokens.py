@@ -90,11 +90,10 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        # TODO Change to EngineCoreRequest once Renderer work progresses
+        # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
+        # completed
         engine_prompt = EngineTokensPrompt(prompt_token_ids=request.token_ids)
         if request.features is not None:
-            # TODO we need the new asyncllm interface here to support
-            # MultiModalFeatureSpec
             engine_prompt["multi_modal_data"] = None
 
         if hasattr(request, "cache_salt") and request.cache_salt is not None:
@@ -127,7 +126,7 @@ class ServingTokens(OpenAIServing):
         except ValueError as e:
             return self.create_error_response(str(e))
 
-        # TODO Streaming response
+        # TODO(NickLucche): Implement streaming response
 
         try:
             assert result_generator is not None
@@ -166,7 +165,7 @@ class ServingTokens(OpenAIServing):
             token_ids = output.token_ids
             out_logprobs = output.logprobs
 
-            # sampling_params.logprobs == req.top_logprobs
+            # This is top_logprobs in completions API
             if sampling_params.logprobs:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_tokens_logprobs(
@@ -223,9 +222,10 @@ class ServingTokens(OpenAIServing):
                         choice.index].token_ids
 
                 if output_token_ids:
+                    # Log token_ids only.
                     self.request_logger.log_outputs(
                         request_id=request_id,
-                        outputs="",  # TODO 
+                        outputs="", 
                         output_token_ids=output_token_ids,
                         finish_reason=choice.finish_reason,
                         is_streaming=False,
