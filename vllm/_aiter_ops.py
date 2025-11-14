@@ -30,7 +30,7 @@ def if_aiter_supported(func: Callable) -> Callable:
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        # checks the platform, device arch and aiter library existance.
+        # checks the platform, device arch and aiter library existence.
 
         if current_platform.is_rocm() and IS_AITER_FOUND:
             from vllm.platforms.rocm import on_gfx9
