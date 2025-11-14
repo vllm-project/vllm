@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import torch
@@ -134,31 +134,37 @@ class MultiModalBudget:
 @dataclass
 class AttentionGroup:
     backend: type[AttentionBackend]
-    # When ubatching is enabled we will have a metadata builder for each ubatch
-    # so that if they use internal persistant buffers for cudagraphs, and they
-    # won't have to worry about conflicting with the other ubatches.
-    metadata_builders: list[AttentionMetadataBuilder]
     layer_names: list[str]
     kv_cache_spec: KVCacheSpec
     kv_cache_group_id: int
+    # When ubatching is enabled we will have a metadata builder for each ubatch
+    # so that if they use internal persistant buffers for cudagraphs, and they
+    # won't have to worry about conflicting with the other ubatches.
+    metadata_builders: list[AttentionMetadataBuilder] = field(
+        default_factory=lambda: []
+    )
 
-    @staticmethod
-    def create_with_metadata_builders(
-        backend: type[AttentionBackend],
-        layer_names: list[str],
-        kv_cache_spec: KVCacheSpec,
-        vllm_config: VllmConfig,
-        device: torch.device,
-        kv_cache_group_id: int,
+    def create_metadata_builders(
+        self,
+        vllm_config,
+        device,
+        kernel_block_size: int | None,
         num_metadata_builders: int = 1,
-    ) -> "AttentionGroup":
-        metadata_builders = [
-            backend.get_builder_cls()(kv_cache_spec, layer_names, vllm_config, device)
+    ):
+        kv_cache_spec_builder = (
+            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
+            if kernel_block_size is not None
+            else self.kv_cache_spec
+        )
+        self.metadata_builders = [
+            self.backend.get_builder_cls()(
+                kv_cache_spec_builder,
+                self.layer_names,
+                vllm_config,
+                device,
+            )
             for _ in range(num_metadata_builders)
         ]
-        return AttentionGroup(
-            backend, metadata_builders, layer_names, kv_cache_spec, kv_cache_group_id
-        )
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
@@ -171,27 +177,27 @@ def sanity_check_mm_encoder_outputs(
 ) -> None:
     """
     Perform sanity checks for the result of
-    [`vllm.model_executor.models.SupportsMultiModal.get_multimodal_embeddings`][].
+    [`vllm.model_executor.models.SupportsMultiModal.embed_multimodal`][].
     """
     assert isinstance(mm_embeddings, (list, tuple, torch.Tensor)), (
         "Expected multimodal embeddings to be a list/tuple of 2D tensors, "
         f"or a single 3D tensor, but got {type(mm_embeddings)} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
     assert len(mm_embeddings) == expected_num_items, (
         "Expected number of multimodal embeddings to match number of "
         f"input items: {expected_num_items}, but got {len(mm_embeddings)=} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
     assert all(e.ndim == 2 for e in mm_embeddings), (
         "Expected multimodal embeddings to be a sequence of 2D tensors, "
         f"but got tensors with shapes {[e.shape for e in mm_embeddings]} "
         "instead. This is most likely due to incorrect implementation "
-        "of the model's `get_multimodal_embeddings` method."
+        "of the model's `embed_multimodal` method."
     )
 
 

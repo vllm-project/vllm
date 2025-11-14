@@ -154,26 +154,6 @@ AUDIO_ASSETS = AudioTestAssets()
 """Singleton instance of {class}`AudioTestAssets`."""
 
 
-@pytest.fixture(scope="function", autouse=True)
-def cleanup_VLLM_USE_V1(monkeypatch):
-    """
-    The V1 oracle sets "VLLM_USE_V1" during loading. This means
-    that each invocation of a test change the env variable.
-
-    If we touch "VLLM_USE_V1" with monkeypatch, then any changes
-    made during the test run by vLLM will be cleaned up.
-
-    This fixture is used by every test.
-    """
-
-    # If VLLM_USE_V1 is not set, set then delete. This will
-    # cause monkeypatch to clean up VLLM_USE_V1 upon exit
-    # if VLLM modifies the value of envs.VLLM_USE_V1.
-    if "VLLM_USE_V1" not in os.environ:
-        monkeypatch.setenv("VLLM_USE_V1", "")
-        monkeypatch.delenv("VLLM_USE_V1")
-
-
 @pytest.fixture(autouse=True)
 def init_test_http_connection():
     # pytest_asyncio may use a different event loop per test
@@ -1404,3 +1384,16 @@ def image_urls(request, local_asset_server) -> list[str]:
     """Indirect fixture: takes a list of names, returns list of full URLs."""
     names: list[str] = request.param
     return [local_asset_server.url_for(name) for name in names]
+
+
+@pytest.fixture
+def disable_deepgemm_ue8m0(monkeypatch):
+    from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
+
+    with monkeypatch.context() as monkeypatch_ctx:
+        monkeypatch_ctx.setenv("VLLM_USE_DEEP_GEMM_E8M0", "0")
+        is_deep_gemm_e8m0_used.cache_clear()
+        yield
+        # Clear cache so the next time it is used it is processed with the
+        # default VLLM_USE_DEEP_GEMM_E8M0  setting.
+        is_deep_gemm_e8m0_used.cache_clear()
