@@ -239,6 +239,9 @@ class EagleProposer:
         # Use provided draft_length or fall back to default
         if draft_length is None:
             draft_length = self.num_speculative_tokens
+        elif draft_length < 1:
+            # Minimum draft length is 1
+            draft_length = 1
         elif draft_length > self.num_speculative_tokens:
             # Cap at max configured length
             draft_length = self.num_speculative_tokens
