@@ -69,7 +69,7 @@ def sample_tokens(tokenizer: PreTrainedTokenizerBase, length: int) -> list[int]:
 
     # Remove the special tokens.
     return random.choices(
-        [v for k, v in vocab.items() if k not in all_special_ids],
+        [v for v in vocab.values() if v not in all_special_ids],
         k=length,
     )
 
