@@ -1465,8 +1465,8 @@ class DeepseekV2ForCausalLM(
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            is_fusion_moe_shared_experts_layer = rocm_aiter_moe_shared_expert_enabled and (
-                "mlp.shared_experts" in name
+            is_fusion_moe_shared_experts_layer = (
+                rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
