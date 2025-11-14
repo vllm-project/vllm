@@ -200,10 +200,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             )
             x = x.view((num_experts, -1, hidden_dim))
 
-        if q_dtype is not None:
+        if q_dtype is not None and q_dtype != "nvfp4":
             assert x_scales is not None
-            if q_dtype != "nvfp4":
-                x_scales = normalize_batched_scales_shape(x_scales, num_experts)
+            x_scales = normalize_batched_scales_shape(x_scales, num_experts)
 
         return x, x_scales
 
