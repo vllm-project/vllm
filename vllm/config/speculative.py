@@ -107,6 +107,13 @@ class SpeculativeConfig:
     threshold, subsequent tokens will not write to KV cache, saving memory
     bandwidth. Set to 0.0 to disable early stopping (always write all tokens).
     Set to 1.0 to stop after any non-certain prediction. Default: 0.5."""
+    draft_length_options: list[int] | None = None
+    """List of draft lengths to capture as CUDA graphs for adaptive speculative
+    decoding. If None, auto-computed as [n//2, n, min(8, n*2)] where
+    n=num_speculative_tokens. For example, if num_speculative_tokens=5,
+    defaults to [2, 5, 8]. The system will dynamically select the optimal
+    draft length based on recent acceptance rates to balance compute cost
+    vs. speculation benefit."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -460,6 +467,18 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        # Auto-compute draft_length_options if not specified
+        if self.draft_length_options is None and self.num_speculative_tokens is not None:
+            n = self.num_speculative_tokens
+            self.draft_length_options = [
+                max(2, n // 2),  # Half
+                n,               # Target
+                min(8, n * 2),   # Double (capped at 8)
+            ]
+            # Remove duplicates and sort
+            self.draft_length_options = sorted(set(self.draft_length_options))
+
         return self
 
     def _validate_suffix_decoding(self):
