@@ -21,11 +21,11 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv pip install -r requirements/cpu-build.txt
-          uv pip install -r requirements/cpu.txt
+          uv pip install --system -r requirements/cpu-build.txt
+          uv pip install --system -r requirements/cpu.txt
 
       - name: Build vLLM
-        run: uv pip install -v -e .
+        run: uv pip install --system -v -e .
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
