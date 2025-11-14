@@ -48,6 +48,17 @@ class CPUAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "CPU_ATTN"
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """CPU attention supports decoder and encoder-only attention."""
+        from vllm.attention import AttentionType
+
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+        )
+
     @staticmethod
     def get_impl_cls() -> type["CPUAttentionBackendImpl"]:
         return CPUAttentionBackendImpl

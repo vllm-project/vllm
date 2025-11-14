@@ -152,6 +152,12 @@ class SchedulerConfig:
     This tracks both the token demand (from running and waiting requests) and
     the memory capacity limit (based on available KV cache memory). Statistics
     will be logged at shutdown showing the distribution of bottlenecks."""
+    
+    stream_interval: int = Field(default=1, ge=1)
+    """The interval (or buffer size) for streaming in terms of token length.
+    A smaller value (1) makes streaming smoother by sending each token immediately,
+    while a larger value (e.g., 10) reduces host overhead and may increase throughput
+    by batching multiple tokens before sending."""
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
