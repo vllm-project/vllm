@@ -445,6 +445,7 @@ steps:
     - vllm/
     - tests/compile
   commands:
+    - pytest -v -s compile/test_graph_partition.py
     - pytest -v -s compile/test_config.py
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
