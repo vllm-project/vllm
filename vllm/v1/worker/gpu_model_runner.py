@@ -386,6 +386,11 @@ class GPUModelRunner(
                     f"{self.speculative_config.method}"
                 )
             self.rejection_sampler = RejectionSampler(self.sampler)
+            # Initialize spec decoding stats for adaptive draft length
+            from vllm.v1.spec_decode.metrics import SpecDecodingStats
+            self.spec_decoding_stats = SpecDecodingStats.new(
+                self.speculative_config.num_speculative_tokens
+            )
 
         self.num_spec_tokens = 0
         if self.speculative_config:
@@ -2479,6 +2484,17 @@ class GPUModelRunner(
                     sampled_token_ids,
                     self.input_batch.vocab_size,
                 )
+                # Update spec decoding stats for adaptive draft length
+                if hasattr(self, "spec_decoding_stats"):
+                    for tokens in valid_sampled_token_ids:
+                        if tokens:  # Only count non-empty sequences
+                            # num_draft_tokens = max_gen_len - 1 (target token + drafts)
+                            num_draft_tokens = max_gen_len - 1
+                            # num_accepted = len(tokens) - 1 (exclude target token)
+                            num_accepted_tokens = len(tokens) - 1
+                            self.spec_decoding_stats.observe_draft(
+                                num_draft_tokens, num_accepted_tokens
+                            )
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[int(i)].clear()
@@ -3217,6 +3233,16 @@ class GPUModelRunner(
             else:
                 mm_embed_inputs = None
 
+            # Compute optimal draft length from acceptance rate
+            draft_length = None
+            if (
+                hasattr(self, "spec_decoding_stats")
+                and self.speculative_config.draft_length_options
+            ):
+                draft_length = self.spec_decoding_stats.compute_optimal_draft_length(
+                    self.speculative_config.draft_length_options
+                )
+
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
@@ -3226,6 +3252,7 @@ class GPUModelRunner(
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
+                draft_length=draft_length,
             )
 
         return draft_token_ids
