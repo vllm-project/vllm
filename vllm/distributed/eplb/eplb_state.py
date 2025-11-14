@@ -1010,11 +1010,41 @@ class EplbState:
             assert time_start is not None
             torch.cuda.synchronize()
             time_end = time.perf_counter()
-            logger.info(
-                "Rearranged experts%sin %.2f seconds.",
-                " (profile) " if is_profile else " ",
-                time_end - time_start,
-            )
+            
+            # Log additional info for health-based masking
+            if is_health_masking and rank_mapping is not None:
+                masked_ranks = [
+                    rank for rank, new_rank in rank_mapping.items() 
+                    if new_rank == -1
+                ]
+                active_ranks = [
+                    rank for rank, new_rank in rank_mapping.items() 
+                    if new_rank != -1
+                ]
+                
+                # Count masked experts across all models
+                total_masked_experts = 0
+                for eplb_model_state in self.model_states.values():
+                    # Count -1 values in physical_to_logical_map
+                    masked_count = (eplb_model_state.physical_to_logical_map == -1).sum().item()
+                    total_masked_experts += masked_count
+                
+                logger.info(
+                    "Successfully masked GPU rank(s) %s. "
+                    "Active ranks: %s. "
+                    "Masked %d expert slots. "
+                    "Rearranged experts in %.2f seconds.",
+                    masked_ranks,
+                    active_ranks,
+                    total_masked_experts,
+                    time_end - time_start,
+                )
+            else:
+                logger.info(
+                    "Rearranged experts%sin %.2f seconds.",
+                    " (profile) " if is_profile else " ",
+                    time_end - time_start,
+                )
         return None
 
     @staticmethod

@@ -1240,6 +1240,79 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+def select_valid_physical_experts(
+    topk_ids_long: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    pos_indices: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Select valid (non-masked) physical experts for each logical expert assignment.
+    
+    For health-based masking, some expert replicas may be marked as -1 (masked).
+    This function ensures we select valid replicas by trying multiple candidates
+    starting from a pseudo-random position.
+    
+    Args:
+        topk_ids_long: Logical expert IDs for each token.
+            Shape: (num_tokens, topk)
+        logical_to_physical_map: Maps logical experts to physical expert replicas.
+            Shape: (num_logical_experts, max_replicas_per_expert)
+            Values can be -1 for masked or padding replicas.
+        logical_replica_count: Number of replicas for each logical expert.
+            Shape: (num_logical_experts,)
+        pos_indices: Flattened position indices for pseudo-random selection.
+            Shape: (num_tokens, topk)
+    
+    Returns:
+        physical_ids: Selected physical expert IDs (guaranteed non--1 if possible).
+            Shape: (num_tokens, topk)
+    """
+    # Get all physical replicas for each logical expert
+    # Shape: (num_tokens, topk, max_replicas)
+    physical_replicas = logical_to_physical_map[topk_ids_long]
+    
+    # Use (token position) modulo (replica count) to get pseudo-random starting point
+    replica_count = logical_replica_count[topk_ids_long]
+    starting_replica_idx = (pos_indices % replica_count)
+    
+    # Create a sequence of replica indices to try, wrapping around
+    # This ensures we try all replicas starting from the pseudo-random index
+    max_replicas = physical_replicas.shape[-1]
+    replica_offsets = torch.arange(
+        max_replicas, device=topk_ids_long.device, dtype=torch.long
+    ).unsqueeze(0).unsqueeze(0)  # (1, 1, max_replicas)
+    replica_indices_to_try = (
+        starting_replica_idx.unsqueeze(-1) + replica_offsets
+    ) % max_replicas  # (num_tokens, topk, max_replicas)
+    
+    # Gather all candidate physical IDs in order of preference
+    batch_indices = torch.arange(
+        topk_ids_long.shape[0], device=topk_ids_long.device, dtype=torch.long
+    ).unsqueeze(1).unsqueeze(2)  # (num_tokens, 1, 1)
+    expert_indices = topk_ids_long.unsqueeze(-1)  # (num_tokens, topk, 1)
+    
+    # Shape: (num_tokens, topk, max_replicas)
+    candidates = physical_replicas[
+        batch_indices.expand(-1, topk_ids_long.shape[1], max_replicas),
+        expert_indices.expand(-1, -1, max_replicas),
+        replica_indices_to_try
+    ]
+    
+    # Find first non--1 candidate for each position
+    # Create mask: True where candidate is valid (>= 0)
+    valid_mask = candidates >= 0
+    
+    # For each token,expert pair, find the index of first valid replica
+    # If no valid replica found (all -1), this will return 0 (will get -1)
+    first_valid_idx = torch.argmax(valid_mask.int(), dim=-1)  # (num_tokens, topk)
+    
+    # Gather the selected physical IDs
+    physical_ids = candidates.gather(-1, first_valid_idx.unsqueeze(-1)).squeeze(-1)
+    
+    return physical_ids
+
+
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def eplb_map_to_physical_and_record(
     topk_ids: torch.Tensor,
@@ -1267,24 +1340,25 @@ def eplb_map_to_physical_and_record(
     """
 
     # 1. Convert the logical expert ids to physical expert ids
-    # Directly select a random replica for each logical expert
-
+    # Select a valid (non-masked) replica for each logical expert
+    
     # In case `indices_type` is not `torch.long` or `torch.int`,
     # e.g. `torch.uint32` as required by dispatch/combine kernels
     topk_ids_long = topk_ids.long()
-    # Use (token position) modulo (replica count)
-    # to deterministically choose a replica
-    replica_count = logical_replica_count[topk_ids_long]
-    # Flatten-position based index, reshaped back to `topk_ids` shape
+    
+    # Flatten-position based index for pseudo-random replica selection
     pos_indices = torch.arange(
         topk_ids.numel(), device=topk_ids.device, dtype=torch.long
     ).reshape_as(topk_ids)
-    # Compute pseudo-random indices by modulo
-    replica_indices = (pos_indices % replica_count).unsqueeze(-1)
-    physical_ids = (
-        logical_to_physical_map[topk_ids_long].gather(-1, replica_indices).squeeze(-1)
+    
+    # Select valid physical experts, skipping any masked (-1) replicas
+    physical_ids = select_valid_physical_experts(
+        topk_ids_long=topk_ids_long,
+        logical_to_physical_map=logical_to_physical_map,
+        logical_replica_count=logical_replica_count,
+        pos_indices=pos_indices,
     )
-
+    
     topk_ids = physical_ids
 
     # 2. Record expert load metrics.
