@@ -226,7 +226,7 @@ def run_test(
     cache_arg: dict[str, Any] = (
         dict(num_gpu_blocks_override=32)
         if test_preemption
-        else dict(gpu_memory_utilization=0.7)
+        else dict(gpu_memory_utilization=0.9)
     )
     spec_mml = (spec_config or {}).get("max_model_len")
     test_config = (
