@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator, model_validator
 from pydantic.dataclasses import dataclass
-from typing_extensions import Self
+from typing_extensions import Self, deprecated
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -198,6 +198,19 @@ class SchedulerConfig:
         if value is None:
             return value
         return handler(value)
+
+    @property
+    @deprecated(
+        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
+        "`SchedulerConfig.enable_chunked_prefill`. "
+        "The old name will be removed in v0.12."
+    )
+    def chunked_prefill_enabled(self) -> bool:
+        return self.enable_chunked_prefill
+
+    @chunked_prefill_enabled.setter
+    def chunked_prefill_enabled(self, value: bool):
+        self.enable_chunked_prefill = value
 
     def __post_init__(self, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
