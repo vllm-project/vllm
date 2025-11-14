@@ -580,15 +580,6 @@ class VllmConfig:
                         "to 'spawn'."
                     )
 
-            if (
-                self.model_config.logits_processors
-                and self.speculative_config is not None
-            ):
-                raise ValueError(
-                    "Custom LogitsProcessors are currently "
-                    "not supported with speculative decoding."
-                )
-
         # Final off-switch for CP/APC:
         # Disable for (a) collected blockers, (b) encoder–decoder, or
         # (c) explicit CP=False when APC wasn't requested.

@@ -41,7 +41,7 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 # Error message when the user tries to initialize vLLM with a speculative
 # decoding enabled and custom logitsproces
 STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
-    "Custom logits processors are not supportedwhen speculative decoding is enabled."
+    "Custom logits processors are not supported when speculative decoding is enabled."
 )
 
 LOGITSPROCS_GROUP = "vllm.logits_processors"
