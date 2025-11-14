@@ -36,7 +36,7 @@ def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):
     # Enable envs cache and ignore ongoing environment changes
     enable_envs_cache()
 
-    # __getattr__ is not decorated with functools.cache
+    # __getattr__ is decorated with functools.cache
     assert hasattr(envs.__getattr__, "cache_info")
     start_hits = envs.__getattr__.cache_info().hits
 
