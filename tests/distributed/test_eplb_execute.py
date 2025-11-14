@@ -17,8 +17,6 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.system_utils import update_environment_variables
 
-mp.set_start_method("spawn")
-
 
 def distributed_run(fn, world_size, *args):
     number_of_processes = world_size
@@ -518,3 +516,7 @@ def test_rearrange_expert_weights_profile_mode(world_size):
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(_test_rearrange_expert_weights_profile_mode, world_size)
+
+
+if __name__ == "__main__":
+    mp.set_start_method("spawn")
