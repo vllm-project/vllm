@@ -4123,12 +4123,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # they are cached correctly, there will be different objects per
             # layer.
             for layer_name in kv_cache_group_spec.layer_names:
-                # When PP_rank > 0 in native multi-node serving,
-                # kv_cache_group_spec contains all layer names, but the GPUModelRunner
-                # for PP_rank == 1 does not include layers from PP_rank == 0. 
-                # We skip backend initialization for any missing layers.
-                if layer_name not in layers:
-                    continue
                 attn_backend = layers[layer_name].get_attn_backend()
 
                 if layer_name in self.kv_sharing_fast_prefill_eligible_layers:
