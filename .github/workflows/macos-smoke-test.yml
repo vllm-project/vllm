@@ -19,13 +19,10 @@ jobs:
             pyproject.toml
           python-version: '3.12'
 
-      - name: Install dependencies
+      - name: Install dependencies and build vLLM
         run: |
-          uv pip install --system -r requirements/cpu-build.txt
-          uv pip install --system -r requirements/cpu.txt
-
-      - name: Build vLLM
-        run: uv pip install --system -v -e .
+          uv pip install --system -r requirements/cpu.txt --index-strategy unsafe-best-match
+          uv pip install --system -e .
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
