@@ -11,7 +11,6 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.model import ModelConfig
-from vllm.config.scheduler import SchedulerConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -443,16 +442,10 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
     )
 
     model_config = ModelConfig(max_model_len=16)
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=4,
-        max_num_batched_tokens=2,
-        enable_chunked_prefill=True,
-    )
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        lora_config=lora_config,
-        scheduler_config=scheduler_config,
-    )
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
 
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
         vllm_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES
@@ -553,16 +546,10 @@ def test_worker_adapter_manager(dist_init, dummy_model_gate_up, device, tmp_path
     )
 
     model_config = ModelConfig(max_model_len=16)
-    scheduler_config = SchedulerConfig(
-        max_num_seqs=4,
-        max_num_batched_tokens=2,
-        enable_chunked_prefill=True,
-    )
-    vllm_config = VllmConfig(
-        model_config=model_config,
-        lora_config=lora_config,
-        scheduler_config=scheduler_config,
-    )
+    vllm_config = VllmConfig(model_config=model_config, lora_config=lora_config)
+
+    vllm_config.scheduler_config.max_num_seqs = 4
+    vllm_config.scheduler_config.max_num_batched_tokens = 2
 
     worker_adapter_manager = WorkerLoRAManager(
         vllm_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES
