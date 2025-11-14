@@ -786,7 +786,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-speech-3.3-2b`, `ibm-granite/granite-speech-3.3-8b`, etc. | ✅︎ | ✅︎ |
 
 !!! note
-    `VoxtralForConditionalGeneration` requires to install `mistral-common[audio]`.
+    `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
 ### Pooling Models
 
