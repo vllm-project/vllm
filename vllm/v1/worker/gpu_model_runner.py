@@ -589,6 +589,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 is_training=new_req_data.is_training,
                 training_params=new_req_data.training_params,
                 labels=new_req_data.labels,
+                training_attention_mask=new_req_data.training_attention_mask,
             )
             self.requests[req_id] = req_state
 
@@ -897,7 +898,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         """
         :return: tuple[
             attn_metadata: layer-to-attention_metadata mapping,
-            logits_indices, spec_decode_metadata
+            logits_indices, spec_decode_metadata, num_scheduled_tokens,
+            spec_decode_common_attn_metadata, max_num_scheduled_tokens,
+            ubatch_slices, num_tokens_after_padding
         ]
         """
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -997,12 +1000,65 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # Check if this is a training batch (all requests are training)
         is_training_batch = False
+        training_attention_mask = None
         if self.input_batch.num_reqs > 0:
             # Check if any request is a training request
             training_count = sum(1 for req_id in self.input_batch.req_ids if req_id is not None and (req_state := self.requests.get(req_id)) is not None and req_state.is_training)
             is_training_batch = (training_count == self.input_batch.num_reqs)
             if training_count > 0 and training_count != self.input_batch.num_reqs:
                 raise ValueError("Mixed training and inference requests are not supported.")
+
+        # Prepare training_attention_mask for training batches
+        # Keep as list of individual masks (don't concatenate) - will create block diagonal in attention backend
+        training_attention_mask = None
+        if is_training_batch:
+            training_attention_masks_per_req = []
+            seq_lens_per_req = []
+            all_masks_found = True
+            
+            for req_id in self.input_batch.req_ids:
+                if req_id is None:
+                    continue
+                req_state = self.requests.get(req_id)
+                if req_state is None or not req_state.is_training:
+                    continue
+
+                num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                req_training_attention_mask = req_state.training_attention_mask
+
+                if req_training_attention_mask is not None:
+                    if not isinstance(req_training_attention_mask, torch.Tensor):
+                        req_training_attention_mask = torch.tensor(req_training_attention_mask,
+                                                                   dtype=torch.bool,
+                                                                   device=self.device)
+                    else:
+                        req_training_attention_mask = req_training_attention_mask.to(self.device)
+
+                    # Expect 2D mask [seq_len, seq_len] from PEFT/Transformers
+                    if req_training_attention_mask.ndim == 2:
+                        # Verify or adjust size
+                        if req_training_attention_mask.shape[0] != num_tokens:
+                            if req_training_attention_mask.shape[0] < num_tokens:
+                                # Pad the mask
+                                pad_size = num_tokens - req_training_attention_mask.shape[0]
+                                req_training_attention_mask = torch.nn.functional.pad(
+                                    req_training_attention_mask, (0, pad_size, 0, pad_size), value=False)
+                            else:
+                                # Truncate
+                                req_training_attention_mask = req_training_attention_mask[:num_tokens, :num_tokens]
+                    
+                    training_attention_masks_per_req.append(req_training_attention_mask)
+                    seq_lens_per_req.append(num_tokens)
+                else:
+                    all_masks_found = False
+                    logger.warning(f"Request {req_id} missing training_attention_mask")
+
+            if all_masks_found and training_attention_masks_per_req:
+                # Store as dict for attention backend to construct block diagonal mask
+                training_attention_mask = {
+                    'masks': training_attention_masks_per_req,
+                    'seq_lens': seq_lens_per_req,
+                }
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
@@ -1146,6 +1202,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Add is_training flag to metadata args for XFormers backend
                 if is_training_batch:
                     extra_attn_metadata_args['is_training'] = True
+                    extra_attn_metadata_args['training_attention_mask'] = training_attention_mask
 
                 if ubatch_slices is not None:
                     common_attn_metadata_list = split_attn_metadata(
@@ -2548,7 +2605,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_ids_tensor = torch.stack(all_input_ids, dim=0)
 
                 # Capture input tensors for debugging/comparison
-                self.training_manager.capture_input_tensors(input_ids_tensor, labels)
+                # self.training_manager.capture_input_tensors(input_ids_tensor, labels)
 
                 # TODO(girfan): Check if this is correct.
                 # https://github.com/huggingface/transformers/issues/41842

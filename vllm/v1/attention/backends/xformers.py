@@ -143,6 +143,9 @@ class XFormersAttentionMetadata:
     # Training mode flag
     is_training: bool = False
 
+    # Training attention mask - dict with 'masks' (list of tensors) and 'seq_lens' (list of ints)
+    training_attention_mask: Optional[dict] = None
+
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["XFormersAttentionMetadata"] = None
     _cached_decode_metadata: Optional["XFormersAttentionMetadata"] = None
@@ -231,6 +234,7 @@ class XFormersAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         is_training: bool = False,
+        training_attention_mask: Optional[dict] = None,
     ) -> XFormersAttentionMetadata:
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
@@ -275,6 +279,7 @@ class XFormersAttentionMetadataBuilder(
             slot_mapping=slot_mapping,
             attn_bias=bias,
             is_training=is_training,
+            training_attention_mask=training_attention_mask,
         )
 
 
@@ -456,7 +461,7 @@ class XFormersAttentionImpl(AttentionImpl):
         # Reshape the output tensor.
         return output
 
-    def forward_training(
+    def forward_training_(
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
@@ -539,7 +544,7 @@ class XFormersAttentionImpl(AttentionImpl):
 
         return output
 
-    def forward_training_sdpa(
+    def forward_training(
         self,
         layer: torch.nn.Module,
         query: torch.Tensor,
@@ -655,12 +660,49 @@ class XFormersAttentionImpl(AttentionImpl):
             
             print(f"vLLM loaded ATTN_MASK shape: {ATTN_MASK.shape}, dtype: {ATTN_MASK.dtype}")
 
+        attn_mask = ATTN_MASK
+
+        # # Construct block diagonal attention mask from per-request masks
+        # attn_mask = None
+        # if attn_metadata.training_attention_mask is not None:
+        #     mask_data = attn_metadata.training_attention_mask
+        #     if isinstance(mask_data, dict) and 'masks' in mask_data:
+        #         # Extract individual masks and sequence lengths
+        #         masks_per_req = mask_data['masks']  # List of [seq_len_i, seq_len_i] tensors
+        #         seq_lens = mask_data['seq_lens']    # List of seq_len_i integers
+
+        #         # Total sequence length (sum of all requests)
+        #         total_seq_len = sum(seq_lens)
+        #         batch_vllm, num_heads_vllm, _, head_dim = q.shape  # [1, num_heads, total_seq_len, head_dim]
+                
+        #         # Create block diagonal mask: [1, 1, total_seq_len, total_seq_len]
+        #         attn_mask = torch.zeros(1, 1, total_seq_len, total_seq_len, 
+        #                                dtype=torch.bool, device=q.device)
+                
+        #         # Fill in blocks for each request
+        #         current_offset = 0
+        #         for req_mask, seq_len in zip(masks_per_req, seq_lens):
+        #             # req_mask shape: [seq_len, seq_len]
+        #             end_offset = current_offset + seq_len
+        #             attn_mask[0, 0, current_offset:end_offset, current_offset:end_offset] = req_mask
+        #             current_offset = end_offset
+                
+        #         # # Save mask to CSV for comparison
+        #         # import pandas as pd
+        #         # df = pd.DataFrame({
+        #         #     "attn_mask": attn_mask.flatten().cpu().tolist(),
+        #         # })
+        #         # df.to_csv("vllm_xformers_attn_mask.csv", index=False)
+        #         # print(f"vLLM xformers saved attn_mask shape: {attn_mask.shape}, dtype: {attn_mask.dtype}")
+        #         # ss
+
+
         # Use PyTorch's scaled_dot_product_attention (same as Transformers)
         attn_output = torch.nn.functional.scaled_dot_product_attention(
             q,
             k,
             v,
-            attn_mask=ATTN_MASK,
+            attn_mask=attn_mask,
             dropout_p=dropout,
             scale=scaling,
             is_causal=is_causal,

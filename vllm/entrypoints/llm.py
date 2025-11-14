@@ -456,11 +456,11 @@ class LLM:
         dataset = Dataset.from_list(data_list)
         tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
 
-        # print the first 4 tokenized dataset
-        print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
-        print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
-        print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
-        print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
+        # # print the first 4 tokenized dataset
+        # print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
+        # print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
+        # print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
+        # print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
 
         # Split the tokenized dataset into train and eval
         tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
@@ -589,6 +589,7 @@ class LLM:
         prompt_token_ids = sample["input_ids"]
         prompt_str = sample["text"]
         labels = sample["labels"]
+        training_attention_mask = sample["attention_mask"]
         request_id = str(next(self.request_counter))
 
         training_request = Request(
@@ -601,6 +602,7 @@ class LLM:
             is_training=True,
             training_params=training_params,
             labels=labels,
+            training_attention_mask=training_attention_mask,
         )
 
         # Add to output processor first (needed for get_num_unfinished_requests)

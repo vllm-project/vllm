@@ -47,6 +47,7 @@ class CachedRequestState:
     is_training: bool = False
     training_params: Optional[TrainingParams] = None
     labels: Optional[torch.Tensor] = None
+    training_attention_mask: Optional[list[int]] = None
 
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)

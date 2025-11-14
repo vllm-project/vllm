@@ -29,7 +29,7 @@ class TrainingState:
         return self._total_steps
 
     def add_loss(self, loss: torch.Tensor):
-        self._loss += loss.to(self._loss.device)
+        self._loss = self._loss + loss.to(self._loss.device)
 
     def step(self):
         self._steps += 1

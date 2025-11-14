@@ -43,6 +43,7 @@ class Request:
         is_training: bool = False,
         training_params: Optional[TrainingParams] = None,
         labels: Optional[torch.Tensor] = None,
+        training_attention_mask: Optional[list[int]] = None,
     ) -> None:
         self.request_id = request_id
         self.client_index = client_index
@@ -64,6 +65,7 @@ class Request:
         self.is_training = is_training
         self.training_params = training_params
         self.labels = labels
+        self.training_attention_mask = training_attention_mask
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: Optional[dict[str, Any]] = None

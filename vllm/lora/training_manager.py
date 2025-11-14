@@ -364,6 +364,14 @@ class TrainingManager:
         self.model.eval()
         if hasattr(self.optimizer, "eval") and callable(self.optimizer.eval):
             self.optimizer.eval()
+        # Set requires_grad to False for all parameters
+        for param in self.model.parameters():
+            param.requires_grad = False
+        # Set requires_grad to False for all trainable parameters
+        for param in self.trainable_lora_params:
+            param.requires_grad = False
+        self.model.zero_grad()
+        self.optimizer.zero_grad()
 
 
     def lora_train(self, lora_request: LoRARequest):
@@ -373,6 +381,9 @@ class TrainingManager:
         self.model.train()
         if hasattr(self.optimizer, "train") and callable(self.optimizer.train):
             self.optimizer.train()
+        # Set requires_grad to True for all trainable parameters
+        for param in self.trainable_lora_params:
+            param.requires_grad = True
 
 
     # TODO(girfan): Take the params from earlier in the code.
@@ -525,8 +536,14 @@ class TrainingManager:
             # Clip gradients to prevent exploding gradients during training
             # This matches PEFT's TrainingArguments(max_grad_norm=1.0) default
             trainable_params = [p for p in self.optimizer.param_groups[0]['params'] if p.grad is not None]
+
+            # TODO(girfan): HACK
+            # combine model parameters and trainable parameters
+            all_params = trainable_params + list(self.model.parameters())
+
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                trainable_params,
+                # trainable_params,
+                all_params,
                 max_norm=self.max_grad_norm,
             )
             self.grad_norm = grad_norm
@@ -540,11 +557,11 @@ class TrainingManager:
             total_norm = total_norm**0.5
             self.grad_norm = total_norm
 
+        self.optimizer.step()
+
         # Save learning rate before update
         learning_rate = self.get_learning_rate()
 
-        # Perform optimizer step and scheduler step
-        self.optimizer.step()
         self.scheduler.step()
 
         return learning_rate

@@ -18,15 +18,15 @@ from vllm.lora.request import LoRARequest
 # Configuration - MATCHES PEFT exactly
 BASE_MODEL_PATH = "/home/girfan/models/Llama-3.2-1B-Instruct"
 DTYPE = "bfloat16"
-# LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_qkv_zero_init_lora"
-LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_random_lora"
+LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_qkv_zero_init_lora"
+# LORA_ADAPTER_PATH = "/home/girfan/LaAL/tests/inputs/llama3_random_lora"
 LORA_DROPOUT = 0.05
 LORA_RANK = 8
 LORA_ALPHA = 16
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 3
 BATCH_SIZE = 4
-GRADIENT_ACCUMULATION_STEPS = 2
+GRADIENT_ACCUMULATION_STEPS = 1
 WARMUP_STEPS = 100
 MAX_LENGTH = 512
 DATASET_SIZE = 1000

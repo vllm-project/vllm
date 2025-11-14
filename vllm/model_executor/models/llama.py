@@ -731,21 +731,21 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         global IS_TRAINING
 
-        # # save input_ids to a csv file
+        # # # save input_ids to a csv file
         # # check if all input_ids are zero
-        # if not torch.all(input_ids == 0):
-        #     # import pandas as pd
+        if not torch.all(input_ids == 0):
         #     # # print(f"input_ids shape: {input_ids.shape}")
         #     # # df = pd.DataFrame({
         #     # #     "input_ids": input_ids.flatten().tolist(),
         #     # # })
         #     # # df.to_csv(f"vllm_input_ids.csv", index=False)
-        #     # # load input_ids from transformers_input_ids.csv
-        #     # df = pd.read_csv(f"transformers_input_ids.csv")
-        #     # input_ids = torch.tensor(df["input_ids"].tolist(), device='cuda')
-        #     assert self.girfan_temp == False, "Girfan temp is already True"
-        #     self.girfan_temp = True
-        #     IS_TRAINING = True
+        #     # load input_ids from transformers_input_ids.csv
+            import pandas as pd
+            df = pd.read_csv(f"transformers_input_ids.csv")
+            input_ids = torch.tensor(df["input_ids"].tolist(), device='cuda')
+            assert self.girfan_temp == False, "Girfan temp is already True"
+            self.girfan_temp = True
+            IS_TRAINING = True
 
         # if IS_TRAINING:
         #     # save input_ids to a csv file
