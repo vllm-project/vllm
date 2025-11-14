@@ -228,6 +228,9 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
 class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
     can_return_lse_for_decode: bool = True
 
+    def supports_compiled_split(self) -> bool:
+        return True
+
     def __init__(
         self,
         num_heads: int,

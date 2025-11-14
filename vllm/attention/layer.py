@@ -10,15 +10,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.attention import AttentionType
 from vllm.attention.backends.abstract import AttentionBackend, MLAAttentionImpl
 from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.attention.ops.common import cp_lse_ag_out_rs
 from vllm.attention.selector import get_attn_backend
 from vllm.attention.utils.kv_sharing_utils import validate_kv_sharing_target
 from vllm.attention.utils.kv_transfer_utils import maybe_transfer_kv_layer
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -44,9 +47,11 @@ from vllm.v1.kv_cache_interface import (
 )
 
 if current_platform.is_rocm():
+    from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms.rocm import on_gfx9
 else:
     on_gfx9 = lambda *args, **kwargs: False
+    rocm_aiter_ops = None
 
 
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -745,6 +750,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
 
+        try:
+            self._use_compiled_split = bool(self.impl.supports_compiled_split())
+        except Exception:
+            self._use_compiled_split = False
+
     def forward(
         self,
         q: torch.Tensor,
@@ -764,19 +774,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                self.impl.forward(
-                    self,
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self_kv_cache,
-                    attn_metadata,
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                     output=output,
                 )
-                return output
             else:
-                return self.impl.forward(
-                    self, q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
+                return self.forward_impl(
+                    q=q,
+                    kv_c_normed=kv_c_normed,
+                    k_pe=k_pe,
+                    kv_cache=self_kv_cache,
+                    attn_metadata=attn_metadata,
                 )
         else:
             if self.attn_backend.accept_output_buffer:
@@ -796,6 +808,169 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     k_pe,
                     self.layer_name,
                 )
+
+    def forward_prefill(
+        self,
+        q: torch.Tensor,
+        k_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+    ) -> torch.Tensor:
+        """Prefill path orchestration in the layer."""
+        return self.impl._forward_prefill(
+            q, k_c_normed, k_pe, kv_cache, attn_metadata, self._k_scale
+        )
+
+    def forward_decode(
+        self,
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+    ) -> torch.Tensor:
+        """Decode path orchestration in the layer."""
+        if self.impl.dcp_world_size is None:
+            self.impl.dcp_world_size = get_dcp_group().world_size
+
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
+
+        # Split q into no-rope and rope parts
+        decode_q_nope, decode_q_pe = q.split(
+            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+        )
+        # (B, N, P) -> (N, B, P)
+        decode_q_nope = decode_q_nope.transpose(0, 1)
+
+        if self.impl.q_pad_num_heads is not None:
+            B, N, L = decode_q_pe.shape
+            decode_pe_padded = decode_q_pe.new_empty((B, self.impl.q_pad_num_heads, L))
+            decode_pe_padded.resize_((B, N, L))
+            decode_pe_padded.copy_(decode_q_pe)
+            decode_q_pe = decode_pe_padded
+
+        if self.impl.is_aiter_triton_fp8_bmm_enabled:
+            # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
+            decode_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                decode_q_nope,
+                self.impl.W_K,
+                self.impl.W_K_scale,
+                group_size=128,
+                transpose_bm=True,
+            )
+        else:
+            N, B, P = decode_q_nope.shape
+            _, _, L = self.impl.W_UK_T.shape
+            if self.impl.q_pad_num_heads is not None:
+                decode_ql_nope = decode_q_nope.new_empty(
+                    (self.impl.q_pad_num_heads, B, L)
+                )
+                decode_ql_nope.resize_((N, B, L))
+            else:
+                decode_ql_nope = decode_q_nope.new_empty((N, B, L))
+            torch.bmm(decode_q_nope, self.impl.W_UK_T, out=decode_ql_nope)
+            decode_ql_nope = decode_ql_nope.transpose(0, 1)
+
+        if fp8_attention:
+            ql_nope_shape = decode_ql_nope.shape
+            decode_ql_nope, _ = ops.scaled_fp8_quant(
+                decode_ql_nope.reshape(
+                    [ql_nope_shape[0], ql_nope_shape[1] * ql_nope_shape[2]]
+                ),
+                self._q_scale,
+            )
+            decode_ql_nope = decode_ql_nope.reshape(ql_nope_shape)
+            q_pe_shape = decode_q_pe.shape
+            decode_q_pe, _ = ops.scaled_fp8_quant(
+                decode_q_pe.reshape([q_pe_shape[0], q_pe_shape[1] * q_pe_shape[2]]),
+                self._q_scale,
+            )
+            decode_q_pe = decode_q_pe.reshape(q_pe_shape)
+
+        decode_q = (decode_ql_nope, decode_q_pe)
+        if self.impl.dcp_world_size > 1:
+            assert not fp8_attention, "DCP not support fp8 kvcache now."
+            decode_q = torch.cat(decode_q, dim=-1)
+            decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+
+        attn_out, lse = self.impl._forward_decode(
+            decode_q, kv_cache, attn_metadata, self
+        )
+
+        if self.impl.dcp_world_size > 1:
+            attn_out = cp_lse_ag_out_rs(attn_out, lse, get_dcp_group())
+
+        out = torch.empty(
+            (q.shape[0], self.num_heads * self.v_head_dim),
+            dtype=q.dtype,
+            device=q.device,
+        )
+        self.impl._v_up_proj(attn_out, out=out)
+        return out
+
+    def forward_impl(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata,
+        output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        allow_compiled_split: bool = True,
+    ) -> torch.Tensor:
+        """Forward implementation for MLA attention.
+
+        This method always handles decode/prefill orchestration in the layer
+        """
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for MLA"
+            )
+
+        # Allocate output if not provided
+        if output is None:
+            output = torch.empty(
+                (q.shape[0], self.num_heads * self.v_head_dim),
+                dtype=q.dtype,
+                device=q.device,
+            )
+
+        if attn_metadata is None:
+            return output.fill_(0)
+
+        # Write KV to cache first (outside backend)
+        if kv_cache.numel() > 0:
+            ops.concat_and_cache_mla(
+                kv_c_normed,
+                k_pe.squeeze(1) if k_pe.dim() > 2 else k_pe,
+                kv_cache,
+                attn_metadata.slot_mapping.flatten(),
+                kv_cache_dtype=self.kv_cache_dtype,
+                scale=self._k_scale,
+            )
+
+        has_decode = attn_metadata.num_decodes > 0
+        has_prefill = attn_metadata.num_prefills > 0
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
+        decode_q = q[:num_decode_tokens]
+        prefill_q = q[num_decode_tokens:]
+        prefill_k_c = kv_c_normed[num_decode_tokens:]
+        prefill_k_pe = k_pe[num_decode_tokens:]
+
+        # Process decode and prefill branches
+        if has_prefill:
+            prefill_out = self.forward_prefill(
+                prefill_q, prefill_k_c, prefill_k_pe, kv_cache, attn_metadata
+            )
+            output[num_decode_tokens:] = prefill_out
+
+        if has_decode:
+            decode_out = self.forward_decode(decode_q, kv_cache, attn_metadata)
+            output[:num_decode_tokens] = decode_out
+
+        return output
 
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if hasattr(self.impl, "process_weights_after_loading"):
@@ -984,7 +1159,13 @@ def unified_mla_attention(
     layer_name: str,
 ) -> torch.Tensor:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    output = self.impl.forward(self, q, kv_c_normed, k_pe, kv_cache, attn_metadata)
+    output = self.forward_impl(
+        q=q,
+        kv_c_normed=kv_c_normed,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata
+    )
 
     return output
 
@@ -1018,13 +1199,12 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    self.impl.forward(
-        self,
-        q,
-        kv_c_normed,
-        k_pe,
-        kv_cache,
-        attn_metadata,
+    self.forward_impl(
+        q=q,
+        kv_c_normed=kv_c_normed,
+        k_pe=k_pe,
+        kv_cache=kv_cache,
+        attn_metadata=attn_metadata,
         output=output,
         output_scale=output_scale,
         output_block_scale=output_block_scale,
