@@ -7,8 +7,6 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
-import math
-
 import torch
 
 from vllm.logger import init_logger
@@ -933,10 +931,10 @@ def unified_attention(
 
         # Make sure that the 3D kernel launch grid is a multiple of
         # num_kv_heads and of NUM_SEGMENTS
-        lcm_result = math.lcm(num_kv_heads, NUM_SEGMENTS)
         LAUNCH_GRID_DIM0_3D_DECODE = (
-            (MIN_TARGET_LAUNCH_GRID_SIZE + lcm_result - 1) // lcm_result
-        ) * lcm_result
+            (MIN_TARGET_LAUNCH_GRID_SIZE + (num_kv_heads * NUM_SEGMENTS - 1))
+            // (num_kv_heads * NUM_SEGMENTS)
+        ) * (num_kv_heads * NUM_SEGMENTS)
 
         # Make sure that the reduction kernel launch grid is a multiple
         # of num_query_heads
