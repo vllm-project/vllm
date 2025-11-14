@@ -2256,6 +2256,8 @@ def test_chunked_prefill_disabled_for_encoder_decoder(
     scheduler_config = SchedulerConfig(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=is_encoder_decoder,
+        # Must <= max_num_batched_tokens if chunked prefill is disabled
+        max_model_len=SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
     )
 
     # `is_encoder_decoder` should only be used during construction

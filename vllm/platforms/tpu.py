@@ -10,7 +10,6 @@ from tpu_info import device
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import DEFAULT_MAX_NUM_BATCHED_TOKENS
 
 from .interface import Platform, PlatformEnum
 
@@ -186,10 +185,9 @@ class TpuPlatform(Platform):
                 "prefill and prefix caching to be disabled."
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
                 vllm_config.scheduler_config.max_model_len,
-                DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
     @classmethod
