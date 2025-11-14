@@ -373,33 +373,93 @@ def _rocm_aiter_rms_norm_fake(
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
+    out: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
+    residual_out: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> None:
     from aiter import rmsnorm2d_fwd_with_add
 
-    residual_out = torch.empty_like(residual)
-    output = torch.empty_like(x)
     rmsnorm2d_fwd_with_add(
-        output,  # output
+        out,  # output
         x,  # input
         residual,  # residual input
         residual_out,  # residual output
         weight,
         variance_epsilon,
     )
-    return output, residual_out
 
 
 def _rocm_aiter_rmsnorm2d_fwd_with_add_fake(
+    out: torch.Tensor,
     x: torch.Tensor,
     residual: torch.Tensor,
+    residual_out: torch.Tensor,
     weight: torch.Tensor,
     variance_epsilon: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.empty_like(x), torch.empty_like(residual)
+) -> None:
+    pass
+
+
+def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    residual_out: torch.Tensor,
+    weight: torch.Tensor,
+    y_scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    import aiter as rocm_aiter
+
+    rocm_aiter.rmsnorm2d_fwd_with_add_dynamicquant(
+        out,
+        x,
+        residual,
+        residual_out,
+        y_scale,
+        weight,
+        epsilon,
+        use_model_sensitive_rmsnorm=0,
+    )
+
+
+def _rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    residual_out: torch.Tensor,
+    weight: torch.Tensor,
+    y_scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    pass
+
+
+def _rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
+    out: torch.Tensor,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    y_scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    import aiter as rocm_aiter
+
+    rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
+        out, x, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
+    )
+
+
+def _rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
+    out: torch.Tensor,
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    y_scale: torch.Tensor,
+    epsilon: float,
+) -> None:
+    pass
 
 
 # Global flag to ensure ops are registered only once
@@ -587,8 +647,24 @@ class rocm_aiter_ops:
             direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
-                mutates_args=[],
+                mutates_args=["out", "residual_out"],
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
+                op_func=_rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
+                mutates_args=["out", "y_scale"],
+                fake_impl=_rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
+                op_func=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
+                mutates_args=["out", "residual_out", "y_scale"],
+                fake_impl=_rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
@@ -601,9 +677,12 @@ class rocm_aiter_ops:
         weight: torch.Tensor,
         variance_epsilon: float,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-            x, residual, weight, variance_epsilon
+        residual_out = torch.empty_like(residual)
+        out = torch.empty_like(x)
+        torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
+            out, x, residual, residual_out, weight, variance_epsilon
         )
+        return out, residual_out
 
     @staticmethod
     def rms_norm(
@@ -780,6 +859,42 @@ class rocm_aiter_ops:
             kv_last_page_lens,
             sm_scale=sm_scale,
             logit_cap=logit_cap,
+        )
+
+    @staticmethod
+    def rmsnorm_fused_add_dynamic_quant(
+        out: torch.Tensor,
+        input: torch.Tensor,
+        residual: torch.Tensor,
+        residual_out: torch.Tensor,
+        weight: torch.Tensor,
+        y_scale: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_rmsnorm_fused_add_dynamic_quant(
+            out,
+            input,
+            residual,
+            residual_out,
+            weight,
+            y_scale,
+            epsilon,
+        )
+
+    @staticmethod
+    def rmsnorm_fused_dynamic_quant(
+        out: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        y_scale: torch.Tensor,
+        epsilon: float,
+    ) -> None:
+        torch.ops.vllm.rocm_aiter_rmsnorm_fused_dynamic_quant(
+            out,
+            input,
+            weight,
+            y_scale,
+            epsilon,
         )
 
     @staticmethod

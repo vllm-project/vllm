@@ -110,7 +110,7 @@ class FixFunctionalizationPass(VllmInductorPass):
                 mutated_args = {1: "out", 2: "residual_out", 3: "y_scale"}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default:  # noqa: E501
-                mutated_args = {1: "output", 2: "residual_out"}
+                mutated_args = {1: "out", 2: "residual_out"}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target in [
                 torch.ops._C.rms_norm.default,

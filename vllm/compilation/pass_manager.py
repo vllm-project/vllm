@@ -5,6 +5,7 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -22,7 +23,6 @@ if current_platform.is_cuda_alike():
 if current_platform.is_rocm():
     from .rocm_aiter_rmsnorm_fusion import (
         RMSNormAiterQuantFusionPass,
-        is_rocm_aiter_rmsnorm_enabled,
     )
 
 if current_platform.is_cuda():
@@ -112,7 +112,7 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_fusion:
                 self.passes += [RMSNormQuantFusionPass(config)]
                 self.passes += [ActivationQuantFusionPass(config)]
-                if is_rocm_aiter_rmsnorm_enabled():
+                if rocm_aiter_ops.is_rmsnorm_enabled():
                     self.passes += [RMSNormAiterQuantFusionPass(config)]
 
             if self.pass_config.enable_attn_fusion:

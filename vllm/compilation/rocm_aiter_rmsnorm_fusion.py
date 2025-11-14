@@ -9,8 +9,6 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
-import vllm.envs as envs
-
 # add this import to make sure the custom ops are registered
 import vllm.model_executor.layers.layernorm  # noqa: F401
 from vllm.config import VllmConfig
@@ -21,8 +19,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
     kFp8DynamicTokenSym,
 )
-from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
 
 from .fusion import (
     FP8_DTYPE,
@@ -36,91 +32,6 @@ from .inductor_pass import enable_fake_mode
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
-
-
-def is_rocm_aiter_rmsnorm_enabled() -> bool:
-    return (
-        current_platform.is_rocm()
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        and envs.VLLM_ROCM_USE_AITER
-    )
-
-
-def rocm_aiter_rmsnorm_fused_dynamic_quant_impl(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    y_scale: torch.Tensor,
-    epsilon: float,
-) -> None:
-    import aiter as rocm_aiter
-
-    rocm_aiter.rmsnorm2d_fwd_with_dynamicquant(
-        out, input, y_scale, weight, epsilon, use_model_sensitive_rmsnorm=0
-    )
-
-
-def rocm_aiter_rmsnorm_fused_dynamic_quant_fake(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    y_scale: torch.Tensor,
-    epsilon: float,
-) -> None:
-    pass
-
-
-def rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    residual_out: torch.Tensor,
-    weight: torch.Tensor,
-    y_scale: torch.Tensor,
-    epsilon: float,
-) -> None:
-    import aiter as rocm_aiter
-
-    rocm_aiter.rmsnorm2d_fwd_with_add_dynamicquant(
-        out,
-        input,
-        residual,
-        residual_out,
-        y_scale,
-        weight,
-        epsilon,
-        use_model_sensitive_rmsnorm=0,
-    )
-
-
-def rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake(
-    out: torch.Tensor,
-    input: torch.Tensor,
-    residual: torch.Tensor,
-    residual_out: torch.Tensor,
-    weight: torch.Tensor,
-    y_scale: torch.Tensor,
-    epsilon: float,
-) -> None:
-    pass
-
-
-if current_platform.is_rocm():
-    direct_register_custom_op(
-        op_name="rocm_aiter_rmsnorm_fused_dynamic_quant",
-        op_func=rocm_aiter_rmsnorm_fused_dynamic_quant_impl,
-        mutates_args=["out", "y_scale"],
-        fake_impl=rocm_aiter_rmsnorm_fused_dynamic_quant_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
-
-    direct_register_custom_op(
-        op_name="rocm_aiter_rmsnorm_fused_add_dynamic_quant",
-        op_func=rocm_aiter_rmsnorm_fused_add_dynamic_quant_impl,
-        mutates_args=["out", "residual_out", "y_scale"],
-        fake_impl=rocm_aiter_rmsnorm_fused_add_dynamic_quant_fake,
-        dispatch_key=current_platform.dispatch_key,
-    )
 
 
 class RMSNormAiterQuantPattern(RMSNormQuantPattern):
@@ -192,7 +103,7 @@ class RMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             at = auto_functionalized(
                 self.FUSED_OP,
                 out=result,
-                input=input,
+                x=input,
                 weight=weight,
                 y_scale=scale,
                 epsilon=self.epsilon,
@@ -260,7 +171,7 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
         ):
             at = auto_functionalized(
                 self.ROCM_AITER_RMS_ADD_OP,
-                output=rms_result,
+                out=rms_result,
                 x=input,
                 residual=residual,
                 residual_out=residual_out,
@@ -286,7 +197,7 @@ class FusedAddRMSNormAiterDynamicQuantPattern(RMSNormAiterQuantPattern):
             at = auto_functionalized(
                 self.FUSED_OP,
                 out=result,
-                input=input,
+                x=input,
                 residual=residual,
                 residual_out=residual_out,
                 weight=weight,

@@ -216,26 +216,12 @@ class RMSNorm(CustomOp):
             return self.forward_native(x, residual)
 
         add_residual = residual is not None
-        if self.rocm_use_aiter:
-            if add_residual:
-                residual_out = torch.empty_like(residual)
-                output = torch.empty_like(x)
-
-                torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
-                    output,
-                    x,
-                    residual,
-                    residual_out,
-                    self.weight.data,
-                    self.variance_epsilon,
-                )
-                return output, residual_out
-            else:
-                return torch.ops.vllm.rocm_aiter_rms_norm(
-                    x, self.weight.data, self.variance_epsilon
-                )
-
-        return self.forward_cuda(x, residual)
+        if add_residual:
+            return self.rocm_norm_func_with_add(
+                x, residual, self.weight.data, self.variance_epsilon
+            )
+        else:
+            return self.rocm_norm_func(x, self.weight.data, self.variance_epsilon)
 
     def forward_xpu(
         self,
