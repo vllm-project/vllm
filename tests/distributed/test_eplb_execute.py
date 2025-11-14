@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import multiprocessing
 import os
 import random
 
 import pytest
 import torch
 import torch.distributed
+import torch.multiprocessing as mp
 
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.distributed.parallel_state import (
@@ -17,10 +17,12 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.utils.system_utils import update_environment_variables
 
+mp.set_start_method("spawn")
+
 
 def distributed_run(fn, world_size):
     number_of_processes = world_size
-    processes: list[multiprocessing.Process] = []
+    processes: list[mp.Process] = []
     for i in range(number_of_processes):
         env: dict[str, str] = {}
         env["RANK"] = str(i)
@@ -29,7 +31,7 @@ def distributed_run(fn, world_size):
         env["LOCAL_WORLD_SIZE"] = str(number_of_processes)
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
-        p = multiprocessing.Process(target=fn, args=(env,))
+        p = mp.Process(target=fn, args=(env,))
         processes.append(p)
         p.start()
 
@@ -41,7 +43,7 @@ def distributed_run(fn, world_size):
 
 
 def worker_fn_wrapper(fn):
-    # `multiprocessing.Process` cannot accept environment variables directly
+    # `torch.multiprocessing.Process` cannot accept environment variables directly
     # so we need to pass the environment variables as arguments
     # and update the environment variables in the function
     def wrapped_fn(env):
