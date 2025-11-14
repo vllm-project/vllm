@@ -20,8 +20,8 @@ ARG PYTHON_VERSION=3.12
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
 ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
-# TODO: Restore to base image after FlashInfer AOT wheel fixed
-ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
+# Using runtime image with minimal build tools for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
+ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu22.04
 
 # By parameterizing the Deadsnakes repository URL, we allow third-party to use
 # their own mirror. When doing so, we don't benefit from the transparent
@@ -327,6 +327,25 @@ RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
     && python3 --version && python3 -m pip --version
+
+# Install CUDA development tools and build essentials for runtime JIT compilation
+# (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
+RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc-10 \
+        g++-10 \
+        cuda-nvcc-${CUDA_VERSION_DASH} \
+        cuda-cudart-dev-${CUDA_VERSION_DASH} \
+        cuda-nvrtc-dev-${CUDA_VERSION_DASH} \
+        cuda-nvml-dev-${CUDA_VERSION_DASH} \
+        libcublas-dev-${CUDA_VERSION_DASH} \
+        libcusparse-dev-${CUDA_VERSION_DASH} \
+        libcusolver-dev-${CUDA_VERSION_DASH} && \
+    update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10 && \
+    rm -rf /var/lib/apt/lists/* && \
+    gcc --version
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
