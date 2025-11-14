@@ -113,6 +113,8 @@ class NixlAgentMetadata(KVConnectorHandshakeMetadata):
 @dataclass
 class ReqMeta:
     local_block_ids: list[int]
+    # To be used when logical block size does not match the kernel block size
+    local_physical_block_ids: list[int]
     remote_block_ids: list[int]
     remote_host: str
     remote_port: int
@@ -140,6 +142,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         assert load_remote_cache ^ save_to_host
         _req = ReqMeta(
             local_block_ids=local_block_ids,
+            local_physical_block_ids=local_block_ids,
             remote_block_ids=kv_transfer_params["remote_block_ids"],
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
@@ -1497,7 +1500,7 @@ class NixlConnectorWorker:
         assert self.use_host_buffer
         assert self.copy_blocks is not None
 
-        local_block_ids = meta.local_block_ids
+        local_block_ids = meta.local_physical_block_ids
         self.copy_blocks(
             self.host_xfer_buffers,
             self.device_kv_caches,
@@ -1510,7 +1513,7 @@ class NixlConnectorWorker:
                 "synced recved kv of request[%s] to device kv buffer,"
                 "local_block_ids: %s. ",
                 req_id,
-                ",".join(map(str, meta.local_block_ids)),
+                ",".join(map(str, local_block_ids)),
             )
 
     def save_kv_to_host(self, metadata: NixlConnectorMetadata):
@@ -1519,19 +1522,22 @@ class NixlConnectorWorker:
         assert self.copy_blocks is not None
 
         for req_id, meta in metadata.reqs_to_save.items():
+            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
+                meta.local_block_ids
+            )
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug(
                     "save_load_kv for request[%s] to host xfer buffer."
                     "local_block_ids: %s. ",
                     req_id,
-                    ",".join(map(str, meta.local_block_ids)),
+                    ",".join(map(str, meta.local_physical_block_ids)),
                 )
             # blocking
             self.copy_blocks(
                 self.device_kv_caches,
                 self.host_xfer_buffers,
-                meta.local_block_ids,
-                meta.local_block_ids,
+                meta.local_physical_block_ids,
+                meta.local_physical_block_ids,
                 "d2h",
             )
 
@@ -1600,7 +1606,7 @@ class NixlConnectorWorker:
             if self.use_host_buffer:
                 self.sync_recved_kv_to_device(req_id, meta)
             if self.enable_permute_local_kv:
-                block_ids_to_permute += meta.local_block_ids
+                block_ids_to_permute += meta.local_physical_block_ids
         if len(block_ids_to_permute) > 0:
             self.permute_device_kv(block_ids_to_permute)
 
@@ -1687,7 +1693,7 @@ class NixlConnectorWorker:
                         req_id,
                         xfer_state,
                     )
-                    # mark all blocks for this request as invalid
+                    # mark all (logical)blocks for this request as invalid
                     if meta := self._recving_metadata.pop(req_id, None):
                         self._invalid_block_ids.update(meta.local_block_ids)
                     self._recving_metadata.pop(req_id, None)
@@ -1704,7 +1710,7 @@ class NixlConnectorWorker:
         We check for these trnxs to complete in each step().
         """
         for req_id, meta in metadata.reqs_to_recv.items():
-            meta.local_block_ids = self._logical_to_kernel_block_ids(
+            meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
                 meta.local_block_ids
             )
             meta.remote_block_ids = self._logical_to_kernel_block_ids(
@@ -1716,7 +1722,7 @@ class NixlConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ",
                 req_id,
                 remote_engine_id,
-                len(meta.local_block_ids),
+                len(meta.local_physical_block_ids),
                 len(meta.remote_block_ids),
             )
             # always store metadata for failure recovery
@@ -1764,7 +1770,7 @@ class NixlConnectorWorker:
         self._read_blocks(
             request_id=req_id,
             dst_engine_id=meta.remote_engine_id,
-            local_block_ids=meta.local_block_ids,
+            local_block_ids=meta.local_physical_block_ids,
             remote_block_ids=meta.remote_block_ids,
         )
 
@@ -1891,7 +1897,7 @@ class NixlConnectorWorker:
                 "Marking blocks as invalid.",
                 request_id,
             )
-            # mark all blocks for this request as invalid
+            # mark all (logical) blocks for this request as invalid
             if meta := self._recving_metadata.get(request_id):
                 self._invalid_block_ids.update(meta.local_block_ids)
             self.xfer_stats.record_failed_transfer()
