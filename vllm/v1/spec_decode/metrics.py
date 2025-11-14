@@ -98,11 +98,14 @@ class SpecDecodingStats:
             mid_idx = len(sorted_options) // 2
             return sorted_options[mid_idx]
         elif self.acceptance_rate_ewma > 0.3:
-            # Short: use second option if available
-            idx = min(1, len(sorted_options) - 1)
-            return sorted_options[idx]
+            # Low: use second-shortest if 4+ options, else shortest
+            # This differentiates from very low when enough options available
+            if len(sorted_options) >= 4:
+                return sorted_options[1]
+            else:
+                return sorted_options[0]
         else:
-            return sorted_options[0]  # Shortest
+            return sorted_options[0]  # Very low: shortest
 
 
 class SpecDecodingLogging:

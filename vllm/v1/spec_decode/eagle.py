@@ -64,7 +64,13 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
-        self.pad_token_id = 0  # Used for masking stopped sequences in early stopping
+        # Get pad_token_id from draft model config for masking stopped sequences
+        self.pad_token_id = (
+            self.draft_model_config.hf_config.pad_token_id
+            if hasattr(self.draft_model_config.hf_config, 'pad_token_id')
+            and self.draft_model_config.hf_config.pad_token_id is not None
+            else 0
+        )
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
         self.confidence_threshold = self.speculative_config.draft_confidence_threshold
