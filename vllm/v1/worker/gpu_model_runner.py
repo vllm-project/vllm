@@ -2590,28 +2590,28 @@ class GPUModelRunner(
                     )
                 )
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            if ubatch_slices:
-                assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            else:
-                num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens
-                )
+                dp_rank = self.parallel_config.data_parallel_rank
+                if ubatch_slices:
+                    assert num_tokens_across_dp is not None
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                    self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+                elif num_tokens_across_dp is not None:
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                else:
+                    num_input_tokens = self._get_num_input_tokens(
+                        scheduler_output.total_num_scheduled_tokens
+                    )
 
-            (
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-                ec_connector_output,
-            ) = self._preprocess(
-                scheduler_output, num_input_tokens, intermediate_tensors
-            )
+                (
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                    ec_connector_output,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
+                )
 
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len
