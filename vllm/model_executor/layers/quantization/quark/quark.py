@@ -90,8 +90,10 @@ class QuarkConfig(QuantizationConfig):
             elif isinstance(v, dict):
                 quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply_dict(v)
             else:
-                if v is not None:
-                    quant_config_with_hf_to_vllm_mapper[k] = hf_to_vllm_mapper.apply(v)
+                if isinstance(v, str):
+                    mapped_v_list = hf_to_vllm_mapper.apply_list([v])
+                    if mapped_v_list:
+                        quant_config_with_hf_to_vllm_mapper[k] = mapped_v_list[0]
                 else:
                     quant_config_with_hf_to_vllm_mapper[k] = v
 
