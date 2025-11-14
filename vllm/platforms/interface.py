@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from vllm.inputs import ProcessorInputs, PromptType
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
-    from vllm.utils import FlexibleArgumentParser
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
 else:
     FlexibleArgumentParser = object
 
@@ -467,14 +467,7 @@ class Platform:
         """
         Whether to use allgather in LogitsProcessor to gather the logits.
         """
-        import vllm.envs as envs
-        from vllm.config import get_current_vllm_config
-
-        parallel_config = get_current_vllm_config().parallel_config
-        return (
-            envs.VLLM_USE_V1
-            or parallel_config.distributed_executor_backend == "external_launcher"
-        )
+        return True
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
@@ -607,6 +600,13 @@ class Platform:
         Returns the nixl memory type for the current platform.
         """
         return None
+
+    @classmethod
+    def check_max_model_len(cls, max_model_len: int) -> int:
+        """
+        Check max_model_len for the current platform.
+        """
+        return max_model_len
 
 
 class UnspecifiedPlatform(Platform):

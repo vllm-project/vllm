@@ -214,15 +214,15 @@ void rms_norm_per_block_quant_dispatch(
   auto num_tokens = input.numel() / hidden_size;
 
   dim3 grid13(num_tokens);
-  dim3 block13(std::min(hidden_size, 1024));
+  dim3 block13(std::min(hidden_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   auto const fp_options =
       torch::TensorOptions().dtype(torch::kFloat32).device(input.device());
-  torch::Tensor rms = torch::zeros({num_tokens}, fp_options);
+  torch::Tensor rms = torch::empty({num_tokens}, fp_options);
   torch::Tensor token_scale =
-      torch::zeros({num_tokens * hidden_size / group_size}, fp_options);
+      torch::empty({num_tokens * hidden_size / group_size}, fp_options);
 
   if (residual.has_value()) {
     VLLM_DISPATCH_QUANT_TYPES(

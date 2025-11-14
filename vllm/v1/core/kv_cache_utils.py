@@ -12,8 +12,8 @@ from typing import Any, NewType, TypeAlias
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv
 from vllm.utils.hashing import sha256_cbor
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
+from vllm.v1.utils import tensor_data
 
 # BlockHash represents the hash of a single KV-cache block used for
 # prefix caching.  Treating it as a distinct type from `bytes` helps
@@ -461,11 +462,33 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
     return [request.lora_request.lora_name]
 
 
+def _gen_prompt_embeds_extra_hash_keys(
+    request: Request, start_token_idx: int, end_token_idx: int
+) -> list[bytes]:
+    """Generate extra keys related to prompt embeds for block hash computation.
+
+    Args:
+        request: The request object.
+        start_token_idx: The start token index of the block.
+        end_token_idx: The end token index of the block.
+
+    Returns:
+        Return prompt embeddings data of the request if it has prompt embeds.
+        Return empty list otherwise.
+    """
+    if request.prompt_embeds is None:
+        return []
+    block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+    embeds_bytes = tensor_data(block_prompt_embeds).tobytes()
+    return [embeds_bytes]
+
+
 def generate_block_hash_extra_keys(
     request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
-    the multi-modal inputs and request specific metadata (e.g., LoRA name).
+    the multi-modal inputs, request specific metadata (e.g., LoRA names), and
+    data from prompt embeddings.
 
     Args:
         request: The request object.
@@ -484,8 +507,13 @@ def generate_block_hash_extra_keys(
     cache_salt_keys: list[str] = (
         [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
     )
+    prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
+        request, start_token_idx, end_token_idx
+    )
 
-    extra_keys: list[Any] = lora_extra_keys + mm_extra_keys + cache_salt_keys
+    extra_keys: list[Any] = (
+        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+    )
 
     if not extra_keys:
         return None, new_start_mm_idx
@@ -1198,7 +1226,7 @@ def _report_kv_cache_config(
             vllm_config.parallel_config.decode_context_parallel_size,
         )
     num_tokens_str = f"{num_tokens:,}"
-    logger.info("GPU KV cache size: %s tokens", num_tokens_str)
+    logger.info_once("GPU KV cache size: %s tokens", num_tokens_str, scope="local")
     max_model_len_str = f"{vllm_config.model_config.max_model_len:,}"
     max_concurrency = get_max_concurrency_for_kv_cache_config(
         vllm_config, kv_cache_config

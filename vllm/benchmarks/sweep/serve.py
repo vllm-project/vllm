@@ -7,12 +7,18 @@ import shlex
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import ClassVar
 
-import pandas as pd
+from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
 from .server import ServerProcess
 from .utils import sanitize_filename
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 
 @contextlib.contextmanager
@@ -66,6 +72,8 @@ def run_benchmark(
 ):
     benchmark_cmd = [
         *bench_overrides.apply_to_cmd(bench_cmd),
+        "--percentile-metrics",
+        "ttft,tpot,itl,e2el",
         "--save-result",
         "--result-dir",
         str(output_path.parent),
@@ -255,6 +263,9 @@ class SweepServeArgs:
     dry_run: bool
     resume: str | None
 
+    parser_name: ClassVar[str] = "serve"
+    parser_help: ClassVar[str] = "Run vLLM server benchmark under multiple settings."
+
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         serve_cmd = shlex.split(args.serve_cmd)
@@ -399,9 +410,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Run vLLM server benchmark under multiple settings."
-    )
+    parser = argparse.ArgumentParser(description=SweepServeArgs.parser_help)
     SweepServeArgs.add_cli_args(parser)
 
     main(parser.parse_args())

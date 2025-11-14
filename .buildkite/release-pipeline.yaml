@@ -22,7 +22,7 @@ steps:
     agents:
       queue: arm64_cpu_queue_postmerge
     commands:
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_BUILD_ACL=ON --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile.cpu ."
+      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg GIT_REPO_CHECK=1 --build-arg VLLM_BUILD_ACL=ON --tag vllm-ci:build-image --target vllm-build --progress plain -f docker/Dockerfile.cpu ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
       - "bash .buildkite/scripts/upload-wheels.sh"
@@ -115,24 +115,6 @@ steps:
       queue: cpu_queue_postmerge
     commands:
       - "bash .buildkite/scripts/annotate-release.sh"
-
-  - label: "Build and publish TPU release image"
-    depends_on: ~
-    if: build.env("NIGHTLY") == "1"
-    agents:
-      queue: tpu_queue_postmerge
-    commands:
-      - "yes | docker system prune -a"
-      - "git fetch --all"
-      - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --tag vllm/vllm-tpu:nightly --tag vllm/vllm-tpu:$BUILDKITE_COMMIT --progress plain -f docker/Dockerfile.tpu ."
-      - "docker push vllm/vllm-tpu:nightly"
-      - "docker push vllm/vllm-tpu:$BUILDKITE_COMMIT"
-    plugins:
-      - docker-login#v3.0.0:
-          username: vllmbot
-          password-env: DOCKERHUB_TOKEN
-    env:
-      DOCKER_BUILDKIT: "1"
 
   - input: "Provide Release version here"
     id: input-release-version
