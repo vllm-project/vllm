@@ -1612,7 +1612,3 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
-
-    def supports_compiled_split(self) -> bool:
-        """MLACommonImpl supports the compiled split path."""
-        return True

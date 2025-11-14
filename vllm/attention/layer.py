@@ -1090,10 +1090,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_block_scale: torch.Tensor | None = None,
         allow_compiled_split: bool = True,
     ) -> torch.Tensor:
-        """Forward implementation for MLA attention.
-
-        This method always handles decode/prefill orchestration in the layer
-        """
+        """Forward implementation for MLA attention."""
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported for MLA"
