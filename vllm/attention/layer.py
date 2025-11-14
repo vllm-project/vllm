@@ -1163,8 +1163,7 @@ def unified_mla_attention(
         kv_c_normed=kv_c_normed,
         k_pe=k_pe,
         kv_cache=kv_cache,
-        attn_metadata=attn_metadata,
-        allow_compiled_split=False,
+        attn_metadata=attn_metadata
     )
 
     return output
