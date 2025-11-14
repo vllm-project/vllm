@@ -2,26 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from datetime import datetime
 from itertools import product
+
+# torch.manual_seed(42)
+# torch.cuda.manual_seed(42)
+# torch.cuda.manual_seed_all(42)
+# import random
+# import numpy as np
+# random.seed(42)
+# np.random.seed(42)
+# torch.backends.cudnn.deterministic = True
+# torch.backends.cudnn.benchmark = False
+import regex as re
 import torch
 
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-torch.cuda.manual_seed_all(42)
-import random
-import numpy as np
-random.seed(42)
-np.random.seed(42)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
-
-import regex as re
-import torch 
-  
-from vllm.v1.sample.ops.topk_topp_sampler import (apply_top_k_top_p,
-                                                  apply_top_k_top_p_triton,
-                                                  apply_top_k_top_p_test2
-                                        
-                                                  )
+from vllm.v1.sample.ops.topk_topp_sampler import (
+    apply_top_k_top_p,
+    apply_top_k_top_p_test2,
+)
 
 
 def g_str(s):
@@ -56,30 +53,37 @@ def test_accuracy(logits, k, p, func_list):
         output_logits = func_list[i](input_logit_list[i], k, p)
 
         torch.cuda.synchronize()
-        is_correct = torch.allclose(original_logits, output_logits)
+        original_logits_bin = original_logits.view(torch.int32)
+        output_logits_bin = output_logits.view(torch.int32)
+        is_correct = torch.all(original_logits_bin == output_logits_bin)
         output_correct_list.append(is_correct)
         func_name = func_list[i].__name__
 
         if not is_correct:
-            print_to_log(r_str(f"Error: logits are not close on {i} - " + f"{func_name}"), log_file)
+            print_to_log(
+                r_str(f"Error: logits are not close on {i} - " + f"{func_name}"),
+                log_file,
+            )
             output_logits = apply_top_k_top_p_test2(logits, k, p, debug=True)
-            error_mask = torch.abs(output_logits - original_logits) > 1e-5
+            error_mask = torch.abs(output_logits - original_logits) > 1e-16
             error_rows = torch.where(error_mask)[0]
             error_rows = torch.unique(error_rows)
             num_error_rows = error_rows.shape[0]
             error_cols = torch.where(error_mask)[1]
             error_cols = torch.unique(error_cols)
             num_error_cols = error_cols.shape[0]
-            print_to_log(f"num_error_rows: {num_error_rows} - {error_rows}",
-                        log_file)
+            print_to_log(f"num_error_rows: {num_error_rows} - {error_rows}", log_file)
             print_to_log(f"num_error_cols: {num_error_cols}", log_file)
             row_to_show = 5 if num_error_rows > 5 else num_error_rows
-            logits_to_show = torch.sort(output_logits[error_rows],
-                                        descending=True).values
+            logits_to_show = torch.sort(
+                output_logits[error_rows], descending=True
+            ).values
+
             logits_to_show = logits_to_show[:row_to_show, :20]
             print_to_log(f"logits: {logits_to_show}", log_file)
-            original_logits_to_show = \
-                torch.sort(original_logits[error_rows], descending=True).values
+            original_logits_to_show = torch.sort(
+                original_logits[error_rows], descending=True
+            ).values
             original_logits_to_show = original_logits_to_show[:row_to_show, :20]
             print_to_log(f"original_logits: {original_logits_to_show}", log_file)
             assert False
@@ -112,10 +116,10 @@ if __name__ == "__main__":
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     batch_size_list = [64, 128, 1024]
-    vocab_size_list = [4096, 16384, 65536]
-    p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
-    # k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
-    k_list = [None]
+    vocab_size_list = [4096, 16384, 65536, 128000, 262144]
+    # p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
+    p_list = [None]
+    k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
     func_list = [apply_top_k_top_p, apply_top_k_top_p_test2]
 
     log_file = f"triton_topk_topp_test_{date_str}.log"
@@ -131,12 +135,14 @@ if __name__ == "__main__":
     print_to_log(y_str("csv_file:") + f"{csv_file}", log_file)
 
     with open(csv_file, "w") as f:
-        f.write("dist_generator,batch_size,vocab_size,p,k,triton_correct,test_correct"
-                "torch_time_taken,triton_time_taken,test_time_taken,triton_speedup,test_speedup\n")
+        f.write(
+            "dist_generator,batch_size,vocab_size,p,k,triton_correct,test_correct"
+            "torch_time_taken,triton_time_taken,test_time_taken,triton_speedup,test_speedup\n"
+        )
 
-    for batch_size, vocab_size, p, k in product(batch_size_list,
-                                                vocab_size_list, p_list,
-                                                k_list):
+    for batch_size, vocab_size, p, k in product(
+        batch_size_list, vocab_size_list, p_list, k_list
+    ):
         if p is None and k is None:
             continue
 
@@ -144,28 +150,34 @@ if __name__ == "__main__":
         logits_list = [("RANDN", logits_randn)]
 
         if p == "RAND":
-            p_tensor = torch.rand((batch_size, ), device="cuda") * 0.95 + 0.05
+            p_tensor = torch.rand((batch_size,), device="cuda") * 0.95 + 0.05
         elif p is not None:
-            p_tensor = torch.full((batch_size, ), p, device="cuda")
+            p_tensor = torch.full((batch_size,), p, device="cuda")
         else:
             p_tensor = None
 
         if k == "RAND":
-            k_tensor = torch.randint(1,
-                                     vocab_size, (batch_size, ),
-                                     device="cuda")
+            k_tensor = torch.randint(1, vocab_size, (batch_size,), device="cuda")
         elif k is not None:
-            k_tensor = torch.full((batch_size, ), k, device="cuda")
+            k_tensor = torch.full((batch_size,), k, device="cuda")
         else:
             k_tensor = None
 
         for dist_generator, logits in logits_list:
             print_to_log(y_str("--------------------------------"), log_file)
             print_to_log(
-                g_str("Testing ") + f"{dist_generator}" +
-                y_str(" with batch_size: ") + f"{batch_size}" +
-                y_str(" vocab_size: ") + f"{vocab_size}" + y_str(" p: ") +
-                f"{p}" + y_str(" k: ") + f"{k}", log_file)
+                g_str("Testing ")
+                + f"{dist_generator}"
+                + y_str(" with batch_size: ")
+                + f"{batch_size}"
+                + y_str(" vocab_size: ")
+                + f"{vocab_size}"
+                + y_str(" p: ")
+                + f"{p}"
+                + y_str(" k: ")
+                + f"{k}",
+                log_file,
+            )
             correct_list = test_accuracy(logits, k_tensor, p_tensor, func_list)
             for i in range(len(func_list) - 1):
                 is_correct = correct_list[i]
@@ -174,29 +186,32 @@ if __name__ == "__main__":
                         f"Error: logits are not close for function {func_list[i + 1].__name__},"
                         f" batch_size: {batch_size},"
                         f" vocab_size: {vocab_size}, dist_generator: "
-                        f"{dist_generator}, p: {p}, k: {k}", log_file)
-            print_to_log(f"Test accuracy passed! Now testing speedup...", log_file)
+                        f"{dist_generator}, p: {p}, k: {k}",
+                        log_file,
+                    )
+            print_to_log("Test accuracy passed! Now testing speedup...", log_file)
             time_list = []
             for func in func_list:
                 time_taken = test_time(logits, k_tensor, p_tensor, test_func=func)
                 time_list.append(time_taken)
-            print_to_log(
-                b_str("torch_time_taken: ") + f"{time_list[0]}", log_file)
-            print_to_log(
-                b_str("test_time_taken: ") + f"{time_list[1]}",
-                log_file)
+            print_to_log(b_str("torch_time_taken: ") + f"{time_list[0]}", log_file)
+            print_to_log(b_str("test_time_taken: ") + f"{time_list[1]}", log_file)
             # print_to_log(
             #     b_str("test_time_taken: ") + f"{time_list[2]}", log_file)
             print_to_log(
-                g_str("test Speedup over Torch: ") +
-                f"{time_list[0] / time_list[1]:.8f}x", log_file)
+                g_str("test Speedup over Torch: ")
+                + f"{time_list[0] / time_list[1]:.8f}x",
+                log_file,
+            )
             # print_to_log(
             #     y_str("Test Speedup over Torch: ") +
-                # f"{time_list[0] / time_list[2]:.8f}x", log_file)
+            # f"{time_list[0] / time_list[2]:.8f}x", log_file)
             with open(csv_file, "a") as f:
-                f.write(f"{dist_generator},{batch_size},{vocab_size},{p},{k},"
-                        f"{correct_list[0]},{time_list[0]},"
-                        f"{time_list[0] / time_list[1]:.8f}\n")
+                f.write(
+                    f"{dist_generator},{batch_size},{vocab_size},{p},{k},"
+                    f"{correct_list[0]},{time_list[0]},"
+                    f"{time_list[0] / time_list[1]:.8f}\n"
+                )
             print_to_log(y_str("--------------------------------\n"), log_file)
 
 """# SPDX-License-Identifier: Apache-2.0
