@@ -88,9 +88,9 @@ def test_accuracy(logits, k, p, func_list):
 
 def test_time(logits, k, p, test_func, num_runs=30, num_warmup=5):
     # We must clone the logits for each run to avoid modifying the original
-    warmup_tensor = logits.clone().detach()
+    warmup_tensor = [logits.clone().detach() for _ in range(num_warmup)]
     for _ in range(num_warmup):
-        test_func(warmup_tensor, k, p)
+        test_func(warmup_tensor[_], k, p)
     torch.cuda.synchronize()
 
     input_logits = [logits.clone().detach() for _ in range(num_runs)]
@@ -112,8 +112,8 @@ if __name__ == "__main__":
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     batch_size_list = [64, 128, 1024]
-    vocab_size_list = [4096, 16384]
-    p_list = [None, 0.4, 0.7, 0.9, 0.95, 0.99]
+    vocab_size_list = [4096, 16384, 65536]
+    p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
     # k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
     k_list = [None]
     func_list = [apply_top_k_top_p, apply_top_k_top_p_test2]
@@ -175,6 +175,7 @@ if __name__ == "__main__":
                         f" batch_size: {batch_size},"
                         f" vocab_size: {vocab_size}, dist_generator: "
                         f"{dist_generator}, p: {p}, k: {k}", log_file)
+            print_to_log(f"Test accuracy passed! Now testing speedup...", log_file)
             time_list = []
             for func in func_list:
                 time_taken = test_time(logits, k_tensor, p_tensor, test_func=func)

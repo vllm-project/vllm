@@ -1245,9 +1245,6 @@ def top_p_pivot_filter(
     OUTPUT_LOGITS, 
     OUTPUT_INDICES, 
     B, # --> batch size 
-    DEBUG_K_PIVOT, 
-    DEBUG_WRITE_POS, 
-    DEBUG_NUM_OUTLIERS, 
     SIGMA: tl.constexpr,
     VOCAB_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
@@ -1321,7 +1318,6 @@ def top_p_pivot_filter(
             
             # Second passes: Quaternary search for pivots (nlog_4(n))
             num_iters = 0
-            tl.store(OUTPUT_LOGITS_ROW, 12345.0)
             while k_pivot == -float('inf') and num_iters < 18:
                 k_pivot_0 = (max_range - min_range) * 1.0 / 4.0 + min_range
                 k_pivot_1 = (max_range - min_range) * 2.0 / 4.0 + min_range
@@ -1380,10 +1376,7 @@ def top_p_pivot_filter(
                 tl.store(OUTPUT_LOGITS_ROW + write_idx, logits_blk, mask=final_mask)
                 tl.store(OUTPUT_INDICES_ROW + write_idx, offs_n, mask=final_mask)
                 write_pos += tl.sum(final_mask, dtype=tl.int32)
-                # for temporary debugging 
-                tl.store(DEBUG_K_PIVOT + row_id, k_pivot)
-                tl.store(DEBUG_WRITE_POS + row_id, write_pos)
-                tl.store(DEBUG_NUM_OUTLIERS + row_id, num_outliers)
+
 
 
 def apply_top_p_filtered (
@@ -1402,32 +1395,12 @@ def apply_top_p_filtered (
 
     if not torch.any(p < 1.0):  
         return logits
-    
+        
     # ================= to find the k filter value ====================
-    max_p = p.max().item()
-    if max_p > 0.9: 
-        k_filter = 6 * 1000 
-    elif max_p > 0.8: 
-        k_filter = 5 * 1000 
-    elif max_p > 0.7: 
-        k_filter = 4 * 1000 
-    elif max_p > 0.6: 
-        k_filter = 4 * 1000 
-    elif max_p > 0.5: 
-        k_filter = 4 * 1000
-    elif max_p > 0.4: 
-        k_filter = 4 * 1000  
-    else: 
-        k_filter = 4 * 1000
-
-    k_filter = min(k_filter, vocab_size) 
+    k_filter = int(vocab_size * 1/32)
 
     filtered_logits = torch.full((batch_size, k_filter), -float('inf'), device=logits.device)
     filtered_indices = torch.full((batch_size, k_filter), 0, dtype=torch.int32, device=logits.device)
-
-    debug_k_pivot = torch.full((batch_size,), -float('inf'), dtype=torch.float32, device=logits.device)
-    debug_write_pos = torch.zeros((batch_size,), dtype=torch.int32, device=logits.device)
-    debug_num_outliers = torch.zeros((batch_size,), dtype=torch.int32, device=logits.device)
 
     probs = torch.empty((batch_size, vocab_size), device=logits.device, dtype=torch.float32)
     probs_idx = torch.empty_like(probs, dtype=torch.int32)
@@ -1441,16 +1414,11 @@ def apply_top_p_filtered (
         filtered_logits, # --> output, filtered
         filtered_indices, # --> filtered logits indices 
         batch_size, 
-        debug_k_pivot, 
-        debug_write_pos, 
-        debug_num_outliers,
         SIGMA=SIGMA, 
         VOCAB_SIZE=vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         )
-    print(f"k pivot: {debug_k_pivot}") 
-    print(f"write pos: {debug_write_pos}") 
-    print(f"filtered logits: {filtered_logits[0:10]}")
+
     # this kernel outputs filtered_logits and filtered_indices of shape (batch_size, k_filter)
     logits_sort, sort_indices = filtered_logits.sort(dim=-1, descending=False)
     logits_sort_indices = torch.gather(filtered_indices, -1, sort_indices)
@@ -1460,18 +1428,10 @@ def apply_top_p_filtered (
 
     sum_probs = sorted_probs.sum(dim=-1)
 
-    # ========================== Debugging ===========================================
-    print("filtered_logits[0,:10]:", filtered_logits[0,:10])
-
-    print("logits sort: ", logits_sort[0, 10])
-
-    print("logits_sort_indices[0,:10]:", logits_sort_indices[0,:10])
-
-    print("sorted probs:", sorted_probs[0,:10])
-
-    # if torch.any(sum_probs < p): 
-    #     print("edge case..........")
-    #     return apply_top_k_top_p(logits, k=None, p=p)
+    if torch.any(sum_probs < p): 
+        print(f"edge case --> fall back !")
+        assert False
+        return apply_top_k_top_p(logits, k=None, p=p)
 
     probs_sum = torch.cumsum(sorted_probs, dim=-1)
     sum_non_outliers = (1.0 - sum_probs).unsqueeze(-1)
