@@ -43,6 +43,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
+    ClassificationChatRequest,
+    ClassificationCompletionRequest,
     ClassificationRequest,
     ClassificationResponse,
     CompletionRequest,
@@ -114,13 +116,16 @@ CompletionLikeRequest: TypeAlias = (
     | DetokenizeRequest
     | EmbeddingCompletionRequest
     | RerankRequest
-    | ClassificationRequest
+    | ClassificationCompletionRequest
     | ScoreRequest
     | TokenizeCompletionRequest
 )
 
 ChatLikeRequest: TypeAlias = (
-    ChatCompletionRequest | EmbeddingChatRequest | TokenizeChatRequest
+    ChatCompletionRequest
+    | EmbeddingChatRequest
+    | TokenizeChatRequest
+    | ClassificationChatRequest
 )
 SpeechToTextRequest: TypeAlias = TranscriptionRequest | TranslationRequest
 AnyRequest: TypeAlias = (
@@ -814,7 +819,11 @@ class OpenAIServing:
         if not hasattr(request, "messages"):
             return message_types
 
-        for message in request.messages:
+        messages = request.messages
+        if messages is None or isinstance(messages, (str, bytes)):
+            return message_types
+
+        for message in messages:
             if (
                 isinstance(message, dict)
                 and "content" in message
@@ -907,7 +916,8 @@ class OpenAIServing:
                 EmbeddingCompletionRequest,
                 ScoreRequest,
                 RerankRequest,
-                ClassificationRequest,
+                ClassificationCompletionRequest,
+                ClassificationChatRequest,
             ),
         ):
             # Note: input length can be up to the entire model context length
@@ -915,7 +925,8 @@ class OpenAIServing:
             if token_num > self.max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreRequest: "score",
-                    ClassificationRequest: "classification",
+                    ClassificationCompletionRequest: "classification",
+                    ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
                 raise ValueError(

@@ -1784,6 +1784,9 @@ async def init_app_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
             log_error_stack=args.log_error_stack,
         )
         if "classify" in supported_tasks
