@@ -996,6 +996,7 @@ class EagleProposer:
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model
+
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
@@ -1007,19 +1008,44 @@ class EagleProposer:
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
 
-            if not self.model.has_own_embed_tokens:
-                logger.info(
-                    "Draft model embed_tokens are not initialized from the checkpoint "
-                    "weights. Assuming draft model should share the embedding weights "
-                    "with the target model to save memory."
-                )
-                del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+            share_embeddings = False
+            reason = ""
+            if hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE-{1,2,3} model
+                if not self.model.has_own_embed_tokens:
+                    share_embeddings = True
+                    reason = (
+                        "Detected EAGLE model without its own embed_tokens in the"
+                        " checkpoint. Sharing target model embedding weights with the"
+                        " draft model."
+                    )
+                elif torch.equal(
+                    self.model.model.embed_tokens.weight, target_embed_tokens.weight
+                ):
+                    share_embeddings = True
+                    reason = (
+                        "Detected EAGLE model with embed_tokens identical to the target"
+                        " model. Sharing target model embedding weights with the draft"
+                        " model."
+                    )
+                else:
+                    logger.info(
+                        "Detected EAGLE model with distinct embed_tokens weights. "
+                        "Keeping separate embedding weights from the target model."
+                    )
             else:
-                logger.info(
-                    "Draft model embed_tokens are initialized from the checkpoint "
-                    "weights. Keeping separate embedding weights from the target model."
+                # MTP model
+                share_embeddings = True
+                reason = (
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings:
+                logger.info(reason)
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
                 "The draft model's vocab embedding will be loaded separately"
@@ -1027,30 +1053,42 @@ class EagleProposer:
             )
 
         # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3":
-            if hasattr(target_language_model, "lm_head"):
-                logger.info("Loading EAGLE LM head weights from the target model.")
-                self.model.lm_head = target_language_model.lm_head
-        else:
-            if (
-                hasattr(self.model, "lm_head")
-                and hasattr(target_language_model, "lm_head")
-                and not self.model.has_own_lm_head
-            ):
-                logger.info(
-                    "Draft model lm_head is not initialized from the checkpoint weights"
-                    ". Assuming draft model should share the lm_head weights with the "
-                    "target model to save memory."
+        share_lm_head = False
+        reason = ""
+        if hasattr(self.model, "has_own_lm_head"):
+            # EAGLE-{1,2,3} model
+            if not self.model.has_own_lm_head:
+                share_lm_head = True
+                reason = (
+                    "Detected EAGLE model without its own lm_head in the checkpoint. "
+                    "Sharing target model lm_head weights with the draft model."
                 )
-                del self.model.lm_head
-                self.model.lm_head = target_language_model.lm_head
+            elif hasattr(target_language_model, "lm_head") and torch.equal(
+                self.model.lm_head.weight, target_language_model.lm_head.weight
+            ):
+                share_lm_head = True
+                reason = (
+                    "Detected EAGLE model with lm_head identical to the target model. "
+                    "Sharing target model lm_head weights with the draft model."
+                )
             else:
                 logger.info(
-                    "Draft model lm_head is initialized from the checkpoint weights. "
+                    "Detected EAGLE model with distinct lm_head weights. "
                     "Keeping separate lm_head weights from the target model."
                 )
+        else:
+            # MTP model
+            share_lm_head = True
+            reason = (
+                "Detected MTP model. "
+                "Sharing target model lm_head weights with the draft model."
+            )
+
+        if share_lm_head and hasattr(target_language_model, "lm_head"):
+            logger.info(reason)
+            if hasattr(self.model, "lm_head"):
+                del self.model.lm_head
+            self.model.lm_head = target_language_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
