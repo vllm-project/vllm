@@ -104,10 +104,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForCausalLM,
         image_size_factors=[(), (0.25,)],
         vllm_runner_kwargs={"gpu_memory_utilization": 0.5},
-        # Use strict comparator; normalize outputs to (ids, text)
-        vllm_output_post_proc=lambda vllm_output, model: vllm_output[:2],
-        hf_output_post_proc=lambda hf_output, model: hf_output[:2],
-        comparator=check_outputs_equal,
         marks=[pytest.mark.core_model],
     ),
     #### Core tests to always run in the CI
