@@ -64,8 +64,10 @@ class EagleProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.pad_token_id = 0  # Used for masking stopped sequences in early stopping
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+        self.confidence_threshold = self.speculative_config.draft_confidence_threshold
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
         # We need to get the hidden size from the draft model config because
@@ -136,6 +138,10 @@ class EagleProposer:
             )
         self.hidden_states = torch.zeros(
             (self.max_num_tokens, self.hidden_size), dtype=self.dtype, device=device
+        )
+        # Continue mask for confidence-based early stopping
+        self.continue_mask = torch.ones(
+            self.max_num_tokens, dtype=torch.bool, device=device
         )
 
         # We need +1 here because the arange is used to set query_start_loc,
