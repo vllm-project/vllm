@@ -420,10 +420,12 @@ class Qwen3_VisionTransformer(nn.Module):
     @lru_cache(maxsize=1024)
     def rot_pos_ids(h: int, w: int, spatial_merge_size: int) -> torch.Tensor:
         hpos_ids = np.broadcast_to(np.arange(h).reshape(h, 1), (h, w))
+        h_div = h // spatial_merge_size
+        w_div = w // spatial_merge_size
         hpos_ids = hpos_ids.reshape(
-            h // spatial_merge_size,
+            h_div,
             spatial_merge_size,
-            w // spatial_merge_size,
+            w_div,
             spatial_merge_size,
         )
         hpos_ids = hpos_ids.transpose(0, 2, 1, 3)
@@ -431,9 +433,9 @@ class Qwen3_VisionTransformer(nn.Module):
 
         wpos_ids = np.broadcast_to(np.arange(w).reshape(1, w), (h, w))
         wpos_ids = wpos_ids.reshape(
-            h // spatial_merge_size,
+            h_div,
             spatial_merge_size,
-            w // spatial_merge_size,
+            w_div,
             spatial_merge_size,
         )
         wpos_ids = wpos_ids.transpose(0, 2, 1, 3)
