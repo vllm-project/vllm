@@ -428,11 +428,11 @@ class EngineArgs:
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
-    max_num_batched_tokens: int | None = SchedulerConfig.max_num_batched_tokens
+    max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
-    max_num_seqs: int | None = SchedulerConfig.max_num_seqs
+    max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
@@ -485,7 +485,7 @@ class EngineArgs:
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
-    enable_chunked_prefill: bool | None = SchedulerConfig.enable_chunked_prefill
+    enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
@@ -1875,6 +1875,7 @@ class EngineArgs:
         ) = self.get_batch_defaults(world_size)
 
         use_context_value = usage_context.value if usage_context else None
+        print("max_num_batched_tokens", self.max_num_batched_tokens)
         if self.max_num_batched_tokens is None:
             self.max_num_batched_tokens = default_max_num_batched_tokens.get(
                 usage_context,
@@ -1886,7 +1887,9 @@ class EngineArgs:
                 self.max_num_batched_tokens,
                 use_context_value,
             )
+        print("max_num_batched_tokens", self.max_num_batched_tokens)
 
+        print("max_num_seqs", self.max_num_seqs)
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs.get(
                 usage_context,
@@ -1899,6 +1902,7 @@ class EngineArgs:
                 self.max_num_seqs,
                 use_context_value,
             )
+        print("max_num_seqs", self.max_num_seqs)
 
 
 @dataclass
