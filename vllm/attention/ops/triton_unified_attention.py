@@ -7,6 +7,8 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+import math
+
 import torch
 
 from vllm.logger import init_logger
@@ -70,6 +72,7 @@ def kernel_unified_attention_2d(
     out_scale,  # float32
     softcap,  # float32
     num_query_heads: tl.constexpr,  # int
+    num_kv_heads: tl.constexpr,  # int
     num_queries_per_kv: tl.constexpr,  # int
     block_table_stride: tl.int64,  # int
     query_stride_0: tl.int64,  # int
@@ -104,17 +107,19 @@ def kernel_unified_attention_2d(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    num_q_block_iterations = cdiv_fn(num_q_blocks, LAUNCH_GRID_DIM0)
+    kv_head_idx = tl.program_id(0) % num_kv_heads
+    num_q_block_iterations = cdiv_fn(num_q_blocks, LAUNCH_GRID_DIM0 // num_kv_heads)
 
-    if tl.program_id(0) * num_q_block_iterations >= num_q_blocks:
+    if (tl.program_id(0) // num_kv_heads) * num_q_block_iterations >= num_q_blocks:
         return
 
     for q_block_global_idx in range(
-        tl.program_id(0) * num_q_block_iterations,
-        min((tl.program_id(0) + 1) * num_q_block_iterations, num_q_blocks),
+        (tl.program_id(0) // num_kv_heads) * num_q_block_iterations,
+        min(
+            ((tl.program_id(0) // num_kv_heads) + 1) * num_q_block_iterations,
+            num_q_blocks,
+        ),
     ):
-        kv_head_idx = tl.program_id(1)
-
         seq_idx = find_seq_idx(
             query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
         )
@@ -380,6 +385,7 @@ def kernel_unified_attention_3d(
     v_scale,  # float32
     softcap,  # float32
     num_query_heads: tl.constexpr,  # int
+    num_kv_heads: tl.constexpr,  # int
     num_queries_per_kv: tl.constexpr,  # int
     block_table_stride: tl.int64,  # int
     query_stride_0: tl.int64,  # int
@@ -410,18 +416,27 @@ def kernel_unified_attention_3d(
     num_q_blocks: int,  # int
     LAUNCH_GRID_DIM0: tl.constexpr,  # int
 ):
-    num_q_block_iterations = cdiv_fn(num_q_blocks, LAUNCH_GRID_DIM0)
+    kv_head_idx = (tl.program_id(0) // NUM_SEGMENTS_PER_SEQ) % num_kv_heads
+    segm_idx = tl.program_id(0) % NUM_SEGMENTS_PER_SEQ
 
-    if tl.program_id(0) * num_q_block_iterations >= num_q_blocks:
+    num_q_block_iterations = cdiv_fn(
+        num_q_blocks, LAUNCH_GRID_DIM0 // (num_kv_heads * NUM_SEGMENTS_PER_SEQ)
+    )
+
+    if (
+        tl.program_id(0) // (num_kv_heads * NUM_SEGMENTS_PER_SEQ)
+    ) * num_q_block_iterations >= num_q_blocks:
         return
 
     for q_block_global_idx in range(
-        tl.program_id(0) * num_q_block_iterations,
-        min((tl.program_id(0) + 1) * num_q_block_iterations, num_q_blocks),
+        (tl.program_id(0) // (num_kv_heads * NUM_SEGMENTS_PER_SEQ))
+        * num_q_block_iterations,
+        min(
+            ((tl.program_id(0) // (num_kv_heads * NUM_SEGMENTS_PER_SEQ)) + 1)
+            * num_q_block_iterations,
+            num_q_blocks,
+        ),
     ):
-        kv_head_idx = tl.program_id(1)
-        segm_idx = tl.program_id(2)
-
         seq_idx = find_seq_idx(
             query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
         )
@@ -683,17 +698,23 @@ def reduce_segments(
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
-    num_query_token_iterations = cdiv_fn(num_query_tokens, LAUNCH_GRID_DIM0)
+    query_head_idx = tl.program_id(0) % num_query_heads
+    num_query_token_iterations = cdiv_fn(
+        num_query_tokens, LAUNCH_GRID_DIM0 // num_query_heads
+    )
 
-    if tl.program_id(0) * num_query_token_iterations >= num_query_tokens:
+    if (
+        tl.program_id(0) // num_query_heads
+    ) * num_query_token_iterations >= num_query_tokens:
         return
 
     for query_token_idx in range(
-        tl.program_id(0) * num_query_token_iterations,
-        min((tl.program_id(0) + 1) * num_query_token_iterations, num_query_tokens),
+        (tl.program_id(0) // num_query_heads) * num_query_token_iterations,
+        min(
+            ((tl.program_id(0) // num_query_heads) + 1) * num_query_token_iterations,
+            num_query_tokens,
+        ),
     ):
-        query_head_idx = tl.program_id(1)
-
         seq_idx = find_seq_idx(
             query_start_len_ptr, query_token_idx, num_seqs, BLOCK_Q, False
         )
@@ -822,18 +843,18 @@ def unified_attention(
     TILE_SIZE_PREFILL = 32
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
-    LAUNCH_GRID_DIM0_2D = 16
-    LAUNCH_GRID_DIM0_3D_DECODE = 4
-    LAUNCH_GRID_DIM0_3D_REDUCE = 4
+    MIN_TARGET_LAUNCH_GRID_SIZE = 128
 
     # if batch contains a prefill
-    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
-        kernel_unified_attention_2d[
-            (
-                LAUNCH_GRID_DIM0_2D,
-                num_kv_heads,
-            )
-        ](
+    if (
+        max_seqlen_q > 1
+        or total_num_q_blocks * num_kv_heads > MIN_TARGET_LAUNCH_GRID_SIZE
+    ):
+        # Make sure that the launch grid is a multiple of num_kv_heads
+        LAUNCH_GRID_DIM0_2D = (
+            (MIN_TARGET_LAUNCH_GRID_SIZE + num_kv_heads - 1) // num_kv_heads
+        ) * num_kv_heads
+        kernel_unified_attention_2d[(LAUNCH_GRID_DIM0_2D,)](
             output_ptr=out,
             query_ptr=q,
             key_cache_ptr=k,
@@ -849,6 +870,7 @@ def unified_attention(
             out_scale=1 / output_scale if output_scale is not None else 1.0,
             softcap=softcap,
             num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
             num_queries_per_kv=num_queries_per_kv,
             block_table_stride=block_table.stride(0),
             query_stride_0=q.stride(0),
@@ -909,9 +931,20 @@ def unified_attention(
             device=q.device,
         )
 
-        kernel_unified_attention_3d[
-            (LAUNCH_GRID_DIM0_3D_DECODE, num_kv_heads, NUM_SEGMENTS)
-        ](
+        # Make sure that the 3D kernel launch grid is a multiple of
+        # num_kv_heads and of NUM_SEGMENTS
+        lcm_result = math.lcm(num_kv_heads, NUM_SEGMENTS)
+        LAUNCH_GRID_DIM0_3D_DECODE = (
+            (MIN_TARGET_LAUNCH_GRID_SIZE + lcm_result - 1) // lcm_result
+        ) * lcm_result
+
+        # Make sure that the reduction kernel launch grid is a multiple
+        # of num_query_heads
+        LAUNCH_GRID_DIM0_3D_REDUCE = (
+            (MIN_TARGET_LAUNCH_GRID_SIZE + num_query_heads - 1) // num_query_heads
+        ) * num_query_heads
+
+        kernel_unified_attention_3d[(LAUNCH_GRID_DIM0_3D_DECODE,)](
             segm_output_ptr=segm_output,
             segm_max_ptr=segm_max,
             segm_expsum_ptr=segm_expsum,
@@ -928,6 +961,7 @@ def unified_attention(
             v_scale=v_descale,
             softcap=softcap,
             num_query_heads=num_query_heads,
+            num_kv_heads=num_kv_heads,
             num_queries_per_kv=num_queries_per_kv,
             block_table_stride=block_table.stride(0),
             query_stride_0=q.stride(0),
@@ -958,7 +992,7 @@ def unified_attention(
             num_q_blocks=total_num_q_blocks,
             LAUNCH_GRID_DIM0=LAUNCH_GRID_DIM0_3D_DECODE,
         )
-        reduce_segments[(LAUNCH_GRID_DIM0_3D_REDUCE, num_query_heads)](
+        reduce_segments[(LAUNCH_GRID_DIM0_3D_REDUCE,)](
             output_ptr=out,
             segm_output_ptr=segm_output,
             segm_max_ptr=segm_max,
