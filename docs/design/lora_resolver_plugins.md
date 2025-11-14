@@ -21,19 +21,16 @@ Before using LoRA Resolver Plugins, ensure the following environment variables a
 ### Required Environment Variables
 
 1. **`VLLM_ALLOW_RUNTIME_LORA_UPDATING`**: Must be set to `true` or `1` to enable dynamic LoRA loading
-
    ```bash
    export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
    ```
 
 2. **`VLLM_PLUGINS`**: Must include the desired resolver plugins (comma-separated list)
-
    ```bash
    export VLLM_PLUGINS=lora_filesystem_resolver
    ```
 
 3. **`VLLM_LORA_RESOLVER_CACHE_DIR`**: Must be set to a valid directory path for filesystem resolver
-
    ```bash
    export VLLM_LORA_RESOLVER_CACHE_DIR=/path/to/lora/adapters
    ```
@@ -51,13 +48,11 @@ The filesystem resolver is installed with vLLM by default and enables loading Lo
 #### Setup Steps
 
 1. **Create the LoRA adapter storage directory**:
-
    ```bash
    mkdir -p /path/to/lora/adapters
    ```
 
 2. **Set environment variables**:
-
    ```bash
    export VLLM_ALLOW_RUNTIME_LORA_UPDATING=true
    export VLLM_PLUGINS=lora_filesystem_resolver
@@ -66,7 +61,6 @@ The filesystem resolver is installed with vLLM by default and enables loading Lo
 
 3. **Start vLLM server**:
    Your base model can be `meta-llama/Llama-2-7b-hf`. Please make sure you set up the Hugging Face token in your env var `export HF_TOKEN=xxx235`.
-
    ```bash
    python -m vllm.entrypoints.openai.api_server \
        --model your-base-model \
@@ -93,7 +87,6 @@ The filesystem resolver expects LoRA adapters to be organized in the following s
 Each adapter directory must contain:
 
 - **`adapter_config.json`**: Required configuration file with the following structure:
-
   ```json
   {
     "peft_type": "LORA",
@@ -113,21 +106,18 @@ Each adapter directory must contain:
 #### Usage Example
 
 1. **Prepare your LoRA adapter**:
-
    ```bash
    # Assuming you have a LoRA adapter in /tmp/my_lora_adapter
    cp -r /tmp/my_lora_adapter /path/to/lora/adapters/my_sql_adapter
    ```
 
 2. **Verify the directory structure**:
-
    ```bash
    ls -la /path/to/lora/adapters/my_sql_adapter/
    # Should show: adapter_config.json, adapter_model.bin, etc.
    ```
 
 3. **Make a request using the adapter**:
-
    ```bash
    curl http://localhost:8000/v1/completions \
        -H "Content-Type: application/json" \
@@ -167,7 +157,6 @@ All listed resolvers are enabled; at request time, vLLM tries them in order unti
 To implement your own resolver plugin:
 
 1. **Create a new resolver class**:
-
    ```python
    from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
    from vllm.lora.request import LoRARequest
@@ -179,7 +168,6 @@ To implement your own resolver plugin:
    ```
 
 2. **Register the resolver**:
-
    ```python
    def register_custom_resolver():
        resolver = CustomResolver()
@@ -210,13 +198,11 @@ To implement your own resolver plugin:
 ### Debugging Tips
 
 1. **Enable debug logging**:
-
    ```bash
    export VLLM_LOGGING_LEVEL=DEBUG
    ```
 
 2. **Verify environment variables**:
-
    ```bash
    echo $VLLM_ALLOW_RUNTIME_LORA_UPDATING
    echo $VLLM_PLUGINS
@@ -224,7 +210,6 @@ To implement your own resolver plugin:
    ```
 
 3. **Test adapter configuration**:
-
    ```bash
    python -c "
    import json
