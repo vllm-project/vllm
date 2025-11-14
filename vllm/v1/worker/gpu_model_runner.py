@@ -1314,7 +1314,7 @@ class GPUModelRunner(
         :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
         """
         logits_indices_padded = None
-        num_logits_indices = 0
+        num_logits_indices = None
         if logits_indices is not None:
             num_logits_indices = logits_indices.size(0)
             if self.cache_config.kv_sharing_fast_prefill:
@@ -1853,7 +1853,7 @@ class GPUModelRunner(
                         )
                     )
 
-                    micro_batch_outputs = model.get_multimodal_embeddings(
+                    micro_batch_outputs = model.embed_multimodal(
                         **micro_batch_mm_inputs
                     )
 
@@ -1866,7 +1866,7 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
-                curr_group_outputs = model.get_multimodal_embeddings(**mm_kwargs_group)
+                curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
@@ -2225,7 +2225,7 @@ class GPUModelRunner(
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds_scheduled = self.model.get_input_embeddings(
+            inputs_embeds_scheduled = self.model.embed_input_ids(
                 self.input_ids.gpu[:num_scheduled_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
@@ -2261,7 +2261,7 @@ class GPUModelRunner(
             # Some tokens ids may need to become embeds
             if token_ids_idx.numel() > 0:
                 token_ids = self.input_ids.gpu[token_ids_idx]
-                tokens_to_embeds = self.model.get_input_embeddings(input_ids=token_ids)
+                tokens_to_embeds = self.model.embed_input_ids(input_ids=token_ids)
                 self.inputs_embeds.gpu[token_ids_idx] = tokens_to_embeds
 
             inputs_embeds = self.inputs_embeds.gpu[:num_input_tokens]
@@ -2590,28 +2590,28 @@ class GPUModelRunner(
                     )
                 )
 
-            dp_rank = self.parallel_config.data_parallel_rank
-            if ubatch_slices:
-                assert num_tokens_across_dp is not None
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-                self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
-            elif num_tokens_across_dp is not None:
-                num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
-            else:
-                num_input_tokens = self._get_num_input_tokens(
-                    scheduler_output.total_num_scheduled_tokens
-                )
+                dp_rank = self.parallel_config.data_parallel_rank
+                if ubatch_slices:
+                    assert num_tokens_across_dp is not None
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                    self.pad_out_ubatch_slice(ubatch_slices, num_input_tokens)
+                elif num_tokens_across_dp is not None:
+                    num_input_tokens = int(num_tokens_across_dp[dp_rank].item())
+                else:
+                    num_input_tokens = self._get_num_input_tokens(
+                        scheduler_output.total_num_scheduled_tokens
+                    )
 
-            (
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-                ec_connector_output,
-            ) = self._preprocess(
-                scheduler_output, num_input_tokens, intermediate_tensors
-            )
+                (
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                    ec_connector_output,
+                ) = self._preprocess(
+                    scheduler_output, num_input_tokens, intermediate_tensors
+                )
 
             uniform_decode = (
                 max_num_scheduled_tokens == self.uniform_decode_query_len
@@ -3889,7 +3889,7 @@ class GPUModelRunner(
                     )
 
                     # Run multimodal encoder.
-                    dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                    dummy_encoder_outputs = self.model.embed_multimodal(
                         **batched_dummy_mm_inputs
                     )
 
