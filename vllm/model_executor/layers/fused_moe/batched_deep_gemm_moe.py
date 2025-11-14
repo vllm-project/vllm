@@ -5,6 +5,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
@@ -316,13 +317,15 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def estimate_expected_m(
         self, global_num_experts: int, max_tokens_per_expert: int, topk: int
     ) -> int:
-        from vllm.forward_context import get_forward_context
-
-        dp_meta = get_forward_context().dp_metadata
+        dp_meta = (
+            get_forward_context().dp_metadata
+            if is_forward_context_available()
+            else None
+        )
         if dp_meta is None:
             logger.warning_once(
                 "DPMetadata unavailable. Defaulting expected_m to "
-                f"{max_tokens_per_expert}",
+                f"{max_tokens_per_expert}.",
                 scope="local",
             )
             return max_tokens_per_expert
