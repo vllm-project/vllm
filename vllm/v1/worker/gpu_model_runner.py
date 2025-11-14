@@ -1366,12 +1366,12 @@ class GPUModelRunner(
                 )
             else:
                 blk_table = self.input_batch.block_table[kv_cache_gid]
-                blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
-                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
-
                 # Fill unused with -1. Needed for reshape_and_cache in full cuda
                 # graph mode.
                 blk_table.slot_mapping.gpu[num_tokens:].fill_(-1)
+
+                blk_table_tensor = blk_table.get_device_tensor(num_reqs_padded)
+                slot_mapping = blk_table.slot_mapping.gpu[:num_tokens_padded]
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc,
@@ -2611,6 +2611,15 @@ class GPUModelRunner(
                     use_cascade_attn=cascade_attn_prefix_lens is not None,
                 )
 
+                logger.debug(
+                    "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+                    "ubatch_slices: %s, num_tokens_across_dp: %s",
+                    cudagraph_mode,
+                    batch_descriptor,
+                    ubatch_slices,
+                    num_tokens_across_dp,
+                )
+
                 num_tokens_padded = batch_descriptor.num_tokens
                 num_reqs_padded = (
                     batch_descriptor.num_reqs
@@ -2619,12 +2628,15 @@ class GPUModelRunner(
                 )
 
                 use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
+                pad_attention = cudagraph_mode == CUDAGraphMode.FULL
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
                         num_tokens=num_tokens_unpadded,
-                        num_tokens_padded=num_tokens_padded,
-                        num_reqs=num_reqs_padded,
-                        num_reqs_padded=num_reqs_padded,
+                        num_tokens_padded=num_tokens_padded
+                        if pad_attention
+                        else num_tokens_unpadded,
+                        num_reqs=num_reqs,
+                        num_reqs_padded=num_reqs_padded if pad_attention else num_reqs,
                         max_query_len=max_num_scheduled_tokens,
                         ubatch_slices=ubatch_slices,
                         logits_indices=logits_indices,
@@ -3526,6 +3538,7 @@ class GPUModelRunner(
                 num_scheduled_tokens_np=num_scheduled_tokens,
                 max_num_scheduled_tokens=max_query_len,
                 use_cascade_attn=False,
+                allow_microbatching=allow_microbatching,
                 force_eager=is_profile
                 or (cudagraph_runtime_mode == CUDAGraphMode.NONE),
                 # `force_uniform_decode` is used for cudagraph capture; because for
