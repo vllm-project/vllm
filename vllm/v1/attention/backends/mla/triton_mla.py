@@ -5,6 +5,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.attention.backends.abstract import (
     AttentionLayer,
     AttentionType,
@@ -21,6 +22,11 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
+    MLACommonMetadataBuilder,
+)
+from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+    AiterMLAImpl,
+    AiterMLAMetadataBuilder,
 )
 
 logger = init_logger(__name__)
@@ -35,12 +41,73 @@ class TritonMLABackend(MLACommonBackend):
         return "TRITON_MLA"
 
     @staticmethod
-    def get_impl_cls() -> type["TritonMLAImpl"]:
+    def get_impl_cls() -> type["TritonMLAImpl"] | type["AiterTritonMLAImpl"]:
+        if rocm_aiter_ops.is_mla_enabled():
+            return AiterTritonMLAImpl
         return TritonMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> (
+        type["AiterMLAMetadataBuilder"] | type["MLACommonMetadataBuilder"]
+    ):
+        if rocm_aiter_ops.is_mla_enabled():
+            return AiterMLAMetadataBuilder
+        return MLACommonMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
         return True
+
+
+class AiterTritonMLAImpl(AiterMLAImpl):
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            **mla_args,
+        )
+        from aiter.ops.triton.mha import flash_attn_varlen_func
+
+        self.flash_attn_varlen_func = flash_attn_varlen_func
+
+    def _flash_attn_varlen_diff_headdims(
+        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
+    ):
+        result = self.flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            **kwargs,
+        )
+        # Transpose the LSE if Triton MHA is used:
+        # (q.shape[0], num_q_heads) to (num_q_heads, q.shape[0])
+        if type(result) is tuple and return_softmax_lse:
+            output, lse = result
+            lse = lse.T.contiguous()
+            return (output, lse)
+        return result
 
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
