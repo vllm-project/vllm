@@ -6,7 +6,7 @@
 import json
 import time
 from http import HTTPStatus
-from typing import Annotated, Any, ClassVar, Generic, Literal, TypeAlias, TypeVar
+from typing import Annotated, Any, ClassVar, Literal, Optional, Dict, Tuple, Generic, TypeAlias, TypeVar
 
 import regex as re
 import torch
@@ -3220,3 +3220,51 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+def find_unsupported_type(schema: Any) -> Tuple[bool, Optional[str]]:
+    """
+    Whitelist mechanism: recursively check whether the JSON schema contains
+    any unsupported `type` values.
+    If an unsupported type is found, return (True, unsupported_type_name);
+    otherwise return (False, None).
+    """
+    SUPPORTED_TYPES = {"object", "array", "string", "number", "integer", "boolean"}
+    if isinstance(schema, dict):
+        t = schema.get("type")
+        if isinstance(t, str):
+            if t not in SUPPORTED_TYPES:
+                return True, t
+        elif isinstance(t, list):
+            for x in t:
+                # Composite type (type can be a list, e.g., ["string", "null"]);
+                # each element must also be validated.
+                if not isinstance(x, str) or x not in SUPPORTED_TYPES:
+                    return True, x
+        # Recursively check all nested fields
+        for v in schema.values():
+            found, unsupported = find_unsupported_type(v)
+            if found:
+                return True, unsupported
+    elif isinstance(schema, list):
+        for item in schema:
+            found, unsupported = find_unsupported_type(item)
+            if found:
+                return True, unsupported
+    return False, None
+
+
+def validate_schema_format(schema: Dict[str, Any]):
+    """Validate the given schema.
+    If it contains any types not in the whitelist, raise a ValueError.
+    """
+    if not schema:
+        return
+    try:
+        found, unsupported = find_unsupported_type(schema)
+        if found:
+            raise ValueError(f"Invalid schema: {unsupported}")
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"Invalid schema: {str(e)}")
