@@ -25,6 +25,7 @@ logger = init_logger(__name__)
 class FlashinferMoeBackend(Enum):
     TENSORRT_LLM = "TensorRT-LLM"
     CUTLASS = "CUTLASS"
+    CUTEDSL = "CUTEDSL"
 
 
 def calculate_tile_tokens_dim(num_tokens, top_k, num_experts):
@@ -273,19 +274,21 @@ def flashinfer_cutlass_moe_fp8(
 
 
 def get_flashinfer_moe_backend() -> FlashinferMoeBackend:
-    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
-    # Prefer CUTLASS on SM90 to cover both SM90/SM100 generations
-    if flashinfer_moe_backend == "throughput" or current_platform.is_device_capability(
-        90
-    ):
-        return FlashinferMoeBackend.CUTLASS
-    elif flashinfer_moe_backend == "latency":
-        return FlashinferMoeBackend.TENSORRT_LLM
+    backend_map = {
+        "throughput": FlashinferMoeBackend.CUTLASS,
+        "latency": FlashinferMoeBackend.TENSORRT_LLM,
+        "masked_gemm": FlashinferMoeBackend.CUTEDSL,
+    }
 
-    allowed_backends = ["throughput", "latency"]
+    flashinfer_moe_backend = envs.VLLM_FLASHINFER_MOE_BACKEND
+    if flashinfer_moe_backend in backend_map:
+        return backend_map[flashinfer_moe_backend]
+    elif current_platform.is_device_capability(90):
+        return FlashinferMoeBackend.CUTLASS
+
     raise ValueError(
-        f"Unknown flashinfer moe backend: {flashinfer_moe_backend}"
-        f" expected one of {allowed_backends}"
+        f"Unknown flashinfer moe backend: {flashinfer_moe_backend!r}. "
+        f"Expected one of {list(backend_map.keys())}."
     )
 
 
