@@ -231,9 +231,17 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        draft_length: int | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
+
+        # Use provided draft_length or fall back to default
+        if draft_length is None:
+            draft_length = self.num_speculative_tokens
+        elif draft_length > self.num_speculative_tokens:
+            # Cap at max configured length
+            draft_length = self.num_speculative_tokens
 
         if last_token_indices is None:
             last_token_indices = common_attn_metadata.query_start_loc[1:] - 1
@@ -327,7 +335,7 @@ class EagleProposer:
         logits = self.model.compute_logits(sample_hidden_states)
 
         # Early exit if there is only one draft token to be generated.
-        if self.num_speculative_tokens == 1:
+        if draft_length == 1:
             draft_token_ids = logits.argmax(dim=-1)
             return draft_token_ids.view(-1, 1)
 
@@ -387,7 +395,7 @@ class EagleProposer:
         ).clone()
         # Initialize continue mask for confidence-based early stopping
         self.continue_mask[:batch_size] = True
-        for token_index in range(self.num_speculative_tokens - 1):
+        for token_index in range(draft_length - 1):
             # Update the inputs.
             # cast to int32 is crucial when eagle model is compiled.
             # tensor.argmax() returns int64 by default.
