@@ -42,6 +42,11 @@ class SchedulerConfig:
     This config has no static default. If left unspecified by the user, it will
     be set in `EngineArgs.create_engine_config` based on the usage context."""
 
+    prefill_max_num_batched_tokens: int = Field(default=None, ge=1)
+    """Maximum number of tokens to be processed in a single iteration when there
+    are no decode requests. If not set (None), defaults to max_num_batched_tokens.
+    Must satisfy: prefill_max_num_batched_tokens >= max_num_batched_tokens."""
+
     max_num_seqs: int = Field(default=None, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
 
@@ -142,6 +147,12 @@ class SchedulerConfig:
     speculative decoding and pipeline parallelism.
     """
 
+    enable_schedule_capacity_profiling: bool = False
+    """If set to True, profile the maximum schedulable tokens at each step.
+    This tracks both the token demand (from running and waiting requests) and
+    the memory capacity limit (based on available KV cache memory). Statistics
+    will be logged at shutdown showing the distribution of bottlenecks."""
+    
     stream_interval: int = Field(default=1, ge=1)
     """The interval (or buffer size) for streaming in terms of token length.
     A smaller value (1) makes streaming smoother by sending each token immediately,
@@ -190,6 +201,7 @@ class SchedulerConfig:
 
     @field_validator(
         "max_num_batched_tokens",
+        "prefill_max_num_batched_tokens",
         "max_num_seqs",
         "max_model_len",
         "enable_chunked_prefill",
@@ -245,7 +257,6 @@ class SchedulerConfig:
                     self.max_num_batched_tokens,
                     MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
-
             # When using default settings,
             # Ensure max_num_batched_tokens does not exceed model limit.
             # Some models (e.g., Whisper) have embeddings tied to max length.
@@ -253,6 +264,10 @@ class SchedulerConfig:
                 self.max_num_seqs * self.max_model_len, self.max_num_batched_tokens
             )
 
+        # Initialize prefill_max_num_batched_tokens based on user input
+        if self.prefill_max_num_batched_tokens is None:
+            # Default to max_num_batched_tokens
+            self.prefill_max_num_batched_tokens = self.max_num_batched_tokens
         self.max_num_encoder_input_tokens = self.max_num_batched_tokens
         self.encoder_cache_size = self.max_num_batched_tokens
 
@@ -324,6 +339,15 @@ class SchedulerConfig:
             raise ValueError(
                 f"{self.max_long_partial_prefills=} must be less than or equal to "
                 f"{self.max_num_partial_prefills=}."
+            )
+
+        # Validate prefill_max_num_batched_tokens
+        if self.prefill_max_num_batched_tokens < self.max_num_batched_tokens:
+            raise ValueError(
+                f"prefill_max_num_batched_tokens "
+                f"({self.prefill_max_num_batched_tokens}) must be greater "
+                f"than or equal to max_num_batched_tokens "
+                f"({self.max_num_batched_tokens})."
             )
 
         return self

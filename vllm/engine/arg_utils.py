@@ -429,6 +429,9 @@ class EngineArgs:
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = SchedulerConfig.max_num_batched_tokens
+    prefill_max_num_batched_tokens: int | None = (
+        SchedulerConfig.prefill_max_num_batched_tokens
+    )
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -558,6 +561,10 @@ class EngineArgs:
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
+    enable_schedule_capacity_profiling: bool = (
+        SchedulerConfig.enable_schedule_capacity_profiling
+    )
+      
     stream_interval: int = SchedulerConfig.stream_interval
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
@@ -1032,6 +1039,10 @@ class EngineArgs:
             "--max-num-batched-tokens", **scheduler_kwargs["max_num_batched_tokens"]
         )
         scheduler_group.add_argument(
+            "--prefill-max-num-batched-tokens",
+            **scheduler_kwargs["prefill_max_num_batched_tokens"],
+        )
+        scheduler_group.add_argument(
             "--max-num-seqs", **scheduler_kwargs["max_num_seqs"]
         )
         scheduler_group.add_argument(
@@ -1068,6 +1079,10 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
+        )
+        scheduler_group.add_argument(
+            "--enable-schedule-capacity-profiling",
+            **scheduler_kwargs["enable_schedule_capacity_profiling"],
         )
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
@@ -1553,6 +1568,7 @@ class EngineArgs:
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
+            prefill_max_num_batched_tokens=self.prefill_max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             num_lookahead_slots=num_lookahead_slots,
@@ -1567,6 +1583,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            enable_schedule_capacity_profiling=self.enable_schedule_capacity_profiling,
             stream_interval=self.stream_interval,
         )
 
