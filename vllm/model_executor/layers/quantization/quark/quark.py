@@ -58,7 +58,6 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
-        self.ignore: list[str] = cast(list[str], self.quant_config.get("exclude", []))
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -106,8 +105,9 @@ class QuarkConfig(QuantizationConfig):
         from vllm.attention.layer import Attention  # Avoid circular import
 
         # Check if the layer is skipped for quantization.
+        exclude_layers = cast(list[str], self.quant_config.get("exclude"))
         if should_ignore_layer(
-            prefix, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+            prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
             return UnquantizedLinearMethod()
         if isinstance(layer, LinearBase):
@@ -120,9 +120,6 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, FusedMoE):
             return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
         return None
-
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
-        self.ignore = hf_to_vllm_mapper.apply_list(self.ignore)
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "QuarkConfig":
