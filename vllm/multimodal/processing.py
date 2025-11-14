@@ -1678,7 +1678,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_hashes: MultiModalHashes,
     ) -> tuple[OptionalPreCachedMediaItems, MultiModalDataItems]:
         mm_cached_items = {
-            modality: cache.get(hashes) for modality, hashes in mm_hashes.items()
+            modality: cache.peek(hashes) for modality, hashes in mm_hashes.items()
         }
 
         mm_missing_idxs = {
@@ -1744,12 +1744,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     mm_missing_next_idx[modality] += 1
 
                     item = kwargs, updates
-                    kwargs, updates = cache.get_and_update_item(item, item_hash)
                 else:
                     item = mm_cached_items[modality][item_idx]
 
-                # We call `get_and_update_item` on every item, pre-cached or not,
-                # to establish a simple cache order that can be copied in P1
                 kwargs, updates = cache.get_and_update_item(item, item_hash)
 
                 merged_kwargs[modality].append(kwargs)

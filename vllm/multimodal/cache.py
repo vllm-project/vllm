@@ -188,57 +188,22 @@ class BaseMultiModalCache(ABC, Generic[_I, _O]):
     the server in the core process (=P1). The data flow is as follows:
 
     ```
-                 get_and_update()
-    P0: From API -----------------> To P1
+                  peek() x N         get_and_update()
+    P0: From API -----------------> -----------------> To P1
 
                  get_and_update()
     P1: From P0 -----------------> To model
     ```
 
+    `peek()` can be called any number of times in P0. However,
     `get_and_update()` must be called in P0 and P1 one after another
     so that their cache eviction order remains the same.
 
+    This ensures that the keys in P0 and P1 caches are mirrored,
+    allowing us to determine whether a key is cached in P1 by looking
+    up the P0 cache, without having to communicate with P1.
     This ensures that the keys in P0 and P1 caches are mirrored.
     """
-
-    @abstractmethod
-    def get_item(
-        self,
-        mm_hash: str,
-    ) -> _O | None:
-        """
-        Get a multi-modal item from the cache, if it exists.
-        This should be used to check for the existence of an item in the cache,
-        as the cache can be changed by other threads.
-
-        This **DOES** update the cache eviction order.
-
-        Args:
-            mm_hash: The hash of the item to fetch.
-
-        Returns:
-            The multi-modal item, if it is cached, otherwise None.
-        """
-        raise NotImplementedError
-
-    def get(
-        self,
-        mm_hashes: list[str],
-    ) -> list[_O | None]:
-        """
-        Get a sequence of multi-modal items from the cache, if they exist.
-        This should be used to check for the existence of items in the cache,
-        as the cache can be changed by other threads.
-
-        This **DOES** update the cache eviction order.
-
-        Args:
-            mm_hash: The hash of the item to fetch.
-
-        Returns:
-            For each item, the multi-modal item if it is cached, otherwise None.
-        """
-        return [self.get_item(mm_hash) for mm_hash in mm_hashes]
 
     @abstractmethod
     def get_and_update_item(
@@ -308,6 +273,45 @@ class BaseMultiModalProcessorCache(
     """The required interface for caches on P0."""
 
     @abstractmethod
+    def peek_item(
+        self,
+        mm_hash: str,
+    ) -> _O | None:
+        """
+        Get a multi-modal item from the cache, if it exists.
+        This should be used to check for the existence of an item in the cache,
+        as the cache can be changed by other threads.
+
+        This **DOES NOT** update the cache eviction order.
+
+        Args:
+            mm_hash: The hash of the item to fetch.
+
+        Returns:
+            The multi-modal item, if it is cached, otherwise None.
+        """
+        raise NotImplementedError
+
+    def peek(
+        self,
+        mm_hashes: list[str],
+    ) -> list[_O | None]:
+        """
+        Get a sequence of multi-modal items from the cache, if they exist.
+        This should be used to check for the existence of items in the cache,
+        as the cache can be changed by other threads.
+
+        This **DOES NOT** update the cache eviction order.
+
+        Args:
+            mm_hash: The hash of the item to fetch.
+
+        Returns:
+            For each item, the multi-modal item if it is cached, otherwise None.
+        """
+        return [self.peek_item(mm_hash) for mm_hash in mm_hashes]
+
+    @abstractmethod
     def make_stats(self, *, delta: bool = False) -> CacheInfo:
         """
         Get (and reset) the multi-modal cache stats.
@@ -340,8 +344,8 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
-        if (cached_item := self._cache.get(mm_hash)) is not None:
+    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
             return cached_item.item, cached_item.prompt_updates
 
         return None
@@ -352,9 +356,8 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        cached_response = self.get_item(mm_hash)
-        if cached_response is not None:
-            return cached_response
+        if (cached_item := self._cache.get(mm_hash)) is not None:
+            return cached_item.item, cached_item.prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
@@ -398,8 +401,8 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         )
 
     @override
-    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
-        if (cached_item := self._cache.get(mm_hash)) is not None:
+    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+        if (cached_item := self._cache.peek(mm_hash)) is not None:
             return None, cached_item.prompt_updates
 
         return None
@@ -410,9 +413,8 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        cached_response = self.get_item(mm_hash)
-        if cached_response is not None:
-            return cached_response
+        if (cached_item := self._cache.get(mm_hash)) is not None:
+            return None, cached_item.prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
@@ -476,7 +478,10 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         return info
 
     @override
-    def get_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+    def peek_item(self, mm_hash: str) -> MultiModalProcessorCacheOutItem | None:
+        # SHM cache is FIFO, so calling the standard get_cached method will not
+        # change the cache eviction order
+
         if self._shm_cache.is_cached(mm_hash):
             self._hits += 1
             self._total += 1
@@ -485,6 +490,7 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             prompt_updates, modality = self._p0_cache[mm_hash]
             return self.address_as_item(address, monotonic_id, modality), prompt_updates
 
+        self._total += 1
         return None
 
     @override
@@ -493,9 +499,13 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
         mm_item: MultiModalProcessorCacheInItem,
         mm_hash: str,
     ) -> MultiModalProcessorCacheOutItem:
-        cached_response = self.get_item(mm_hash)
-        if cached_response is not None:
-            return cached_response
+        if self._shm_cache.is_cached(mm_hash):
+            self._hits += 1
+            self._total += 1
+
+            address, monotonic_id = self._shm_cache.get_cached(mm_hash)
+            prompt_updates, modality = self._p0_cache[mm_hash]
+            return self.address_as_item(address, monotonic_id, modality), prompt_updates
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
@@ -628,10 +638,6 @@ class BaseMultiModalReceiverCache(
         mm_features: list["MultiModalFeatureSpec"],
     ) -> list["MultiModalFeatureSpec"]:
         """Update multimodal features with cached encoder outputs."""
-        # Touch each previously-cached item in the input request, to align with P0
-        for feature in mm_features:
-            self.get_item(feature.identifier)
-
         for feature in mm_features:
             feature.data = self.get_and_update_item(feature.data, feature.identifier)
         return mm_features
@@ -659,21 +665,13 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         )
 
     @override
-    def get_item(self, mm_hash: str) -> MultiModalKwargsItem | None:
-        if (cached_item := self._cache.get(mm_hash)) is not None:
-            return cached_item
-
-        return None
-
-    @override
     def get_and_update_item(
         self,
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        cached_response = self.get_item(mm_hash)
-        if cached_response is not None:
-            return cached_response
+        if (cached_item := self._cache.get(mm_hash)) is not None:
+            return cached_item
 
         assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
 
@@ -717,11 +715,6 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
             serde_class=MsgpackSerde,
             reader_lock=shared_worker_lock,
         )
-
-    @override
-    def get_item(self, mm_hash: str) -> MultiModalKwargsItem | None:
-        # Cannot get data from shm ring cache with only hash
-        return None
 
     @override
     def get_and_update_item(
