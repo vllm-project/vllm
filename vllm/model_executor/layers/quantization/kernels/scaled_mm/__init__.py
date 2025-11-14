@@ -69,6 +69,10 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         RowWiseTorchScaledMMLinearKernel,
         ChannelWiseTorchScaledMMLinearKernel,
     ],
+    PlatformEnum.CPU: [
+        PerTensorTorchScaledMMLinearKernel,
+        ChannelWiseTorchScaledMMLinearKernel,
+    ],
 }
 
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
