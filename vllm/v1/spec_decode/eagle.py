@@ -40,6 +40,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import _SAMPLING_EPS
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 logger = init_logger(__name__)
@@ -272,6 +273,13 @@ class EagleProposer:
             cudagraph_runtime_mode = CUDAGraphMode.PIECEWISE
         else:
             num_input_tokens = num_tokens
+
+        num_input_tokens, num_tokens_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=num_tokens,
+            num_tokens_padded=num_input_tokens,
+            allow_dp_padding=cudagraph_runtime_mode != CUDAGraphMode.NONE,
+        )
+
         # copy inputs to buffer for cudagraph
         self._set_positions(num_tokens, target_positions)
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -295,6 +303,7 @@ class EagleProposer:
             per_layer_attn_metadata,
             self.vllm_config,
             num_tokens=num_input_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
             cudagraph_runtime_mode=cudagraph_runtime_mode,
         ):
             ret_hidden_states = self.model(
@@ -363,6 +372,12 @@ class EagleProposer:
         else:
             input_batch_size = batch_size
             cudagraph_runtime_mode = CUDAGraphMode.NONE
+
+        input_batch_size, batch_size_across_dp = self._pad_batch_across_dp(
+            num_tokens_unpadded=batch_size,
+            num_tokens_padded=input_batch_size,
+            allow_dp_padding=cudagraph_runtime_mode != CUDAGraphMode.NONE,
+        )
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -460,6 +475,7 @@ class EagleProposer:
                 per_layer_attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch_size,
+                num_tokens_across_dp=batch_size_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
             ):
                 ret_hidden_states = self.model(
@@ -1055,35 +1071,51 @@ class EagleProposer:
         self,
         num_tokens: int,
         use_cudagraphs=True,
+        is_graph_capturing=False,
     ) -> None:
         # Determine if CUDA graphs should be used for this run.
         cudagraphs_enabled = use_cudagraphs and self.use_cuda_graph
         if cudagraphs_enabled and num_tokens <= self.cudagraph_batch_sizes[-1]:
-            num_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)
-            # FIXME: when using tree-based specdec, adjust number of forward-passes
-            # according to the depth of the tree.
-            for _ in range(self.num_speculative_tokens):
-                with set_forward_context(
-                    None,
-                    self.vllm_config,
-                    num_tokens=num_tokens,
-                    cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
-                    if cudagraphs_enabled
-                    else CUDAGraphMode.NONE,
-                ):
-                    if self.supports_mm_inputs:
-                        input_ids = None
-                        inputs_embeds = self.inputs_embeds[:num_tokens]
-                    else:
-                        input_ids = self.input_ids[:num_tokens]
-                        inputs_embeds = None
+            num_tokens_padded = self.vllm_config.pad_for_cudagraph(num_tokens)
+        else:
+            num_tokens_padded = num_tokens
 
-                    self.model(
-                        input_ids=input_ids,
-                        positions=self._get_positions(num_tokens),
-                        hidden_states=self.hidden_states[:num_tokens],
-                        inputs_embeds=inputs_embeds,
-                    )
+        # FIXME: when using tree-based specdec, adjust number of forward-passes
+        # according to the depth of the tree.
+        for fwd_idx in range(
+            self.num_speculative_tokens if not is_graph_capturing else 1
+        ):
+            if fwd_idx <= 1:
+                num_input_tokens, num_tokens_across_dp = self._pad_batch_across_dp(
+                    num_tokens_unpadded=num_tokens,
+                    num_tokens_padded=num_tokens_padded,
+                    # We don't use 'cudagraphs_enabled' because a dummy batch runs 
+                    # in eager mode although we want it to get padded to match the 
+                    # cudagraph-enabled non-dummy dp batch size
+                    allow_dp_padding=self.use_cuda_graph,
+                )
+            with set_forward_context(
+                None,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE
+                if cudagraphs_enabled
+                else CUDAGraphMode.NONE,
+            ):
+                if self.supports_mm_inputs:
+                    input_ids = None
+                    inputs_embeds = self.inputs_embeds[:num_input_tokens]
+                else:
+                    input_ids = self.input_ids[:num_input_tokens]
+                    inputs_embeds = None
+
+                self.model(
+                    input_ids=input_ids,
+                    positions=self._get_positions(num_input_tokens),
+                    hidden_states=self.hidden_states[:num_input_tokens],
+                    inputs_embeds=inputs_embeds,
+                )
 
     def _get_attention_metadata_builder(self) -> AttentionMetadataBuilder:
         """Find and return the attention metadata builders for EAGLE layers.
@@ -1132,6 +1164,29 @@ class EagleProposer:
             )
             == 1
         ), "All eagle layers should belong to the same kv cache group"
+
+    def _pad_batch_across_dp(
+        self,
+        num_tokens_unpadded: int,
+        num_tokens_padded: int,
+        allow_dp_padding: bool,
+    ) -> tuple[int, torch.Tensor]:
+        # TODO(Flechman): support DBO ubatching
+        ubatch_slices, num_toks_across_dp = coordinate_batch_across_dp(
+            num_tokens_unpadded=num_tokens_unpadded,
+            parallel_config=self.vllm_config.parallel_config,
+            allow_microbatching=False,
+            allow_dp_padding=allow_dp_padding,
+            num_tokens_padded=num_tokens_padded,
+            uniform_decode=None,
+            num_scheduled_tokens_per_request=None,
+        )
+        assert ubatch_slices is None, "DBO ubatching not implemented for EAGLE"
+
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+        if num_toks_across_dp is not None:
+            num_tokens_padded = int(num_toks_across_dp[dp_rank].item())
+        return num_tokens_padded, num_toks_across_dp
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax
