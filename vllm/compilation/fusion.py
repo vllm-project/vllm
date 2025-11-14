@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
+    kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
@@ -54,6 +55,8 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 }
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
     QUANT_OPS[kNvfp4Quant] = torch.ops._C.scaled_fp4_quant.default
+if current_platform.is_cuda():
+    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):
@@ -86,6 +89,12 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
     ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic128Sym, False
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
+    FusedRMSQuantKey(
+        kFp8Dynamic128Sym, True
+    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
 
 
@@ -214,6 +223,114 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
         )
 
 
+class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric=True,
+    ):
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        super().__init__(epsilon, key)
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor):
+            result_rms, residual = self.rmsnorm_matcher(input, weight, residual)
+            result, scale = self.quant_matcher(result_rms)
+            return result, residual, scale
+
+        def replacement(
+            input: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor
+        ):
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=self.model_dtype)
+
+            result = torch.empty_like(input, dtype=self.quant_dtype)
+            scale = self.quant_matcher.make_scale(input)
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=residual,
+                group_size=self.group_shape[1],
+            )
+
+            # result, residual, scale
+            return at[1], at[3], at[2]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.rmsnorm_matcher.inputs(),
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class RMSNormGroupQuantPattern(RMSNormQuantPattern):
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        group_shape: GroupShape,
+        symmetric=True,
+    ):
+        scale = ScaleDesc(torch.float32, False, group_shape)
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(dtype=quant_dtype, scale=scale, symmetric=symmetric),
+        )
+        self.group_shape = group_shape
+        super().__init__(epsilon, key)
+
+    def register(self, pm_pass: PatternMatcherPass):
+        def pattern(input: torch.Tensor, weight: torch.Tensor):
+            result_rms = self.rmsnorm_matcher(input, weight)
+            result, scale = self.quant_matcher(result_rms)
+            return result, scale
+
+        def replacement(input: torch.Tensor, weight: torch.Tensor):
+            # In case we're matching native rms-norm, conversions might be
+            # optimized out. We convert here just to be safe.
+            input = input.to(dtype=self.model_dtype)
+
+            result = torch.empty_like(input, dtype=self.quant_dtype)
+            scale = self.quant_matcher.make_scale(input)
+            at = auto_functionalized(
+                self.FUSED_OP,
+                result=result,
+                input=input,
+                weight=weight,
+                scale=scale,
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=None,
+                group_size=self.group_shape[1],
+            )
+
+            # result, scale
+            return at[1], at[2]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.rmsnorm_matcher.inputs(),
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
 class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
     def __init__(
         self,
@@ -336,6 +453,16 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         # Make sure fused add patterns are before simple rms norm,
         # as the latter is a subset of the former in torch ops
         for epsilon in [1e-5, 1e-6]:
+            # Try it before the dynamic one, maybe refator later to run both
+            # blockwise and per-token from the same pattern?
+            FusedAddRMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            ).register(self.patterns)
+
+            RMSNormGroupQuantPattern(
+                epsilon, FP8_DTYPE, group_shape=GroupShape(1, 128)
+            ).register(self.patterns)
+
             # Fuse fused_add_rms_norm + static fp8 quant
             FusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
                 self.patterns
@@ -362,9 +489,11 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
     def uuid(self) -> Any:
         return self.hash_source(
             self,
+            RMSNormGroupQuantPattern,
             RMSNormQuantPattern,
             RMSNormStaticQuantPattern,
             RMSNormDynamicQuantPattern,
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
+            FusedAddRMSNormGroupQuantPattern,
         )
