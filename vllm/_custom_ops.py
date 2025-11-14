@@ -329,6 +329,7 @@ def rms_norm(
     out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     # TODO: Remove this contiguous call when the kernel is updated to support non-contiguous input
+    # If removed, also need to remove contiguous in MatcherRMSNorm
     input_contiguous = input.contiguous()
     torch.ops._C.rms_norm(out, input_contiguous, weight, epsilon)
 
@@ -337,6 +338,34 @@ def fused_add_rms_norm(
     input: torch.Tensor, residual: torch.Tensor, weight: torch.Tensor, epsilon: float
 ) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def fused_qk_norm_rope(
+    qkv: torch.Tensor,
+    num_heads_q: int,
+    num_heads_k: int,
+    num_heads_v: int,
+    head_dim: int,
+    eps: float,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    position_ids: torch.Tensor,
+) -> None:
+    torch.ops._C.fused_qk_norm_rope(
+        qkv,
+        num_heads_q,
+        num_heads_k,
+        num_heads_v,
+        head_dim,
+        eps,
+        q_weight,
+        k_weight,
+        cos_sin_cache,
+        is_neox,
+        position_ids,
+    )
 
 
 def apply_repetition_penalties_torch(
@@ -1145,11 +1174,48 @@ def gptq_marlin_repack(
     return torch.ops._C.gptq_marlin_repack(b_q_weight, perm, size_k, size_n, num_bits)
 
 
-# gptq_marlin
+if hasattr(torch.ops._C, "gptq_marlin_repack"):
+
+    @register_fake("_C::gptq_marlin_repack")
+    def _gptq_marlin_repack_fake(
+        b_q_weight: torch.Tensor,
+        perm: torch.Tensor,
+        size_k: torch.SymInt,
+        size_n: torch.SymInt,
+        num_bits: int,
+    ) -> torch.Tensor:
+        pack_factor = 32 // num_bits
+        marlin_tile_size = 16
+        return torch.empty(
+            (size_k // marlin_tile_size, size_n * marlin_tile_size // pack_factor),
+            dtype=b_q_weight.dtype,
+            device=b_q_weight.device,
+        )
+
+
+# awq_marlin
 def awq_marlin_repack(
     b_q_weight: torch.Tensor, size_k: int, size_n: int, num_bits: int
 ) -> torch.Tensor:
     return torch.ops._C.awq_marlin_repack(b_q_weight, size_k, size_n, num_bits)
+
+
+if hasattr(torch.ops._C, "awq_marlin_repack"):
+
+    @register_fake("_C::awq_marlin_repack")
+    def _awq_marlin_repack_fake(
+        b_q_weight: torch.Tensor,
+        size_k: torch.SymInt,
+        size_n: torch.SymInt,
+        num_bits: int,
+    ) -> torch.Tensor:
+        pack_factor = 32 // num_bits
+        marlin_tile_size = 16
+        return torch.empty(
+            (size_k // marlin_tile_size, size_n * marlin_tile_size // pack_factor),
+            dtype=b_q_weight.dtype,
+            device=b_q_weight.device,
+        )
 
 
 def gptq_marlin_moe_repack(
@@ -2552,6 +2618,88 @@ def onednn_scaled_mm(
     )
 
     return output
+
+
+def cpu_attn_get_scheduler_metadata(
+    num_reqs: int,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    seq_lens: torch.Tensor,
+    dtype: torch.dtype,
+    query_start_loc: torch.Tensor,
+    causal: bool,
+    sliding_window_size: int,
+    isa: str,
+    enable_kv_split: bool,
+) -> torch.Tensor:
+    sheduler_metadata = torch.ops._C.get_scheduler_metadata(
+        num_reqs,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        seq_lens,
+        dtype,
+        query_start_loc,
+        causal,
+        sliding_window_size,
+        isa,
+        enable_kv_split,
+    )
+    return sheduler_metadata
+
+
+def cpu_attn_reshape_and_cache(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    isa: str,
+) -> None:
+    torch.ops._C.cpu_attn_reshape_and_cache(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        slot_mapping,
+        isa,
+    )
+
+
+def cpu_attention_with_kv_cache(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    output: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    scale: float,
+    causal: bool,
+    alibi_slopes: torch.Tensor | None,
+    sliding_window: tuple[int, int],
+    block_table: torch.Tensor,
+    softcap: float,
+    scheduler_metadata: torch.Tensor,
+    s_aux: torch.Tensor | None,
+) -> None:
+    torch.ops._C.cpu_attention_with_kv_cache(
+        query,
+        key_cache,
+        value_cache,
+        output,
+        query_start_loc,
+        seq_lens,
+        scale,
+        causal,
+        alibi_slopes,
+        sliding_window[0],
+        sliding_window[1],
+        block_table,
+        softcap,
+        scheduler_metadata,
+        s_aux,
+    )
 
 
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
