@@ -97,14 +97,12 @@ VLM_TEST_SETTINGS = {
         multi_image_prompt=(
             "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
             "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
-            "请分别描述这两张图片。"
+            "Describe these two images separately."
         ),
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
         image_size_factors=[(), (0.25,)],
-        vllm_runner_kwargs={"gpu_memory_utilization": 0.5},
-        marks=[pytest.mark.core_model],
     ),
     #### Core tests to always run in the CI
     "llava": VLMTestInfo(
