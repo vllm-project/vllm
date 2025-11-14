@@ -42,24 +42,16 @@ def distributed_run(fn, world_size):
         assert p.exitcode == 0
 
 
-def worker_fn_wrapper(fn):
-    # `torch.multiprocessing.Process` cannot accept environment variables directly
-    # so we need to pass the environment variables as arguments
-    # and update the environment variables in the function
-    def wrapped_fn(env):
-        update_environment_variables(env)
-        local_rank = os.environ["LOCAL_RANK"]
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-        init_distributed_environment()
+def set_env_vars_and_device(env: dict[str, str]) -> None:
+    update_environment_variables(env)
+    local_rank = os.environ["LOCAL_RANK"]
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    init_distributed_environment()
 
-        # Ensure each worker process has the same random seed
-        random.seed(42)
-        torch.manual_seed(42)
-
-        fn()
-
-    return wrapped_fn
+    # Ensure each worker process has the same random seed
+    random.seed(42)
+    torch.manual_seed(42)
 
 
 def create_expert_indices_with_redundancy(
@@ -308,10 +300,10 @@ def test_rearrange_expert_weights_with_redundancy(
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
-    @worker_fn_wrapper
-    def worker_fn():
+    def worker_fn(env: dict[str, str]) -> None:
         # Initialize model parallel (using tensor parallel as an entrypoint
         # to expert parallel)
+        set_env_vars_and_device(env)
         ensure_model_parallel_initialized(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
@@ -391,8 +383,8 @@ def test_rearrange_expert_weights_no_change(world_size):
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
-    @worker_fn_wrapper
-    def worker_fn():
+    def worker_fn(env: dict[str, str]) -> None:
+        set_env_vars_and_device(env)
         ensure_model_parallel_initialized(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
@@ -455,8 +447,8 @@ def test_rearrange_expert_weights_profile_mode(world_size):
     if torch.cuda.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
-    @worker_fn_wrapper
-    def worker_fn():
+    def worker_fn(env: dict[str, str]) -> None:
+        set_env_vars_and_device(env)
         ensure_model_parallel_initialized(
             tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
         )
