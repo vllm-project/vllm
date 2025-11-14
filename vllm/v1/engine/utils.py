@@ -24,7 +24,10 @@ from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
-from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
+from vllm.v1.utils import (
+    get_engine_client_zmq_addr_with_socket,
+    shutdown,
+)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -787,17 +790,25 @@ def launch_core_engines(
         offline_mode or local_engines_only or (local_engine_count == dp_size)
     )
 
-    # Set up input and output addresses.
+    # Set up input and output addresses with socket holding to prevent port conflicts.
+    input_addrs_and_socks = [
+        get_engine_client_zmq_addr_with_socket(client_local_only, host)
+        for _ in range(num_api_servers)
+    ]
+    output_addrs_and_socks = [
+        get_engine_client_zmq_addr_with_socket(client_local_only, host)
+        for _ in range(num_api_servers)
+    ]
+
     addresses = EngineZmqAddresses(
-        inputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
-        outputs=[
-            get_engine_client_zmq_addr(client_local_only, host)
-            for _ in range(num_api_servers)
-        ],
+        inputs=[addr for addr, _ in input_addrs_and_socks],
+        outputs=[addr for addr, _ in output_addrs_and_socks],
     )
+
+    # Keep held sockets alive until ZMQ binds
+    held_sockets = [sock for _, sock in input_addrs_and_socks if sock is not None] + [
+        sock for _, sock in output_addrs_and_socks if sock is not None
+    ]
 
     # Run the DP Coordinator process with rank 0 when in
     # online DP mode.
@@ -827,7 +838,12 @@ def launch_core_engines(
             log_stats=log_stats,
         )
 
-        yield engine_actor_manager, coordinator, addresses
+        try:
+            yield engine_actor_manager, coordinator, addresses
+        finally:
+            # Close held sockets after engines have bound
+            for sock in held_sockets:
+                sock.close()
         return
 
     if offline_mode:
@@ -858,7 +874,7 @@ def launch_core_engines(
     # will be False.
     handshake_local_only = offline_mode or local_engine_count == dp_size
 
-    handshake_address = get_engine_client_zmq_addr(
+    handshake_address, handshake_held_socket = get_engine_client_zmq_addr_with_socket(
         handshake_local_only, host, parallel_config.data_parallel_rpc_port
     )
 
@@ -870,40 +886,47 @@ def launch_core_engines(
         local_handshake_address = handshake_address
         client_handshake_address = None
 
-    with zmq_socket_ctx(
-        local_handshake_address, zmq.ROUTER, bind=True
-    ) as handshake_socket:
-        from vllm.v1.engine.core import EngineCoreProc
+    try:
+        with zmq_socket_ctx(
+            local_handshake_address, zmq.ROUTER, bind=True
+        ) as handshake_socket:
+            from vllm.v1.engine.core import EngineCoreProc
 
-        # Start local engines.
-        if local_engine_count:
-            local_engine_manager = CoreEngineProcManager(
-                EngineCoreProc.run_engine_core,
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=log_stats,
-                handshake_address=handshake_address,
-                client_handshake_address=client_handshake_address,
-                local_client=True,
-                local_engine_count=local_engine_count,
-                start_index=dp_rank,
-                local_start_index=local_start_index or 0,
+            # Start local engines.
+            if local_engine_count:
+                local_engine_manager = CoreEngineProcManager(
+                    EngineCoreProc.run_engine_core,
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    handshake_address=handshake_address,
+                    client_handshake_address=client_handshake_address,
+                    local_client=True,
+                    local_engine_count=local_engine_count,
+                    start_index=dp_rank,
+                    local_start_index=local_start_index or 0,
+                )
+            else:
+                local_engine_manager = None
+
+            yield local_engine_manager, coordinator, addresses
+
+            # Now wait for engines to start.
+            wait_for_engine_startup(
+                handshake_socket,
+                addresses,
+                engines_to_handshake,
+                parallel_config,
+                vllm_config.cache_config,
+                local_engine_manager,
+                coordinator.proc if coordinator else None,
             )
-        else:
-            local_engine_manager = None
-
-        yield local_engine_manager, coordinator, addresses
-
-        # Now wait for engines to start.
-        wait_for_engine_startup(
-            handshake_socket,
-            addresses,
-            engines_to_handshake,
-            parallel_config,
-            vllm_config.cache_config,
-            local_engine_manager,
-            coordinator.proc if coordinator else None,
-        )
+    finally:
+        # Close held sockets after engines have bound
+        for sock in held_sockets:
+            sock.close()
+        if handshake_held_socket is not None:
+            handshake_held_socket.close()
 
 
 def wait_for_engine_startup(

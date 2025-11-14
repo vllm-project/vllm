@@ -197,6 +197,82 @@ def _get_open_port() -> int:
             return s.getsockname()[1]
 
 
+def get_and_hold_open_port() -> tuple[socket.socket, int]:
+    """
+    Get an open port and return both the bound socket and port number.
+
+    This function addresses the race condition where a port is discovered
+    to be free, but gets claimed by another process before being used.
+    By keeping the socket bound, we guarantee the port remains reserved
+    until the caller is ready to use it.
+
+    The caller MUST keep the returned socket alive until the port is
+    actually bound by the intended service (e.g., ZMQ socket), otherwise
+    the port may become available again.
+
+    Returns:
+        tuple: (bound_socket, port_number)
+            - bound_socket: A socket that is bound to the port and must be
+                           kept alive to maintain the port reservation
+            - port_number: The port number that was allocated
+
+    Example:
+        sock, port = get_and_hold_open_port()
+        # Use port for configuration
+        address = f"tcp://localhost:{port}"
+        # Keep sock alive until ZMQ binds
+        zmq_socket.bind(address)
+        # Now safe to close the holding socket
+        sock.close()
+    """
+    if "VLLM_DP_MASTER_PORT" in os.environ:
+        dp_master_port = envs.VLLM_DP_MASTER_PORT
+        reserved_port_range = range(dp_master_port, dp_master_port + 10)
+        while True:
+            sock, port = _get_and_hold_open_port()
+            if port not in reserved_port_range:
+                return sock, port
+            sock.close()
+    return _get_and_hold_open_port()
+
+
+def _get_and_hold_open_port() -> tuple[socket.socket, int]:
+    """
+    Internal helper that creates and returns a bound socket.
+
+    Returns:
+        tuple: (bound_socket, port_number)
+    """
+    port = envs.VLLM_PORT
+    if port is not None:
+        while True:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                # Enable SO_REUSEADDR to allow immediate rebinding
+                # This is important for graceful restarts
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(("", port))
+                return s, port
+            except OSError:
+                port += 1
+                logger.info("Port %d is already in use, trying port %d", port - 1, port)
+
+    # try ipv4
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+        return s, port
+    except OSError:
+        # try ipv6
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("", 0))
+        port = s.getsockname()[1]
+        return s, port
+
+
 def find_process_using_port(port: int) -> psutil.Process | None:
     # TODO: We can not check for running processes with network
     # port on macOS. Therefore, we can not have a full graceful shutdown

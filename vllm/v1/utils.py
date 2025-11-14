@@ -25,7 +25,12 @@ from torch.autograd.profiler import record_function
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
-from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
+from vllm.utils.network_utils import (
+    get_and_hold_open_port,
+    get_open_port,
+    get_open_zmq_ipc_path,
+    get_tcp_uri,
+)
 from vllm.utils.system_utils import kill_process_tree
 
 if TYPE_CHECKING:
@@ -150,6 +155,44 @@ def get_engine_client_zmq_addr(local_only: bool, host: str, port: int = 0) -> st
         if local_only
         else (get_tcp_uri(host, port or get_open_port()))
     )
+
+
+def get_engine_client_zmq_addr_with_socket(
+    local_only: bool, host: str, port: int = 0
+) -> tuple[str, Any | None]:
+    """Assign a new ZMQ socket address with socket holding to prevent port conflicts.
+
+    This function addresses the race condition in port allocation by keeping
+    the socket bound until the ZMQ socket actually binds to it.
+
+    If local_only is True, participants are colocated and so a unique IPC
+    address will be returned with None socket.
+
+    Otherwise, a TCP address is constructed and a bound socket is returned
+    to hold the port reservation.
+
+    Args:
+        local_only: Whether to use IPC (local) or TCP
+        host: Host address for TCP
+        port: Port number (0 means auto-assign)
+
+    Returns:
+        tuple: (address_string, held_socket_or_none)
+            - address_string: The ZMQ address to use
+            - held_socket_or_none: Socket that must be kept alive until ZMQ binds,
+                                   or None for IPC addresses
+    """
+
+    if local_only:
+        return get_open_zmq_ipc_path(), None
+
+    if port != 0:
+        # Explicit port specified, no socket holding needed
+        return get_tcp_uri(host, port), None
+
+    # Auto-assign port with socket holding to prevent race conditions
+    held_socket, assigned_port = get_and_hold_open_port()
+    return get_tcp_uri(host, assigned_port), held_socket
 
 
 class APIServerProcessManager:

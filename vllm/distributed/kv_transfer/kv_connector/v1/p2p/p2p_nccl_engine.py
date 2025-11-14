@@ -26,7 +26,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 from vllm.distributed.kv_transfer.kv_connector.v1.p2p.tensor_memory_pool import (  # noqa: E501
     TensorMemoryPool,
 )
-from vllm.utils.network_utils import get_ip
+from vllm.utils.network_utils import get_and_hold_open_port, get_ip
 from vllm.utils.torch_utils import current_stream
 
 logger = logging.getLogger(__name__)
@@ -88,11 +88,13 @@ class P2pNcclEngine:
 
         if not hostname:
             hostname = get_ip()
-        port = int(self.config.kv_port) + port_offset
-        if port == 0:
-            raise ValueError("Port cannot be 0")
         self._hostname = hostname
-        self._port = port
+
+        # Use socket holding to prevent port allocation race conditions
+        # This allocates a unique port dynamically instead of using kv_port + offset
+        held_socket, allocated_port = get_and_hold_open_port()
+        self._port = allocated_port
+        self._held_socket = held_socket
 
         # Each card corresponds to a ZMQ address.
         self.zmq_address = f"{self._hostname}:{self._port}"
@@ -122,9 +124,15 @@ class P2pNcclEngine:
                 )
             self.http_address = f"{self._hostname}:{http_port}"
 
+        # Bind ZMQ socket to the reserved port
         self.context = zmq.Context()
         self.router_socket = self.context.socket(zmq.ROUTER)
         self.router_socket.bind(f"tcp://{self.zmq_address}")
+
+        # Close the held socket after ZMQ has successfully bound
+        # This prevents the race condition where another process could
+        # claim the port between allocation and binding
+        self._held_socket.close()
 
         self.poller = zmq.Poller()
         self.poller.register(self.router_socket, zmq.POLLIN)
