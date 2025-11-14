@@ -129,6 +129,7 @@ def build_llm_instance(shared_storage_path: Path):
         enforce_eager=False,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
+        hf_overrides={"num_hidden_layers": 4},
     )
 
     # Create the LLM instance
