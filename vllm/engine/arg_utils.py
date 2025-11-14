@@ -566,6 +566,7 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend | None = (
         CacheConfig.kv_offloading_backend
     )
+    tokens_only: bool = False
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1494,6 +1495,10 @@ class EngineArgs:
             if (self.data_parallel_rpc_port is not None)
             else ParallelConfig.data_parallel_rpc_port
         )
+
+        if self.tokens_only and not model_config.skip_tokenizer_init:
+            model_config.skip_tokenizer_init = True
+            logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
