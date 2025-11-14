@@ -87,23 +87,6 @@ COMMON_BROADCAST_SETTINGS = {
 # this is a good idea for checking your command first, since tests are slow.
 
 VLM_TEST_SETTINGS = {
-    "paddleocr_vl": VLMTestInfo(
-        models=["PaddlePaddle/PaddleOCR-VL"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        img_idx_to_prompt=lambda idx: (
-            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
-        ),
-        multi_image_prompt=(
-            "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
-            "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
-            "Describe these two images separately."
-        ),
-        max_model_len=8192,
-        max_num_seqs=2,
-        auto_cls=AutoModelForCausalLM,
-        image_size_factors=[(), (0.25,)],
-    ),
     #### Core tests to always run in the CI
     "llava": VLMTestInfo(
         models=["llava-hf/llava-1.5-7b-hf"],
@@ -708,6 +691,23 @@ VLM_TEST_SETTINGS = {
         num_logprobs=10,
         patch_hf_runner=model_utils.ovis2_5_patch_hf_runner,
         hf_model_kwargs={"revision": "refs/pr/5"},
+    ),
+    "paddleocr_vl": VLMTestInfo(
+        models=["PaddlePaddle/PaddleOCR-VL"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        img_idx_to_prompt=lambda idx: (
+            "<|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>"
+        ),
+        multi_image_prompt=(
+            "Image-1: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Image-2: <|IMAGE_START|><|IMAGE_PLACEHOLDER|><|IMAGE_END|>\n"
+            "Describe these two images separately."
+        ),
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForCausalLM,
+        image_size_factors=[(), (0.25,)],
     ),
     "phi3v": VLMTestInfo(
         models=["microsoft/Phi-3.5-vision-instruct"],
