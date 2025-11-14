@@ -8,11 +8,14 @@ from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
+from vllm.logger import init_logger
 from vllm.utils.hashing import safe_hash
 
 StructuredOutputsBackend = Literal[
     "auto", "xgrammar", "guidance", "outlines", "lm-format-enforcer"
 ]
+
+logger = init_logger(__name__)
 
 
 @config
@@ -76,9 +79,11 @@ class StructuredOutputsConfig:
             self.reasoning_parser != ""
             and self.reasoning_parser not in valid_reasoning_parsers
         ):
-            raise ValueError(
-                f"invalid reasoning parser: {self.reasoning_parser} "
-                f"(chose from {{ {','.join(valid_reasoning_parsers)} }})"
+            logger.warning(
+                "Reasoning parser %s not defined in reasoning_parser_plugin "
+                "argument. Assuming it is registered to the "
+                "ReasoningParserManager programmatically.",
+                self.reasoning_parser,
             )
 
         if self.disable_any_whitespace and self.backend not in ("xgrammar", "guidance"):
