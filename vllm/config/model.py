@@ -1342,7 +1342,8 @@ class ModelConfig:
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
             return num_experts[0]
-        return num_experts
+        # Coerce to 0 if explicitly set to None
+        return num_experts or 0
 
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig
