@@ -169,18 +169,7 @@ def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
 def decorate_logs(process_name: str | None = None) -> None:
     """Decorate stdout/stderr with process name and PID prefix."""
     # Respect VLLM_CONFIGURE_LOGGING environment variable
-    try:
-        if not envs.VLLM_CONFIGURE_LOGGING:
-            return
-    except (ValueError, AttributeError) as e:
-        # If VLLM_CONFIGURE_LOGGING is set to an invalid value, log a warning
-        # and disable log decoration to avoid crashing the process
-        logger.warning(
-            "Invalid value for VLLM_CONFIGURE_LOGGING environment variable: %s. "
-            "Disabling log decoration. Error: %s",
-            os.getenv("VLLM_CONFIGURE_LOGGING"),
-            e,
-        )
+    if not envs.VLLM_CONFIGURE_LOGGING:
         return
 
     if process_name is None:
