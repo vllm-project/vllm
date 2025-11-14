@@ -9,6 +9,7 @@ import functools
 import importlib
 import os
 from collections.abc import Callable
+from enum import Enum
 from typing import Any, NoReturn
 
 import torch
@@ -18,6 +19,28 @@ from vllm.logger import logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
+
+
+class DeepGemmQuantScaleFMT(Enum):
+    # Float32 scales in Float32 tensor
+    FLOAT32 = 0
+    # Compute float32 scales and ceil the scales to UE8M0.
+    # Keep the scales in Float32 tensor.
+    FLOAT32_CEIL_UE8M0 = 1
+    # Compute float32 scales and ceil the scales to UE8M0.
+    # Pack the scales into a int32 tensor where each int32
+    # element contains 4 scale values.
+    UE8M0 = 2
+
+    @staticmethod
+    def from_oracle() -> "DeepGemmQuantScaleFMT":
+        if not is_deep_gemm_e8m0_used():
+            return DeepGemmQuantScaleFMT.FLOAT32
+        return (
+            DeepGemmQuantScaleFMT.UE8M0
+            if current_platform.is_device_capability(100)
+            else DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0
+        )
 
 
 @functools.cache
@@ -49,10 +72,6 @@ def is_deep_gemm_e8m0_used() -> bool:
         logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
         return False
 
-    if envs.VLLM_USE_FLASHINFER_MOE_FP8:
-        logger.info_once("DeepGEMM E8M0 disabled: FlashInfer MOE is enabled.")
-        return False
-
     if envs.VLLM_USE_DEEP_GEMM_E8M0:
         logger.info_once("DeepGEMM E8M0 enabled on current platform.")
         return True
@@ -77,6 +96,7 @@ _fp8_paged_mqa_logits_impl: Callable[..., Any] | None = None
 _get_paged_mqa_logits_metadata_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_tensor_impl: Callable[..., Any] | None = None
 _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
+_transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 
 
 def _lazy_init() -> None:
@@ -86,6 +106,7 @@ def _lazy_init() -> None:
     global _get_paged_mqa_logits_metadata_impl
     global _get_mn_major_tma_aligned_tensor_impl
     global _get_mk_alignment_for_contiguous_layout_impl
+    global _transform_sf_into_required_layout_impl
     # fast path
     if (
         _fp8_gemm_nt_impl is not None
@@ -95,6 +116,7 @@ def _lazy_init() -> None:
         or _fp8_paged_mqa_logits_impl is not None
         or _get_paged_mqa_logits_metadata_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
+        or _transform_sf_into_required_layout_impl is not None
     ):
         return
 
@@ -123,6 +145,9 @@ def _lazy_init() -> None:
     )
     _get_mk_alignment_for_contiguous_layout_impl = getattr(
         _dg, "get_mk_alignment_for_contiguous_layout", None
+    )
+    _transform_sf_into_required_layout_impl = getattr(
+        _dg, "transform_sf_into_required_layout", None
     )
 
 
@@ -175,6 +200,15 @@ def fp8_m_grouped_gemm_nt_masked(*args, **kwargs):
     if _grouped_masked_impl is None:
         return _missing(*args, **kwargs)
     return _grouped_masked_impl(
+        *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
+    )
+
+
+def transform_sf_into_required_layout(*args, **kwargs):
+    _lazy_init()
+    if _transform_sf_into_required_layout_impl is None:
+        return _missing(*args, **kwargs)
+    return _transform_sf_into_required_layout_impl(
         *args, disable_ue8m0_cast=not is_deep_gemm_e8m0_used(), **kwargs
     )
 
