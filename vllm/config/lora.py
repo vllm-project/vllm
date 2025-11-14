@@ -70,7 +70,7 @@ class LoRAConfig:
     will be automatically assigned to 1-n with the names of the modalities
     in alphabetic order."""
 
-    max_num_labels: int|None = None
+    max_num_labels: int | None = None
     """Max classification label number.
     """
 

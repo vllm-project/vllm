@@ -308,49 +308,11 @@ def as_seq_cls_model(cls: _T) -> _T:
                 quant_config=quant_config,
                 return_bias=False,
                 prefix=maybe_prefix(prefix, "score"),
-                return_bias=False)
+            )
 
             pooler_config = vllm_config.model_config.pooler_config
             assert pooler_config is not None
 
-<<<<<<< HEAD
-            pooling_type_str = pooler_config.pooling_type
-            assert pooling_type_str is not None
-            pooling_type = PoolingType[pooling_type_str]
-
-            self.pooler = DispatchPooler({
-                "encode":
-                Pooler.for_encode(pooler_config),
-                "classify":
-                ClassifierPooler(
-                    pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
-                    act_fn=ClassifierPooler.act_fn_for_seq_cls(
-                        vllm_config.model_config),
-                ),
-                "score":
-                ClassifierPooler(
-                    pooling=PoolingMethod.from_pooling_type(pooling_type),
-                    classifier=self._classifier,
-                    act_fn=ClassifierPooler.act_fn_for_cross_encoder(
-                        vllm_config.model_config),
-                ),
-            })
-
-        def _classifier(self, x: torch.Tensor):
-            x = self.score(x)
-            return x
-
-        def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
-        ) -> torch.Tensor:
-            return super().forward(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
-=======
             self.pooler = DispatchPooler(
                 {
                     "token_classify": Pooler.for_token_classify(
@@ -364,7 +326,6 @@ def as_seq_cls_model(cls: _T) -> _T:
                     ),
                 }
             )
->>>>>>> origin/main
 
         def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
             text_config = self.config.get_text_config()

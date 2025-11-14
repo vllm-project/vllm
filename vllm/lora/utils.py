@@ -17,28 +17,14 @@ from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
+
 # being imported for _all_lora_classes below
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.lora.layers import (BaseLayerWithLoRA, ClassifierWithLoRA,
-                              ColumnParallelLinearWithLoRA,
-                              ColumnParallelLinearWithShardedLoRA,
-                              LogitsProcessorWithLoRA,
-                              MergedColumnParallelLinearWithLoRA,
-                              MergedColumnParallelLinearWithShardedLoRA,
-                              MergedQKVParallelLinearWithLoRA,
-                              MergedQKVParallelLinearWithShardedLoRA,
-                              QKVParallelLinearWithLoRA,
-                              QKVParallelLinearWithShardedLoRA,
-                              ReplicatedLinearWithLoRA,
-                              RowParallelLinearWithLoRA,
-                              RowParallelLinearWithShardedLoRA,
-                              VocabParallelEmbeddingWithLoRA)
-from vllm.model_executor.layers.linear import LinearBase
-
 # being imported for _all_lora_classes below
 from vllm.lora.layers import (
     BaseLayerWithLoRA,
+    ClassifierWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,

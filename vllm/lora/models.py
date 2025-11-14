@@ -541,15 +541,24 @@ class LoRAModelManager:
             packed_moduled_lst = self.packed_modules_mapping.get(parts, [])
             if "score" in module_name and self.is_pooling_model:
                 new_module = replace_submodule(
-                    self.model, module_name,
-                    from_layer_classifier(module, self.lora_slots,
-                                          self.lora_config, self.model.config))
+                    self.model,
+                    module_name,
+                    from_layer_classifier(
+                        module, self.lora_slots, self.lora_config, self.model.config
+                    ),
+                )
             else:
-
                 new_module = replace_submodule(
-                    self.model, module_name,
-                    from_layer(module, self.lora_slots, self.lora_config,
-                               packed_moduled_lst, self.model.config))
+                    self.model,
+                    module_name,
+                    from_layer(
+                        module,
+                        self.lora_slots,
+                        self.lora_config,
+                        packed_moduled_lst,
+                        self.model.config,
+                    ),
+                )
 
             # (yard1): TODO make this more robust
             if "lm_head" in module_name:
@@ -637,7 +646,8 @@ class LoRAModelManager:
                         rank,
                         module.lora_a_stacked[0].dtype,
                         "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim)
+                        embeddings_tensor_dim=embeddings_tensor_dim,
+                    )
                 elif self.is_pooling_model and parts[-1] == "score":
                     lora = ClassifierLoRALayerWeights.create_dummy_lora_weights(
                         module_name,
