@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     dequant_mxfp4,
@@ -69,9 +70,10 @@ try:
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
         M = x.shape[0]
-        N = weight.shape[0]
+        N = x.shape[0]
+        K = weight.shape[0]
         if rocm_use_aiter_fp4_asm_gemm:
-            if M <= 64:
+            if M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K):
                 if x_scales is None:
                     # use hip quant kernel for performance
                     if M >= 32:
