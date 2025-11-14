@@ -111,12 +111,12 @@ def run_headless(args: argparse.Namespace):
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
 
-    if parallel_config.distributed_node_rank_within_dp > 0:
+    if parallel_config.node_rank_within_dp > 0:
         from vllm.version import __version__ as VLLM_VERSION
 
         # Run headless workers (for multi-node PP/TP).
-        host = parallel_config.distributed_master_ip
-        head_node_address = f"{host}:{parallel_config.distributed_master_port}"
+        host = parallel_config.master_addr
+        head_node_address = f"{host}:{parallel_config.master_port}"
         logger.info(
             "Launching vLLM (v%s) headless multiproc executor, "
             "with head node address %s for torch.distributed process group.",

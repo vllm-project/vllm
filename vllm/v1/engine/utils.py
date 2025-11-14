@@ -195,7 +195,7 @@ def get_device_indices(
     device_control_env_var: str,
     local_dp_rank: int,
     world_size: int,
-    local_world_size: int = -1,
+    local_world_size: int | None = None,
 ):
     """
     Returns a comma-separated string of device indices for the specified
@@ -204,7 +204,7 @@ def get_device_indices(
     For example, if world_size=2 and local_dp_rank=1, and there are 4 devices,
     this will select devices 2 and 3 for local_dp_rank=1.
     """
-    if local_world_size < 0:
+    if local_world_size is None:
         local_world_size = world_size
     try:
         value = ",".join(

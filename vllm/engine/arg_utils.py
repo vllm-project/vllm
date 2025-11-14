@@ -383,10 +383,10 @@ class EngineArgs:
     ) = ParallelConfig.distributed_executor_backend
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
-    distributed_master_ip: str = ParallelConfig.distributed_master_ip
-    distributed_master_port: int = ParallelConfig.distributed_master_port
-    distributed_node_size: int = ParallelConfig.distributed_node_size
-    distributed_node_rank: int = ParallelConfig.distributed_node_rank
+    master_addr: str = ParallelConfig.master_addr
+    master_port: int = ParallelConfig.master_port
+    nnodes: int = ParallelConfig.nnodes
+    node_rank: int = ParallelConfig.node_rank
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
     dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
@@ -748,18 +748,10 @@ class EngineArgs:
             "-pp",
             **parallel_kwargs["pipeline_parallel_size"],
         )
-        parallel_group.add_argument(
-            "--distributed-master-ip", **parallel_kwargs["distributed_master_ip"]
-        )
-        parallel_group.add_argument(
-            "--distributed-master-port", **parallel_kwargs["distributed_master_port"]
-        )
-        parallel_group.add_argument(
-            "--distributed-node-size", **parallel_kwargs["distributed_node_size"]
-        )
-        parallel_group.add_argument(
-            "--distributed-node-rank", **parallel_kwargs["distributed_node_rank"]
-        )
+        parallel_group.add_argument("--master-addr", **parallel_kwargs["master_addr"])
+        parallel_group.add_argument("--master-port", **parallel_kwargs["master_port"])
+        parallel_group.add_argument("--nnodes", "-n", **parallel_kwargs["nnodes"])
+        parallel_group.add_argument("--node-rank", "-r", **parallel_kwargs["node_rank"])
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
         )
@@ -1443,12 +1435,11 @@ class EngineArgs:
         assert not (self.data_parallel_hybrid_lb and self.data_parallel_external_lb), (
             "data_parallel_hybrid_lb and data_parallel_external_lb cannot both be True."
         )
-
-        assert (
-            self.data_parallel_backend == "mp" or not self.distributed_node_size > 1
-        ), "distributed_node_size > 1 is only supported with data_parallel_backend=mp"
+        assert self.data_parallel_backend == "mp" or self.nnodes == 1, (
+            "nnodes > 1 is only supported with data_parallel_backend=mp"
+        )
         inferred_data_parallel_rank = 0
-        if self.distributed_node_size > 1:
+        if self.nnodes > 1:
             world_size = (
                 self.data_parallel_size
                 * self.pipeline_parallel_size
@@ -1457,25 +1448,22 @@ class EngineArgs:
             world_size_within_dp = (
                 self.pipeline_parallel_size * self.tensor_parallel_size
             )
-            local_world_size = world_size // self.distributed_node_size
-            assert world_size % self.distributed_node_size == 0, (
-                f"world_size={world_size} must be divisible by "
-                f"distributed_node_size={self.distributed_node_size}."
+            local_world_size = world_size // self.nnodes
+            assert world_size % self.nnodes == 0, (
+                f"world_size={world_size} must be divisible by nnodes={self.nnodes}."
             )
-            assert self.distributed_node_rank < self.distributed_node_size, (
-                f"distributed_node_rank={self.distributed_node_rank} must be less than "
-                f"distributed_node_size={self.distributed_node_size}."
+            assert self.node_rank < self.nnodes, (
+                f"node_rank={self.node_rank} must be less than nnodes={self.nnodes}."
             )
             inferred_data_parallel_rank = (
-                self.distributed_node_rank * local_world_size
+                self.node_rank * local_world_size
             ) // world_size_within_dp
             if self.data_parallel_size > 1 and self.data_parallel_external_lb:
                 self.data_parallel_rank = inferred_data_parallel_rank
                 logger.info(
-                    "Inferred data_parallel_rank %d from distributed_node_rank"
-                    " %d for external lb",
+                    "Inferred data_parallel_rank %d from node_rank %d for external lb",
                     self.data_parallel_rank,
-                    self.distributed_node_rank,
+                    self.node_rank,
                 )
             elif self.data_parallel_size_local is None:
                 # Infer data parallel size local for internal dplb:
@@ -1488,7 +1476,7 @@ class EngineArgs:
         # Local DP rank = 1, use pure-external LB.
         if data_parallel_external_lb:
             assert self.data_parallel_rank is not None, (
-                "data_parallel_rank or distributed_node_rank must be spefified if "
+                "data_parallel_rank or node_rank must be spefified if "
                 "data_parallel_external_lb is enable."
             )
             assert self.data_parallel_size_local in (1, None), (
@@ -1522,11 +1510,11 @@ class EngineArgs:
             self.data_parallel_rank = (
                 self.data_parallel_start_rank or inferred_data_parallel_rank
             )
-            if self.distributed_node_size > 1:
+            if self.nnodes > 1:
                 logger.info(
-                    "Inferred data_parallel_rank %d from distributed_node_rank %d",
+                    "Inferred data_parallel_rank %d from node_rank %d",
                     self.data_parallel_rank,
-                    self.distributed_node_rank,
+                    self.node_rank,
                 )
         else:
             assert not self.data_parallel_hybrid_lb, (
@@ -1558,7 +1546,7 @@ class EngineArgs:
                     self.data_parallel_backend,
                 )
                 data_parallel_address = (
-                    self.distributed_master_ip or ParallelConfig.data_parallel_master_ip
+                    self.master_addr or ParallelConfig.data_parallel_master_ip
                 )
         else:
             data_parallel_address = self.data_parallel_address
@@ -1588,10 +1576,10 @@ class EngineArgs:
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
-            distributed_master_ip=self.distributed_master_ip,
-            distributed_master_port=self.distributed_master_port,
-            distributed_node_size=self.distributed_node_size,
-            distributed_node_rank=self.distributed_node_rank,
+            master_addr=self.master_addr,
+            master_port=self.master_port,
+            nnodes=self.nnodes,
+            node_rank=self.node_rank,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,

@@ -68,15 +68,18 @@ class EPLBConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    distributed_master_ip: str = "127.0.0.1"
-    """distributed master ip for multi-node distributed 
+    master_addr: str = "127.0.0.1"
+    """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
-    distributed_master_port: int = 29501
-    """distributed master port """
-    distributed_node_rank: int = 0
-    """distributed node rank """
-    distributed_node_size: int = 1
-    """distributed node size """
+    master_port: int = 29501
+    """distributed master port for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    node_rank: int = 0
+    """distributed node rank for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    nnodes: int = 1
+    """num of nodes for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
     pipeline_parallel_size: int = 1
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = 1
@@ -397,21 +400,21 @@ class ParallelConfig:
         )
 
     @property
-    def distributed_node_rank_within_dp(self) -> int:
-        return self.distributed_node_rank % self.distributed_node_size_within_dp
+    def node_rank_within_dp(self) -> int:
+        return self.node_rank % self.nnodes_within_dp
 
     @property
-    def distributed_node_size_within_dp(self) -> int:
-        if self.distributed_node_size == 1:
+    def nnodes_within_dp(self) -> int:
+        if self.nnodes == 1:
             return 1
         data_parallel_node_size = (
             self.data_parallel_size // self.data_parallel_size_local
         )
-        return self.distributed_node_size // data_parallel_node_size
+        return self.nnodes // data_parallel_node_size
 
     @property
     def local_world_size(self) -> int:
-        return self.world_size // self.distributed_node_size_within_dp
+        return self.world_size // self.nnodes_within_dp
 
     @staticmethod
     def has_unfinished_dp(dp_group: ProcessGroup, has_unfinished: bool) -> bool:
@@ -554,7 +557,7 @@ class ParallelConfig:
             ray_found = ray_utils.ray_is_available()
             if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
                 backend = "uni"
-            elif current_platform.is_cuda() and self.distributed_node_size > 1:
+            elif current_platform.is_cuda() and self.nnodes > 1:
                 backend = "mp"
             elif (
                 current_platform.is_cuda()
@@ -592,6 +595,10 @@ class ParallelConfig:
             logger.warning(
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
+            )
+        if self.distributed_executor_backend != "mp" and self.nnodes > 1:
+            raise ValueError(
+                "nnodes > 1 can only be set when distributed exectuor backend is mp."
             )
 
     @property
@@ -635,7 +642,7 @@ class ParallelConfig:
                 "Disabled the custom all-reduce kernel because it is not "
                 "supported on current platform."
             )
-        if self.distributed_node_size > 1:
+        if self.nnodes > 1:
             self.disable_custom_all_reduce = True
             logger.debug(
                 "Disabled the custom all-reduce since we are running on multi-node."

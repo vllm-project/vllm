@@ -316,6 +316,7 @@ class WorkerWrapperBase:
             assert self.worker is not None
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
+        print(f"{len(kv_cache_configs)=}, {self.global_rank=}")
         kv_cache_config = kv_cache_configs[self.global_rank]
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore

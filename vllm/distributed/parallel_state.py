@@ -1177,12 +1177,12 @@ def init_distributed_environment(
     from vllm.config import get_current_vllm_config
 
     config = get_current_vllm_config()
-    if config is not None and config.parallel_config.distributed_node_size > 1:
+    if config is not None and config.parallel_config.nnodes > 1:
         parallel_config = config.parallel_config
-        ip = parallel_config.distributed_master_ip
+        ip = parallel_config.master_addr
         rank = parallel_config.data_parallel_rank * world_size + rank
         world_size = parallel_config.world_size_across_dp
-        port = parallel_config.distributed_master_port
+        port = parallel_config.master_port
         distributed_init_method = get_distributed_init_method(ip, port)
     elif (
         config is not None
@@ -1245,8 +1245,8 @@ def init_distributed_environment(
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        if config.parallel_config.distributed_node_size > 1:
-            _NODE_COUNT = config.parallel_config.distributed_node_size
+        if config.parallel_config.nnodes > 1:
+            _NODE_COUNT = config.parallel_config.nnodes
         else:
             _NODE_COUNT = _node_count(_WORLD.cpu_group)
         logger.debug("Detected %d nodes in the distributed environment", _NODE_COUNT)
@@ -1254,7 +1254,7 @@ def init_distributed_environment(
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size"
         )
-    if config.parallel_config.distributed_node_size_within_dp > 1:
+    if config.parallel_config.nnodes_within_dp > 1:
         if parallel_config.data_parallel_size > 1:
             world_size_inner_dp = parallel_config.world_size
             group_ranks = [

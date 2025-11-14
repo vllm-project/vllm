@@ -26,9 +26,9 @@ def create_vllm_config(
     max_model_len: int = 256,
     gpu_memory_utilization: float = 0.3,
     distributed_executor_backend: str = "mp",
-    distributed_node_size: int = 1,
-    distributed_node_rank: int = 0,
-    distributed_master_port: int = 0,
+    nnodes: int = 1,
+    node_rank: int = 0,
+    master_port: int = 0,
 ) -> VllmConfig:
     """Create a VllmConfig for testing using EngineArgs."""
     engine_args = EngineArgs(
@@ -43,11 +43,11 @@ def create_vllm_config(
     vllm_config = engine_args.create_engine_config()
 
     # Override distributed node settings if needed
-    if distributed_node_size > 1 or distributed_node_rank > 0:
-        vllm_config.parallel_config.distributed_node_size = distributed_node_size
-        vllm_config.parallel_config.distributed_node_rank = distributed_node_rank
-        vllm_config.parallel_config.distributed_master_port = distributed_master_port
-    if distributed_node_size > 1:
+    if nnodes > 1 or node_rank > 0:
+        vllm_config.parallel_config.nnodes = nnodes
+        vllm_config.parallel_config.node_rank = node_rank
+        vllm_config.parallel_config.master_port = master_port
+    if nnodes > 1:
         vllm_config.parallel_config.disable_custom_all_reduce = True
 
     return vllm_config
@@ -317,8 +317,8 @@ def test_multiproc_executor_properties():
         # Test local_world_size calculation
         assert executor.local_world_size == (
             executor.parallel_config.world_size
-            // executor.parallel_config.distributed_node_size
-        ), "Local world size should be world_size / distributed_node_size"
+            // executor.parallel_config.nnodes
+        ), "Local world size should be world_size / nnodes"
 
     finally:
         # Clean up
@@ -332,7 +332,7 @@ def test_multiproc_executor_multi_node():
     This simulates 2 nodes with TP=4:
     - Node 0 (rank 0): Uses GPUs 0,1 (CUDA_VISIBLE_DEVICES=0,1) with TP=2
     - Node 1 (rank 1): Uses GPUs 2,3 (CUDA_VISIBLE_DEVICES=2,3) with TP=2
-    Total world_size = 4, distributed_node_size = 2
+    Total world_size = 4, nnodes = 2
     """
     port = get_open_port()
     # symm_mem does not work for simulating multi instance in single node
@@ -352,9 +352,9 @@ def test_multiproc_executor_multi_node():
             vllm_config = create_vllm_config(
                 tensor_parallel_size=4,  # Total TP across all nodes
                 pipeline_parallel_size=1,
-                distributed_node_size=2,  # 2 nodes
-                distributed_node_rank=node_rank,
-                distributed_master_port=port,  # same port
+                nnodes=2,  # 2 nodes
+                node_rank=node_rank,
+                master_port=port,  # same port
             )
 
             # Create executor for this node
