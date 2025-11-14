@@ -189,6 +189,11 @@ class FrontendArgs:
     Helps mitigate header abuse. Default: 256."""
     log_error_stack: bool = envs.VLLM_SERVER_DEV_MODE
     """If set to True, log the stack trace of error responses"""
+    tokens_only: bool = False
+    """
+    If set to True, only enable the Tokens In<>Out endpoint. 
+    This is intended for use in a Disaggregated Everything setup.
+    """
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
