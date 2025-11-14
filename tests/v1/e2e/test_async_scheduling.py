@@ -218,7 +218,7 @@ def run_test(
     test_preemption: bool,
     executor: str,
     async_scheduling: bool,
-    spec_config: SpeculativeConfig | None,
+    spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
 ):
     spec_decoding = spec_config is not None
