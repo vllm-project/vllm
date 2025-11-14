@@ -45,6 +45,7 @@ from typing_extensions import Required, TypedDict
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.entrypoints.encoding_dsv32 import encode_messages
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
@@ -1778,6 +1779,25 @@ def apply_hf_chat_template(
             "An error occurred in `transformers` while applying chat template"
         )
         raise ValueError(str(e)) from e
+
+
+def encode_dsv32_chat_messages(
+    tokenizer: Union[PreTrainedTokenizer, PreTrainedTokenizerFast],
+    conversation: list[ConversationMessage],
+    **kwargs: Any,
+) -> str:
+    drop_thinking = kwargs.get("thinking", False)
+    if drop_thinking:
+        encode_config = dict(
+            thinking_mode="thinking", drop_thinking=True, add_default_bos_token=True
+        )
+    else:
+        encode_config = dict(
+            thinking_mode="chat", drop_thinking=True, add_default_bos_token=True
+        )
+    prompt = encode_messages(conversation, **encode_config)
+
+    return prompt
 
 
 def apply_mistral_chat_template(
