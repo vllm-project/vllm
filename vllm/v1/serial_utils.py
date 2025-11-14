@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import (
     MultiModalSharedField,
     NestedTensors,
 )
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.engine import UtilityResult
 from vllm.v1.utils import tensor_data
 
@@ -282,7 +283,9 @@ class MsgpackDecoder:
     not thread-safe when encoding tensors / numpy arrays.
     """
 
-    def __init__(self, t: Any | None = None):
+    def __init__(self, t: Any | None = None, share_mem: bool = True):
+        self.share_mem = share_mem
+        self.pin_tensors = is_pin_memory_available()
         args = () if t is None else (t,)
         self.decoder = msgpack.Decoder(
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
@@ -347,21 +350,30 @@ class MsgpackDecoder:
         # zero-copy decode. We assume the ndarray will not be kept around,
         # as it now locks the whole received message buffer in memory.
         buffer = self.aux_buffers[data] if isinstance(data, int) else data
-        return np.frombuffer(buffer, dtype=dtype).reshape(shape)
+        arr = np.frombuffer(buffer, dtype=dtype)
+        if not self.share_mem:
+            arr = arr.copy()
+        return arr.reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
         dtype, shape, data = arr
-        # Copy from inline representation, to decouple the memory storage
-        # of the message from the original buffer. And also make Torch
-        # not complain about a readonly memoryview.
-        buffer = self.aux_buffers[data] if isinstance(data, int) else bytearray(data)
+        is_aux = isinstance(data, int)
+        buffer = self.aux_buffers[data] if is_aux else data
+        buffer = buffer if isinstance(buffer, memoryview) else memoryview(buffer)
         torch_dtype = getattr(torch, dtype)
         assert isinstance(torch_dtype, torch.dtype)
-        if not buffer:  # torch.frombuffer doesn't like empty buffers
+        if not buffer.nbytes:  # torch.frombuffer doesn't like empty buffers
             assert 0 in shape
             return torch.empty(shape, dtype=torch_dtype)
         # Create uint8 array
         arr = torch.frombuffer(buffer, dtype=torch.uint8)
+        # Clone ensures tensor is backed by pytorch-owned memory for safe
+        # future async CPU->GPU transfer.
+        # Pin larger tensors for more efficient CPU->GPU transfer.
+        if not is_aux:
+            arr = arr.clone()
+        elif not self.share_mem:
+            arr = arr.pin_memory() if self.pin_tensors else arr.clone()
         # Convert back to proper shape & type
         return arr.view(torch_dtype).view(shape)
 
