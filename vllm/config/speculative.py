@@ -109,7 +109,7 @@ class SpeculativeConfig:
     Set to 1.0 to stop after any non-certain prediction. Default: 0.0 (disabled)."""
     draft_length_options: list[int] | None = None
     """List of draft lengths to capture as CUDA graphs for adaptive speculative
-    decoding. If None, auto-computed as [n//2, n, min(8, n*2)] where
+    decoding. If None, auto-computed as [max(2, n//2), n, min(8, n*2)] where
     n=num_speculative_tokens. For example, if num_speculative_tokens=5,
     defaults to [2, 5, 8]. The system will dynamically select the optimal
     draft length based on recent acceptance rates to balance compute cost

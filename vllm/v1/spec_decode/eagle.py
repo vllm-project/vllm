@@ -56,7 +56,11 @@ class EagleProposer:
     ):
         self.vllm_config = vllm_config
         self.speculative_config = vllm_config.speculative_config
-        assert self.speculative_config is not None
+        if self.speculative_config is None:
+            raise ValueError(
+                "EagleProposer requires speculative_config to be set. "
+                "This indicates a configuration error in vLLM initialization."
+            )
         self.draft_model_config = self.speculative_config.draft_model_config
         self.method = self.speculative_config.method
 
@@ -268,7 +272,11 @@ class EagleProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         self.input_ids[last_token_indices] = next_token_ids
 
-        assert self.runner is not None
+        if self.runner is None:
+            raise RuntimeError(
+                "EagleProposer.runner must be initialized before calling propose(). "
+                "Call load_model() first to initialize the runner."
+            )
 
         if self.attn_metadata_builder is None:
             attn_metadata_builder = self._get_attention_metadata_builder()
