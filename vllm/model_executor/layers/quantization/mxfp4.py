@@ -755,8 +755,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
             self.w13_weight = w13_weight
             self.w2_weight = w2_weight
-            layer.w13_weight = w13_weight
-            layer.w2_weight = w2_weight
+            layer.w13_weight = Parameter(w13_weight.data, requires_grad=False)
+            layer.w2_weight = Parameter(w2_weight.data, requires_grad=False)
         else:
             raise ValueError(f"Unsupported backend: {self.mxfp4_backend}")
 
