@@ -89,7 +89,10 @@ def test_classify_accepts_chat_text_only(
 
 
 @pytest.mark.parametrize("model_name", [VLM_MODEL_NAME])
-@pytest.mark.xfail(reason="Gemma classifier does not yet support video inputs via /classify", strict=True)
+@pytest.mark.xfail(
+    reason="Gemma classifier does not yet support video inputs via /classify",
+    strict=True,
+)
 def test_classify_accepts_chat_video_url(
     server_vlm_classify: RemoteOpenAIServer, model_name: str
 ) -> None:
