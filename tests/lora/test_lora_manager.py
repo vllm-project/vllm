@@ -8,9 +8,8 @@ import torch
 from safetensors.torch import load_file
 from torch import nn
 
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
-from vllm.config.model import ModelConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -446,7 +445,6 @@ def test_lru_cache_worker_adapter_manager(dist_init, dummy_model, device, tmp_pa
 
     vllm_config.scheduler_config.max_num_seqs = 4
     vllm_config.scheduler_config.max_num_batched_tokens = 2
-
     worker_adapter_manager = LRUCacheWorkerLoRAManager(
         vllm_config, device, EMBEDDING_MODULES, EMBEDDING_PADDING_MODULES
     )
