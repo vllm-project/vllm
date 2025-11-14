@@ -233,7 +233,7 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         # to create a dummy image with a reasonable aspect ratio.
         h_patches = int(math.sqrt(max_num_tokens))
         while max_num_tokens % h_patches != 0:
-            h_patches -= 1
+            max_num_tokens -= 1
         w_patches = max_num_tokens // h_patches
         return ImageSize(height=h_patches * factor, width=w_patches * factor)
 
