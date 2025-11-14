@@ -11,7 +11,6 @@ from vllm.attention.backends.abstract import (
 )
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
