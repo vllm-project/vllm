@@ -69,8 +69,8 @@ class OAIAttention(nn.Module):
             max_position=config.max_position_embeddings,
             dtype=torch.float32,
             rope_parameters={
+                "rope_theta": config.rope_parameters["rope_theta"],
                 "rope_type": "yarn",
-                "rope_base": config.rope_parameters["rope_theta"],
                 "factor": config.rope_parameters["factor"],
                 "original_max_position_embeddings": config.rope_parameters[
                     "original_max_position_embeddings"
