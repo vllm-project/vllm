@@ -846,9 +846,17 @@ class AsyncMPClient(MPClient):
         async def process_outputs_socket():
             try:
                 while True:
+                    logger.error("TzuLing process_outputs_socket: Waiting for frames from ZMQ...")
                     frames = await output_socket.recv_multipart(copy=False)
+                    logger.error("TzuLing process_outputs_socket: Received frames from ZMQ")
                     resources.validate_alive(frames)
                     outputs: EngineCoreOutputs = decoder.decode(frames)
+                    logger.error(
+                        "TzuLing process_outputs_socket: Decoded outputs: %d outputs, utility: %s, stats: %s",
+                        len(outputs.outputs) if outputs.outputs else 0,
+                        outputs.utility_output is not None,
+                        outputs.scheduler_stats is not None
+                    )
                     if outputs.utility_output:
                         _process_utility_output(outputs.utility_output, utility_results)
                         continue
@@ -862,10 +870,13 @@ class AsyncMPClient(MPClient):
                         await output_handler(_self, outputs)
 
                     if outputs.outputs or outputs.scheduler_stats:
+                        logger.error("TzuLing process_outputs_socket: Putting outputs into queue")
                         outputs_queue.put_nowait(outputs)
             except Exception as e:
+                logger.exception("TzuLing process_outputs_socket: Exception occurred")
                 outputs_queue.put_nowait(e)
             except asyncio.CancelledError:
+                logger.error("TzuLing process_outputs_socket: Task cancelled")
                 outputs_queue.put_nowait(EngineDeadError())
 
         resources.output_queue_task = asyncio.create_task(
@@ -878,7 +889,9 @@ class AsyncMPClient(MPClient):
         # it is forwarded to the outputs_queue so we can raise it
         # from this (run_output_handler) task to shut down the server.
         assert self.outputs_queue is not None
+        logger.error("TzuLing get_output_async: Waiting for outputs from queue...")
         outputs = await self.outputs_queue.get()
+        logger.error("TzuLing get_output_async: Got outputs from queue")
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         return outputs

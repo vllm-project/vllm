@@ -20,7 +20,6 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     get_kv_transfer_group,
@@ -33,10 +32,8 @@ from vllm.distributed.parallel_state import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.model_executor.models.interfaces import is_mixture_of_experts
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
-from vllm.profiler.gpu_profiler import CudaProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.mem_constants import GiB_bytes
@@ -118,8 +115,6 @@ class Worker(WorkerBase):
                     torch_profiler_trace_dir, worker_name=worker_name, use_gzip=True
                 ),
             )
-        elif envs.VLLM_TORCH_CUDA_PROFILE:
-            self.profiler = CudaProfilerWrapper()
         else:
             self.profiler = None
 
@@ -513,19 +508,6 @@ class Worker(WorkerBase):
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
 
-    def annotate_profile(self, scheduler_output):
-        # add trace annotation so that we can easily distinguish
-        # new/cached request numbers in each iteration
-        if not self.profiler:
-            return nullcontext()
-
-        num_new = len(scheduler_output.scheduled_new_reqs)
-        num_cached = len(scheduler_output.scheduled_cached_reqs.req_ids)
-
-        return torch.profiler.record_function(
-            f"execute_new_{num_new}_cached_{num_cached}"
-        )
-
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
@@ -553,12 +535,9 @@ class Worker(WorkerBase):
                 )
             )
 
-        with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
-            if isinstance(output, (ModelRunnerOutput, NoneType)):
-                return output
+        output = self.model_runner.execute_model(scheduler_output, intermediate_tensors)
+        if isinstance(output, (ModelRunnerOutput, NoneType)):
+            return output
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
@@ -597,10 +576,7 @@ class Worker(WorkerBase):
         else:
             self.profiler.stop()
             # only print profiler results on rank 0
-            if (
-                isinstance(self.profiler, torch.profiler.profile)
-                and self.local_rank == 0
-            ):
+            if self.local_rank == 0:
                 print(
                     self.profiler.key_averages().table(sort_by="self_cuda_time_total")
                 )
@@ -627,20 +603,68 @@ class Worker(WorkerBase):
     def _eplb_before_scale_down(self, old_ep_size: int, new_ep_size: int) -> None:
         from vllm.distributed.parallel_state import get_ep_group
 
+        assert self.model_runner.eplb_state is not None
+        
+        # Check if there are any masked/unhealthy ranks
+        masked_ranks = self.model_runner.eplb_state.masked_ranks
+        
+        if masked_ranks:
+            # Masked ranks exist - only allow scale-down that removes them
+            expected_new_size = old_ep_size - len(masked_ranks)
+            
+            if new_ep_size != expected_new_size:
+                raise RuntimeError(
+                    f"Cannot scale down {old_ep_size}→{new_ep_size} while unhealthy ranks exist.\n"
+                    f"Masked/unhealthy ranks: {sorted(masked_ranks)}\n"
+                    f"You must first remove the unhealthy ranks by scaling down to "
+                    f"{expected_new_size} (= {old_ep_size} - {len(masked_ranks)} masked ranks).\n"
+                    f"After removing unhealthy ranks, you can then scale to any desired size."
+                )
+            
+            # This is a removal of masked ranks - proceed
+            if get_ep_group().rank == 0:
+                logger.info(
+                    f"[Elastic EP] Removing unhealthy ranks {sorted(masked_ranks)} "
+                    f"during scale-down {old_ep_size}→{new_ep_size}"
+                )
+        
         if get_ep_group().rank == 0:
             logger.info(
                 "[Elastic EP] Starting expert resharding before scaling down..."
             )
-        rank_mapping = {
-            old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
-            for old_ep_rank in range(old_ep_size)
-        }
-        assert self.model_runner.eplb_state is not None
+        
+        # Build rank_mapping
+        if masked_ranks and new_ep_size == old_ep_size - len(masked_ranks):
+            # Removing masked ranks: map healthy ranks to new positions
+            rank_mapping = {}
+            healthy_ranks = [r for r in range(old_ep_size) if r not in masked_ranks]
+            for new_idx, old_rank in enumerate(healthy_ranks):
+                rank_mapping[old_rank] = new_idx
+            for masked_rank in masked_ranks:
+                rank_mapping[masked_rank] = -1
+        else:
+            # Normal scale-down (no masked ranks)
+            rank_mapping = {
+                old_ep_rank: old_ep_rank if old_ep_rank < new_ep_size else -1
+                for old_ep_rank in range(old_ep_size)
+            }
+        
         self.model_runner.eplb_state.rearrange(
+            self.model_runner.model,
             execute_shuffle=True,
             global_expert_load=None,
             rank_mapping=rank_mapping,
         )
+        
+        # Clear masked_ranks after successful removal
+        if masked_ranks and new_ep_size == old_ep_size - len(masked_ranks):
+            self.model_runner.eplb_state.masked_ranks.clear()
+            if get_ep_group().rank == 0:
+                logger.info(
+                    f"[Elastic EP] Cleared masked ranks after removal. "
+                    f"All {new_ep_size} ranks are now healthy."
+                )
+        
         torch.cuda.synchronize()
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed!")
@@ -649,17 +673,38 @@ class Worker(WorkerBase):
         self,
         old_ep_size: int,
         new_ep_size: int,
-        global_expert_loads: list[torch.Tensor] | None,
+        global_expert_load: torch.Tensor | None,
     ) -> None:
         from vllm.distributed.parallel_state import get_ep_group
 
+        assert self.model_runner.eplb_state is not None
+        
+        # Validate: No masked ranks allowed during scale-up
+        masked_ranks = self.model_runner.eplb_state.masked_ranks
+        if masked_ranks:
+            expected_scale_down_size = old_ep_size - len(masked_ranks)
+            raise RuntimeError(
+                f"Cannot scale up {old_ep_size}→{new_ep_size} while unhealthy ranks exist.\n"
+                f"Masked/unhealthy ranks: {sorted(masked_ranks)}\n"
+                f"You must first scale down to {expected_scale_down_size} to remove these "
+                f"unhealthy ranks, then you can scale up.\n"
+                f"\n"
+                f"Required workflow:\n"
+                f"1. Scale down {old_ep_size}→{expected_scale_down_size} (removes masked ranks)\n"
+                f"2. After removal, all ranks will be healthy\n"
+                f"3. Then scale up to desired size: {expected_scale_down_size}→{new_ep_size}"
+            )
+        
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Starting expert resharding after scaling up...")
+        # rank_mapping for OLD ranks only (new ranks don't have old data to map):
+        # Old ranks keep their positions (identity mapping)
+        # New ranks not in mapping - they'll get new expert data from rebalancing
         rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
-        assert self.model_runner.eplb_state is not None
         self.model_runner.eplb_state.rearrange(
+            self.model_runner.model,
             execute_shuffle=True,
-            global_expert_loads=global_expert_loads,
+            global_expert_load=global_expert_load,
             rank_mapping=rank_mapping,
         )
         if get_ep_group().rank == 0:
@@ -706,56 +751,31 @@ class Worker(WorkerBase):
             get_ep_group,
             prepare_communication_buffer_for_model,
         )
-        from vllm.model_executor.layers.fused_moe.layer import (
-            FusedMoE,
-            FusedMoEParallelConfig,
-        )
+        from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig
 
         parallel_config = self.vllm_config.parallel_config
-
-        def get_moe_modules(model: torch.nn.Module) -> list[FusedMoE]:
-            return [
-                module
-                for module in model.modules()
-                if (
-                    module.__class__.__name__ == "FusedMoE"
-                    or module.__class__.__name__ == "SharedFusedMoE"
-                )
-            ]
-
-        def update_moe_modules(moe_modules: list[FusedMoE], num_local_experts: int):
-            assert all(
-                module.moe_config.num_local_experts == num_local_experts
-                for module in moe_modules
-            ), "All MoE modules must have the same number of experts"
-            for module in moe_modules:
-                module.moe_config.num_experts = num_local_experts * new_ep_size
-                module.global_num_experts = module.moe_config.num_experts
-                module.moe_parallel_config = FusedMoEParallelConfig.make(
-                    tp_size_=get_tp_group().world_size,
-                    dp_size_=get_dp_group().world_size,
-                    vllm_parallel_config=parallel_config,
-                )
-                module.moe_config.moe_parallel_config = module.moe_parallel_config
-            return moe_modules
-
-        model_moe_modules = get_moe_modules(self.model_runner.model)
-        num_local_experts = model_moe_modules[0].moe_config.num_local_experts
-
-        update_moe_modules(model_moe_modules, num_local_experts)
-        drafter_model = None
-        if hasattr(self.model_runner, "drafter") and hasattr(
-            self.model_runner.drafter, "model"
-        ):
-            drafter_model = self.model_runner.drafter.model
-        if drafter_model is not None and is_mixture_of_experts(drafter_model):
-            drafter_moe_modules = get_moe_modules(drafter_model)
-            # Check if drafter and model have matching configs
-            assert (
-                drafter_moe_modules[0].moe_config.num_local_experts == num_local_experts
-            ), "Drafter and model configs should be the same"
-            update_moe_modules(drafter_moe_modules, num_local_experts)
-
+        moe_modules = [
+            module
+            for module in self.model_runner.model.modules()
+            if (
+                module.__class__.__name__ == "FusedMoE"
+                or module.__class__.__name__ == "SharedFusedMoE"
+            )
+        ]
+        num_local_experts = moe_modules[0].moe_config.num_local_experts
+        assert all(
+            module.moe_config.num_local_experts == num_local_experts
+            for module in moe_modules
+        ), "All MoE modules must have the same number of experts"
+        for module in moe_modules:
+            module.moe_config.num_experts = num_local_experts * new_ep_size
+            module.global_num_experts = module.moe_config.num_experts
+            module.moe_parallel_config = FusedMoEParallelConfig.make(
+                tp_size_=get_tp_group().world_size,
+                dp_size_=get_dp_group().world_size,
+                vllm_parallel_config=parallel_config,
+            )
+            module.moe_config.moe_parallel_config = module.moe_parallel_config
         if new_ep_size < old_ep_size:
             num_local_physical_experts = num_local_experts
             assert self.model_runner.eplb_state is not None
@@ -764,9 +784,9 @@ class Worker(WorkerBase):
             )
             parallel_config.eplb_config.num_redundant_experts = (
                 new_physical_experts
-                - self.model_runner.eplb_state.logical_replica_count.shape[1]
+                - self.model_runner.model.num_logical_experts
             )
-            global_expert_loads = None
+            global_expert_load = None
         else:
             num_local_physical_experts = torch.tensor(
                 [num_local_experts], dtype=torch.int32, device="cpu"
@@ -777,20 +797,18 @@ class Worker(WorkerBase):
             num_local_physical_experts = num_local_physical_experts.item()
             new_physical_experts = num_local_physical_experts * new_ep_size
             assert self.model_runner.eplb_state is not None
-            global_expert_loads = self.model_runner.eplb_state.rearrange(
-                execute_shuffle=False
+            global_expert_load = self.model_runner.eplb_state.rearrange(
+                self.model_runner.model, execute_shuffle=False
             )
             parallel_config.eplb_config.num_redundant_experts = (
-                new_physical_experts - global_expert_loads[0].shape[1]
+                new_physical_experts - self.model_runner.model.num_logical_experts
             )
         prepare_communication_buffer_for_model(self.model_runner.model)
-        if drafter_model is not None:
-            prepare_communication_buffer_for_model(drafter_model)
         self.model_runner.model.update_physical_experts_metadata(
             num_physical_experts=new_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
         )
-        return global_expert_loads
+        return global_expert_load
 
     def reinitialize_distributed(
         self, reconfig_request: ReconfigureDistributedRequest
@@ -831,11 +849,11 @@ class Worker(WorkerBase):
                 self.local_rank,
             )
 
-        global_expert_loads = self._reconfigure_moe(old_ep_size, new_ep_size)
+        global_expert_load = self._reconfigure_moe(old_ep_size, new_ep_size)
 
         if new_ep_size > old_ep_size:
-            assert global_expert_loads is not None
-            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_loads)
+            assert global_expert_load is not None
+            self._eplb_after_scale_up(old_ep_size, new_ep_size, global_expert_load)
 
     def save_sharded_state(
         self,
@@ -888,7 +906,3 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.decode_context_parallel_size,
     )
-
-    # Init ec connector here before KV caches caches init
-    # NOTE: We do not init KV caches for Encoder-only instance in EPD disagg mode
-    ensure_ec_transfer_initialized(vllm_config)

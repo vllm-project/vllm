@@ -474,8 +474,14 @@ class AsyncLLM(EngineClient):
             try:
                 while True:
                     # 1) Pull EngineCoreOutputs from the EngineCore.
+                    logger.error("TzuLing output_handler: Waiting for outputs from engine_core...")
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
+                    logger.error(
+                        "TzuLing output_handler: Received %d outputs from engine_core (engine_idx: %s)",
+                        num_outputs,
+                        outputs.engine_index
+                    )
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None
@@ -494,11 +500,21 @@ class AsyncLLM(EngineClient):
 
                     for i, outputs_slice in enumerate(slices):
                         # 2) Process EngineCoreOutputs.
+                        logger.error(
+                            "TzuLing output_handler: Processing %d outputs (slice %d/%d)",
+                            len(outputs_slice),
+                            i + 1,
+                            len(slices)
+                        )
                         processed_outputs = output_processor.process_outputs(
                             outputs_slice, outputs.timestamp, iteration_stats
                         )
                         # NOTE: RequestOutputs are pushed to their queues.
                         assert not processed_outputs.request_outputs
+                        logger.error(
+                            "TzuLing output_handler: Processed outputs, %d reqs to abort",
+                            len(processed_outputs.reqs_to_abort)
+                        )
 
                         # Allow other asyncio tasks to run between chunks
                         if i + 1 < len(slices):

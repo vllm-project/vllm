@@ -298,6 +298,12 @@ def rearrange_expert_weights_inplace(
 
     ep_rank = ep_group.rank()
     ep_size = ep_group.size()
+    # After mapping transformations, num_physical_experts includes slots for all ranks
+    # (including masked ones), so it should equal ep_size * local_experts
+    # For health-based masking: rebalance_masked_experts() maintains full ep_size representation
+    # For scale-up: _map_old_expert_indices_with_rank_mapping() expands old to match new ep_size
+    # For scale-down: _map_new_expert_indices_with_rank_mapping() expands new to match old
+    # For normal rearrangement: both tensors already at full ep_size
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     # A buffer to hold the expert weights in one layer during the exchange.
