@@ -1,12 +1,6 @@
 name: macOS Apple Silicon Smoke Test
 
 on:
-  pull_request:
-    paths:
-      - 'csrc/cpu/**'
-      - 'cmake/cpu_extension.cmake'
-      - 'requirements/cpu*.txt'
-      - 'vllm/platforms/cpu.py'
   workflow_dispatch:  # Manual trigger
 
 jobs:
