@@ -46,7 +46,10 @@ nav:
       - contributing/model/multimodal.md
       - contributing/model/transcription.md
     - CI: contributing/ci
-    - Design Documents: design
+    - Design Documents:
+      - Plugins:
+        - design/*plugin*.md
+      - design/*
   - API Reference:
     - api/README.md
     - api/vllm
