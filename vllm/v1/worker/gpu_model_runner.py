@@ -2486,15 +2486,29 @@ class GPUModelRunner(
                 )
                 # Update spec decoding stats for adaptive draft length
                 if hasattr(self, "spec_decoding_stats"):
+                    # Accumulate batch statistics before updating EWMA
+                    batch_total_drafts = 0
+                    batch_total_accepted = 0
+                    batch_count = 0
                     for tokens in valid_sampled_token_ids:
                         if tokens:  # Only count non-empty sequences
                             # num_draft_tokens = max_gen_len - 1 (target token + drafts)
                             num_draft_tokens = max_gen_len - 1
                             # num_accepted = len(tokens) - 1 (exclude target token)
                             num_accepted_tokens = len(tokens) - 1
+                            # Update per-draft statistics for logging
                             self.spec_decoding_stats.observe_draft(
                                 num_draft_tokens, num_accepted_tokens
                             )
+                            batch_total_drafts += num_draft_tokens
+                            batch_total_accepted += num_accepted_tokens
+                            batch_count += 1
+                    # Update EWMA once with batch-level acceptance rate
+                    if batch_count > 0 and batch_total_drafts > 0:
+                        batch_acceptance_rate = batch_total_accepted / batch_total_drafts
+                        self.spec_decoding_stats.update_acceptance_ewma(
+                            batch_acceptance_rate, batch_count
+                        )
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
                 valid_sampled_token_ids[int(i)].clear()

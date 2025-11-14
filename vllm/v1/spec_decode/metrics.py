@@ -39,6 +39,12 @@ class SpecDecodingStats:
         )
 
     def observe_draft(self, num_draft_tokens: int, num_accepted_tokens: int):
+        """Observe a single draft for logging purposes.
+
+        Note: This does NOT update acceptance_rate_ewma. The EWMA should be
+        updated at batch level using update_acceptance_ewma() to avoid
+        applying exponential decay multiple times per batch.
+        """
         self.num_drafts += 1
         self.num_draft_tokens += num_draft_tokens
         self.num_accepted_tokens += num_accepted_tokens
@@ -46,14 +52,20 @@ class SpecDecodingStats:
         for i in range(num_accepted_tokens):
             self.num_accepted_tokens_per_pos[i] += 1
 
-        # Update global acceptance rate EWMA
-        if num_draft_tokens > 0:
-            current_rate = num_accepted_tokens / num_draft_tokens
-            # Use alpha=0.1 for smoothing (90% history, 10% current)
-            self.acceptance_rate_ewma = (
-                0.9 * self.acceptance_rate_ewma + 0.1 * current_rate
-            )
-            self.num_requests_tracked += 1
+    def update_acceptance_ewma(self, batch_acceptance_rate: float, batch_count: int):
+        """Update acceptance EWMA with batch-level acceptance rate.
+
+        This should be called once per batch after observing all drafts.
+
+        Args:
+            batch_acceptance_rate: Mean acceptance rate for the batch
+            batch_count: Number of requests in the batch
+        """
+        # Use alpha=0.1 for smoothing (90% history, 10% current)
+        self.acceptance_rate_ewma = (
+            0.9 * self.acceptance_rate_ewma + 0.1 * batch_acceptance_rate
+        )
+        self.num_requests_tracked += batch_count
 
     def compute_optimal_draft_length(
         self, draft_length_options: list[int]
