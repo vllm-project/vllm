@@ -37,6 +37,16 @@
 
 #ifdef USE_ROCM
   #define FINAL_MASK 0xffffffffffffffffULL
+
+  #if defined(HIP_VERSION) && HIP_VERSION < 70000000
+// On ROCm versions before 7.0, __syncwarp isn't defined. The below
+// implementation is copy/pasted from the implementation in ROCm 7.0
+__device__ inline void __syncwarp() {
+  __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
+  __builtin_amdgcn_wave_barrier();
+  __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
+}
+  #endif
 #else
   #define FINAL_MASK 0xffffffff
 #endif
