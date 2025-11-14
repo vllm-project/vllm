@@ -75,6 +75,10 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         "vllm.v1.attention.backends.rocm_aiter_unified_attn."
         "RocmAiterUnifiedAttentionBackend"
     )
+    EXPERIMENTAL_HELION_ATTN = ( 
+        "vllm.v1.attention.backends.helion_attn."
+        "HelionAttentionBackend"
+    )
     CPU_ATTN = "vllm.v1.attention.backends.cpu_attn.CPUAttentionBackend"
     # Placeholder for third-party/custom backends - must be registered before use
     CUSTOM = ""

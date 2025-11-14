@@ -794,7 +794,7 @@ def unified_attention(
     TILE_SIZE_DECODE = 16 if q.element_size() >= 2 else 32
 
     # if batch contains a prefill
-    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128:
+    if max_seqlen_q > 1 or total_num_q_blocks * num_kv_heads > 128 or True:
         kernel_unified_attention_2d[
             (
                 total_num_q_blocks,
