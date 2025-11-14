@@ -399,6 +399,10 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         for sub_config in sub_configs:
             patch_rope_parameters(getattr(config, sub_config))
         return
+    else:
+        # Some custom multi-modal configs don't use sub_configs.So we get the
+        # text config and assume that there is no RoPE in other modalities.
+        config = config.get_text_config()
     # Retrieve rope_parameters differently based on Transformers version
     if Version(version("transformers")) >= Version("5.0.0.dev0"):
         from transformers.modeling_rope_utils import RopeParameters
