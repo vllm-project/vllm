@@ -88,8 +88,6 @@ try:
                     x_s = x_s[:M, ...].view(torch.uint8)
 
                 y = torch.empty(M, N, device=x_q.device, dtype=out_dtype)
-
-                print("gemm_afp4wfp4_preshuffled_weight_scales")
                 gemm_afp4wfp4_preshuffled_weight_scales(
                     x_q.view(torch.uint8),
                     weight.view(torch.uint8).view(weight.shape[0] // 16, -1),
