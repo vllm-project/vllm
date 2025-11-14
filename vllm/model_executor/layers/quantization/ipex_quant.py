@@ -454,7 +454,6 @@ class XPUFp8MoEMethod(FusedMoEMethodBase):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor:
         return layer.ipex_fusion(
             x,

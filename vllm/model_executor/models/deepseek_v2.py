@@ -98,6 +98,8 @@ if current_platform.is_cuda_alike():
 elif current_platform.is_xpu():
     from vllm._ipex_ops import ipex_ops as ops
 
+import vllm.envs as envs
+
 logger = init_logger(__name__)
 
 
@@ -243,7 +245,6 @@ class DeepseekV2MoE(nn.Module):
         self.tp_rank = get_tensor_model_parallel_rank()
 
         self.routed_scaling_factor = getattr(config, "routed_scaling_factor", 1.0)
-        self.enable_fused_moe_router = parallel_config.enable_fused_moe_router
 
         self.ep_group = get_ep_group().device_group
         self.ep_rank = get_ep_group().rank_in_group
@@ -278,7 +279,6 @@ class DeepseekV2MoE(nn.Module):
         self.enable_eplb = parallel_config.enable_eplb
 
         self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.enable_fused_shared_experts = parallel_config.enable_fused_shared_experts
 
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
@@ -290,10 +290,11 @@ class DeepseekV2MoE(nn.Module):
         )
 
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+        enable_fused_shared_experts = envs.VLLM_USE_CUDA_FUSION_SHARED_EXPERTS
         if (
             config.n_shared_experts is None
             or self.is_rocm_aiter_moe_enabled
-            or self.enable_fused_shared_experts
+            or enable_fused_shared_experts
         ):
             self.shared_experts = None
         else:
@@ -310,8 +311,8 @@ class DeepseekV2MoE(nn.Module):
             )
         used_inside_scaling = (
             self.is_rocm_aiter_moe_enabled
-            or self.enable_fused_moe_router
-            or self.enable_fused_shared_experts
+            or envs.VLLM_USE_FUSED_MOE_ROUTER
+            or enable_fused_shared_experts
         )
         self.experts = SharedFusedMoE(
             shared_experts=self.shared_experts,
@@ -339,9 +340,8 @@ class DeepseekV2MoE(nn.Module):
             is_sequence_parallel=self.is_sequence_parallel,
             n_shared_experts=config.n_shared_experts
             if rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-            or self.enable_fused_shared_experts
+            or enable_fused_shared_experts
             else None,
-            enable_fused_shared_experts=self.enable_fused_shared_experts,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -376,11 +376,11 @@ class DeepseekV2MoE(nn.Module):
         if hidden_states.dtype != torch.float16:
             if not self.is_rocm_aiter_moe_enabled:
                 final_hidden_states *= self.routed_scaling_factor
-        elif self.shared_experts is not None and not self.enable_fused_shared_experts:
+        elif self.shared_experts is not None:
             assert shared_output is not None
             shared_output *= 1.0 / self.routed_scaling_factor
 
-        if self.shared_experts is not None and not self.enable_fused_shared_experts:
+        if self.shared_experts is not None:
             assert shared_output is not None
             final_hidden_states += shared_output
 
@@ -1386,9 +1386,6 @@ class DeepseekV2ForCausalLM(
             self.config.num_hidden_layers - self.config.first_k_dense_replace
         )
         self.set_moe_parameters()
-        self.enable_fused_shared_experts = (
-            vllm_config.parallel_config.enable_fused_shared_experts
-        )
 
     def set_moe_parameters(self):
         self.expert_weights = []
@@ -1448,6 +1445,7 @@ class DeepseekV2ForCausalLM(
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
         )
+        enable_fused_shared_experts = envs.VLLM_USE_CUDA_FUSION_SHARED_EXPERTS
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -1467,7 +1465,7 @@ class DeepseekV2ForCausalLM(
         else:
             stacked_params_mapping.extend(mla_params_mapping)
 
-        if self.enable_fused_shared_experts:
+        if enable_fused_shared_experts:
             logger.info(
                 "Cloning %s replicas of the shared expert into MoE",
                 self.num_shared_experts,
@@ -1480,8 +1478,7 @@ class DeepseekV2ForCausalLM(
             num_experts=self.config.n_routed_experts
             + (
                 self.config.n_shared_experts
-                if rocm_aiter_moe_shared_expert_enabled
-                or self.enable_fused_shared_experts
+                if rocm_aiter_moe_shared_expert_enabled or enable_fused_shared_experts
                 else 0
             ),
             num_redundant_experts=self.num_redundant_experts,
@@ -1498,7 +1495,7 @@ class DeepseekV2ForCausalLM(
                 continue  # skip spec decode layers for main model
 
             is_fuse_shared_experts_layer = (
-                self.enable_fused_shared_experts or rocm_aiter_moe_shared_expert_enabled
+                enable_fused_shared_experts or rocm_aiter_moe_shared_expert_enabled
             ) and ("mlp.shared_experts" in name)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

@@ -882,7 +882,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
@@ -1145,7 +1144,6 @@ class IpexMxfp4MoEMethod(Mxfp4MoEMethod):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        enable_fused_moe_router: bool = False,
     ) -> torch.Tensor:
         assert activation == "swigluoai", (
             "Only swiglu_oai activation is supported for IPEX MXFP4 MoE"

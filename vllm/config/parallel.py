@@ -281,12 +281,6 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
-    enable_fused_shared_experts: bool = False
-    """Enable the fusion of the shared experts of the model with other experts."""
-
-    enable_fused_moe_router: bool = False
-    """Use the fused grouped top-k MoE expert selection router"""
-
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
