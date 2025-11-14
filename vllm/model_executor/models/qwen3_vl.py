@@ -575,7 +575,7 @@ class Qwen3_VisionTransformer(nn.Module):
             ("attn.qkv.", "attn.k.", "k"),
             ("attn.qkv.", "attn.v.", "v"),
         ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False)) | dict(self.named_buffers(remove_duplicate=False))
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
@@ -1140,7 +1140,9 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         self.config = config
 
         self.quant_config = quant_config
-        self.model = Qwen3LLMModel(vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self.model = Qwen3LLMModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
