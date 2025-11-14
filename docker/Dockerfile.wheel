@@ -15,9 +15,9 @@
 #   docker build --build-arg VLLM_WHEEL_URL=https://vllm-wheels.s3.us-west-2.amazonaws.com/v0.11.0/vllm-0.11.0-cp38-abi3-manylinux1_x86_64.whl \
 #                -f docker/Dockerfile.wheel -t vllm-custom:latest .
 
-ARG CUDA_VERSION=12.8.1
+ARG CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.12
-ARG TORCH_BACKEND=cu128
+ARG TORCH_BACKEND=cu129
 
 # By parameterizing the base images, we allow third-party to use their own base images
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
@@ -105,10 +105,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # https://docs.flashinfer.ai/installation.html
 RUN --mount=type=cache,target=/root/.cache/uv \
     echo "Installing FlashInfer components for TORCH_BACKEND=${TORCH_BACKEND}" \
-    && uv pip install --system flashinfer-cubin==0.4.1 \
-    && uv pip install --system flashinfer-jit-cache==0.4.1 \
+    && uv pip install --system flashinfer-cubin==0.5.2 \
+    && uv pip install --system flashinfer-jit-cache==0.5.2 \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-    && (which flashinfer && flashinfer show-config || echo "FlashInfer installed (CLI not available)")
+    && flashinfer show-config
 
 # Note: No need to copy Python files since we're using editable install (-e)
 # The source is already in /vllm-workspace and linked

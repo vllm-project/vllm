@@ -590,7 +590,7 @@ class EplbState:
                             eplb_model_state, expert_latency_pass, log_stats
                         )
                         eplb_model_state.expert_latency_window[
-                            eplb_model_state.expert_load_window_step
+                            self.expert_load_window_step
                         ] = expert_latency_pass.clone()
                         # Reset for next pass
                         expert_latency_pass.zero_()
