@@ -9,7 +9,7 @@ from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, TypeAlias, TypeVar
 
 import huggingface_hub
 from huggingface_hub import (
@@ -394,15 +394,6 @@ def file_or_path_exists(
 
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
-    # Handle nested configs (e.g., multi-modal models)
-    if sub_configs := getattr(config, "sub_configs", None):
-        for sub_config in sub_configs:
-            patch_rope_parameters(getattr(config, sub_config))
-        return
-    else:
-        # Some custom multi-modal configs don't use sub_configs.So we get the
-        # text config and assume that there is no RoPE in other modalities.
-        config = config.get_text_config()
     # Retrieve rope_parameters differently based on Transformers version
     if Version(version("transformers")) >= Version("5.0.0.dev0"):
         from transformers.modeling_rope_utils import RopeParameters
@@ -414,6 +405,18 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
         rope_theta: float | None = getattr(config, "rope_theta", None)
         rope_scaling: dict | None = getattr(config, "rope_scaling", None)
+        # Make best effort to retrieve parameters for multi-modal configs
+        if rope_theta is None and rope_scaling is None:
+            SubConfigs: TypeAlias = dict[str, PretrainedConfig]
+            sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
+            if sub_configs:
+                for sub_config in sub_configs:
+                    patch_rope_parameters(getattr(config, sub_config))
+                return
+            # Not all multi-modal configs use sub_configs
+            config = config.get_text_config()
+            rope_theta = getattr(config, "rope_theta", None)
+            rope_scaling = getattr(config, "rope_scaling", None)
         rope_parameters = rope_scaling
         # Move rope_theta into rope_parameters
         if rope_theta is not None:
