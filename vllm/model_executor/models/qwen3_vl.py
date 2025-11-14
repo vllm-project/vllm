@@ -1410,7 +1410,7 @@ class Qwen3VLForConditionalGeneration(
                 )
         return mm_input_by_modality
 
-    def get_mm_grid_hw(
+    def iter_mm_grid_hw(
         self, input_tokens: list[int], mm_features: list[MultiModalFeatureSpec]
     ) -> Iterator[tuple[int, int, int]]:
         video_token_id = self.config.video_token_id
@@ -1439,7 +1439,7 @@ class Qwen3VLForConditionalGeneration(
     ) -> tuple[torch.Tensor, int]:
         llm_pos_ids_list = []
         st = 0
-        for offset, llm_grid_h, llm_grid_w in self.get_mm_grid_hw(
+        for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
             input_tokens, mm_features
         ):
             text_len = offset - st
