@@ -51,15 +51,23 @@ __device__ __forceinline__ auto convert_to_uint32(float x) -> uint32_t {
 
 template <int step>
 static inline __device__ uint32_t extractBinIdx(float x) {
-  uint32_t bits = __float_as_uint(x);
-  bits = (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
-
   if constexpr (step == 0) {
-    return bits >> 21;
-  } else if constexpr (step == 1) {
-    return (bits >> 10) & 0x7ff;
+    __half hx = __float2half(x);
+    uint16_t bits = __half_as_ushort(hx);
+    bits = (bits & 0x8000) ? bits : ~bits & 0x7fff;
+    return bits >> 5;
   } else {
     return bits & 0x3ff;
+    uint32_t bits = __float_as_uint(x);
+    bits = (bits & 0x80000000) ? bits : ~bits & 0x7fffffff;
+
+    if constexpr (step == 1) {
+      return bits >> 21;
+    } else if constexpr (step == 2) {
+      return (bits >> 10) & 0x7ff;
+    } else if constexpr (step == 3) {
+      return bits & 0x3ff;
+    }
   }
 }
 
@@ -161,11 +169,11 @@ __device__ bool processHistogramStep(
   __syncthreads();
 
   // Update pattern
-  constexpr auto patternShift = step == 0 ? 0 : step == 1 ? 21 : 10;
-  if constexpr (step == 1) {
+  constexpr auto patternShift = step < 2 ? 0 : step == 2 ? 21 : 10;
+  if constexpr (step == 2) {
     logitPattern = static_cast<uint32_t>(thresholdBinIdx & 0x7ff)
                    << patternShift;
-  } else if constexpr (step == 2) {
+  } else if constexpr (step == 3) {
     logitPattern |= static_cast<uint32_t>(thresholdBinIdx & 0x7ff)
                     << patternShift;
   }
@@ -261,7 +269,7 @@ __device__ bool processHistogramStep(
           smemOutput[dstIdx] = idx;
         }
       }
-      if constexpr (step < 2) {
+      if constexpr (step < 3) {
         // Only fill the final items for sorting if the threshold bin fits
         if (binIdx == thresholdBinIdx &&
             smemFinalBinSize[0] <= kNumFinalItems) {
@@ -274,13 +282,10 @@ __device__ bool processHistogramStep(
           } else {
             smemFinal.items.indices[dstIdx] = idx;
           }
-        } else if (binIdx == thresholdBinIdx &&
-                   smemFinalBinSize[0] > kNumFinalItems) {
-          // Load elements for next it
         }
       } else {
         if (binIdx == thresholdBinIdx) {
-          // The elements in the threshold bin share the same 32 bits at step 2
+          // The elements in the threshold bin share the same 32 bits at step 3
           int dstIdx = atomicAdd(&smemFinal.histo.data[binIdx], 1);
           if (dstIdx < topK) {
             if constexpr (mergeBlocks) {
@@ -315,7 +320,7 @@ __device__ bool processHistogramStep(
   return smemFinalBinSize[0] > kNumFinalItems;
 }
 
-// Follows 11 - 11 - 10 bit iterations
+// Follows half - 11 - 11 - 10 bit iterations
 template <int kNumThreadsPerBlock, int kNumBins, bool useRadixSort,
           bool multipleBlocksPerRow = false, bool mergeBlocks = false>
 static __device__ void topKPerRowJob(const int* indices, const float* logits,
@@ -403,7 +408,7 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
   int thresholdBinIdx = -1;
   uint32_t logitPattern = 0;
 
-  // Step 0: Process first 11 bits
+  // Step 0: Process first 11 bits of half representation
   bool continueToNextStep =
       processHistogramStep<0, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
                            multipleBlocksPerRow, mergeBlocks>(
@@ -419,15 +424,25 @@ static __device__ void topKPerRowJob(const int* indices, const float* logits,
             indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
             smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
             smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
+  }
 
-    if (continueToNextStep) {
-      // Step 2: Process final 10 bits
-      processHistogramStep<2, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
-                           multipleBlocksPerRow, mergeBlocks>(
-          indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
-          smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
-          smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
-    }
+  if (continueToNextStep) {
+    // Step 2: Process next 11 bits
+    continueToNextStep =
+        processHistogramStep<2, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
+                             multipleBlocksPerRow, mergeBlocks>(
+            indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
+            smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
+            smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
+  }
+
+  if (continueToNextStep) {
+    // Step 3: Process last 10 bits
+    processHistogramStep<3, kNumThreadsPerBlock, kNumBins, kNumFinalItems,
+                         multipleBlocksPerRow, mergeBlocks>(
+        indices, logits, rowEnd, logitPattern, thresholdBinIdx, smemOutput,
+        smemThresholdBinIdx, smemFinalDstIdx, smemFinalBinSize,
+        smemFoundTopKValues, smemFinal, stride1, rowStart, topK);
   }
 
   if (!continueToNextStep) {
