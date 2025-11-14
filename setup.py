@@ -208,6 +208,8 @@ class cmake_build_ext(build_ext):
         # Make sure we use the nvcc from CUDA_HOME
         if _is_cuda():
             cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+        elif _is_hip():
+            cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
         other_cmake_args = os.environ.get("CMAKE_ARGS")
         if other_cmake_args:
@@ -543,7 +545,9 @@ def get_vllm_version() -> str:
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
     if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
-        return env_version
+        print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
+        os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
+        return get_version(write_to="vllm/_version.py")
 
     version = get_version(write_to="vllm/_version.py")
     sep = "+" if "+" not in version else "."  # dev versions might contain +
@@ -628,6 +632,7 @@ ext_modules = []
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -643,7 +648,6 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
-    ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
@@ -709,10 +713,10 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
-        "bench": ["pandas", "datasets"],
+        "bench": ["pandas", "matplotlib", "seaborn", "datasets"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.1.10"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.14.0"],
+        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.0"],
         "audio": [
             "librosa",
             "soundfile",
