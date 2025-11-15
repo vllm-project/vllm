@@ -926,7 +926,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
 
-- label: Blackwell Fusion & Compile Tests # 30 min
+- label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
   gpu: b200
