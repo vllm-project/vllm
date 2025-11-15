@@ -172,10 +172,13 @@ def test_fusion_aiter_silu_and_mul_group_fp8_quant(
         model2 = torch.compile(model, backend=backend)
         result2 = model2(x)
 
-        atol, rtol = 1e-2, 1e-2
+        if dtype == torch.float16:
+            ATOL, RTOL = (5e-3, 5e-3)
+        else:
+            ATOL, RTOL = (1e-2, 1e-2)
 
         torch.testing.assert_close(
-            result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol
+            result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=ATOL, rtol=RTOL
         )
 
         assert fusion_pass.matched_count == 1
