@@ -143,6 +143,17 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """Check if backend supports a given attention type.
+
+        By default, only supports decoder attention.
+        Backends should override this to support other attention types.
+        """
+        from vllm.attention import AttentionType
+
+        return attn_type == AttentionType.DECODER
+
+    @classmethod
     def supports_compute_capability(cls, capability: "DeviceCapability") -> bool:
         return True
 
@@ -171,6 +182,7 @@ class AttentionBackend(ABC):
         has_sink: bool,
         use_sparse: bool,
         device_capability: "DeviceCapability",
+        attn_type: str,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -195,6 +207,8 @@ class AttentionBackend(ABC):
                 invalid_reasons.append("non-sparse not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
+        if not cls.supports_attn_type(attn_type):
+            invalid_reasons.append(f"attention type {attn_type} not supported")
         combination_reason = cls.supports_combination(
             head_size,
             dtype,
