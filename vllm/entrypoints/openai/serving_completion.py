@@ -216,6 +216,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         request_id=request_id,
                         params=sampling_params,
                         lora_request=lora_request,
+                        trace_headers=trace_headers,
                     )
                 else:
                     engine_request, tokenization_kwargs = await self._process_inputs(
