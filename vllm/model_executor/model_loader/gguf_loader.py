@@ -120,11 +120,14 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
-        # Gemma3 special case: mm_input_projection uses different base name
-        # in automatic mapping but still needs .weight suffix in GGUF file
+        # Gemma3 special cases: The multimodal projector requires explicit
+        # mappings for the input projection and normalization layer.
         if model_type == "gemma3":
-            gguf_to_hf_name_map["multi_modal_projector.mm_input_projection.weight"] = (
+            gguf_to_hf_name_map["mm.input_projection.weight"] = (
                 "multi_modal_projector.mm_input_projection_weight"
+            )
+            gguf_to_hf_name_map["mm.soft_emb_norm.weight"] = (
+                "multi_modal_projector.mm_soft_emb_norm.weight"
             )
 
         arch = None
