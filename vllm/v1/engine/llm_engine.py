@@ -14,7 +14,6 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import Device
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -321,7 +320,7 @@ class LLMEngine:
         self.processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self, device: Device | None = None):
+    def reset_prefix_cache(self):
         self.engine_core.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
