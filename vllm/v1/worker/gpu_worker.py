@@ -257,7 +257,10 @@ class Worker(WorkerBase):
                 GPUModelRunner as GPUModelRunnerV2,
             )
 
-            self.model_runner = GPUModelRunnerV2(self.vllm_config, self.device)
+            # HACK(woosuk): This is a temporary fix to avoid type errors.
+            self.model_runner: GPUModelRunner = GPUModelRunnerV2(  # type: ignore
+                self.vllm_config, self.device
+            )
         else:
             self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
