@@ -854,15 +854,13 @@ class OpenPanguSinkAttention(nn.Module):
                 )
             else:
                 self.param_sink_value = torch.zeros(
-                    torch.empty(
-                        (
-                            self.param_sink_number,
-                            self.num_kv_heads,
-                            self.v_channels,
-                        ),
-                        device=torch.cuda.current_device(),
-                        dtype=config.torch_dtype,
-                    )
+                    (
+                        self.param_sink_number,
+                        self.num_kv_heads,
+                        self.v_channels,
+                    ),
+                    device=torch.cuda.current_device(),
+                    dtype=config.torch_dtype,
                 )
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):

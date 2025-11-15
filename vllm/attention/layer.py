@@ -945,36 +945,27 @@ def unified_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
     attn_metadata, self, kv_cache = get_attention_context(layer_name)
-    if sink_key is None and sink_value is None:
-        self.impl.forward(
-            self,
-            query,
-            key,
-            value,
-            kv_cache,
-            attn_metadata,
-            output=output,
-            output_scale=output_scale,
-            output_block_scale=output_block_scale,
-        )
-    else:
+    kwargs = {}
+    if sink_key is not None or sink_value is not None:
         assert sink_key is not None and sink_value is not None, (
             "Currently, it is only supported when "
             "sink_key and sink_value are both not None"
         )
-        self.impl.forward(
-            self,
-            query,
-            key,
-            value,
-            kv_cache,
-            attn_metadata,
-            output=output,
-            output_scale=output_scale,
-            output_block_scale=output_block_scale,
-            sink_key=sink_key,
-            sink_value=sink_value,
-        )
+        kwargs["sink_key"] = sink_key
+        kwargs["sink_value"] = sink_value
+
+    self.impl.forward(
+        self,
+        query,
+        key,
+        value,
+        kv_cache,
+        attn_metadata,
+        output=output,
+        output_scale=output_scale,
+        output_block_scale=output_block_scale,
+        **kwargs,
+    )
 
 
 def unified_attention_with_output_fake(

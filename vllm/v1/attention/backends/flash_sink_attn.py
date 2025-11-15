@@ -614,7 +614,8 @@ class FlashSinkAttentionImpl(AttentionImpl):
             assert sink_len % block_size == 0
             num_sink_blocks = sink_len // block_size
             sink_kv_slot_mapping = torch.arange(
-                sink_len,
+                block_size,
+                sink_len + block_size,
                 device=attn_metadata.slot_mapping.device,
                 dtype=attn_metadata.slot_mapping.dtype,
             )
@@ -654,7 +655,10 @@ class FlashSinkAttentionImpl(AttentionImpl):
             block_table = attn_metadata.block_table
             scheduler_metadata = attn_metadata.scheduler_metadata
             sink_block_table = torch.arange(
-                num_sink_blocks, device=block_table.device, dtype=block_table.dtype
+                1,
+                num_sink_blocks + 1,
+                device=block_table.device,
+                dtype=block_table.dtype,
             )
             sink_block_table = sink_block_table[None, :].expand(
                 block_table.shape[0], -1
@@ -939,13 +943,8 @@ def cascade_attention(
     descale_shape = (cu_prefix_query_lens.shape[0] - 1, key_cache.shape[-2])
 
     num_sink_blocks = sink_len // block_size
-    block_table = block_table + num_sink_blocks
-    block_table[block_table == num_sink_blocks] = 0
-    sink_block_table = (
-        torch.arange(
-            num_sink_blocks, device=block_table.device, dtype=block_table.dtype
-        )
-        + 1
+    sink_block_table = torch.arange(
+        1, num_sink_blocks + 1, device=block_table.device, dtype=block_table.dtype
     )
     sink_block_table = sink_block_table[None, :].expand(block_table.shape[0], -1)
     block_table = torch.cat((sink_block_table, block_table), dim=1)
