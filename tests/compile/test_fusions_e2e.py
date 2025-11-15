@@ -113,7 +113,7 @@ if current_platform.is_cuda():
                 allreduce_fusion=97,
                 # TODO(luka) perhaps avoid SP for MoE allreduce? 49
                 sequence_parallel=97,
-                async_tp=48,  # mlp is moe, no fusion there
+                async_tp=96,  # MLP is MoE, half the fusions of dense
             ),
         ),
     ]
