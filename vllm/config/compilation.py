@@ -774,7 +774,7 @@ class CompilationConfig:
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
 
-        # Gets recomputed in the model runner but compute it here for testing.
+        # May get recomputed in the model runner if adjustment is needed for spec-decode
         self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(self):
