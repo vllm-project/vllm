@@ -3,17 +3,18 @@
 from datetime import datetime
 from itertools import product
 
-# torch.manual_seed(42)
-# torch.cuda.manual_seed(42)
-# torch.cuda.manual_seed_all(42)
-# import random
-# import numpy as np
-# random.seed(42)
-# np.random.seed(42)
-# torch.backends.cudnn.deterministic = True
-# torch.backends.cudnn.benchmark = False
-import regex as re
 import torch
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+torch.cuda.manual_seed_all(42)
+import random
+import numpy as np
+random.seed(42)
+np.random.seed(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+import regex as re
+
 
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -76,7 +77,7 @@ def test_accuracy(logits, k, p, func_list):
             error_cols = torch.unique(error_cols)
             num_error_cols = error_cols.shape[0]
             print_to_log(f"num_error_rows: {num_error_rows} - {error_rows}", log_file)
-            print_to_log(f"num_error_cols: {num_error_cols}", log_file)
+            print_to_log(f"num_error_cols: {num_error_cols} - {error_cols}", log_file)
             row_to_show = 5 if num_error_rows > 5 else num_error_rows
             logits_to_show = torch.sort(
                 output_logits[error_rows], descending=True
@@ -122,8 +123,8 @@ if __name__ == "__main__":
     vocab_size_list = [4096, 16384, 65536, 128000, 262144]
     p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
     # p_list = [None]
-    # k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
-    k_list = [None]
+    k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
+    # k_list = [None]
     func_list = [apply_top_k_top_p, apply_top_k_top_p_triton]
 
     log_file = f"triton_topk_topp_test_{date_str}.log"

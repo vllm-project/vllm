@@ -667,7 +667,7 @@ def top_p_pivot_filter(
         sum_exp_logits = tl.zeros((), dtype=tl.float32)
         for i in range(0, NUM_TILES):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            mask_n = offs_n < search_range
+            mask_n = offs_n < VOCAB_SIZE
             probs_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf"))
             probs_blk = probs_blk - max_logit
             probs_blk = tl.exp(probs_blk)
@@ -677,7 +677,7 @@ def top_p_pivot_filter(
         # Fourth pass: Calculate softmax
         for i in range(0, NUM_TILES):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-            mask_n = offs_n < search_range
+            mask_n = offs_n < VOCAB_SIZE
             probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
             probs_blk = probs_blk / sum_exp_logits
             tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
@@ -767,17 +767,12 @@ def apply_top_p_filtered(
         num_stages=NUM_STAGES,
     )
 
-    # filtered_logits = logits.clone().detach()
-    # filtered_indices = torch.arange(0, vocab_size, device=logits.device).unsqueeze(0).expand(batch_size, vocab_size)
-    # filtered_probs = torch.softmax(filtered_logits, dim=-1)
-    # sum_filtered_probs = torch.sum(filtered_probs, dim=-1)
-
-    if torch.any(sum_filtered_probs < p):
-        return apply_top_k_top_p(logits, k, p)
-
     logits_sort, sort_indices = filtered_logits.sort(dim=-1, descending=False)
     logits_sort_indices = torch.gather(filtered_indices, -1, sort_indices)
     sorted_probs = torch.gather(filtered_probs, -1, sort_indices)
+
+    if torch.any(sum_filtered_probs < p):
+        return apply_top_k_top_p(logits, k, p)
 
     probs_sum = torch.cumsum(sorted_probs, dim=-1)
     sum_non_outliers = (1.0 - sum_filtered_probs).unsqueeze(-1)
@@ -789,6 +784,7 @@ def apply_top_p_filtered(
     logits.fill_(-float("inf"))
     logits.scatter_(dim=1, index=logits_sort_indices, src=logits_sort)
     return logits
+    
 
 
 def apply_top_k_top_p_triton(
