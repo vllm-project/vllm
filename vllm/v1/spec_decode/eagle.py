@@ -279,7 +279,7 @@ class EagleProposer:
         if self.supports_mm_inputs:
             mm_embeds, is_mm_embed = mm_embed_inputs or (None, None)
 
-            self.inputs_embeds[:num_tokens] = self.model.get_input_embeddings(
+            self.inputs_embeds[:num_tokens] = self.model.embed_input_ids(
                 self.input_ids[:num_tokens],
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
@@ -447,9 +447,7 @@ class EagleProposer:
             self._set_positions(batch_size, clamped_positions)
             self.hidden_states[:batch_size] = hidden_states
             if self.supports_mm_inputs:
-                self.inputs_embeds[:batch_size] = self.model.get_input_embeddings(
-                    input_ids
-                )
+                self.inputs_embeds[:batch_size] = self.model.embed_input_ids(input_ids)
 
                 input_ids = None
                 inputs_embeds = self.inputs_embeds[:input_batch_size]
@@ -486,7 +484,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -501,7 +499,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -512,10 +510,9 @@ class EagleProposer:
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(
+        return torch.tensor(
             next_token_ids, dtype=torch.int32, device=self.input_ids.device
         )
-        return next_token_ids
 
     def prepare_next_token_ids_padded(
         self,
@@ -972,9 +969,7 @@ class EagleProposer:
             # text-only draft models
             try:
                 dummy_input_ids = torch.tensor([[1]], device=self.input_ids.device)
-                self.model.get_input_embeddings(
-                    dummy_input_ids, multimodal_embeddings=None
-                )
+                self.model.embed_input_ids(dummy_input_ids, multimodal_embeddings=None)
             except (NotImplementedError, AttributeError, TypeError):
                 logger.warning(
                     "Draft model does not support multimodal inputs, "

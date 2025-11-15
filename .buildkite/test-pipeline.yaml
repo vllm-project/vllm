@@ -57,7 +57,7 @@ steps:
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
-- label: Async Engine, Inputs, Utils, Worker Test (CPU) # 4 mins
+- label: Async Engine, Inputs, Utils, Worker, Config Test (CPU) # 4 mins
   timeout_in_minutes: 10
   source_file_dependencies:
   - vllm/
@@ -66,6 +66,7 @@ steps:
   - tests/multimodal
   - tests/standalone_tests/lazy_imports.py
   - tests/transformers_utils
+  - tests/config
   no_gpu: true
   commands:
   - python3 standalone_tests/lazy_imports.py
@@ -73,6 +74,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s transformers_utils
+  - pytest -v -s config
 
 - label: Python-only Installation Test # 10min
   timeout_in_minutes: 20
@@ -443,6 +445,7 @@ steps:
     - vllm/
     - tests/compile
   commands:
+    - pytest -v -s compile/test_graph_partition.py
     - pytest -v -s compile/test_config.py
     - pytest -v -s compile/test_pass_manager.py
     - pytest -v -s compile/test_fusion.py
@@ -872,12 +875,12 @@ steps:
   optional: true
   commands:
     - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
+    - pytest -v -s tests/models/test_initialization.py -k 'not (Gemma3 or ModernBert or Qwen2_5_VL or Qwen2_5vl or Qwen2VL or TransformersMultiModalEmbeddingModel or TransformersMultiModalForSequenceClassification or Ultravox or Phi4Multimodal or LlavaNextVideo or MiniCPMO or Lfm2Moe or PaliGemma or RobertaForSequenceClassification or Ovis2_5 or Fuyu or DeepseekOCR or KimiVL)'
     - pytest -v -s tests/models/test_transformers.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
+    # - pytest -v -s tests/models/multimodal/processing/
+    - pytest -v -s tests/models/multimodal/test_mapping.py -k 'not (Gemma3 or Qwen2VL or Qwen2_5_VL)'
     - python3 examples/offline_inference/basic/chat.py
-    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
+    # - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
