@@ -159,7 +159,7 @@ def support_torch_compile(
 
     `mark_unbacked_dims` is a dictionary that maps argument names with a dynamic
     dim to be decorated with `mark_unbacked`.  This is useful if we would like to
-    enforce that dynamo do not specialize on 0/1 values in the case of dummy input
+    enforce that dynamo does not specialize on 0/1 values in the case of dummy input
     such as for vision model compilation
     """
 
@@ -483,7 +483,7 @@ def maybe_use_cudagraph_partition_wrapper(vllm_config: VllmConfig):
     Context manager to set/unset customized cudagraph partition wrappers.
 
     If we're using Inductor-based graph partitioning, we currently have the
-    whole `fx.Graph` before Inductor lowering and and the piecewise
+    whole `fx.Graph` before Inductor lowering and the piecewise
     splitting happens after all graph passes and fusions. Here, we add
     a custom hook for Inductor to wrap each partition with our static
     graph wrapper class to maintain more control over static graph

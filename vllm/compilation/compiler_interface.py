@@ -299,7 +299,7 @@ class InductorAdaptor(CompilerInterface):
         self.base_cache_dir = cache_dir[: -len(prefix)] if prefix else cache_dir
         if disable_cache:
             return
-        # redirect the cache directory to a sub-directory
+        # redirect the cache directory to a subdirectory
         # set flags so that Inductor and Triton store their cache
         # in the cache_dir, then users only need to copy the cache_dir
         # to another machine to reuse the cache.
