@@ -306,11 +306,12 @@ class KVCacheManager:
                 "Computed blocks should be empty when prefix caching is disabled"
             )
 
-        # Append the new computed blocks to the request blocks until now to
-        # avoid the case where the new blocks cannot be allocated.
-        self.coordinator.save_new_computed_blocks(
-            request.request_id, new_computed_block_list
-        )
+        if new_computed_block_list is not self.empty_kv_cache_blocks.blocks:
+            # Append the new computed blocks to the request blocks until now to
+            # avoid the case where the new blocks cannot be allocated.
+            self.coordinator.save_new_computed_blocks(
+                request.request_id, new_computed_block_list
+            )
 
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot, num_encoder_tokens

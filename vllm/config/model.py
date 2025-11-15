@@ -20,9 +20,6 @@ from vllm.config.pooler import PoolerConfig
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import assert_hashable, config, getattr_iter
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     ConfigFormat,
@@ -48,7 +45,7 @@ if TYPE_CHECKING:
 
     import vllm.model_executor.layers.quantization as me_quant
     import vllm.model_executor.models as me_models
-    from vllm.attention.backends.registry import _Backend
+    from vllm.attention.backends.registry import AttentionBackendEnum
     from vllm.config.load import LoadConfig
     from vllm.config.parallel import ParallelConfig
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -56,7 +53,7 @@ if TYPE_CHECKING:
 else:
     PretrainedConfig = Any
 
-    _Backend = Any
+    AttentionBackendEnum = Any
     me_quant = LazyLoader(
         "model_executor", globals(), "vllm.model_executor.layers.quantization"
     )
@@ -171,12 +168,6 @@ class ModelConfig:
     """The specific revision to use for the model code on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
     use the default version."""
-    rope_scaling: dict[str, Any] = field(default_factory=dict)
-    """RoPE scaling configuration. For example,
-    `{"rope_type":"dynamic","factor":2.0}`."""
-    rope_theta: float | None = None
-    """RoPE theta. Use with `rope_scaling`. In some cases, changing the RoPE
-    theta improves the performance of the scaled model."""
     tokenizer_revision: str | None = None
     """The specific revision to use for the tokenizer on the Hugging Face Hub.
     It can be a branch name, a tag name, or a commit id. If unspecified, will
@@ -273,7 +264,8 @@ class ModelConfig:
     merged with the default config from the model. If used with
     `--generation-config vllm`, only the override parameters are used."""
     enable_sleep_mode: bool = False
-    """Enable sleep mode for the engine (only cuda platform is supported)."""
+    """Enable sleep mode for the engine (only cuda and
+    hip platforms are supported)."""
     model_impl: str | ModelImpl = "auto"
     """Which implementation of the model to use:\n
     - "auto" will try to use the vLLM implementation, if it exists, and fall
@@ -311,7 +303,7 @@ class ModelConfig:
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
-    mm_encoder_attn_backend: InitVar[_Backend | str | None] = None
+    mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -341,8 +333,6 @@ class ModelConfig:
         factors.append(self.generation_config)
         factors.append(self.model_impl)
         factors.append(self.override_generation_config)
-        factors.append(self.rope_scaling)
-        factors.append(self.rope_theta)
         factors.append(self.video_pruning_rate)
         factors.append(self.enable_prompt_embeds)
 
@@ -431,15 +421,11 @@ class ModelConfig:
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
-        mm_encoder_attn_backend: _Backend | str | None,
+        mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
     ) -> None:
-        # Enable batch invariance settings if requested
-        if vllm_is_batch_invariant():
-            self.enforce_eager = True
-
         # Set the default seed to 0 in V1.
         # NOTE(woosuk): In V1, we use separate processes for workers (unless
         # VLLM_ENABLE_V1_MULTIPROCESSING=0), so setting a seed here
@@ -487,25 +473,6 @@ class ModelConfig:
                 else:
                     hf_overrides_kw[key] = value
             hf_overrides_fn = None
-
-        if self.rope_scaling:
-            hf_override: dict[str, Any] = {"rope_scaling": self.rope_scaling}
-            hf_overrides_kw.update(hf_override)
-            hf_overrides_str = json.dumps(hf_overrides_kw)
-            msg = (
-                "`--rope-scaling` will be removed in a future release. "
-                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`"
-            )
-            warnings.warn(DeprecationWarning(msg), stacklevel=2)
-        if self.rope_theta is not None:
-            hf_override = {"rope_theta": self.rope_theta}
-            hf_overrides_kw.update(hf_override)
-            hf_overrides_str = json.dumps(hf_overrides_kw)
-            msg = (
-                "`--rope-theta` will be removed in a future release. "
-                f"'Please instead use `--hf-overrides '{hf_overrides_str}'`"
-            )
-            warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
         self.maybe_pull_model_tokenizer_for_runai(self.model, self.tokenizer)
 
@@ -765,7 +732,7 @@ class ModelConfig:
         return self
 
     def _get_transformers_backend_cls(self) -> str:
-        """Determine which Transformers backend class will be used if
+        """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
         # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
@@ -779,8 +746,8 @@ class ModelConfig:
         # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
-        # Only consider Transformers backend pooling classes if we're wrapping an
-        # architecture that defaults to pooling. Otherwise, we return the LM class
+        # Only consider Transformers modeling backend pooling classes if we're wrapping
+        # an architecture that defaults to pooling. Otherwise, we return the LM class
         # and use adapters.
         if runner == "pooling" and task in {"embed", "classify"}:
             if task == "embed":
@@ -792,7 +759,7 @@ class ModelConfig:
         return cls
 
     def using_transformers_backend(self) -> bool:
-        """Check if the model is using the Transformers backend class."""
+        """Check if the model is using the Transformers modeling backend class."""
         used_cls = self._model_info.architecture
         transformers_backend_cls = self._get_transformers_backend_cls()
         return used_cls == transformers_backend_cls
@@ -1216,6 +1183,14 @@ class ModelConfig:
                 f"but got {decode_context_parallel_size}"
             )
 
+            num_q_per_kv = total_num_attention_heads // total_num_kv_heads
+            assert num_q_per_kv % decode_context_parallel_size == 0, (
+                f"Total number of q per kv attn heads ({num_q_per_kv})"
+                " must be divisible by dcp world size when enable "
+                "decode context parallel for GQA "
+                f"({parallel_config.decode_context_parallel_size})."
+            )
+
     def get_sliding_window(self) -> int | None:
         """Get the sliding window size from the HF text config if present."""
         return getattr(self.hf_text_config, "sliding_window", None)
@@ -1238,6 +1213,8 @@ class ModelConfig:
             "kimi_k2",
             "kimi_linear",
             "longcat_flash",
+            "pangu_ultra_moe",
+            "pangu_ultra_moe_mtp",
         ):
             return self.hf_text_config.kv_lora_rank is not None
         elif self.hf_text_config.model_type == "eagle":
@@ -1373,7 +1350,8 @@ class ModelConfig:
             # Ernie VL's remote code uses list[int]...
             # The values are always the same so we just take the first one.
             return num_experts[0]
-        return num_experts
+        # Coerce to 0 if explicitly set to None
+        return num_experts or 0
 
     def get_layers_start_end_indices(
         self, parallel_config: ParallelConfig
@@ -1386,6 +1364,7 @@ class ModelConfig:
             or self.hf_config.model_type == "glm4_moe_mtp"
             or self.hf_config.model_type == "ernie_mtp"
             or self.hf_config.model_type == "qwen3_next_mtp"
+            or self.hf_config.model_type == "pangu_ultra_moe_mtp"
         ):
             total_num_hidden_layers = getattr(
                 self.hf_text_config, "num_nextn_predict_layers", 0
@@ -1490,6 +1469,12 @@ class ModelConfig:
         if chunk_size is None:
             # used by e.g. Mamba2, NemotronH, Zamba
             chunk_size = getattr(self.hf_text_config, "chunk_size", None)
+
+        # Since Mamba1 does not have a chunk notion
+        # we use a default chunk size of 1024.
+        if chunk_size is None:
+            chunk_size = 2048
+
         return chunk_size
 
     def get_multimodal_config(self) -> MultiModalConfig:
@@ -1644,6 +1629,13 @@ class ModelConfig:
 
     @property
     def is_hybrid(self) -> bool:
+        # Handle granite-4.0-micro case which uses hybrid config but does not
+        # actually contain any non-attention layers.
+        layer_types = getattr(self.hf_config, "layer_types", None)
+        if layer_types is not None and all(
+            layer == "attention" for layer in layer_types
+        ):
+            return False
         return self._model_info.is_hybrid
 
     @property

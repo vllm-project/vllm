@@ -18,10 +18,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
 RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
+ROTARY_OP = torch.ops._C.rotary_embedding.default
+FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
 QUANT_OPS: dict[QuantKey, OpOverload] = {
     kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
@@ -58,12 +61,86 @@ class MatcherCustomOp(ABC):
     def empty(self, *args, **kws):
         return torch.empty(*args, dtype=self.model_dtype, device=self.device, **kws)
 
+    def empty_int64(self, *args, **kws):
+        return torch.empty(*args, dtype=torch.int64, device=self.device, **kws)
+
     def empty_f32(self, *args, **kws):
         return torch.empty(*args, dtype=torch.float32, device=self.device, **kws)
 
     def inputs(self) -> list[torch.Tensor]:
         """Utility for inputs to the pattern"""
         raise NotImplementedError
+
+
+class MatcherRotaryEmbedding(MatcherCustomOp):
+    def __init__(
+        self,
+        is_neox: bool,
+        head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        use_flashinfer: bool = False,
+        enabled: bool | None = None,
+    ) -> None:
+        if enabled is None:
+            enabled = RotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.is_neox = is_neox
+        self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.rotary_dim = head_size
+        if use_flashinfer:
+            self.rotary_op = FLASHINFER_ROTARY_OP
+        else:
+            self.rotary_op = ROTARY_OP
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(5)
+        query = self.empty(5, self.q_size)
+        key = self.empty(5, self.kv_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, query, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result = auto_functionalized(
+            self.rotary_op,
+            positions=positions,
+            query=query,
+            key=key,
+            head_size=self.head_size,
+            cos_sin_cache=cos_sin_cache,
+            is_neox=self.is_neox,
+        )
+        query_out = result[1]
+        key_out = result[2] if len(result) > 2 else None
+        return query_out, key_out
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return RotaryEmbedding.forward_static(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            cos_sin_cache,
+            self.is_neox,
+        )
 
 
 class MatcherRMSNorm(MatcherCustomOp):
@@ -85,10 +162,12 @@ class MatcherRMSNorm(MatcherCustomOp):
         weight: torch.Tensor,
     ) -> torch.Tensor:
         result = torch.empty_like(input)
+        # TODO: support non-contiguous input for RMSNorm and remove this
+        input_contiguous = input.contiguous()
         _, result = auto_functionalized(
             RMS_OP,
             result=result,
-            input=input,
+            input=input_contiguous,
             weight=weight,
             epsilon=self.epsilon,
         )

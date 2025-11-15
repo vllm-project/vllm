@@ -21,7 +21,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 
-from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix
+from .utils import AutoWeightsLoader, get_draft_quant_config, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -90,7 +90,7 @@ class LlamaModel(nn.Module):
             return_bias=False,
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -182,8 +182,8 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -203,6 +203,7 @@ class EagleLlamaForCausalLM(LlamaForCausalLM):
             name, loaded_weight = inputs
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, loaded_weight
 
         loader = AutoWeightsLoader(
