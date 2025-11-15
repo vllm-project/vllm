@@ -253,11 +253,28 @@ class LlamaAttention(nn.Module):
         global IS_TRAINING
         global IS_LOGGED
 
-        # if IS_TRAINING:
-        #     print("IS_TRAINING is True")
+        if IS_TRAINING:
+            print("IS_TRAINING is True")
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+
+        # save q, k, v to separate csv files
+        # if IS_TRAINING and not IS_LOGGED:
+        #     import pandas as pd
+        #     df = pd.DataFrame({
+        #         "q": q.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_q.csv", index=False)
+        #     df = pd.DataFrame({
+        #         "k": k.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_k.csv", index=False)
+        #     df = pd.DataFrame({
+        #         "v": v.flatten().tolist(),
+        #     })
+        #     df.to_csv(f"vllm_v.csv", index=False)
+        #     ss
 
         # # save q, k, v to a csv file
         # if IS_TRAINING and not IS_LOGGED:
@@ -281,7 +298,8 @@ class LlamaAttention(nn.Module):
         #     print(f"vLLM sin shape: {sin_vllm.shape}, first few values: {sin_vllm[0, :5]}")
         #     print(f"vLLM positions: {positions_flat[:10]}")
 
-        q, k = self.rotary_emb(positions, q, k)
+        # TODO(girfan): HACK!!
+        # q, k = self.rotary_emb(positions, q, k)
 
         # cos, sin = positions
         # q, k = apply_rotary_pos_emb(q, k, cos, sin)
@@ -312,18 +330,16 @@ class LlamaAttention(nn.Module):
         #     })
         #     df.to_csv(f"vllm_attn_output.csv", index=False)
         #     IS_LOGGED = True
-        #     ss
 
         output, _ = self.o_proj(attn_output)
 
-        if IS_TRAINING and not IS_LOGGED:
-            print(f"vLLM output shape: {output.shape}")
+        # if IS_TRAINING:
         #     import pandas as pd
-        #     print(f"vLLM output shape: {output.shape}")
         #     df = pd.DataFrame({
         #         "output": output.flatten().tolist(),
         #     })
         #     df.to_csv(f"vllm_o_proj_output.csv", index=False)
+        #     ss
         #     IS_LOGGED = True
 
         return output
@@ -414,12 +430,37 @@ class LlamaDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
+    def forward_training(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        residual = hidden_states
+        hidden_states, _ = self.input_layernorm(hidden_states, residual)
+
+        # Self Attention
+        hidden_states = self.self_attn(positions=positions,
+                                       hidden_states=hidden_states)
+        hidden_states = residual + hidden_states
+
+        # Fully Connected
+        residual = hidden_states
+        hidden_states, _ = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.mlp(hidden_states)
+        hidden_states = residual + hidden_states
+        return hidden_states, None
+
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        global IS_TRAINING
+        if IS_TRAINING:
+            return self.forward_training(positions, hidden_states, residual)
+
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -518,14 +559,16 @@ class LlamaModel(nn.Module):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
-            # print(f"vLLM hidden_states shape: {hidden_states.shape}")
             # if IS_TRAINING:
+            #     print(f"vLLM hidden_states shape: {hidden_states.shape}")
+            #     print(residual)
             #     # save hidden_states to a csv file
             #     import pandas as pd
             #     df = pd.DataFrame({
             #         "hidden_states": hidden_states.flatten().tolist(),
             #     })
             #     df.to_csv(f"vllm_hidden_states_{idx}.csv", index=False)
+            #     ss
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -534,6 +577,14 @@ class LlamaModel(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        if IS_TRAINING:
+            import pandas as pd
+            df = pd.DataFrame({
+                "hidden_states": hidden_states.flatten().tolist(),
+            })
+            df.to_csv(f"vllm_model_output.csv", index=False)
+            ss
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -741,7 +792,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         #     # # df.to_csv(f"vllm_input_ids.csv", index=False)
         #     # load input_ids from transformers_input_ids.csv
             import pandas as pd
-            df = pd.read_csv(f"transformers_input_ids.csv")
+            df = pd.read_csv(f"inputs/transformers_input_ids.csv")
             input_ids = torch.tensor(df["input_ids"].tolist(), device='cuda')
             assert self.girfan_temp == False, "Girfan temp is already True"
             self.girfan_temp = True
