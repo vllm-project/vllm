@@ -12,7 +12,6 @@ from torch._inductor.pattern_matcher import (
 )
 from torch._ops import OpOverload
 
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -76,38 +75,6 @@ class ActivationQuantPattern(ABC):
     @abstractmethod
     def register(self, pm_pass: PatternMatcherPass):
         raise NotImplementedError
-
-
-if rocm_aiter_ops.is_enabled():
-    AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
-    FUSED_SILU_MUL_QUANT_OP = (
-        torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
-    )
-
-    class AiterSiluMulFp8BlockQuantPattern(ActivationQuantPattern):
-        def __init__(self, use_triton: bool):
-            self.silu_and_mul_matcher = MatcherSiluAndMul()
-            self.use_triton = use_triton
-
-        def register(self, pm_pass: PatternMatcherPass):
-            def pattern(
-                input: torch.Tensor,
-            ):
-                at1 = self.silu_and_mul_matcher(input)
-                at2 = AITER_GROUP_FP8_QUANT_OP(at1, 128, self.use_triton)
-                return at2[0], at2[1]
-
-            def replacement(
-                input: torch.Tensor,
-            ):
-                at = FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
-                return at[0], at[1]
-
-            inputs = [
-                self.silu_and_mul_matcher.inputs()[0],
-            ]
-
-            register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
 
 
 class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
@@ -226,10 +193,6 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        if rocm_aiter_ops.is_enabled():
-            for use_triton in [False, True]:
-                AiterSiluMulFp8BlockQuantPattern(use_triton).register(self.patterns)
-
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -243,6 +206,4 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
         ]
-        if rocm_aiter_ops.is_enabled():
-            fusion_patterns.append(AiterSiluMulFp8BlockQuantPattern)
         return VllmInductorPass.hash_source(self, *fusion_patterns)
