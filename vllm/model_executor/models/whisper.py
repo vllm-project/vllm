@@ -752,7 +752,6 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
             prompt=prompt_text,
             mm_data={},
             mm_kwargs={},
-            # Avoid converting to tensors only to convert back to list
             tok_kwargs={**tokenization_kwargs, "return_tensors": None},
         )
 
