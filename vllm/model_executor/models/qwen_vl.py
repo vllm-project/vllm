@@ -20,7 +20,9 @@ from torchvision import transforms
 from torchvision.transforms import InterpolationMode
 from transformers import BatchFeature, PretrainedConfig, PreTrainedTokenizer, TensorType
 from transformers.image_utils import ImageInput
+from transformers.processing_utils import TextKwargs
 from transformers.tokenization_utils_base import TextInput
+from typing_extensions import Unpack
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -525,6 +527,7 @@ class QwenVLProcessor:
         text: TextInput | list[TextInput] | None = None,
         images: ImageInput | list[ImageInput] | None = None,
         return_tensors: str | TensorType | None = None,
+        **text_kwargs: Unpack[TextKwargs],
     ) -> BatchFeature:
         if text is None:
             text = []
@@ -535,7 +538,7 @@ class QwenVLProcessor:
         if not isinstance(images, list):
             images = [images]
 
-        text_inputs = self.tokenizer(text)
+        text_inputs = self.tokenizer(text, **text_kwargs)
 
         if len(images) == 0:
             image_inputs = {}
