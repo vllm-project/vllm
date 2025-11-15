@@ -19,6 +19,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
@@ -825,3 +826,25 @@ direct_register_custom_op(
     fake_impl=sequence_parallel_chunk_impl_fake,
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
+
+
+def process_eagle_weight(
+    model: nn.Module,
+    name: str,
+) -> None:
+    """
+    Update EAGLE model flags based on loaded weight name.
+    This should be called during weight loading to detect if a model
+    has its own lm_head or embed_tokens weight.
+    Args:
+        model: The model instance (must support EAGLE)
+        name: The name of the weight to process
+    """
+    if not supports_any_eagle(model):
+        return
+
+    # To prevent overriding with target model's layers
+    if "lm_head" in name:
+        model.has_own_lm_head = True
+    if "embed_tokens" in name:
+        model.has_own_embed_tokens = True
