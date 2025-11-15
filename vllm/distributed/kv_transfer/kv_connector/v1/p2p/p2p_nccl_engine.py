@@ -305,6 +305,17 @@ class P2pNcclEngine:
             )
         return True
 
+    def pop_recv_store_after_recv(self, tensor_id: str) -> None:
+        if (
+            self.send_type == "PUT" or self.send_type == "PUT_ASYNC"
+        ) and tensor_id in self.recv_store:
+            with self.recv_store_cv:
+                tensor = self.recv_store.pop(tensor_id, None)
+            if isinstance(tensor, tuple):
+                addr, _, _ = tensor
+                self.pool.free(addr)
+        return
+
     def recv_tensor(
         self,
         tensor_id: str,
