@@ -138,21 +138,23 @@ class LogprobsProcessor:
         token_ids = token_ids.tolist()
 
         # Make Logprob for each position.
-        for pos in range(num_prompt_tokens):
+        for pos, (token_ids_at_pos, logprobs_at_pos, ranks_at_pos) in enumerate(
+            zip(token_ids, prompt_logprobs, prompt_token_ranks)
+        ):
             # Handle flattening.
-            offset = pos * num_logprobs
-            offset_end = offset + num_logprobs
-            decoded_tokens_for_pos = (
-                NONES if decoded_tokens is None else decoded_tokens[offset:offset_end]
-            )
+            if decoded_tokens is None:
+                decoded_tokens_for_pos = NONES
+            else:
+                offset = pos * num_logprobs
+                decoded_tokens_for_pos = decoded_tokens[offset : offset + num_logprobs]
 
             # Update with the Logprob container for this pos.
             append_logprobs_for_next_position(
                 self.prompt_logprobs,
-                token_ids[pos],
-                prompt_logprobs[pos],
+                token_ids_at_pos,
+                logprobs_at_pos,
                 decoded_tokens_for_pos,
-                prompt_token_ranks[pos],
+                ranks_at_pos,
                 self.num_prompt_logprobs,
             )
 
