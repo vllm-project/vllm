@@ -5,7 +5,6 @@ import json
 from collections.abc import Sequence
 
 import partial_json_parser
-import regex as re
 from partial_json_parser.core.options import Allow
 from transformers import PreTrainedTokenizerBase
 
@@ -56,13 +55,6 @@ class Llama3JsonToolParser(ToolParser):
         self.bot_token_id = tokenizer.encode(self.bot_token, add_special_tokens=False)[
             0
         ]
-        # Updated regex to match multiple JSONs separated by semicolons
-        # This pattern uses recursion to handle arbitrarily nested JSON objects
-        # (?R) is a recursive pattern that matches the entire pattern again
-        self.tool_call_regex = re.compile(
-            r"\{(?:[^{}]|(?R))*\}(?:\s*;\s*\{(?:[^{}]|(?R))*\})*",
-            re.DOTALL,
-        )
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
@@ -78,23 +70,26 @@ class Llama3JsonToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        # Find JSON object(s) in the text using regex
-        match = self.tool_call_regex.search(model_output)
-        if not match:
-            return ExtractedToolCallInformation(
-                tools_called=False, tool_calls=[], content=model_output
-            )
-
         try:
-            json_str = match.group(0)
-            # Split by semicolon and strip whitespace
-            json_objects = [obj.strip() for obj in json_str.split(";")]
+            # Find the start of JSON object
+            start_idx = model_output.find("{")
+            if start_idx == -1:
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
+
+            # Use iterative parsing with brace counting to extract JSON objects
+            # This handles strings with braces correctly by tracking string boundaries
+            json_objects = self._extract_json_objects(model_output[start_idx:])
+
+            if not json_objects:
+                return ExtractedToolCallInformation(
+                    tools_called=False, tool_calls=[], content=model_output
+                )
 
             tool_calls: list[ToolCall] = []
-            for json_obj in json_objects:
-                if not json_obj:  # Skip empty strings
-                    continue
-                obj = json.loads(json_obj)
+            for json_str in json_objects:
+                obj = json.loads(json_str)
                 tool_calls.append(
                     ToolCall(
                         type="function",
@@ -121,6 +116,64 @@ class Llama3JsonToolParser(ToolParser):
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
+
+    def _extract_json_objects(self, text: str) -> list[str]:
+        """
+        Extract JSON objects from text using brace counting with string awareness.
+        Handles nested JSON and strings containing braces correctly.
+        Supports multiple JSONs separated by semicolons.
+        """
+        json_objects = []
+        i = 0
+
+        while i < len(text):
+            # Skip whitespace and semicolons
+            while i < len(text) and text[i] in " \t\n\r;":
+                i += 1
+
+            if i >= len(text) or text[i] != "{":
+                break
+
+            # Track braces and string state
+            brace_count = 0
+            in_string = False
+            escape_next = False
+            start = i
+
+            while i < len(text):
+                char = text[i]
+
+                if escape_next:
+                    escape_next = False
+                    i += 1
+                    continue
+
+                if char == "\\":
+                    escape_next = True
+                    i += 1
+                    continue
+
+                if char == '"' and not in_string:
+                    in_string = True
+                elif char == '"' and in_string:
+                    in_string = False
+                elif char == "{" and not in_string:
+                    brace_count += 1
+                elif char == "}" and not in_string:
+                    brace_count -= 1
+                    if brace_count == 0:
+                        # Found complete JSON object
+                        json_objects.append(text[start : i + 1])
+                        i += 1
+                        break
+
+                i += 1
+
+            # If we didn't find a complete object, stop
+            if brace_count != 0:
+                break
+
+        return json_objects
 
     def extract_tool_calls_streaming(
         self,

@@ -173,3 +173,58 @@ def test_extract_tool_calls_very_deeply_nested_json(parser):
     import json
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["level1"]["level2"]["level3"]["value"] == "deep"
+
+
+def test_extract_tool_calls_with_braces_in_strings(parser):
+    # Test with braces inside string values
+    # This is a regression test for string-awareness in JSON extraction
+    model_output = (
+        '{"name": "search", '
+        '"parameters": {"query": "find users with status {active}"}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "search"
+
+    # Verify the string with braces is captured correctly
+    import json
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["query"] == "find users with status {active}"
+
+
+def test_extract_tool_calls_with_code_snippets(parser):
+    # Test with code snippets containing braces
+    model_output = (
+        '{"name": "code_tool", '
+        '"parameters": {"snippet": "function() { return {}; }"}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "code_tool"
+
+    # Verify the code snippet is captured correctly
+    import json
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["snippet"] == "function() { return {}; }"
+
+
+def test_extract_tool_calls_with_escaped_quotes(parser):
+    # Test with escaped quotes in strings
+    model_output = (
+        '{"name": "test", '
+        '"parameters": {"text": "He said \\"hello {world}\\""}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "test"
+
+    # Verify escaped quotes are handled correctly
+    import json
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["text"] == 'He said "hello {world}"'
