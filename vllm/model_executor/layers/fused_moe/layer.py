@@ -1507,7 +1507,11 @@ class FusedMoE(CustomOp):
                     hidden_states, router_logits, self.layer_name
                 )
             if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(fused_output, tuple)
+                if not isinstance(fused_output, tuple):
+                    torch._assert(
+                        False,
+                        "FusedMoE expected (output, zero_expert_result) tuple when zero_expert_num > 0",
+                    )
                 fused_output, zero_expert_result = fused_output
                 return (reduce_output(fused_output) + zero_expert_result)[
                     ..., :og_hidden_states
