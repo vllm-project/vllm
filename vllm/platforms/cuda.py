@@ -269,8 +269,10 @@ class CudaPlatformBase(Platform):
 
         # Try FlashAttention first
         backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
-        if backend_class.supports_head_size(head_size) and backend_class.supports_dtype(
-            dtype
+        if (
+            backend_class.supports_head_size(head_size)
+            and backend_class.supports_dtype(dtype)
+            and cls.has_device_capability(80)
         ):
             return AttentionBackendEnum.FLASH_ATTN
 
