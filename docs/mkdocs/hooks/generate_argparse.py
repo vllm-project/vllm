@@ -9,12 +9,10 @@ from argparse import SUPPRESS, Action, HelpFormatter
 from collections.abc import Iterable
 from importlib.machinery import ModuleSpec
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import MagicMock, patch
 
 from pydantic_core import core_schema
-
-from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 logger = logging.getLogger("mkdocs")
 
@@ -107,6 +105,13 @@ ChatCommand = auto_mock("vllm.entrypoints.cli.openai", "ChatCommand")
 CompleteCommand = auto_mock("vllm.entrypoints.cli.openai", "CompleteCommand")
 openai_cli_args = auto_mock("vllm.entrypoints.openai", "cli_args")
 openai_run_batch = auto_mock("vllm.entrypoints.openai", "run_batch")
+
+if TYPE_CHECKING:
+    from vllm.utils.argparse_utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = auto_mock(
+        "vllm.utils.argparse_utils", "FlexibleArgumentParser"
+    )
 
 
 class MarkdownFormatter(HelpFormatter):
