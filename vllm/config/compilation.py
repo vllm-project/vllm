@@ -14,7 +14,7 @@ from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
-from vllm.config.utils import config
+from vllm.config.utils import Range, config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -129,6 +129,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
+    sequence_parallelism_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
     enable_qk_norm_rope_fusion: bool = False
     """Whether to enable the fused Q/K RMSNorm + RoPE pass."""
 
@@ -142,6 +147,9 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+        if world_size not in FI_SUPPORTED_WORLD_SIZES:
+            return None
         max_size_mb = self.fi_allreduce_fusion_max_size_mb
         if max_size_mb is None:
             max_size_mb = self.default_fi_allreduce_fusion_max_size_mb().get(world_size)
@@ -218,6 +226,8 @@ class CompilationConfig:
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`compile_ranges_split_points`]
+            [vllm.config.CompilationConfig.compile_ranges_split_points]
         - [`inductor_compile_config`]
         [vllm.config.CompilationConfig.inductor_compile_config]
         - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
@@ -348,6 +358,21 @@ class CompilationConfig:
     """Sizes to compile for inductor. In addition
     to integers, it also supports "cudagraph_capture_sizes" to
     specify the sizes for cudagraph capture."""
+    compile_ranges_split_points: list[int] | None = None
+    """Split points that represent compile ranges for inductor.
+    The compile ranges are 
+    [1, split_points[0]], 
+    [split_points[0] + 1, split_points[1]], ..., 
+    [split_points[-1] + 1, max_num_batched_tokens].
+    Compile sizes are also used single element ranges,
+    the range is represented as [compile_sizes[i], compile_sizes[i]].
+    
+    If a range overlaps with the compile size, graph for compile size 
+    will be prioritized, i.e. if we have a range [1, 8] and a compile size 4,
+    graph for compile size 4 will be compiled and used instead of the graph
+    for range [1, 8].
+    """
+
     inductor_compile_config: dict = field(default_factory=dict)
     """Additional configurations for inductor.
     - None: use default configurations."""
@@ -922,3 +947,16 @@ class CompilationConfig:
                     enable_str,
                     op,
                 )
+
+    def get_compile_ranges(self) -> list[Range]:
+        """Get the compile ranges for the compilation config."""
+        if self.compile_ranges_split_points is None:
+            return []
+        split_points = sorted(set(self.compile_ranges_split_points))
+        compile_ranges = []
+        for i, s in enumerate(split_points):
+            if i == 0:
+                compile_ranges.append(Range(start=1, end=s))
+            else:
+                compile_ranges.append(Range(start=split_points[i - 1] + 1, end=s))
+        return compile_ranges
