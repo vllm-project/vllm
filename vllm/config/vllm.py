@@ -483,21 +483,6 @@ class VllmConfig:
                             "Overriding cudagraph_mode to PIECEWISE."
                         )
                         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-                    elif (
-                        current_platform.is_cuda()
-                        and current_platform.is_device_capability(100)
-                        and self.model_config.max_model_len > 131072
-                        and not self.model_config.use_mla
-                    ):
-                        # Refer to vllm/utils/flashinfer.py::use_trtllm_attention()
-                        logger.warning_once(
-                            "NVIDIA Blackwell TRTLLM attention cannot support "
-                            "max_model_len >= 131072 (found "
-                            f"{self.model_config.max_model_len}), causing dynamic "
-                            "dispatching that breaks full cudagraphs. "
-                            "Overriding cudagraph_mode to PIECEWISE."
-                        )
-                        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
