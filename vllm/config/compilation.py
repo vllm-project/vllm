@@ -706,9 +706,6 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = current_platform.simple_compile_backend
 
-        # Gets recomputed in the model runner but compute it here for testing.
-        self.post_init_cudagraph_sizes()
-
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
@@ -776,6 +773,9 @@ class CompilationConfig:
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
+
+        # Gets recomputed in the model runner but compute it here for testing.
+        self.compute_bs_to_padded_graph_size()
 
     def set_splitting_ops_for_v1(self):
         # NOTE: this function needs to be called only when mode is
