@@ -22,6 +22,12 @@ def is_aiter_found() -> bool:
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
 
+# Can't use dtypes.fp8 directly because it returns wrong result on gfx942.
+if IS_AITER_FOUND:
+    from aiter import dtypes
+
+    AITER_FP8_DTYPE = dtypes.fp8
+
 
 def if_aiter_supported(func: Callable) -> Callable:
     """Decorator that only executes the function if
@@ -434,7 +440,6 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
@@ -445,7 +450,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
         None,
         None,
         group_size=group_size,
-        dtype_quant=dtypes.fp8,
+        dtype_quant=AITER_FP8_DTYPE,
         res1=residual,
     )
     return (x_quant, x_quant_scales, res)
@@ -458,12 +463,10 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
-
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=dtypes.fp8, device=x.device),
+        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
         torch.empty_like(residual, device=residual.device),
     )
@@ -475,7 +478,6 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
     from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
@@ -486,7 +488,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
         None,
         None,
         group_size=group_size,
-        dtype_quant=dtypes.fp8,
+        dtype_quant=AITER_FP8_DTYPE,
         res1=None,
     )
     return (x_quant, x_quant_scales)
@@ -498,12 +500,10 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_fake(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
-
     M, N = x.shape
     scale_shape = (M, (N + group_size - 1) // group_size)
     return (
-        torch.empty_like(x, dtype=dtypes.fp8, device=x.device),
+        torch.empty_like(x, dtype=AITER_FP8_DTYPE, device=x.device),
         torch.empty(scale_shape, dtype=torch.float32, device=x.device),
     )
 
@@ -524,10 +524,10 @@ def _rocm_aiter_group_fp8_quant_impl(
         )
     else:
         assert group_size == 128, "Group size must be 128"
-        from aiter import QuantType, dtypes, get_hip_quant
+        from aiter import QuantType, get_hip_quant
 
         aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-        return aiter_per1x128_quant(x.contiguous(), quant_dtype=dtypes.fp8)
+        return aiter_per1x128_quant(x.contiguous(), quant_dtype=AITER_FP8_DTYPE)
 
 
 def _rocm_aiter_group_fp8_quant_fake(
@@ -535,10 +535,8 @@ def _rocm_aiter_group_fp8_quant_fake(
     group_size: int,
     use_triton: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
-
     M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=dtypes.fp8, device=x.device)
+    x_fp8 = torch.empty((M, N), dtype=AITER_FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
         (
             M,
@@ -554,14 +552,13 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_impl(
     x: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
     from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
 
     return act_mul_and_fp8_group_quant(
         x,
         activation="silu",
         group_size=group_size,
-        dtype_quant=dtypes.fp8,
+        dtype_quant=AITER_FP8_DTYPE,
     )
 
 
@@ -569,12 +566,10 @@ def _rocm_aiter_act_mul_and_fp8_group_quant_fake(
     x: torch.Tensor,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter import dtypes
-
     M, N = x.shape
     assert N % 2 == 0
     N_half = N // 2
-    x_fp8 = torch.empty((M, N_half), dtype=dtypes.fp8, device=x.device)
+    x_fp8 = torch.empty((M, N_half), dtype=AITER_FP8_DTYPE, device=x.device)
     out_bs = torch.empty(
         (
             M,
