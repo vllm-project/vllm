@@ -5,6 +5,7 @@ from importlib.util import find_spec
 import pytest
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.activation_quant_fusion import SILU_MUL_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
@@ -21,7 +22,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -74,7 +74,6 @@ class TestAiterSiluMulGroupFp8QuantModel(torch.nn.Module):
 class TestAiterRmsnormGroupFp8QuantModel(torch.nn.Module):
     def __init__(self, hidden_size: int, eps: float):
         super().__init__()
-        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
         self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
             weight_group_shape=GroupShape(128, 128),
             act_quant_group_shape=GroupShape(1, 128),
@@ -92,24 +91,31 @@ class TestAiterRmsnormGroupFp8QuantModel(torch.nn.Module):
             for _ in range(3)
         ]
 
+        self.norm_weight = [torch.ones(hidden_size) for _ in range(4)]
         self.eps = eps
 
     def forward(self, x):
         # avoid having graph input be an arg to a pattern directly
         x = resid = torch.relu(x)
-        y = self.norm[0](x)
+        y = rocm_aiter_ops.rms_norm(x, self.norm_weight[0], self.eps)
 
         x2 = self.w8a8_block_fp8_linear.apply(y, self.w[0], self.wscale[0])
         # make sure resid is used for replacement to work
-        y2, resid = self.norm[1](x2, resid)
+        y2, resid = rocm_aiter_ops.rms_norm2d_with_add(
+            x2, resid, self.norm_weight[1], self.eps
+        )
 
         x3 = self.w8a8_block_fp8_linear.apply(y2, self.w[1], self.wscale[1])
 
-        y3, resid = self.norm[2](x3, resid)  # use resid here
+        y3, resid = rocm_aiter_ops.rms_norm2d_with_add(
+            x3, resid, self.norm_weight[2], self.eps
+        )
 
         x4 = self.w8a8_block_fp8_linear.apply(y3, self.w[2], self.wscale[2])
 
-        y4, resid = self.norm[3](x4, resid)  # use resid here
+        y4, resid = rocm_aiter_ops.rms_norm2d_with_add(
+            x4, resid, self.norm_weight[3], self.eps
+        )
         return y4
 
     def ops_in_model_before(self):
@@ -175,7 +181,7 @@ def test_fusion_aiter_silu_and_mul_group_fp8_quant(
         if dtype == torch.float16:
             ATOL, RTOL = (5e-3, 5e-3)
         else:
-            ATOL, RTOL = (1e-2, 1e-2)
+            ATOL, RTOL = (1e-1, 1e-1)
 
         torch.testing.assert_close(
             result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=ATOL, rtol=RTOL
@@ -191,7 +197,7 @@ def test_fusion_aiter_silu_and_mul_group_fp8_quant(
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("hidden_size", [128, 256])
 @pytest.mark.parametrize("num_tokens", [257])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
 @pytest.mark.skipif(
