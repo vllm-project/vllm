@@ -401,7 +401,7 @@ class RayDistributedExecutor(Executor):
                 "after execute_model() returns None."
             )
 
-        if not self.ec_producer and scheduler_output.total_num_scheduled_tokens:
+        if self.ec_producer or not scheduler_output.total_num_scheduled_tokens:
             # Model will not execute, call model runner immediately.
             return self._execute_dag(scheduler_output, None, non_block)
 
@@ -428,7 +428,7 @@ class RayDistributedExecutor(Executor):
         """
         scheduler_output = self.scheduler_output
         if scheduler_output is None:
-            return None  # noqa
+            return COMPLETED_NONE_FUTURE if non_block else None  # noqa
 
         self.scheduler_output = None
 
