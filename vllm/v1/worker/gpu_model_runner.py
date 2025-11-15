@@ -216,9 +216,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         del self._logprobs_tensors
         del self._sampled_token_ids
 
-        valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+        valid_sampled_token_ids: list[np.ndarray] = [
+            row for row in self.sampled_token_ids_cpu.numpy()
+        ]
         for i in self._invalid_req_indices:
-            valid_sampled_token_ids[i].clear()
+            valid_sampled_token_ids[i] = np.array([])
 
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
@@ -2339,7 +2341,7 @@ class GPUModelRunner(
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
-        list[list[int]],
+        list[np.ndarray],
         dict[str, LogprobsTensors | None],
         list[str],
         dict[str, int],
@@ -2365,6 +2367,7 @@ class GPUModelRunner(
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         invalid_req_indices = []
+        valid_sampled_token_ids: list[np.ndarray]
         if not self.use_async_scheduling:
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
@@ -2379,7 +2382,7 @@ class GPUModelRunner(
                 )
             # Mask out the sampled tokens that should not be sampled.
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[int(i)].clear()
+                valid_sampled_token_ids[int(i)] = np.array([])
         else:
             valid_sampled_token_ids = []
             invalid_req_indices = discard_sampled_tokens_req_indices.tolist()
@@ -2407,19 +2410,24 @@ class GPUModelRunner(
             [0] if spec_decode_metadata and logprobs_tensors else None
         )
         for req_idx in range(num_sampled_tokens):
+            sampled_ids: np.ndarray | None
             if self.use_async_scheduling:
-                sampled_ids = [-1] if req_idx not in invalid_req_indices_set else None
+                sampled_ids = (
+                    np.array([-1]) if req_idx not in invalid_req_indices_set else None
+                )
             else:
                 sampled_ids = valid_sampled_token_ids[req_idx]
 
-            num_sampled_ids: int = len(sampled_ids) if sampled_ids else 0
+            num_sampled_ids: int = (
+                sampled_ids.shape[0] if sampled_ids is not None else 0
+            )
 
             if cu_num_accepted_tokens is not None:
                 cu_num_accepted_tokens.append(
                     cu_num_accepted_tokens[-1] + num_sampled_ids
                 )
 
-            if not sampled_ids:
+            if sampled_ids is None or num_sampled_ids == 0:
                 continue
 
             start_idx = self.input_batch.num_tokens_no_spec[req_idx]
@@ -2761,7 +2769,9 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        def propose_draft_token_ids(sampled_token_ids):
+        def propose_draft_token_ids(
+            sampled_token_ids: torch.Tensor | list[np.ndarray],
+        ) -> None:
             assert spec_decode_common_attn_metadata is not None
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
@@ -2883,14 +2893,14 @@ class GPUModelRunner(
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
-        sampled_token_ids: torch.Tensor | list[list[int]],
+        sampled_token_ids: torch.Tensor | list[np.ndarray],
         sampling_metadata: SamplingMetadata,
         hidden_states: torch.Tensor,
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
         common_attn_metadata: CommonAttentionMetadata,
-    ) -> list[list[int]] | torch.Tensor:
+    ) -> torch.Tensor | list[list[int]]:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.speculative_config.method == "ngram":
             assert isinstance(sampled_token_ids, list)
@@ -2922,7 +2932,7 @@ class GPUModelRunner(
                 for num_draft, tokens in zip(
                     spec_decode_metadata.num_draft_tokens, sampled_token_ids
                 ):
-                    indices.append(offset + len(tokens) - 1)
+                    indices.append(offset + tokens.shape[0] - 1)
                     offset += num_draft + 1
                 indices = torch.tensor(indices, device=self.device)
                 hidden_states = sample_hidden_states[indices]
@@ -4862,7 +4872,7 @@ class GPUModelRunner(
 
         return kv_cache_spec
 
-    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[np.ndarray]:
         # This is a short term mitigation for issue mentioned in
         # https://github.com/vllm-project/vllm/issues/22754.
         # `tolist` would trigger a cuda wise stream sync, which
@@ -4875,4 +4885,4 @@ class GPUModelRunner(
         pinned.copy_(sampled_token_ids, non_blocking=True)
         self.transfer_event.record()
         self.transfer_event.synchronize()
-        return pinned.tolist()
+        return [row for row in pinned.numpy()]

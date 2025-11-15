@@ -1254,13 +1254,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
-            valid_sampled_token_ids = selected_token_ids.tolist()
+            valid_sampled_token_ids: list[np.ndarray] = [
+                row for row in selected_token_ids.numpy()
+            ]
 
             # Mask out the sampled tokens that should not be sampled.
             # TODO: Keep in sync with gpu_model_runner.py, in particular
             #       the "else" case here
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i].clear()
+                valid_sampled_token_ids[i] = np.array([])
 
             # Append sampled tokens
             for i, req_state, seq_len in request_seq_lens:
@@ -1273,7 +1275,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             valid_sampled_token_ids = [
-                seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
+                seq.numpy() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
             self.input_batch.num_tokens[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
