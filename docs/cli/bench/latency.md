@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/bench_latency.md"
+--8<-- "docs/argparse/bench_latency.inc.md"

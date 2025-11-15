@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/run-batch.md"
+--8<-- "docs/argparse/run-batch.inc.md"

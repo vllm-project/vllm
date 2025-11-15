@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/bench_sweep_serve_sla.md"
+--8<-- "docs/argparse/bench_sweep_serve_sla.inc.md"

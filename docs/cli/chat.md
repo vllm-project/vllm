@@ -2,4 +2,4 @@
 
 ## Options
 
---8<-- "docs/argparse/chat.md"
+--8<-- "docs/argparse/chat.inc.md"

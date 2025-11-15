@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/serve.md"
+--8<-- "docs/argparse/serve.inc.md"

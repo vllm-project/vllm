@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/bench_serve.md"
+--8<-- "docs/argparse/bench_serve.inc.md"

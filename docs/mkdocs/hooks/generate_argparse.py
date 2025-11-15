@@ -228,7 +228,7 @@ def on_startup(command: Literal["build", "gh-deploy", "serve"], dirty: bool):
 
     # Generate documentation for each parser
     for stem, parser in parsers.items():
-        doc_path = ARGPARSE_DOC_DIR / f"{stem}.md"
+        doc_path = ARGPARSE_DOC_DIR / f"{stem}.inc.md"
         # Specify encoding for building on Windows
         with open(doc_path, "w", encoding="utf-8") as f:
             f.write(super(type(parser), parser).format_help())

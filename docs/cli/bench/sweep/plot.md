@@ -6,4 +6,4 @@
 
 ## Options
 
---8<-- "docs/argparse/bench_sweep_plot.md"
+--8<-- "docs/argparse/bench_sweep_plot.inc.md"
