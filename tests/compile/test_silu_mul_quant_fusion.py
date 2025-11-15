@@ -7,7 +7,6 @@ import torch
 
 import vllm.envs as envs
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.activation_quant_fusion import (
     FUSED_OPS,
@@ -25,7 +24,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     kFp8StaticTensorSym,
@@ -82,40 +80,6 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
 
     def ops_in_model_after(self):
         return [FUSED_OPS[kFp8StaticTensorSym]]
-
-
-class TestAiterSiluMulGroupFp8QuantModel(torch.nn.Module):
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        self.silu_and_mul = SiluAndMul()
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(128, 128),
-            act_quant_group_shape=GroupShape(1, 128),
-            cutlass_block_fp8_supported=False,
-            use_aiter_and_is_supported=True,
-        )
-        self.w = torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
-
-        scale_hidden_size = (hidden_size + 128 - 1) // 128
-        self.wscale = torch.rand(
-            (scale_hidden_size, scale_hidden_size), dtype=torch.float32
-        )
-
-        self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
-
-    def forward(self, x):
-        y = self.silu_and_mul(x)
-        x2 = self.w8a8_block_fp8_linear.apply(y, self.w, self.wscale)
-        return x2
-
-    def ops_in_model_before(self):
-        return [
-            SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            torch.ops.vllm.rocm_aiter_group_fp8_quant,
-        ]
-
-    def ops_in_model_after(self):
-        return [torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant]
 
 
 class TestSiluMulNvfp4QuantModel(torch.nn.Module):
@@ -230,65 +194,6 @@ def test_fusion_silu_and_mul_quant(
             atol, rtol = 1e-3, 1e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
-
-        torch.testing.assert_close(
-            result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol
-        )
-
-        assert fusion_pass.matched_count == 1
-
-        # In pre-nodes, quant op should be present and fused kernels should not
-        backend.check_before_ops(model.ops_in_model_before())
-
-        # In post-nodes, fused kernels should be present and quant op should not
-        backend.check_after_ops(model.ops_in_model_after())
-
-
-@pytest.mark.parametrize("num_tokens", [32, 64])
-@pytest.mark.parametrize("hidden_size", [128, 256])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("enable_silu_mul_custom_op", [True, False])
-@pytest.mark.skipif(not rocm_aiter_ops.is_enabled(), reason="AITER is not enabled")
-def test_fusion_aiter_silu_and_mul_group_fp8_quant(
-    num_tokens: int,
-    hidden_size: int,
-    dtype: torch.dtype,
-    enable_silu_mul_custom_op: bool,
-):
-    torch.set_default_device("cuda")
-    torch.set_default_dtype(dtype)
-    maybe_create_device_identity()
-
-    x = torch.rand(num_tokens, hidden_size * 2)
-
-    # Reshape pass is needed for the fusion pass to work
-    custom_ops = []
-    if enable_silu_mul_custom_op:
-        custom_ops.append("+silu_and_mul")
-    config = VllmConfig(
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            custom_ops=custom_ops,
-            pass_config=PassConfig(enable_fusion=True, enable_noop=True),
-        ),
-    )
-
-    with set_current_vllm_config(config):
-        fusion_pass = ActivationQuantFusionPass(config)
-
-        passes = [NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)]
-        backend = TestBackend(*passes)
-        model = TestAiterSiluMulGroupFp8QuantModel(hidden_size)
-
-        # First dimension dynamic
-        torch._dynamo.mark_dynamic(x, 0)
-
-        result = model(x)
-
-        model2 = torch.compile(model, backend=backend)
-        result2 = model2(x)
-
-        atol, rtol = 1e-2, 1e-2
 
         torch.testing.assert_close(
             result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=atol, rtol=rtol

@@ -697,14 +697,6 @@ class rocm_aiter_ops:
 
             # register all the custom ops here
             direct_register_custom_op(
-                op_name="rocm_aiter_group_fp8_quant",
-                op_func=_rocm_aiter_group_fp8_quant_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_group_fp8_quant_fake,
-                dispatch_key=current_platform.dispatch_key,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_asm_moe_tkw1",
                 op_func=_rocm_aiter_asm_moe_tkw1_impl,
                 mutates_args=[],
