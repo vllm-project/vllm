@@ -141,7 +141,7 @@ def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
         "neuralmagic/Llama-3.2-1B-quantized.w8a8",
     ],
 )
-@pytest.mark.parametrize("max_tokens", [1])
+@pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("num_logprobs", [10])
 @pytest.mark.parametrize(
     "use_aiter", [True, False] if current_platform.is_rocm() else [False]

@@ -22,8 +22,8 @@ from vllm.model_executor.layers.quantization import (
     get_quantization_config,
     register_quantization_config,
 )
-from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
-    QuantizationConfig,
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,  # noqa: E501
 )
 
 
