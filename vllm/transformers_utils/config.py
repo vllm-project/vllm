@@ -401,22 +401,14 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
         rope_parameters: RopeParameters | dict[str, RopeParameters] | None = getattr(
             config, "rope_parameters", None
         )
+    elif hasattr(config, "rope_parameters"):
+        # We are in Transformers v4 and rope_parameters
+        # has already been patched for this config
+        return
     else:
         # Convert Transformers v4 rope_theta and rope_scaling into rope_parameters
         rope_theta: float | None = getattr(config, "rope_theta", None)
         rope_scaling: dict | None = getattr(config, "rope_scaling", None)
-        # Make best effort to retrieve parameters for multi-modal configs
-        if rope_theta is None and rope_scaling is None:
-            SubConfigs: TypeAlias = dict[str, PretrainedConfig]
-            sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
-            if sub_configs:
-                for sub_config in sub_configs:
-                    patch_rope_parameters(getattr(config, sub_config))
-                return
-            # Not all multi-modal configs use sub_configs
-            config = config.get_text_config()
-            rope_theta = getattr(config, "rope_theta", None)
-            rope_scaling = getattr(config, "rope_scaling", None)
         rope_parameters = rope_scaling
         # Move rope_theta into rope_parameters
         if rope_theta is not None:
@@ -720,7 +712,14 @@ def get_config(
         logger.debug("Overriding HF config with %s", hf_overrides_fn)
         config = hf_overrides_fn(config)
 
+    # Exhaustively patch RoPE parameters everywhere they might be
     patch_rope_parameters(config)
+    patch_rope_parameters(config.get_text_config())
+    SubConfigs: TypeAlias = dict[str, PretrainedConfig]
+    sub_configs: SubConfigs | None = getattr(config, "sub_configs", None)
+    if sub_configs:
+        for sub_config in sub_configs:
+            patch_rope_parameters(getattr(config, sub_config))
 
     if trust_remote_code:
         maybe_register_config_serialize_by_value()
