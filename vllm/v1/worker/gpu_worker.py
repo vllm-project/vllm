@@ -596,14 +596,19 @@ class Worker(WorkerBase):
             self.profiler.start()
         else:
             self.profiler.stop()
-            # only print profiler results on rank 0
-            if (
-                isinstance(self.profiler, torch.profiler.profile)
-                and self.local_rank == 0
-            ):
-                print(
-                    self.profiler.key_averages().table(sort_by="self_cuda_time_total")
-                )
+            if isinstance(self.profiler, torch.profiler.profile):
+                rank = self.local_rank
+                profiler_dir = envs.VLLM_TORCH_PROFILER_DIR
+                profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+                sort_key = "self_cuda_time_total"
+                table = self.profiler.key_averages().table(sort_by=sort_key)
+
+                with open(profiler_out_file, "w") as f:
+                    print(table, file=f)
+
+                # only print profiler results on rank 0
+                if rank == 0:
+                    print(table)
 
     def execute_dummy_batch(self) -> None:
         self.model_runner._dummy_run(1, uniform_decode=True)
