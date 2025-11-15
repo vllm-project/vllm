@@ -149,7 +149,7 @@ class MiniMaxM2Attention(nn.Module):
         num_heads: int,
         num_kv_heads: int,
         rotary_dim: int,
-        rope_parameters: dict[str, Any],
+        rope_parameters: dict[str, Any] | None = None,
         attn_window_size: int | None = None,
         max_position_embeddings: int = 8192,
         head_dim: int | None = None,

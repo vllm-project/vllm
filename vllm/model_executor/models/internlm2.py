@@ -91,7 +91,7 @@ class InternLM2Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_parameters: dict[str, Any],
+        rope_parameters: dict[str, Any] | None = None,
         max_position_embeddings: int = 8192,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,

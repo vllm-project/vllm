@@ -134,8 +134,8 @@ class Grok1Attention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        rope_parameters: dict[str, Any],
         max_position: int = 4096 * 32,
+        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -234,11 +234,6 @@ class Grok1DecoderLayer(nn.Module):
             if not self.use_fp8 and hasattr(quant_config, "is_fp8"):
                 self.use_fp8 = quant_config.is_fp8
 
-        if getattr(config, "rope_parameters", None) is None:
-            config.rope_parameters = {"rope_type": "default"}
-        if "rope_theta" not in config.rope_parameters:
-            # Default rope_theta value if not in config
-            config.rope_parameters["rope_theta"] = 10000
         self.attn = Grok1Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,

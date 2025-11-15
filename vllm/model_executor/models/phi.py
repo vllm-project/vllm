@@ -115,11 +115,6 @@ class PhiAttention(nn.Module):
         )
         assert rotary_dim % 2 == 0
 
-        if getattr(config, "rope_parameters", None) is None:
-            config.rope_parameters = {"rope_type": "default"}
-        if "rope_theta" not in config.rope_parameters:
-            # Refer to https://huggingface.co/microsoft/phi-1_5/blob/d212a789620c380ff32ca1d1ee9943a777360987/modeling_phi.py#L518
-            config.rope_parameters["rope_theta"] = 10000.0
         max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
         self.rotary_emb = get_rope(
             self.head_size,

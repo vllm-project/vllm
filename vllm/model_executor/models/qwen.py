@@ -83,7 +83,7 @@ class QWenAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         max_position_embeddings: int,
-        rope_parameters: dict[str, Any],
+        rope_parameters: dict[str, Any] | None = None,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",

@@ -92,10 +92,6 @@ class GPTNeoXAttention(nn.Module):
         scaling = self.head_size**-0.5
         rotary_dim = int(self.head_size * config.rotary_pct)
         assert rotary_dim % 2 == 0
-        if getattr(config, "rope_parameters", None) is None:
-            config.rope_parameters = {"rope_type": "default"}
-        if "rope_theta" not in config.rope_parameters:
-            config.rope_parameters["rope_theta"] = 10000
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             self.head_size,
