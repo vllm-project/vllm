@@ -991,6 +991,7 @@ class EagleProposer:
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model
+
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
@@ -1002,52 +1003,92 @@ class EagleProposer:
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
 
-            # Check if shapes match and we found the embedding
-            eagle_shape = self.model.model.embed_tokens.weight.shape
-            target_shape = target_embed_tokens.weight.shape
-            if eagle_shape == target_shape:
-                logger.info(
-                    "Assuming the EAGLE head shares the same vocab embedding"
-                    " with the target model."
-                )
-                del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+            share_embeddings = False
+            if hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE model
+                if not self.model.has_own_embed_tokens:
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model without its own embed_tokens in the"
+                        " checkpoint. Sharing target model embedding weights with the"
+                        " draft model."
+                    )
+                elif (
+                    isinstance(target_embed_tokens.weight, torch.Tensor)
+                    and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                    and torch.equal(
+                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                    )
+                ):
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model with embed_tokens identical to the target"
+                        " model. Sharing target model embedding weights with the draft"
+                        " model."
+                    )
+                else:
+                    logger.info(
+                        "Detected EAGLE model with distinct embed_tokens weights. "
+                        "Keeping separate embedding weights from the target model."
+                    )
             else:
+                # MTP model
+                share_embeddings = True
                 logger.info(
-                    "The EAGLE head's vocab embedding will be loaded separately"
-                    " from the target model."
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings:
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "The EAGLE head's vocab embedding will be loaded separately"
+                "The draft model's vocab embedding will be loaded separately"
                 " from the target model."
             )
 
         # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3":
-            if hasattr(target_language_model, "lm_head"):
-                logger.info("Loading EAGLE LM head weights from the target model.")
-                self.model.lm_head = target_language_model.lm_head
-        else:
-            if (
-                hasattr(self.model, "lm_head")
-                and hasattr(target_language_model, "lm_head")
-                and self.model.lm_head.weight.shape
-                == target_language_model.lm_head.weight.shape
-            ):
+        share_lm_head = False
+        if hasattr(self.model, "has_own_lm_head"):
+            # EAGLE model
+            if not self.model.has_own_lm_head:
+                share_lm_head = True
                 logger.info(
-                    "Assuming the EAGLE head shares the same lm_head"
-                    " with the target model."
+                    "Detected EAGLE model without its own lm_head in the checkpoint. "
+                    "Sharing target model lm_head weights with the draft model."
                 )
-                del self.model.lm_head
-                self.model.lm_head = target_language_model.lm_head
+            elif (
+                hasattr(target_language_model, "lm_head")
+                and isinstance(target_language_model.lm_head.weight, torch.Tensor)
+                and isinstance(self.model.lm_head.weight, torch.Tensor)
+                and torch.equal(
+                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                )
+            ):
+                share_lm_head = True
+                logger.info(
+                    "Detected EAGLE model with lm_head identical to the target model. "
+                    "Sharing target model lm_head weights with the draft model."
+                )
             else:
                 logger.info(
-                    "The EAGLE head's lm_head will be loaded separately"
-                    " from the target model."
+                    "Detected EAGLE model with distinct lm_head weights. "
+                    "Keeping separate lm_head weights from the target model."
                 )
+        else:
+            # MTP model
+            share_lm_head = True
+            logger.info(
+                "Detected MTP model. "
+                "Sharing target model lm_head weights with the draft model."
+            )
+
+        if share_lm_head and hasattr(target_language_model, "lm_head"):
+            if hasattr(self.model, "lm_head"):
+                del self.model.lm_head
+            self.model.lm_head = target_language_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
