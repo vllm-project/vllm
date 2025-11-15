@@ -524,19 +524,9 @@ class Gemma3ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
-        # Detect GGUF model format
-        model_path = vllm_config.model_config.model
-        self._is_gguf = (
-            quant_config is not None
-            and getattr(quant_config, "quant_method", "") == "gguf"
-        ) or (model_path and model_path.endswith(".gguf"))
-
-        # GGUF models: vision tower is always unquantized (F16 from mmproj.gguf).
-        # HF models: pass through quant_config normally
-        vision_quant_config = None if self._is_gguf else quant_config
         self.vision_tower = SiglipVisionModel(
             config.vision_config,
-            quant_config=vision_quant_config,
+            quant_config=quant_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
         self.multi_modal_projector = Gemma3MultiModalProjector(config)
