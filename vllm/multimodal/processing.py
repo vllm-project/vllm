@@ -1088,9 +1088,10 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
+        allowed_kwargs.setdefault("return_tensors", "pt")
 
         try:
-            output = hf_processor(**data, **allowed_kwargs, return_tensors="pt")
+            output = hf_processor(**data, **allowed_kwargs)
         except Exception as exc:
             # See https://github.com/huggingface/tokenizers/issues/537
             if (
@@ -1505,11 +1506,17 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         In addition, return whether prompt updates have been applied.
         """
         if not mm_items:
-            from transformers.feature_extraction_utils import BatchFeature
+            processed_data = self._call_hf_processor(
+                prompt=prompt_text,
+                mm_data={},
+                mm_kwargs=hf_processor_mm_kwargs,
+                # Avoid converting to tensors only to convert back to list
+                tok_kwargs={**tokenization_kwargs, "return_tensors": None},
+            )
 
-            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-            (prompt_ids,) = processor(text=prompt_text, **tokenization_kwargs).input_ids
-            return prompt_ids, BatchFeature(), False
+            (prompt_ids,) = processed_data.pop("input_ids")
+
+            return prompt_ids, processed_data, False
 
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
