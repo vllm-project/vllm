@@ -22,7 +22,8 @@ def is_aiter_found() -> bool:
 # we keep this global outside to not cause torch compile breaks.
 IS_AITER_FOUND = is_aiter_found()
 
-# Can't use dtypes.fp8 directly because it returns wrong result on gfx942.
+# Can't use dtypes.fp8 directly inside an op
+# because it returns wrong result on gfx942.
 # This is a workaround to get the correct FP8 dtype.
 # This might because that the get_gfx() is wrapped as a custom op.
 if IS_AITER_FOUND:
