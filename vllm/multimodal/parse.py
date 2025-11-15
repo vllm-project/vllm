@@ -359,8 +359,9 @@ class MultiModalDataParser:
         )
         self.video_needs_metadata = video_needs_metadata
 
-    def _is_embeddings(
-        self, data: object
+    @classmethod
+    def is_embeddings(
+        cls, data: object
     ) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
         if isinstance(data, torch.Tensor):
             return data.ndim == 3
@@ -420,7 +421,7 @@ class MultiModalDataParser:
         ):
             return None
 
-        if self._is_embeddings(data):
+        if self.is_embeddings(data):
             return AudioEmbeddingItems(data)
 
         data_items: list[AudioItem]
@@ -458,7 +459,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if self._is_embeddings(data):
+        if self.is_embeddings(data):
             return ImageEmbeddingItems(data)
 
         if (
@@ -484,7 +485,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if self._is_embeddings(data):
+        if self.is_embeddings(data):
             return VideoEmbeddingItems(data)
 
         data_items: list[VideoItem]
