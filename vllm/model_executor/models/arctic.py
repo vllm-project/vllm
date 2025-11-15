@@ -75,7 +75,11 @@ class ArcticMLP(nn.Module):
         )
 
         self.w13 = MergedColumnParallelLinear(
-            self.hidden_size, [self.ffn_dim] * 2, bias=False, quant_config=quant_config
+            self.hidden_size,
+            [self.ffn_dim] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.w13",
         )
         self.w2 = RowParallelLinear(
             self.ffn_dim,
@@ -83,6 +87,7 @@ class ArcticMLP(nn.Module):
             bias=False,
             reduce_results=reduce_results,
             quant_config=quant_config,
+            prefix=f"{prefix}.w2",
         )
         if config.hidden_act != "silu":
             raise ValueError(
@@ -297,6 +302,7 @@ class ArcticAttention(nn.Module):
             self.total_num_kv_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -304,6 +310,7 @@ class ArcticAttention(nn.Module):
             bias=False,
             reduce_results=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -435,7 +442,7 @@ class ArcticModel(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -449,7 +456,7 @@ class ArcticModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -483,16 +490,14 @@ class ArcticForCausalLM(nn.Module, SupportsPP, SupportsQuant):
             self.lm_head.weight = self.model.embed_tokens.weight
         self.num_experts = config.num_local_experts
         self.num_experts_per_tok = config.num_experts_per_tok
-        self.unpadded_vocab_size = config.vocab_size
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

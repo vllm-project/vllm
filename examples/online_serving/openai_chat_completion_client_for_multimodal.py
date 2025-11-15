@@ -112,8 +112,8 @@ def run_single_image(model: str, max_completion_tokens: int) -> None:
 
 # Multi-image input inference
 def run_multi_image(model: str, max_completion_tokens: int) -> None:
-    image_url_duck = "https://upload.wikimedia.org/wikipedia/commons/d/da/2015_Kaczka_krzy%C5%BCowka_w_wodzie_%28samiec%29.jpg"
-    image_url_lion = "https://upload.wikimedia.org/wikipedia/commons/7/77/002_The_lion_king_Snyggve_in_the_Serengeti_National_Park_Photo_by_Giles_Laurent.jpg"
+    image_url_duck = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/duck.jpg"
+    image_url_lion = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/lion.jpg"
     chat_completion_from_url = client.chat.completions.create(
         messages=[
             {

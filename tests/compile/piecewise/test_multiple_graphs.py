@@ -22,6 +22,8 @@ from vllm.config import (
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
+from ...utils import create_new_process_for_each_test
+
 # This import automatically registers `torch.ops.silly.attention`
 from .. import silly_attention  # noqa: F401
 
@@ -193,7 +195,14 @@ def run_model(
 
 
 @pytest.mark.parametrize("use_inductor_graph_partition", [False, True])
-def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
+@pytest.mark.parametrize("use_bytecode_hook", [True, False])
+@create_new_process_for_each_test("spawn")
+def test_multi_graph_piecewise_compile(
+    use_inductor_graph_partition: bool, use_bytecode_hook: bool, monkeypatch
+):
+    # Set the environment variable for this test
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "1" if use_bytecode_hook else "0")
+
     if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
         pytest.skip("inductor graph partition is only available in PyTorch 2.9+")
 
@@ -203,7 +212,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=True,
+            cudagraph_mode=CUDAGraphMode.PIECEWISE,
             splitting_ops=["silly::attention"],
             cudagraph_capture_sizes=[1, 2],
             use_inductor_graph_partition=use_inductor_graph_partition,
@@ -281,7 +290,7 @@ def test_multi_graph_piecewise_compile(use_inductor_graph_partition: bool):
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            use_cudagraph=False,
+            cudagraph_mode=CUDAGraphMode.NONE,
             splitting_ops=["silly::attention"],
             use_inductor_graph_partition=use_inductor_graph_partition,
         )

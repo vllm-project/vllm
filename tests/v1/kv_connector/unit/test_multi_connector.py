@@ -114,7 +114,6 @@ def test_multi_shared_storage_connector_consistency():
         enforce_eager=True,
         gpu_memory_utilization=0.5,
         kv_transfer_config=kv_transfer_config,
-        disable_hybrid_kv_cache_manager=True,
     )
     # Run generation - this should trigger saving KV cache
     _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
