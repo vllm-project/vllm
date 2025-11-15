@@ -1506,17 +1506,14 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         In addition, return whether prompt updates have been applied.
         """
         if not mm_items:
-            processed_data = self._call_hf_processor(
-                prompt=prompt_text,
-                mm_data={},
-                mm_kwargs=hf_processor_mm_kwargs,
-                # Avoid converting to tensors only to convert back to list
-                tok_kwargs={**tokenization_kwargs, "return_tensors": None},
+            from transformers.feature_extraction_utils import BatchFeature
+
+            prompt_ids = self._apply_hf_processor_text_only(
+                prompt_text,
+                tokenization_kwargs=tokenization_kwargs,
             )
 
-            (prompt_ids,) = processed_data.pop("input_ids")
-
-            return prompt_ids, processed_data, False
+            return prompt_ids, BatchFeature(), False
 
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
@@ -1551,12 +1548,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         correspond to each other, we create dummy multi-modal items
         to go along with the text.
         """
-        prompt_ids, _, _ = self._apply_hf_processor_text_mm(
-            prompt_text=prompt_text,
-            mm_items=MultiModalDataItems({}),
-            hf_processor_mm_kwargs={},
-            tokenization_kwargs=tokenization_kwargs,
+        processed_data = self._call_hf_processor(
+            prompt=prompt_text,
+            mm_data={},
+            mm_kwargs={},
+            # Avoid converting to tensors only to convert back to list
+            tok_kwargs={**tokenization_kwargs, "return_tensors": None},
         )
+
+        (prompt_ids,) = processed_data.pop("input_ids")
 
         return prompt_ids
 
