@@ -53,6 +53,43 @@ from .rebalance_execute import rearrange_expert_weights_inplace
 logger = init_logger(__name__)
 
 
+def safe_scatter_add_with_masked_indices(
+    target: torch.Tensor,
+    dim: int,
+    index: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    """
+    Perform scatter_add while filtering out -1 indices (masked values).
+    
+    During health-based masking, index tensors may contain -1 for masked experts.
+    This function filters these out to prevent CUDA index out of bounds errors.
+    
+    Strategy: Replace -1 indices with 0 AND zero out corresponding source values.
+    This means masked positions perform: target[0] += 0 (harmless no-op).
+    Expert 0's actual load is unaffected since we're adding zero, not real load values.
+    
+    Args:
+        target: Target tensor to scatter into
+        dim: Dimension along which to scatter
+        index: Index tensor (may contain -1 for masked values)
+        src: Source tensor with values to add
+    """
+    # Create mask for valid (non--1) indices
+    valid_mask = index >= 0
+    
+    # Replace -1 indices with 0 to avoid CUDA index out of bounds
+    # This is safe because we zero out the corresponding source values below
+    safe_indices = torch.where(valid_mask, index, torch.zeros_like(index))
+    
+    # Zero out source values for -1 positions
+    # This ensures masked positions contribute 0 to the scatter_add
+    safe_src = torch.where(valid_mask, src, torch.zeros_like(src))
+    
+    # Perform scatter_add: valid indices add their load, masked indices add 0
+    target.scatter_add_(dim=dim, index=safe_indices, src=safe_src)
+
+
 @dataclass
 class EplbModelState:
     """EPLB metrics."""
@@ -859,7 +896,11 @@ class EplbState:
                     dtype=eplb_model_state.expert_load_window.dtype,
                     device=eplb_model_state.expert_load_window.device,
                 )
-                logical_expert_load_window.scatter_add_(
+                
+                # Aggregate physical expert loads to logical expert loads
+                # Filter out -1 indices (masked experts) to prevent CUDA errors
+                safe_scatter_add_with_masked_indices(
+                    target=logical_expert_load_window,
                     dim=-1,
                     index=eplb_model_state.physical_to_logical_map.unsqueeze(0)
                     .expand_as(eplb_model_state.expert_load_window)

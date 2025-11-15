@@ -1400,26 +1400,11 @@ def eplb_map_to_physical_and_record(
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
     topk_ids_flatten = topk_ids.flatten()
-    
-    # Filter out -1 indices (masked experts) before scatter_add
-    # This prevents CUDA index out of bounds errors during health-based masking
-    valid_mask = topk_ids_flatten >= 0
-    if valid_mask.all():
-        # Fast path: no masked experts, use indices directly
-        expert_load_view.scatter_add_(
-            dim=0,
-            index=topk_ids_flatten.long(),
-            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-        )
-    else:
-        # Slow path: filter out -1 indices
-        valid_indices = topk_ids_flatten[valid_mask]
-        valid_src = torch.ones_like(valid_indices).to(expert_load_view)
-        expert_load_view.scatter_add_(
-            dim=0,
-            index=valid_indices.long(),
-            src=valid_src,
-        )
+    expert_load_view.scatter_add_(
+        dim=0,
+        index=topk_ids_flatten.long(),
+        src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+    )
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)
