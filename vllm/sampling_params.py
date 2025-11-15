@@ -15,6 +15,7 @@ from pydantic.dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
 
@@ -122,6 +123,7 @@ class RequestOutputKind(Enum):
 
 
 class SamplingParams(
+    PydanticMsgspecMixin,
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
     # required for @cached_property.
