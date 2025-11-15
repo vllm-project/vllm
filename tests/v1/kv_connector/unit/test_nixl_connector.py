@@ -407,6 +407,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 # `self.kv_cache_layout` is only forced to HND when vllm engine
                 # is started. We mock HND here.
                 kv_cache_layout="HND",
+                block_size=self.block_size,
             ),
             remote_tp_size=remote_tp_size,
         )
@@ -652,6 +653,7 @@ class TestNixlHandshake:
                 block_lens=worker.block_len_per_layer,
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout=mismatched_layout,
+                block_size=worker.block_size,
             )
 
             with pytest.raises(RuntimeError):
@@ -706,6 +708,7 @@ class TestNixlHandshake:
                 block_lens=[i * 2 for i in worker.block_len_per_layer],
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout="HND",
+                block_size=worker.block_size,
             )
 
             # We don't check layout for homogeneous TP and MLA for now, as the
