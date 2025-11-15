@@ -22,9 +22,9 @@ ARGPARSE_DOC_DIR = ROOT_DIR / "docs/argparse"
 sys.path.insert(0, str(ROOT_DIR))
 
 
-def mock_if_not_found(module_name: str, mock: MagicMock):
-    if not importlib.util.find_spec(module_name):
-        sys.modules[module_name] = mock
+def mock_if_no_torch(mock_module: str, mock: MagicMock):
+    if not importlib.util.find_spec("torch"):
+        sys.modules[mock_module] = mock
 
 
 # Mock custom op code
@@ -37,9 +37,9 @@ class MockCustomOp:
         return decorator
 
 
-mock_if_not_found("vllm._C", MagicMock())
-mock_if_not_found("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
-mock_if_not_found(
+mock_if_no_torch("vllm._C", MagicMock())
+mock_if_no_torch("vllm.model_executor.custom_op", MagicMock(CustomOp=MockCustomOp))
+mock_if_no_torch(
     "vllm.utils.torch_utils", MagicMock(direct_register_custom_op=lambda *a, **k: None)
 )
 
@@ -51,7 +51,7 @@ importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
 # Make torch.nn.Parameter safe to inherit from
-mock_if_not_found("torch.nn", MagicMock(Parameter=object))
+mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
 
 
 class PydanticMagicMock(MagicMock):
