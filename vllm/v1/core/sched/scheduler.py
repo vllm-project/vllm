@@ -184,6 +184,11 @@ class Scheduler(SchedulerInterface):
             enable_kv_cache_events=self.enable_kv_cache_events,
             dcp_world_size=self.dcp_world_size,
         )
+        sink_len = getattr(vllm_config.model_config.hf_config, "param_sink_number", 0)
+        if sink_len > 0:
+            assert sink_len % self.block_size == 0
+            num_sink_block = sink_len // self.block_size
+            self.kv_cache_manager.block_pool.free_block_queue.popleft_n(num_sink_block)
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
