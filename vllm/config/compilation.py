@@ -755,6 +755,9 @@ class CompilationConfig:
         if self.backend == "":
             self.backend = current_platform.simple_compile_backend
 
+        # Gets recomputed in the model runner but compute it here for testing.
+        self.post_init_cudagraph_sizes()
+
     def init_backend(self, vllm_config: "VllmConfig") -> str | Callable:
         """
         Initialize the backend for the compilation config from a vllm config.
