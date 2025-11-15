@@ -406,7 +406,9 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 
         prompt = re.sub("<image_placeholder>", hf_processor.image_token, prompt)
         prompt = re.sub("<video_placeholder>", hf_processor.video_token, prompt)
-        text_outputs = tokenizer(prompt, **tok_kwargs, return_tensors="pt")
+        tok_kwargs = dict(tok_kwargs)
+        tok_kwargs.setdefault("return_tensors", "pt")
+        text_outputs = tokenizer(prompt, **tok_kwargs)
 
         return BatchFeature({**text_outputs, **image_outputs, **video_outputs})
 

@@ -289,9 +289,11 @@ class PaddleOCRVLMultiModalProcessor(
             )
         else:
             tokenizer = self.info.get_tokenizer()
-            processed_outputs = tokenizer(
-                prompt, add_special_tokens=True, return_tensors="pt"
-            )
+            tok_kwargs = dict(tok_kwargs)
+            tok_kwargs.setdefault("add_special_tokens", True)
+            tok_kwargs.setdefault("return_tensors", "pt")
+            processed_outputs = tokenizer(prompt, **tok_kwargs)
+
         return processed_outputs
 
     def _get_mm_fields_config(
