@@ -929,7 +929,6 @@ class VllmConfig:
         model_config = self.model_config
         max_model_len = model_config.get_and_verify_max_len(max_model_len)
         self.model_config.max_model_len = max_model_len
-        self.scheduler_config.max_model_len = max_model_len
 
     def try_verify_and_update_config(self):
         if self.model_config is None:

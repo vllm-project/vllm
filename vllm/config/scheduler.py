@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 from typing import TYPE_CHECKING, cast
 from typing import Any, Literal, Optional
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self, deprecated
 
@@ -54,13 +54,6 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_model_len: int = Field(default=8192, ge=1)
-    """Maximum length of a sequence (including prompt and generated text).
-
-    The default value here is mainly for convenience when testing.
-    In real usage, this should duplicate `ModelConfig.max_model_len` via
-    `EngineArgs`."""
-
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
@@ -94,6 +87,12 @@ class SchedulerConfig:
 
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
+
+    max_model_len: InitVar[int] = 8192
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
 
     is_encoder_decoder: InitVar[bool] = False
     """True if the model is an encoder-decoder model.
@@ -214,7 +213,7 @@ class SchedulerConfig:
             return value
         return handler(value)
 
-    def __post_init__(self, is_encoder_decoder: bool) -> None:
+    def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
             # Chunked prefill should be disabled for encoder-decoder models.
             self.disable_chunked_mm_input = True
@@ -236,7 +235,7 @@ class SchedulerConfig:
 
         if self.max_num_partial_prefills > 1:
             if self.long_prefill_token_threshold == 0:
-                self.long_prefill_token_threshold = int(self.max_model_len * 0.04)
+                self.long_prefill_token_threshold = int(max_model_len * 0.04)
 
             logger.info(
                 "Concurrent partial prefills enabled with "
@@ -246,6 +245,8 @@ class SchedulerConfig:
                 self.max_long_partial_prefills,
                 self.long_prefill_token_threshold,
             )
+
+        self.verify_max_model_len(max_model_len)
 
         if self.async_scheduling:
             if self.scheduler_cls == "vllm.v1.core.sched.ewsjf_scheduler.scheduler.EWSJFScheduler":
@@ -285,15 +286,14 @@ class SchedulerConfig:
     def chunked_prefill_enabled(self, value: bool):
         self.enable_chunked_prefill = value
 
-    @model_validator(mode="after")
-    def _verify_args(self) -> Self:
+    def verify_max_model_len(self, max_model_len: int) -> Self:
         if (
-            self.max_num_batched_tokens < self.max_model_len
+            self.max_num_batched_tokens < max_model_len
             and not self.enable_chunked_prefill
         ):
             raise ValueError(
                 f"max_num_batched_tokens ({self.max_num_batched_tokens}) is "
-                f"smaller than max_model_len ({self.max_model_len}). "
+                f"smaller than max_model_len ({max_model_len}). "
                 "This effectively limits the maximum sequence length to "
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
@@ -307,12 +307,12 @@ class SchedulerConfig:
                 f"({self.max_num_seqs})."
             )
 
-        if self.max_num_batched_tokens > self.max_num_seqs * self.max_model_len:
+        if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
             logger.warning(
                 "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
                 self.max_num_batched_tokens,
-                self.max_num_seqs * self.max_model_len,
+                self.max_num_seqs * max_model_len,
             )
 
         if self.max_num_partial_prefills > 1:
@@ -322,11 +322,11 @@ class SchedulerConfig:
                     "max_num_partial_prefills > 1."
                 )
 
-            if self.long_prefill_token_threshold > self.max_model_len:
+            if self.long_prefill_token_threshold > max_model_len:
                 raise ValueError(
                     "long_prefill_token_threshold "
                     f"({self.long_prefill_token_threshold}) cannot be greater "
-                    f"than the max_model_len ({self.max_model_len})."
+                    f"than the max_model_len ({max_model_len})."
                 )
 
         if self.max_long_partial_prefills > self.max_num_partial_prefills:
