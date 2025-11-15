@@ -12,6 +12,7 @@ from typing import (
 )
 
 from vllm.config import VllmConfig
+from vllm.distributed.kv_events import KVEventBatch
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_shutdown,
     get_kv_transfer_group,
@@ -135,10 +136,19 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = (
                 KVConnectorModelRunnerMixin.get_kv_connector_stats()
             )
+            output.kv_cache_events = (
+                KVConnectorModelRunnerMixin.get_kv_connector_kv_cache_events()
+            )
             kv_connector.clear_connector_metadata()
 
     @staticmethod
     def get_kv_connector_stats() -> KVConnectorStats | None:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_kv_connector_stats()
+        return None
+
+    @staticmethod
+    def get_kv_connector_kv_cache_events() -> KVEventBatch | None:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_kv_connector_kv_cache_events()
         return None
