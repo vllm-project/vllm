@@ -17,10 +17,19 @@ PROMPT = "<start_of_image> Describe this image in detail:"
 
 def test_gemma3_4b_gguf_multimodal(vllm_runner):
     """Test Gemma3 4B GGUF multimodal generation."""
+
+    original_repo = "google/gemma-3-4b-it"
+
     # Download GGUF model
     gguf_file = hf_hub_download(
         repo_id="google/gemma-3-4b-it-qat-q4_0-gguf",
         filename="gemma-3-4b-it-q4_0.gguf",
+    )
+
+    # Download mmproj file
+    hf_hub_download(
+        repo_id="google/gemma-3-4b-it-qat-q4_0-gguf",
+        filename="mmproj-model-f16-4B.gguf",
     )
 
     # Get test image
@@ -28,7 +37,7 @@ def test_gemma3_4b_gguf_multimodal(vllm_runner):
 
     with vllm_runner(
         gguf_file,
-        tokenizer_name="google/gemma-3-4b-it",
+        tokenizer_name=original_repo,
         max_model_len=4096,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(
@@ -39,6 +48,7 @@ def test_gemma3_4b_gguf_multimodal(vllm_runner):
 
     # Verify output is generated
     output_ids, output_str = vllm_outputs[0]
+    print("Generated output:", output_str)
     assert len(output_ids) > 0, "No tokens generated"
     assert len(output_str) > 0, "Empty output string"
     assert output_str.strip(), "Output is only whitespace"
