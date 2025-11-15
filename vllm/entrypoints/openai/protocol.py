@@ -2000,10 +2000,10 @@ class ScoreResponse(OpenAIBaseModel):
     usage: UsageInfo
 
 
-class ClassificationRequest(OpenAIBaseModel):
+class ClassificationCompletionRequest(OpenAIBaseModel):
     model: str | None = None
     input: list[str] | str
-    truncate_prompt_tokens: int | None = None
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     user: str | None = None
 
     # --8<-- [start:classification-extra-params]
@@ -2015,7 +2015,21 @@ class ClassificationRequest(OpenAIBaseModel):
             "if the served model does not use priority scheduling."
         ),
     )
-
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."
+        ),
+    )
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
     softmax: bool | None = Field(
         default=None,
         description="softmax will be deprecated, please use use_activation instead.",
@@ -2038,6 +2052,102 @@ class ClassificationRequest(OpenAIBaseModel):
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=get_use_activation(self),
         )
+
+
+class ClassificationChatRequest(OpenAIBaseModel):
+    model: str | None = None
+    messages: list[ChatCompletionMessageParam]
+    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
+    user: str | None = None
+
+    # --8<-- [start:chat-classification-extra-params]
+    add_generation_prompt: bool = Field(
+        default=False,
+        description=(
+            "If true, the generation prompt will be added to the chat template. "
+            "This is a parameter used by chat template in tokenizer config of the "
+            "model."
+        ),
+    )
+
+    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."
+        ),
+    )
+
+    chat_template: str | None = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "As of transformers v4.44, default chat template is no longer "
+            "allowed, so you must provide a chat template if the tokenizer "
+            "does not define one."
+        ),
+    )
+
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the template renderer. "
+            "Will be accessible by the chat template."
+        ),
+    )
+
+    mm_processor_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=("Additional kwargs to pass to the HF processor."),
+    )
+
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    softmax: bool | None = Field(
+        default=None,
+        description="softmax will be deprecated, please use use_activation instead.",
+    )
+
+    activation: bool | None = Field(
+        default=None,
+        description="activation will be deprecated, please use use_activation instead.",
+    )
+
+    use_activation: bool | None = Field(
+        default=None,
+        description="Whether to use activation for classification outputs. "
+        "Default is True.",
+    )
+    # --8<-- [end:chat-classification-extra-params]
+
+    def to_pooling_params(self):
+        return PoolingParams(
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=get_use_activation(self),
+        )
+
+
+ClassificationRequest: TypeAlias = (
+    ClassificationCompletionRequest | ClassificationChatRequest
+)
 
 
 class ClassificationData(OpenAIBaseModel):
@@ -3110,3 +3220,80 @@ class TranslationResponseVerbose(OpenAIBaseModel):
 
     words: list[TranslationWord] | None = None
     """Extracted words and their corresponding timestamps."""
+
+
+####### Tokens IN <> Tokens OUT #######
+class GenerateRequest(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    token_ids: list[int]
+    """The token ids to generate text from."""
+
+    # features: MultiModalFeatureSpec
+    # TODO (NickLucche): implement once Renderer work is completed
+    features: str | None = None
+    """The processed MM inputs for the model."""
+
+    sampling_params: SamplingParams
+    """The sampling parameters for the model."""
+
+    model: str | None = None
+
+    stream: bool | None = False
+    stream_options: StreamOptions | None = None
+    cache_salt: str | None = Field(
+        default=None,
+        description=(
+            "If specified, the prefix cache will be salted with the provided "
+            "string to prevent an attacker to guess prompts in multi-user "
+            "environments. The salt should be random, protected from "
+            "access by 3rd parties, and long enough to be "
+            "unpredictable (e.g., 43 characters base64-encoded, corresponding "
+            "to 256 bit)."
+        ),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."
+        ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+
+class GenerateResponseChoice(BaseModel):
+    index: int
+    logprobs: ChatCompletionLogProbs | None = None
+    # per OpenAI spec this is the default
+    finish_reason: str | None = "stop"
+    token_ids: list[int] | None = None
+
+
+class GenerateResponse(BaseModel):
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."
+        ),
+    )
+    choices: list[GenerateResponseChoice]
+
+    prompt_logprobs: list[dict[int, Logprob] | None] | None = None
+
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )

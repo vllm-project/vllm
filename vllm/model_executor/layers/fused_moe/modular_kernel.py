@@ -1060,7 +1060,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
                 a1q_scale=_slice_scales(a1q_scale, s, e),
-                a2_scale=_slice_scales(self.fused_experts.a2_scale, e, e),
+                a2_scale=_slice_scales(self.fused_experts.a2_scale, s, e),
                 workspace13=workspace13,
                 workspace2=workspace2,
                 expert_tokens_meta=c_expert_tokens_meta,
