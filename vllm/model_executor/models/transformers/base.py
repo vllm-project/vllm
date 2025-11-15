@@ -14,7 +14,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Transformers backend base class."""
+"""Transformers modeling backend base class."""
 
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
@@ -118,7 +118,7 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
         super().__init__()
-        logger.info("Using Transformers backend.")
+        logger.info("Using Transformers modeling backend.")
 
         self.config = vllm_config.model_config.hf_config
         self.text_config = self.config.get_text_config()
@@ -147,7 +147,8 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
             # Check for unsupported quantization methods.
             if quant_method_name == "mxfp4":
                 raise NotImplementedError(
-                    "Transformers backend does not support MXFP4 quantization yet."
+                    "Transformers modeling backend does "
+                    "not support MXFP4 quantization yet."
                 )
             # Skip loading extra bias for GPTQ models.
             if "gptq" in quant_method_name:
@@ -458,6 +459,6 @@ class Base(nn.Module, VllmModel, SupportsQuant, SupportsLoRA, SupportsPP):
         required = Version(min_version)
         if installed < required:
             raise ImportError(
-                f"Transformers backend requires transformers>={required} "
+                f"Transformers modeling backend requires transformers>={required} "
                 f"for {feature}, but got {installed}"
             )

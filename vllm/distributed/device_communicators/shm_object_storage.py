@@ -342,8 +342,8 @@ class MsgpackSerde(ObjectSerde):
         from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
         self.encoder = MsgpackEncoder()
-        self.tensor_decoder = MsgpackDecoder(torch.Tensor)
-        self.mm_decoder = MsgpackDecoder(MultiModalKwargsItem)
+        self.tensor_decoder = MsgpackDecoder(torch.Tensor, share_mem=False)
+        self.mm_decoder = MsgpackDecoder(MultiModalKwargsItem, share_mem=False)
         self._mm_kwargs_item_cls = MultiModalKwargsItem
 
     def serialize(self, value: Any) -> tuple[bytes | list[bytes], int, bytes, int]:
@@ -368,7 +368,7 @@ class MsgpackSerde(ObjectSerde):
         # pickle.loads do not read past the end of a pickled object
         # within a large buffer, so we can skip storing the metadata size
         type_name, nbytes, len_arr = pickle.loads(data_view)
-        serialized_data = bytearray(data_view[-nbytes:])
+        serialized_data = data_view[-nbytes:]
 
         if type_name == torch.Tensor.__name__:
             obj = []

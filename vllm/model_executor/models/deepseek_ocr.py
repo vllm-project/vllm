@@ -161,7 +161,7 @@ class NGramPerReqLogitsProcessor(AdapterLogitsProcessor):
             )
 
     def is_argmax_invariant(self) -> bool:
-        return True
+        return False
 
     def new_req_logits_processor(
         self,
