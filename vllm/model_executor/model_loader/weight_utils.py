@@ -843,6 +843,10 @@ def gguf_quant_weights_iterator(
     """
     Iterate over the quant weights in the model gguf files and convert
     them to torch tensors.
+    Be careful of the order of yielding weight types and weights data,
+    we have to yield all weight types first before yielding any weights.
+    Otherwise it would cause issue when loading weights with for packed
+    layer with different quant types.
     """
 
     reader = gguf.GGUFReader(gguf_file)
@@ -852,19 +856,20 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name not in ("F32", "F16", "BF16"):
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
 
-                weight = tensor.data
+    for tensor in reader.tensors:
+        if tensor.name in gguf_to_hf_name_map:
+            weight = tensor.data
+            weight_type = tensor.tensor_type
+            name = gguf_to_hf_name_map[tensor.name]
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
-                param = torch.tensor(weight)
-                yield name, param
-            else:
-                weight = tensor.data
-                param = torch.tensor(weight)
-                yield name, param
+            param = torch.tensor(weight)
+            yield name, param
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
