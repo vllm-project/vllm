@@ -1250,8 +1250,7 @@ def select_valid_physical_experts(
     Select valid (non-masked) physical experts for each logical expert assignment.
     
     For health-based masking, some expert replicas may be marked as -1 (masked).
-    This function ensures we select valid replicas by trying multiple candidates
-    starting from a pseudo-random position.
+    This function ensures we select valid replicas by avoiding -1 indices.
     
     Args:
         topk_ids_long: Logical expert IDs for each token.
@@ -1272,43 +1271,56 @@ def select_valid_physical_experts(
     # Shape: (num_tokens, topk, max_replicas)
     physical_replicas = logical_to_physical_map[topk_ids_long]
     
-    # Use (token position) modulo (replica count) to get pseudo-random starting point
     replica_count = logical_replica_count[topk_ids_long]
-    starting_replica_idx = (pos_indices % replica_count)
+    # Use max(1, count) to avoid division by zero when all replicas are masked
+    safe_replica_count = torch.clamp(replica_count, min=1)
+    # Use (token position) modulo (replica count) to get pseudo-random starting point
+    starting_replica_idx = (pos_indices % safe_replica_count)
     
-    # Create a sequence of replica indices to try, wrapping around
-    # This ensures we try all replicas starting from the pseudo-random index
-    max_replicas = physical_replicas.shape[-1]
-    replica_offsets = torch.arange(
-        max_replicas, device=topk_ids_long.device, dtype=torch.long
-    ).unsqueeze(0).unsqueeze(0)  # (1, 1, max_replicas)
-    replica_indices_to_try = (
-        starting_replica_idx.unsqueeze(-1) + replica_offsets
-    ) % max_replicas  # (num_tokens, topk, max_replicas)
+    # Simple approach: Try the initial selection, if it's -1, find next valid replica
+    # with wrap-around to maintain pseudo-random distribution
     
-    # Gather all candidate physical IDs in order of preference
-    batch_indices = torch.arange(
-        topk_ids_long.shape[0], device=topk_ids_long.device, dtype=torch.long
-    ).unsqueeze(1).unsqueeze(2)  # (num_tokens, 1, 1)
-    expert_indices = topk_ids_long.unsqueeze(-1)  # (num_tokens, topk, 1)
+    # Initial selection using simple modulo (same as original code)
+    replica_indices = starting_replica_idx.unsqueeze(-1)
+    physical_ids = torch.gather(physical_replicas, dim=-1, index=replica_indices).squeeze(-1)
     
-    # Shape: (num_tokens, topk, max_replicas)
-    candidates = physical_replicas[
-        batch_indices.expand(-1, topk_ids_long.shape[1], max_replicas),
-        expert_indices.expand(-1, -1, max_replicas),
-        replica_indices_to_try
-    ]
+    # Check if any selections resulted in -1 (masked)
+    masked_selections = physical_ids == -1
     
-    # Find first non--1 candidate for each position
-    # Create mask: True where candidate is valid (>= 0)
-    valid_mask = candidates >= 0
-    
-    # For each token,expert pair, find the index of first valid replica
-    # If no valid replica found (all -1), this will return 0 (will get -1)
-    first_valid_idx = torch.argmax(valid_mask.int(), dim=-1)  # (num_tokens, topk)
-    
-    # Gather the selected physical IDs
-    physical_ids = candidates.gather(-1, first_valid_idx.unsqueeze(-1)).squeeze(-1)
+    # For masked selections, find the next valid replica with wrap-around
+    if masked_selections.any():
+        # For positions that got -1, search for first valid replica starting from
+        # starting_replica_idx and wrapping around
+        # Shape: (num_tokens, topk, max_replicas)
+        is_valid = physical_replicas >= 0
+        max_replicas = physical_replicas.shape[-1]
+        
+        # Create circular replica indices starting from starting_replica_idx
+        # Shape: (num_tokens, topk, max_replicas)
+        # For each position, this creates: [start, start+1, ..., max-1, 0, 1, ..., start-1]
+        offsets = torch.arange(max_replicas, device=physical_replicas.device, dtype=torch.long)
+        circular_indices = (starting_replica_idx.unsqueeze(-1) + offsets) % max_replicas
+        
+        # Gather validity mask in circular order
+        # Shape: (num_tokens, topk, max_replicas)
+        circular_valid = torch.gather(is_valid, dim=-1, index=circular_indices)
+        
+        # Find first valid position in circular order
+        # Shape: (num_tokens, topk)
+        first_valid_offset = torch.argmax(circular_valid.to(torch.int32), dim=-1)
+        
+        # Map back to actual replica index
+        first_valid_circular_idx = (starting_replica_idx + first_valid_offset) % max_replicas
+        
+        # Get the first valid physical ID in circular order
+        first_valid_physical_id = torch.gather(
+            physical_replicas,
+            dim=-1,
+            index=first_valid_circular_idx.unsqueeze(-1)
+        ).squeeze(-1)
+        
+        # Replace -1 values with first valid replica (in circular order)
+        physical_ids = torch.where(masked_selections, first_valid_physical_id, physical_ids)
     
     return physical_ids
 
@@ -1360,6 +1372,15 @@ def eplb_map_to_physical_and_record(
     )
     
     topk_ids = physical_ids
+    
+    # Sanity check: Verify no -1 indices remain after selection
+    # If this fails, it means either:
+    # (1) All replicas of an expert are masked (invalid system state), or
+    # (2) Bug in select_valid_physical_experts logic
+    assert (topk_ids >= 0).all(), (
+        f"Found {(topk_ids == -1).sum().item()} invalid expert indices (-1) after "
+        f"replica selection. All experts must have at least one valid (non-masked) replica."
+    )
 
     # 2. Record expert load metrics.
 
@@ -1379,11 +1400,26 @@ def eplb_map_to_physical_and_record(
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
     topk_ids_flatten = topk_ids.flatten()
-    expert_load_view.scatter_add_(
-        dim=0,
-        index=topk_ids_flatten.long(),
-        src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
-    )
+    
+    # Filter out -1 indices (masked experts) before scatter_add
+    # This prevents CUDA index out of bounds errors during health-based masking
+    valid_mask = topk_ids_flatten >= 0
+    if valid_mask.all():
+        # Fast path: no masked experts, use indices directly
+        expert_load_view.scatter_add_(
+            dim=0,
+            index=topk_ids_flatten.long(),
+            src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
+        )
+    else:
+        # Slow path: filter out -1 indices
+        valid_indices = topk_ids_flatten[valid_mask]
+        valid_src = torch.ones_like(valid_indices).to(expert_load_view)
+        expert_load_view.scatter_add_(
+            dim=0,
+            index=valid_indices.long(),
+            src=valid_src,
+        )
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)
