@@ -19,6 +19,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
@@ -717,7 +720,9 @@ def maybe_prefix(prefix: str, name: str) -> str:
     return name if not prefix else f"{prefix}.{name}"
 
 
-def get_draft_quant_config(vllm_config: VllmConfig):
+def get_draft_quant_config(
+    vllm_config: VllmConfig,
+) -> QuantizationConfig | None:
     """Get quantization config for Draft models.
 
     Draft models should use their own quantization config instead of the verifier/target
