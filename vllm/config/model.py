@@ -37,7 +37,6 @@ from vllm.transformers_utils.config import (
     uses_mrope,
 )
 from vllm.transformers_utils.gguf_utils import (
-    detect_gguf_multimodal,
     maybe_patch_hf_config_from_gguf,
 )
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
@@ -679,24 +678,8 @@ class ModelConfig:
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
-
-        # GGUF multimodal: Set flag to initialize multimodal_config
-        # when Gemma3 mmproj file is present
-        is_gguf_multimodal = False
-        if detect_gguf_multimodal(self.model):
-            is_gemma3 = any(
-                "gemma3" in str(arch).lower() for arch in self.architectures
-            )
-            if is_gemma3:
-                is_gguf_multimodal = True
-                logger.info(
-                    "Detected Gemma3 GGUF multimodal model "
-                    "with mmproj.gguf, initializing "
-                    "multimodal_config"
-                )
-
         # Init multimodal config if needed
-        if self._model_info.supports_multimodal or is_gguf_multimodal:
+        if self._model_info.supports_multimodal:
             if (
                 mm_encoder_tp_mode == "data"
                 and not self._model_info.supports_multimodal_encoder_tp_data
