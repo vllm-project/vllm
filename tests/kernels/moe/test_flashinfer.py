@@ -82,7 +82,7 @@ class TestData:
         m: int, k: int, n: int, e: int, reorder: bool, activation: str = "silu"
     ) -> "TestData":
         is_gated = True
-        if activation != "relu2_no_mul":
+        if activation == "relu2_no_mul":
             is_gated = False
 
         hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
