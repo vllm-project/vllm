@@ -22,7 +22,6 @@ from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.registry import ExtensionManager
 
-
 from .audio import AudioMediaIO
 from .base import MediaIO
 from .image import ImageEmbeddingMediaIO, ImageMediaIO
@@ -511,4 +510,3 @@ def fetch_video(
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_video(video_url)
-    
