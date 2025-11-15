@@ -17,7 +17,7 @@ import torch
 
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
-    apply_top_k_top_p_test2,
+    apply_top_k_top_p_triton,
 )
 
 
@@ -56,15 +56,18 @@ def test_accuracy(logits, k, p, func_list):
         original_logits_bin = original_logits.view(torch.int32)
         output_logits_bin = output_logits.view(torch.int32)
         is_correct = torch.all(original_logits_bin == output_logits_bin)
+        is_correct = is_correct and torch.allclose(
+            output_logits, original_logits, atol=1e-16
+        )
         output_correct_list.append(is_correct)
         func_name = func_list[i].__name__
 
         if not is_correct:
             print_to_log(
-                r_str(f"Error: logits are not close on {i} - " + f"{func_name}"),
+                r_str("Error: logits are not close on " + f"{func_name}"),
                 log_file,
             )
-            output_logits = apply_top_k_top_p_test2(logits, k, p, debug=True)
+            output_logits = func_list[i](logits, k, p, debug=True)
             error_mask = torch.abs(output_logits - original_logits) > 1e-16
             error_rows = torch.where(error_mask)[0]
             error_rows = torch.unique(error_rows)
@@ -117,10 +120,11 @@ if __name__ == "__main__":
 
     batch_size_list = [64, 128, 1024]
     vocab_size_list = [4096, 16384, 65536, 128000, 262144]
-    # p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
-    p_list = [None]
-    k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
-    func_list = [apply_top_k_top_p, apply_top_k_top_p_test2]
+    p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
+    # p_list = [None]
+    # k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
+    k_list = [None]
+    func_list = [apply_top_k_top_p, apply_top_k_top_p_triton]
 
     log_file = f"triton_topk_topp_test_{date_str}.log"
     csv_file = f"triton_topk_topp_test_{date_str}.csv"
@@ -213,227 +217,3 @@ if __name__ == "__main__":
                     f"{time_list[0] / time_list[1]:.8f}\n"
                 )
             print_to_log(y_str("--------------------------------\n"), log_file)
-
-"""# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-from datetime import datetime
-from itertools import product
-import regex as re
-import torch
-
-print("Torch version:", torch.__version__)
-print("CUDA available:", torch.cuda.is_available())
-print("Default device:", torch.cuda.current_device())
-
-# --- MODIFIED IMPORTS ---
-# We need all the component kernels to time them individually
-from vllm.v1.sample.ops.topk_topp_sampler import (
-    apply_top_k_top_p, 
-    apply_top_k_with_pivot_filter,  # Used for accuracy check
-    apply_top_k_only,               # This is the baseline AND our Kernel 2
-    top_k_pivot_and_sort,           # Kernel 1
-    scatter_topk_kernel             # Kernel 3
-)
-print("All kernels imported successfully")
-
-x = torch.randn(2, 5, device="cuda")
-y = apply_top_k_only(x, k=torch.tensor([2,2], device="cuda"))
-print("apply_top_k_only ran successfully, output:", y)
-
-
-def g_str(s): return "\033[32m" + s + "\033[0m"
-def r_str(s): return "\033[31m" + s + "\033[0m"
-def y_str(s): return "\033[33m" + s + "\033[0m"
-def b_str(s): return "\033[34m" + s + "\033[0m"
-
-def print_to_log(s, log_file):
-    print(s)
-    s = re.sub(r"\033[[0-9;]*m", "", s)
-    with open(log_file, "a") as f:
-        f.write(s + "\n")
-
-# --- UNCHANGED ---
-# test_accuracy still runs the *full* pipeline to check for correctness
-def test_accuracy(logits, k, log_file):
-    input_logits_torch = logits.clone().detach()
-    input_logits_triton = logits.clone().detach()
-
-    original_logits = apply_top_k_only(input_logits_torch, k)
-    triton_pivot_logits = apply_top_k_with_pivot_filter(input_logits_triton, k)
-
-    torch.cuda.synchronize()
-    is_correct = torch.allclose(original_logits, triton_pivot_logits)
-
-    if not is_correct:
-        print_to_log(r_str("Error: logits are not close"), log_file)
-
-    return is_correct
-
-# --- REWRITTEN test_time FUNCTION ---
-def test_time(logits, k, num_runs=30, num_warmup=5):
-    
-    batch_size, vocab_size = logits.shape
-    
-    # --- Warmup ---
-    for _ in range(num_warmup):
-        warmup_tensor_torch = logits.clone().detach()
-        apply_top_k_only(warmup_tensor_torch, k)
-        
-        warmup_tensor_triton = logits.clone().detach()
-        apply_top_k_with_pivot_filter(warmup_tensor_triton, k)
-    torch.cuda.synchronize()
-
-    # --- 1. Baseline `apply_top_k_only` timing ---
-    start_torch = torch.cuda.Event(enable_timing=True)
-    end_torch = torch.cuda.Event(enable_timing=True)
-    
-    start_torch.record()
-    for i in range(num_runs):
-        input_tensor = logits.clone().detach()
-        apply_top_k_only(input_tensor, k)
-    end_torch.record()
-    torch.cuda.synchronize()
-    apply_top_k_time = start_torch.elapsed_time(end_torch) / num_runs
-
-    # --- 2. Triton Kernel 2 (Sort) Timing ---
-    
-    # Events for Kernel 2
-    start_k2 = torch.cuda.Event(enable_timing=True)
-    end_k2 = torch.cuda.Event(enable_timing=True)
-    
-    # Kernel 2 time accumulator
-    triton_k2_time_acc = 0.0
-    
-    for i in range(num_runs):
-                if (k == vocab_size).all():
-            continue
-
-        # 1. Setup
-        input_tensor = logits.clone().detach()
-        probs = torch.full_like(input_tensor, -float('inf'))
-        l =  torch.empty((batch_size,), device=input_tensor.device, dtype=torch.int32)
-        idx_tensor = torch.full_like(input_tensor, -1, dtype=torch.int)
-
-        BLOCK_SIZE = 1024
-        SIGMA = 2.0
-        grid_pivot = (batch_size,)
-
-        # 2. Run Kernel 1 (Pivot) - *No timer*
-        top_k_pivot_and_sort[grid_pivot](
-            input_tensor, probs, l, idx_tensor, k, batch_size,
-            SIGMA=SIGMA, VOCAB_SIZE=vocab_size, BLOCK_SIZE=BLOCK_SIZE,
-        )
-
-        torch.cuda.synchronize() 
-        max_l = torch.max(l).item()
-        outliers = probs[:, :max_l] 
-        outliers_idx = idx_tensor[:, :max_l]
-        k_pinned = torch.minimum(k, l)
-
-        # 4. Time Kernel 2 (Sort)  
-        start_k2.record()
-        apply_top_k_only(outliers, k_pinned) 
-        end_k2.record()
-
-        torch.cuda.synchronize()
-        triton_k2_time_acc += start_k2.elapsed_time(end_k2)
-
-    triton_sort_only_time = triton_k2_time_acc / num_runs
-    
-    return apply_top_k_time, triton_sort_only_time
-
-
-def main():
-    print("Starting compare.py...")
-    date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    #batch_size_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]  # Up to 512
-    #vocab_size_list = [4096, 16384, 65536, 262144, 102400]
-    #k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000] 
-
-    batch_size_list = [1, 2, 4, 8]
-    vocab_size_list = [4096, 16384]
-    k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
-
-
-    log_file = f"triton_topk_topp_test_{date_str}.log"
-    csv_file = f"triton_topk_topp_test_{date_str}.csv"
-
-    print_to_log(y_str("Testing TopKTopPSampler with Triton"), log_file)
-    print_to_log(y_str("batch_size_list:") + f"{batch_size_list}", log_file)
-    print_to_log(y_str("vocab_size_list:") + f"{vocab_size_list}", log_file)
-    print_to_log(y_str("k_list:") + f"{k_list}", log_file)
-    print_to_log(y_str("log_file:") + f"{log_file}", log_file)
-    print_to_log(y_str("csv_file:") + f"{csv_file}", log_file)
-
-    # --- MODIFIED CSV HEADER ---
-    with open(csv_file, "w") as f:
-        f.write("dist_generator,batch_size,vocab_size,k,is_correct,"
-                "apply_top_k_time,triton_sort_only_time,speedup_vs_baseline\n")
-
-    for batch_size, vocab_size, k in product(batch_size_list,
-                                             vocab_size_list,
-                                             k_list):
-
-        logits_randn = torch.randn(batch_size, vocab_size, device="cuda") * 10
-        logits_list = [("RANDN", logits_randn)]
-
-        if k == "RAND":
-            k_tensor = torch.randint(1,
-                                     vocab_size, (batch_size,),
-                                     device="cuda")
-        elif k is not None:
-            k_val = min(k, vocab_size) # Ensure k is not > vocab_size
-            k_tensor = torch.full((batch_size,), k_val, device="cuda")
-        else:
-            k_tensor = torch.full((batch_size,), vocab_size, device="cuda")
-
-        for dist_generator, logits in logits_list:
-            print_to_log(y_str("--------------------------------"), log_file)
-            print_to_log(
-                g_str("Testing ") + f"{dist_generator}" +
-                y_str(" with batch_size: ") + f"{batch_size}" +
-                y_str(" vocab_size: ") + f"{vocab_size}" +
-                y_str(" k: ") + f"{k}", log_file)
-            
-            is_correct = test_accuracy(logits, k_tensor, log_file)
-            if not is_correct:
-                print_to_log(
-                    r_str(f"Error: logits are not close for batch_size: {batch_size}, "
-                    f"vocab_size: {vocab_size}, dist_generator: {dist_generator}, k: {k}"),
-                    log_file)
-            
-            # --- MODIFIED TIMING CALL ---
-            apply_top_k_time, triton_sort_only_time = test_time(logits, k_tensor)
-            
-            print_to_log(
-                b_str("apply_top_k_time (Baseline): ") + f"{apply_top_k_time}", log_file)
-            print_to_log(
-                b_str("triton_sort_only_time (Kernel 2): ") + f"{triton_sort_only_time}",
-                log_file)
-            
-            # --- THIS IS THE FIX ---
-            # Handle the k: None case where triton_sort_only_time is 0.0
-            if triton_sort_only_time > 0:
-                speedup = apply_top_k_time / triton_sort_only_time
-                speedup_str = f"{speedup:.8f}x"
-            else:
-                # 'k: None' case, speedup is not applicable (N/A)
-                speedup = 0.0 
-                speedup_str = "N/A (passthrough)"
-            # --- END FIX ---
-
-            print_to_log(
-                g_str("Triton Sort Speedup vs. Full Baseline: ") +
-                speedup_str, log_file)
-
-            # Write to CSV
-            with open(csv_file, "a") as f:
-                f.write(f"{dist_generator},{batch_size},{vocab_size},{k},"
-                        f"{is_correct},{apply_top_k_time},{triton_sort_only_time},"
-                        f"{speedup:.8f}\n") # Still write the float for CSV
-            print_to_log(y_str("--------------------------------\n"), log_file)
-
-if __name__ == "__main__":
-    main()"""
