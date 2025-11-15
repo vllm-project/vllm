@@ -229,8 +229,15 @@ class ParallelConfig:
     not change by dcp, it simply reuse the GPUs of TP group, and tp_size
     needs to be divisible by dcp_size."""
 
+    dcp_kv_cache_interleave_size: int = 1
+    """
+    Interleave size of kv_cache storage while using DCP.
+    dcp_kv_cache_interleave_size has been replaced by cp_kv_cache_interleave_size,
+    and will be deprecated when PCP is fully supported.
+
+    """
     cp_kv_cache_interleave_size: int = 1
-    """Interleave size of kv_cache storage while using dcp or pcp.
+    """Interleave size of kv_cache storage while using DCP or PCP.
     For `total_cp_rank = pcp_rank * dcp_world_size + dcp_rank`,
         and `total_cp_world_size = pcp_world_size * dcp_world_szie`.
     store interleave_size tokens on total_cp_rank i,
