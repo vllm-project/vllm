@@ -62,6 +62,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
 from .utils import (
@@ -330,6 +331,7 @@ class Ernie4_5_MoeDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        set_default_rope_theta(config, default_theta=500000)
         max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
         self.self_attn = Ernie4_5_MoeAttention(
             hidden_size=self.hidden_size,

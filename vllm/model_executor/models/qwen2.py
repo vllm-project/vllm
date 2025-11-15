@@ -57,7 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.config import is_interleaved
+from vllm.transformers_utils.config import is_interleaved, set_default_rope_theta
 
 from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
 from .utils import (
@@ -213,7 +213,7 @@ class Qwen2DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        # Requires transformers > 4.32.0
+        set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
             config, "dual_chunk_attention_config", None
         )

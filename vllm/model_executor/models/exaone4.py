@@ -51,6 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -172,6 +173,7 @@ class Exaone4Attention(nn.Module):
         # apply rotary embeddings to every layer in full attention models
         self.apply_rope_all_layers = "sliding_attention" not in config.layer_types
 
+        set_default_rope_theta(config, default_theta=1000000)
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,

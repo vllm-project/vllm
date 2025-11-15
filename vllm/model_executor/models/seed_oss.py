@@ -54,6 +54,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (
@@ -197,6 +198,7 @@ class SeedOssDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        set_default_rope_theta(config, default_theta=1000000)
 
         # By default, SeedOss uses causal attention as it is a
         # decoder-only model.

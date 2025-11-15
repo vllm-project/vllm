@@ -77,6 +77,7 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import set_default_rope_theta
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -336,8 +337,9 @@ class OpenPanguMLAAttention(nn.Module):
         )
 
         # TODO: remove hard coding
+        set_default_rope_theta(config, default_theta=10000)
         rope_parameters = {
-            "rope_theta": config.rope_parameters.get("rope_theta", 10000),
+            "rope_theta": config.rope_parameters["rope_theta"],
             "beta_fast": 32,
             "beta_slow": 1,
             "factor": 1,

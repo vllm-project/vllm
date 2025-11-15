@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.kv_cache_interface import FullAttentionSpec, MambaSpec, MLAAttentionSpec
@@ -77,10 +78,7 @@ class JinaRobertaModelConfig(VerifyAndUpdateConfig):
             if not model_config.enforce_eager:
                 max_position = round_up(max_position, 8)
 
-            if getattr(config, "rope_parameters", None) is None:
-                config.rope_parameters = {"rope_type": "default"}
-            if "rope_theta" not in config.rope_parameters:
-                config.rope_parameters["rope_theta"] = config.rotary_emb_base
+            set_default_rope_theta(config, default_theta=config.rotary_emb_base)
 
             config.rotary_kwargs = {
                 "head_size": head_dim,
@@ -121,10 +119,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         rotary_emb_dim = int(head_dim * config.rotary_emb_fraction)
         max_trained_positions = getattr(config, "max_trained_positions", 2048)
 
-        if getattr(config, "rope_parameters", None) is None:
-            config.rope_parameters = {"rope_type": "default"}
-        if "rope_theta" not in config.rope_parameters:
-            config.rope_parameters["rope_theta"] = config.rotary_emb_base
+        set_default_rope_theta(config, default_theta=config.rotary_emb_base)
 
         config.rotary_kwargs = {
             "head_size": head_dim,

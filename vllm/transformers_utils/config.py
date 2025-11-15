@@ -392,6 +392,15 @@ def file_or_path_exists(
     )
 
 
+def set_default_rope_theta(config: PretrainedConfig, default_theta: float) -> None:
+    """Some models may have no rope_theta in their config but still use RoPE.
+    This function sets a default rope_theta if it's missing."""
+    if getattr(config, "rope_parameters", None) is None:
+        config.rope_parameters = {"rope_type": "default"}
+    if "rope_theta" not in config.rope_parameters:
+        config.rope_parameters["rope_theta"] = default_theta
+
+
 def patch_rope_parameters(config: PretrainedConfig) -> None:
     """Provide backwards compatibility for RoPE."""
     # Retrieve rope_parameters differently based on Transformers version
