@@ -7,7 +7,6 @@ import pytest
 import torch._dynamo.config as dynamo_config
 
 from vllm import SamplingParams
-from vllm.config import SpeculativeConfig
 from vllm.logprobs import Logprob
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.v1.metrics.reader import Metric
@@ -34,45 +33,6 @@ default_params = dict(
 )
 
 
-def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
-    """Test consistency and acceptance rates with some different combos of
-    preemption, executor, async scheduling, prefill chunking,
-    spec decoding model length.
-    """
-
-    spec_config = {"method": "mtp", "num_speculative_tokens": 2}
-    spec_config_short = {
-        "method": "mtp",
-        "num_speculative_tokens": 2,
-        "max_model_len": 50,
-    }
-
-    # test_preemption, executor, async_scheduling,
-    # spec_config, test_prefill_chunking
-    test_configs = [
-        (False, "mp", False, None, False),
-        (False, "mp", False, spec_config, False),
-        (True, "mp", False, spec_config, True),
-        (True, "uni", False, spec_config_short, True),
-        (False, "mp", True, spec_config, False),
-        (True, "mp", True, spec_config, False),
-        (False, "mp", True, spec_config_short, True),
-        (True, "uni", True, spec_config, False),
-        (True, "uni", True, spec_config_short, False),
-        # Async scheduling + preemption + chunked prefill need to be fixed.
-        #  (True, "mp", True, spec_config, True),
-        #  (True, "uni", True, spec_config_short, True),
-    ]
-
-    run_tests(
-        monkeypatch,
-        MTP_MODEL,
-        test_configs,
-        [{}],
-    )
-
-
-# Use smaller model, runs faster.
 def test_without_spec_decoding(
     sample_json_schema,
     monkeypatch: pytest.MonkeyPatch,
@@ -105,7 +65,7 @@ def test_without_spec_decoding(
         (True, "mp", True, None, False),
         (True, "uni", True, None, False),
         (False, "mp", True, None, True),
-        # Async scheduling + preemption + chunked prefill need to be fixed.
+        # Async scheduling + preemption + chunked prefill needs to be fixed (WIP)
         # (True, "mp", True, None, True),
         # (True, "uni", True, None, True),
     ]
@@ -115,6 +75,44 @@ def test_without_spec_decoding(
         MODEL,
         test_configs,
         test_sampling_params,
+    )
+
+
+@pytest.mark.skip("MTP model too big to run in fp32 in CI")
+def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
+    """Test consistency and acceptance rates with some different combos of
+    preemption, executor, async scheduling, prefill chunking,
+    spec decoding model length.
+    """
+
+    spec_config = {
+        "method": "mtp",
+        "num_speculative_tokens": 2,
+    }
+    spec_config_short = spec_config | {"max_model_len": 50}
+
+    # test_preemption, executor, async_scheduling,
+    # spec_config, test_prefill_chunking
+    test_configs = [
+        (False, "mp", False, None, False),
+        (False, "mp", False, spec_config, False),
+        (True, "mp", False, spec_config, True),
+        (True, "uni", False, spec_config_short, True),
+        (False, "mp", True, spec_config, False),
+        (True, "mp", True, spec_config, False),
+        (False, "mp", True, spec_config_short, True),
+        (True, "uni", True, spec_config, False),
+        (True, "uni", True, spec_config_short, False),
+        # Async scheduling + preemption + chunked prefill needs to be fixed (WIP)
+        #  (True, "mp", True, spec_config, True),
+        #  (True, "uni", True, spec_config_short, True),
+    ]
+
+    run_tests(
+        monkeypatch,
+        MTP_MODEL,
+        test_configs,
+        [{}],
     )
 
 
@@ -130,8 +128,8 @@ def run_tests(
 
     with monkeypatch.context() as m:
         # avoid precision errors
-        # m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
-        m.setenv("VLLM_BATCH_INVARIANT", "1")
+        m.setenv("VLLM_ATTENTION_BACKEND", "FLEX_ATTENTION")
+        # m.setenv("VLLM_BATCH_INVARIANT", "1")
         outputs: list[tuple[str, list, list]] = []
         for n, (
             test_preemption,
@@ -219,7 +217,7 @@ def run_test(
     test_preemption: bool,
     executor: str,
     async_scheduling: bool,
-    spec_config: SpeculativeConfig | None,
+    spec_config: dict[str, Any] | None,
     test_prefill_chunking: bool,
 ):
     spec_decoding = spec_config is not None
@@ -235,18 +233,18 @@ def run_test(
         f"chunk_prefill={test_prefill_chunking}, "
         f"spec_decoding={spec_decoding}, spec_mml={spec_mml}"
     )
-    max_batched_tokens = 48 if test_prefill_chunking else None
     print("-" * 80)
     print(f"---- TESTING {test_str}: {test_config}")
     print("-" * 80)
     with VllmRunner(
         model,
         max_model_len=512,
-        max_num_batched_tokens=max_batched_tokens,
-        enforce_eager=True,
+        enable_chunked_prefill=test_prefill_chunking,
+        max_num_batched_tokens=48 if test_prefill_chunking else None,
+        # enforce_eager=True,
         async_scheduling=async_scheduling,
         distributed_executor_backend=executor,
-        # dtype="float32",  # avoid precision errors
+        dtype="float32",  # avoid precision errors
         speculative_config=spec_config,
         disable_log_stats=False,
         **cache_arg,
