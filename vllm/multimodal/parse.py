@@ -359,6 +359,7 @@ class MultiModalDataParser:
         )
         self.video_needs_metadata = video_needs_metadata
 
+    @classmethod
     def is_embeddings(
         cls, data: object
     ) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
