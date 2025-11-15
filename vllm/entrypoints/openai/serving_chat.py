@@ -27,8 +27,8 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     get_system_message,
+    parse_chat_inputs_to_harmony_messages,
     parse_chat_output,
-    parse_inputs_to_harmony_messages,
     render_for_completion,
 )
 from vllm.entrypoints.openai.protocol import (
@@ -1778,7 +1778,7 @@ class OpenAIServingChat(OpenAIServing):
         messages.append(dev_msg)
 
         # Add user message.
-        messages.extend(parse_inputs_to_harmony_messages(request.messages))
+        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)

@@ -232,7 +232,11 @@ def parse_response_input(
     return msg
 
 
-def parse_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
+def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
+    """
+    Parse a list of messages from request.messages in the Chat Completion API to
+    Harmony messages.
+    """
     msgs: list[Message] = []
     tool_id_names: dict[str, str] = {}
 
@@ -244,7 +248,7 @@ def parse_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
             )
 
     for chat_msg in chat_msgs:
-        msgs.extend(parse_input_to_harmony_message(chat_msg, tool_id_names))
+        msgs.extend(parse_chat_input_to_harmony_message(chat_msg, tool_id_names))
 
     msgs = auto_drop_analysis_messages(msgs)
     return msgs
@@ -286,9 +290,13 @@ def auto_drop_analysis_messages(msgs: list[Message]) -> list[Message]:
     return cleaned_msgs
 
 
-def parse_input_to_harmony_message(
+def parse_chat_input_to_harmony_message(
     chat_msg, tool_id_names: dict[str, str] | None = None
 ) -> list[Message]:
+    """
+    Parse a message from request.messages in the Chat Completion API to
+    Harmony messages.
+    """
     tool_id_names = tool_id_names or {}
 
     if not isinstance(chat_msg, dict):
@@ -366,23 +374,83 @@ def parse_input_to_harmony_message(
         msgs.append(analysis_msg)
 
     # Default: user/assistant/system messages with content
-    content = chat_msg.get("content") or []
+    content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
         # TODO: Support refusal.
         contents = [TextContent(text=c.get("text", "")) for c in content]
-    if contents:
-        msg = Message.from_role_and_contents(role, contents)
 
+    # Only add assistant messages if they have content, as reasoning or tool calling
+    # assistant messages were already added above.
+    if role == "assistant" and contents and contents[0].text:
+        msg = Message.from_role_and_contents(role, contents)
         # Send non-tool assistant messages to the final channel if they don't have a
         # channel already.
-        if role == "assistant" and not msg.channel:
+        if not msg.channel:
             msg = msg.with_channel("final")
-
+        msgs.append(msg)
+    # For user/system/developer messages, add them directly even if no content.
+    elif role != "assistant":
+        msg = Message.from_role_and_contents(role, contents)
         msgs.append(msg)
 
     return msgs
+
+
+def parse_input_to_harmony_message(chat_msg) -> list[Message]:
+    """
+    Parse a message from request.preview_input_messages in the Responsees API to
+    Harmony messages.
+    """
+    if not isinstance(chat_msg, dict):
+        # Handle Pydantic models
+        chat_msg = chat_msg.model_dump(exclude_none=True)
+
+    role = chat_msg.get("role")
+
+    # Assistant message with tool calls
+    tool_calls = chat_msg.get("tool_calls")
+    if role == "assistant" and tool_calls:
+        msgs: list[Message] = []
+        for call in tool_calls:
+            func = call.get("function", {})
+            name = func.get("name", "")
+            arguments = func.get("arguments", "") or ""
+            msg = Message.from_role_and_content(Role.ASSISTANT, arguments)
+            msg = msg.with_channel("commentary")
+            msg = msg.with_recipient(f"functions.{name}")
+            msg = msg.with_content_type("json")
+            msgs.append(msg)
+        return msgs
+
+    # Tool role message (tool output)
+    if role == "tool":
+        name = chat_msg.get("name", "")
+        content = chat_msg.get("content", "") or ""
+        if isinstance(content, list):
+            # Handle array format for tool message content
+            # by concatenating all text parts.
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+
+        msg = Message.from_author_and_content(
+            Author.new(Role.TOOL, f"functions.{name}"), content
+        ).with_channel("commentary")
+        return [msg]
+
+    # Default: user/assistant/system messages with content
+    content = chat_msg.get("content", "")
+    if isinstance(content, str):
+        contents = [TextContent(text=content)]
+    else:
+        # TODO: Support refusal.
+        contents = [TextContent(text=c.get("text", "")) for c in content]
+    msg = Message.from_role_and_contents(role, contents)
+    return [msg]
 
 
 def construct_harmony_previous_input_messages(
