@@ -13,3 +13,8 @@ kv_cache_dtype: fp8 # we use fp8 to speed up the eval process
 max_model_len: 8192
 gen_kwargs: "temperature=0,top_p=1,top_k=0,max_gen_toks=5632,until=<|ENDANSWER|>"
 rtol: 0.05
+vllm_args:
+  # enable_expert_parallel: true
+  gpu_memory_utilization: 0.80
+env_vars:
+  VLLM_ROCM_USE_AITER: 1

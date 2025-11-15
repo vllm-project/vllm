@@ -9,11 +9,40 @@ pytest -s -v test_lm_eval_correctness.py \
     --tp-size=1
 """
 
+import os
+from contextlib import contextmanager
+
 import lm_eval
 import numpy as np
 import yaml
 
 DEFAULT_RTOL = 0.08
+
+
+@contextmanager
+def scoped_env_vars(new_env: dict[str, str]):
+    if not new_env:
+        # Fast path: nothing to do
+        yield
+        return
+
+    old_values = {}
+    new_keys = []
+
+    try:
+        for key, value in new_env.items():
+            if key in os.environ:
+                old_values[key] = os.environ[key]
+            else:
+                new_keys.append(key)
+            os.environ[key] = str(value)
+        yield
+    finally:
+        # Restore / clean up
+        for key, value in old_values.items():
+            os.environ[key] = value
+        for key in new_keys:
+            os.environ.pop(key, None)
 
 
 def launch_lm_eval(eval_config, tp_size):
@@ -33,23 +62,25 @@ def launch_lm_eval(eval_config, tp_size):
         f"max_model_len={max_model_len},"
     )
 
-    results = lm_eval.simple_evaluate(
-        model=backend,
-        model_args=model_args,
-        tasks=[task["name"] for task in eval_config["tasks"]],
-        num_fewshot=eval_config["num_fewshot"],
-        limit=eval_config["limit"],
-        # TODO(yeq): using chat template w/ fewshot_as_multiturn is supposed help
-        # text models. however, this is regressing measured strict-match for
-        # existing text models in CI, so only apply it for mm, or explicitly set
-        apply_chat_template=eval_config.get(
-            "apply_chat_template", backend == "vllm-vlm"
-        ),
-        fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", False),
-        # Forward decoding and early-stop controls (e.g., max_gen_toks, until=...)
-        gen_kwargs=eval_config.get("gen_kwargs"),
-        batch_size=batch_size,
-    )
+    env_vars = eval_config.get("env_vars", None)
+    with scoped_env_vars(env_vars):
+        results = lm_eval.simple_evaluate(
+            model=backend,
+            model_args=model_args,
+            tasks=[task["name"] for task in eval_config["tasks"]],
+            num_fewshot=eval_config["num_fewshot"],
+            limit=eval_config["limit"],
+            # TODO(yeq): using chat template w/ fewshot_as_multiturn is supposed help
+            # text models. however, this is regressing measured strict-match for
+            # existing text models in CI, so only apply it for mm, or explicitly set
+            apply_chat_template=eval_config.get(
+                "apply_chat_template", backend == "vllm-vlm"
+            ),
+            fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", False),
+            # Forward decoding and early-stop controls (e.g., max_gen_toks, until=...)
+            gen_kwargs=eval_config.get("gen_kwargs"),
+            batch_size=batch_size,
+        )
     return results
 
 
