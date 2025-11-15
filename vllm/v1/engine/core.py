@@ -180,11 +180,13 @@ class EngineCore:
             logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
+        self.ec_producer = (
+            vllm_config.ec_transfer_config is not None
+            and vllm_config.ec_transfer_config.is_ec_producer
+        )
+
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
-        if (
-            self.vllm_config.cache_config.enable_prefix_caching
-            or kv_connector is not None
-        ):
+        if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
@@ -244,7 +246,7 @@ class EngineCore:
 
         elapsed = time.time() - start
         logger.info_once(
-            ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
+            "init engine (profile, create kv cache, warmup model) took %.2f seconds",
             elapsed,
             scope="local",
         )
@@ -310,6 +312,16 @@ class EngineCore:
             )
             raise err
 
+    def _log_err_callback(self, scheduler_output: SchedulerOutput):
+        """Log error details of a future that's not expected to return a result."""
+
+        def callback(f, sched_output=scheduler_output):
+            with self.log_error_detail(sched_output):
+                result = f.result()
+                assert result is None
+
+        return callback
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -373,31 +385,30 @@ class EngineCore:
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            if not self.ec_producer:
+                model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if scheduler_output.pending_structured_output_tokens:
-                # We need to defer sampling until we have processed the model output
-                # from the prior step.
-                deferred_scheduler_output = scheduler_output
-                # Block-wait for execute to return (continues running async on the GPU).
-                with self.log_error_detail(scheduler_output):
-                    exec_result = exec_future.result()
-                    assert exec_result is None
+            if not model_executed:
+                # No sampling required (no requests scheduled).
+                future = cast(Future[ModelRunnerOutput], exec_future)
             else:
-                # We aren't waiting for any tokens, get any grammar output immediately.
-                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-                # Block-wait for execute to return (continues running async on the GPU).
-                with self.log_error_detail(scheduler_output):
-                    exec_result = exec_future.result()
+                exec_future.add_done_callback(self._log_err_callback(scheduler_output))
 
-                if exec_result is None:
-                    # Call sample tokens.
+                if not scheduler_output.pending_structured_output_tokens:
+                    # We aren't waiting for any tokens, get any grammar output
+                    # and sample immediately.
+                    grammar_output = self.scheduler.get_grammar_bitmask(
+                        scheduler_output
+                    )
                     future = self.model_executor.sample_tokens(
                         grammar_output, non_block=True
                     )
                 else:
-                    # No sampling required (e.g. all requests finished).
-                    future = cast(Future[ModelRunnerOutput], exec_future)
+                    # We need to defer sampling until we have processed the model output
+                    # from the prior step.
+                    deferred_scheduler_output = scheduler_output
+
+            if not deferred_scheduler_output:
                 # Add this step's future to the queue.
                 batch_queue.appendleft((future, scheduler_output))
                 if (
