@@ -268,13 +268,14 @@ class CudaPlatformBase(Platform):
         from vllm.attention.backends.registry import AttentionBackendEnum
 
         # Try FlashAttention first
-        backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
-        if (
-            backend_class.supports_head_size(head_size)
-            and backend_class.supports_dtype(dtype)
-            and cls.has_device_capability(80)
-        ):
-            return AttentionBackendEnum.FLASH_ATTN
+        try:
+            backend_class = AttentionBackendEnum.FLASH_ATTN.get_class()
+            if backend_class.supports_head_size(
+                head_size
+            ) and backend_class.supports_dtype(dtype):
+                return AttentionBackendEnum.FLASH_ATTN
+        except ImportError:
+            pass
 
         if cls.has_device_capability(100):
             # xFormers doesn't support Blackwell, fall back to SDPA
