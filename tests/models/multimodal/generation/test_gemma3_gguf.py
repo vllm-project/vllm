@@ -23,12 +23,6 @@ def test_gemma3_4b_gguf_multimodal(vllm_runner):
         filename="gemma-3-4b-it-q4_0.gguf",
     )
 
-    # Download mmproj file
-    mmproj_file = hf_hub_download(
-        repo_id="google/gemma-3-4b-it-qat-q4_0-gguf",
-        filename="mmproj-model-f16-4B.gguf",
-    )
-
     # Get test image
     image = ImageAsset("stop_sign").pil_image
 
