@@ -1,5 +1,5 @@
 # vllm chat
 
-## Options
+## Arguments
 
 --8<-- "docs/argparse/chat.inc.md"
