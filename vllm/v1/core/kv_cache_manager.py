@@ -100,6 +100,9 @@ class KVCacheManager:
         log_stats: bool = False,
         enable_kv_cache_events: bool = False,
         dcp_world_size: int = 1,
+        eviction_policy: str | None = None,
+        eviction_cost_alpha: float | None = None,
+        eviction_time_decay: float | None = None,
     ) -> None:
         self.max_model_len = max_model_len
 
@@ -142,6 +145,19 @@ class KVCacheManager:
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.kv_cache_config = kv_cache_config
+
+        # Configure optional eviction policy
+        if (
+            self.enable_caching
+            and self.block_size is not None
+            and eviction_policy == "frequency_cost"
+        ):
+            self.block_pool.configure_eviction_policy(
+                "frequency_cost",
+                block_size=self.block_size,
+                alpha=eviction_cost_alpha or 2.0,
+                time_decay=eviction_time_decay or 0.0,
+            )
 
         # Pre-constructed KVCacheBlocks with no blocks, callers should use this
         # via create_kv_cache_blocks instead of creating new ones to avoid GC
