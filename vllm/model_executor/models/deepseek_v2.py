@@ -477,7 +477,7 @@ class DeepseekV2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
-        if config.rope_parameters:
+        if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = "deepseek_yarn"
 
         self.rotary_emb = get_rope(
@@ -488,7 +488,7 @@ class DeepseekV2Attention(nn.Module):
             is_neox_style=False,
         )
 
-        if config.rope_parameters:
+        if config.rope_parameters["rope_type"] != "default":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
@@ -969,7 +969,7 @@ class DeepseekV2MLAAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        if config.rope_parameters:
+        if config.rope_parameters["rope_type"] != "default":
             config.rope_parameters["rope_type"] = "deepseek_yarn"
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
@@ -978,7 +978,7 @@ class DeepseekV2MLAAttention(nn.Module):
             rope_parameters=config.rope_parameters,
             is_neox_style=False,
         )
-        if config.rope_parameters:
+        if config.rope_parameters["rope_type"] != "default":
             mscale_all_dim = config.rope_parameters.get("mscale_all_dim", False)
             scaling_factor = config.rope_parameters["factor"]
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
