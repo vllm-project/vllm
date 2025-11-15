@@ -201,9 +201,9 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self):
-        fusion_patterns = [
+        return VllmInductorPass.hash_source(
+            self,
             ActivationQuantPattern,
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
-        ]
-        return VllmInductorPass.hash_source(self, *fusion_patterns)
+        )

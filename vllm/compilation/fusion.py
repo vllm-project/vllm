@@ -364,11 +364,11 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
         logger.debug("Replaced %s patterns", self.matched_count)
 
     def uuid(self) -> Any:
-        fusion_patterns = [
+        return self.hash_source(
+            self,
             RMSNormQuantPattern,
             RMSNormStaticQuantPattern,
             RMSNormDynamicQuantPattern,
             FusedAddRMSNormStaticQuantPattern,
             FusedAddRMSNormDynamicQuantPattern,
-        ]
-        return self.hash_source(self, *fusion_patterns)
+        )
