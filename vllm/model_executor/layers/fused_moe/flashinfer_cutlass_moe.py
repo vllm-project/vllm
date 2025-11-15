@@ -57,6 +57,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         tp_rank: int = 0,
         tp_size: int = 1,
         use_dp: bool = False,
+        use_deepseek_fp8_block_scale: bool = False,
     ):
         super().__init__(quant_config)
         assert quant_config.quant_dtype in ("nvfp4", torch.float8_e4m3fn, None), (
@@ -69,6 +70,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.tp_size = tp_size
         self.out_dtype = out_dtype
         self.use_dp = use_dp
+        # Enables DeepSeek-style FP8 block-scale path:
+        # - pass per-block weight scales to the kernel
+        # - skip input activation quantization (kernel applies scaling)
+        self.use_deepseek_fp8_block_scale = use_deepseek_fp8_block_scale
 
     @property
     def activation_formats(
@@ -147,7 +152,12 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "Only activation silu is supported in FlashInferExperts"
         )
 
-        if self.quant_dtype == torch.float8_e4m3fn:
+        # Select quantization metadata based on FP8 format/path
+        if (
+            self.quant_dtype == torch.float8_e4m3fn
+            and not self.use_deepseek_fp8_block_scale
+        ):
+            # FP8 per-tensor path: use global alphas/scales; do not pass input_sf
             quant_scales = [
                 self.g1_alphas,
                 self.a2_gscale,
@@ -176,6 +186,15 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             # FlashInfer API requires weight to be long for nvfp4
             fc1_expert_weights = w1.view(torch.long)
             fc2_expert_weights = w2.view(torch.long)
+        elif self.use_deepseek_fp8_block_scale:
+            # FP8 block-scale path: provide block-scale weights, omit a1q_scale
+            quant_scales = [
+                self.w1_scale,
+                self.w2_scale,
+            ]
+            a1q_scale = None
+            fc1_expert_weights = w1
+            fc2_expert_weights = w2
         else:
             quant_scales = None
             a1q_scale = None
@@ -196,6 +215,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             ep_size=self.ep_size,
             ep_rank=self.ep_rank,
             output=output,
+            # Informs FlashInfer to use the block-scale decoding path when True
+            use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
         )
 
 
