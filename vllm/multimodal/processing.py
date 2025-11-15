@@ -1504,6 +1504,13 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         In addition, return whether prompt updates have been applied.
         """
+        if not mm_items:
+            from transformers.feature_extraction_utils import BatchFeature
+
+            processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+            (prompt_ids,) = processor(text=prompt_text, **tokenization_kwargs).input_ids
+            return prompt_ids, BatchFeature(), False
+
         processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
 
         processed_data = self._call_hf_processor(
