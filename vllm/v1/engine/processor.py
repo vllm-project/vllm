@@ -17,7 +17,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
 from vllm.multimodal.processing import EncDecMultiModalProcessor
-from vllm.multimodal.utils import argsort_mm_positions
+from vllm.multimodal.utils import argsort_mm_positions, is_embeddings
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -344,17 +344,9 @@ class Processor:
         mm_uuids: dict[str, list[str | None] | str] = {}
         for modality, data in mm_data.items():
             # Hash each item for embedding inputs.
-            n = len(data) if isinstance(data, list) or self._is_embeddings(data) else 1
+            n = len(data) if isinstance(data, list) or is_embeddings(data) else 1
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
-
-    def _is_embeddings(self, data: object) -> bool:
-        if isinstance(data, torch.Tensor):
-            return data.ndim == 3
-        if is_list_of(data, torch.Tensor):
-            return data[0].ndim == 2  # type: ignore[index]
-
-        return False
 
     def process_inputs(
         self,

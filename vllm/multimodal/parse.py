@@ -21,7 +21,6 @@ from typing_extensions import assert_never
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
-from .utils import is_embeddings
 
 from .audio import AudioResampler
 from .inputs import (
@@ -36,6 +35,7 @@ from .inputs import (
     MultiModalKwargsItems,
     VideoItem,
 )
+from .utils import is_embeddings
 
 _T = TypeVar("_T")
 _I = TypeVar("_I")
