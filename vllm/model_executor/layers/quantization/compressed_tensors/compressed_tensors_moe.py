@@ -1367,6 +1367,11 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Set layer attributes needed for LoRA compatibility
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.local_num_experts = num_experts
+
         intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
 
         # Will transpose the loaded weight along the
@@ -1738,6 +1743,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
+        # Set layer attributes needed for LoRA compatibility
+        layer.hidden_size = hidden_size
+        layer.intermediate_size_per_partition = intermediate_size_per_partition
+        layer.local_num_experts = num_experts
+
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
