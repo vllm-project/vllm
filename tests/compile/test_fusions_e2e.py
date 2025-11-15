@@ -111,7 +111,8 @@ if current_platform.is_cuda():
             matches=Matches(
                 attention_fusion=0,
                 allreduce_fusion=97,
-                sequence_parallel=49,
+                # TODO(luka) perhaps avoid SP for MoE allreduce? 49
+                sequence_parallel=97,
                 async_tp=48,  # mlp is moe, no fusion there
             ),
         ),
