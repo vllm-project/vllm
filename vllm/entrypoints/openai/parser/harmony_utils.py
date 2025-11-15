@@ -238,10 +238,7 @@ def parse_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
 
     # Collect tool id to name mappings for tool response recipient values
     for chat_msg in chat_msgs:
-        # Convert from Pydantic ValidatorIterators to a real list
-        tool_calls = list(chat_msg.get("tool_calls") or [])
-        chat_msg["tool_calls"] = tool_calls
-        for tool_call in chat_msg.get("tool_calls"):
+        for tool_call in chat_msg.get("tool_calls", []):
             tool_id_names[tool_call.get("id")] = tool_call.get("function", {}).get(
                 "name"
             )
@@ -302,10 +299,7 @@ def parse_input_to_harmony_message(
     msgs: list[Message] = []
 
     # Assistant message with tool calls
-    tool_calls = chat_msg.get("tool_calls") or []
-    # Convert from Pydantic ValidatorIterator to a real list
-    if tool_calls and not isinstance(tool_calls, list):
-        tool_calls = list(tool_calls)
+    tool_calls = chat_msg.get("tool_calls", [])
 
     if role == "assistant" and tool_calls:
         content = chat_msg.get("content")

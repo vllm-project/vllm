@@ -1755,6 +1755,11 @@ class OpenAIServingChat(OpenAIServing):
     ):
         messages: list[OpenAIMessage] = []
 
+        # because of issues with pydantic we need to potentially
+        # re-serialize the tool_calls field of the request
+        # for more info: see comment in `maybe_serialize_tool_calls`
+        maybe_serialize_tool_calls(request)
+
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default
         # if the model supports it. TODO: Support browsing.
