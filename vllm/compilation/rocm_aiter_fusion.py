@@ -38,6 +38,11 @@ if rocm_aiter_ops.is_enabled():
 
 
 class AiterRMSFp8GroupQuantPattern:
+    """
+    This pattern fuses aiter rms_norm & group fp8 quant custom
+    ops into an aiter rms_norm_group_fp8_quant op.
+    """
+
     def __init__(self, epsilon: float, quant_dtype: torch.dtype, use_triton: bool):
         self.epsilon = epsilon
         self.quant_dtype = quant_dtype
@@ -76,6 +81,11 @@ class AiterRMSFp8GroupQuantPattern:
 
 
 class AiterFusedAddRMSFp8GroupQuantPattern:
+    """
+    This pattern fuses aiter rms_norm_with_add & group fp8 quant custom ops
+    into a aiter rms_norm_with_add_group_fp8_quant op.
+    """
+
     def __init__(self, epsilon: float, quant_dtype: torch.dtype, use_triton: bool):
         self.epsilon = epsilon
         self.quant_dtype = quant_dtype
@@ -167,6 +177,11 @@ class RocmAiterRMSNormFp8GroupQuantFusionPass(VllmPatternMatcherPass):
 
 
 class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
+    """
+    This pattern fuses aiter silu_and_mul & group fp8 quant custom
+    ops into an aiter silu_and_mul_group_fp8_quant op.
+    """
+
     def __init__(self, use_triton: bool):
         self.silu_and_mul_matcher = MatcherSiluAndMul()
         self.use_triton = use_triton
