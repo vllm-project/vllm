@@ -2871,7 +2871,7 @@ class GPUModelRunner(
             "gpu_model_runner: set_async_sampled_token_ids"
         ):
             # Save ref of sampled_token_ids CPU tensor if the batch contains
-            # any requests with sampling params that that require output ids.
+            # any requests with sampling params that require output ids.
             self.input_batch.set_async_sampled_token_ids(
                 async_output.sampled_token_ids_cpu,
                 async_output.async_copy_ready_event,
