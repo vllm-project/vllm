@@ -66,6 +66,18 @@ class FlashAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "FLASH_ATTN"
 
+    @classmethod
+    def supports_attn_type(cls, attn_type: str) -> bool:
+        """FlashAttention supports all attention types."""
+        from vllm.attention import AttentionType
+
+        return attn_type in (
+            AttentionType.DECODER,
+            AttentionType.ENCODER,
+            AttentionType.ENCODER_ONLY,
+            AttentionType.ENCODER_DECODER,
+        )
+
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
@@ -117,6 +129,12 @@ class FlashAttentionBackend(AttentionBackend):
         if kv_cache_dtype.startswith("fp8"):
             return flash_attn_supports_fp8()
         return kv_cache_dtype in ["auto"]
+
+    @classmethod
+    def supports_sink(cls) -> bool:
+        if not is_flash_attn_varlen_func_available():
+            return False
+        return flash_attn_supports_sinks()
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -207,7 +225,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     # to FULL_AND_PIECEWISE.
     # TODO(luka, lucas): audit FA2 as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    cudagraph_support = (
+    _cudagraph_support = (
         AttentionCGSupport.ALWAYS
         if get_flash_attn_version() == 3
         else AttentionCGSupport.UNIFORM_BATCH

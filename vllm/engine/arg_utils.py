@@ -558,6 +558,8 @@ class EngineArgs:
 
     async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
+    stream_interval: int = SchedulerConfig.stream_interval
+
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
@@ -1067,6 +1069,9 @@ class EngineArgs:
         scheduler_group.add_argument(
             "--async-scheduling", **scheduler_kwargs["async_scheduling"]
         )
+        scheduler_group.add_argument(
+            "--stream-interval", **scheduler_kwargs["stream_interval"]
+        )
 
         # Compilation arguments
         compilation_kwargs = get_kwargs(CompilationConfig)
@@ -1562,6 +1567,7 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
+            stream_interval=self.stream_interval,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -1631,40 +1637,39 @@ class EngineArgs:
             )
 
         observability_config = ObservabilityConfig(
-            show_hidden_metrics_for_version=(self.show_hidden_metrics_for_version),
+            show_hidden_metrics_for_version=self.show_hidden_metrics_for_version,
             otlp_traces_endpoint=self.otlp_traces_endpoint,
             collect_detailed_traces=self.collect_detailed_traces,
         )
 
         # Compilation config overrides
+        compilation_config = copy.deepcopy(self.compilation_config)
         if self.cuda_graph_sizes is not None:
             logger.warning(
                 "--cuda-graph-sizes is deprecated and will be removed in v0.13.0 or "
                 "v1.0.0, whichever is soonest. Please use --cudagraph-capture-sizes "
                 "instead."
             )
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
                     "cuda_graph_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-            self.compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
+            compilation_config.cudagraph_capture_sizes = self.cuda_graph_sizes
         if self.cudagraph_capture_sizes is not None:
-            if self.compilation_config.cudagraph_capture_sizes is not None:
+            if compilation_config.cudagraph_capture_sizes is not None:
                 raise ValueError(
                     "cudagraph_capture_sizes and compilation_config."
                     "cudagraph_capture_sizes are mutually exclusive"
                 )
-            self.compilation_config.cudagraph_capture_sizes = (
-                self.cudagraph_capture_sizes
-            )
+            compilation_config.cudagraph_capture_sizes = self.cudagraph_capture_sizes
         if self.max_cudagraph_capture_size is not None:
-            if self.compilation_config.max_cudagraph_capture_size is not None:
+            if compilation_config.max_cudagraph_capture_size is not None:
                 raise ValueError(
                     "max_cudagraph_capture_size and compilation_config."
                     "max_cudagraph_capture_size are mutually exclusive"
                 )
-            self.compilation_config.max_cudagraph_capture_size = (
+            compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
 
@@ -1679,7 +1684,7 @@ class EngineArgs:
             load_config=load_config,
             structured_outputs_config=self.structured_outputs_config,
             observability_config=observability_config,
-            compilation_config=self.compilation_config,
+            compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
