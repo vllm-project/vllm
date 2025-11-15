@@ -2256,6 +2256,8 @@ def test_chunked_prefill_disabled_for_encoder_decoder(
     scheduler_config = SchedulerConfig(
         enable_chunked_prefill=enable_chunked_prefill,
         is_encoder_decoder=is_encoder_decoder,
+        # Must <= max_num_batched_tokens if chunked prefill is disabled
+        max_model_len=SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
     )
 
     # `is_encoder_decoder` should only be used during construction
@@ -2280,7 +2282,6 @@ def _validate_chunked_prefill_settings_for_encoder_decoder(
 ) -> None:
     """Validate chunked prefill settings in the scheduler config for
     encoder-decoder models."""
-    assert scheduler_config.chunked_prefill_enabled is expect_enabled
     assert scheduler_config.enable_chunked_prefill is expect_enabled
     if is_encoder_decoder:
         # Encoder-decoder models should automatically disable chunked multimodal
