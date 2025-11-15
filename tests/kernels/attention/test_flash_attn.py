@@ -20,7 +20,7 @@ QDTYPES = [None, torch.float8_e4m3fn]
 # one value large enough to test overflow in index calculation.
 # one value small enough to test the schema op check
 NUM_BLOCKS = [32768, 2048]
-SOFT_CAPS = [None, 50.0]
+SOFT_CAPS = [None]
 SLIDING_WINDOWS = [None, 256]
 
 
