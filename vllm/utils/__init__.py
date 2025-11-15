@@ -3,7 +3,7 @@
 
 import uuid
 import warnings
-from typing import Any, TypeVar
+from typing import Any
 
 import torch
 
@@ -39,12 +39,6 @@ def __dir__() -> list[str]:
 
 logger = init_logger(__name__)
 
-# This value is chosen to have a balance between ITL and TTFT. Note it is
-# not optimized for throughput.
-DEFAULT_MAX_NUM_BATCHED_TOKENS = 2048
-POOLING_MODEL_MAX_NUM_BATCHED_TOKENS = 32768
-MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
-
 # Constants related to forcing the attention backend selection
 
 # String name of register which may be set in order to
@@ -58,9 +52,6 @@ STR_FLASHINFER_ATTN_VAL: str = "FLASHINFER"
 STR_XFORMERS_ATTN_VAL: str = "XFORMERS"
 STR_FLASH_ATTN_VAL: str = "FLASH_ATTN"
 STR_INVALID_VAL: str = "INVALID"
-
-
-T = TypeVar("T")
 
 
 def random_uuid() -> str:
