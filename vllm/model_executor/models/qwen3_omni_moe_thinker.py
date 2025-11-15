@@ -962,7 +962,7 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
             if second_per_grid_ts:
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
-                video_second_per_grid_t = 1.0
+                video_second_per_grid_t = 2.0
 
             placeholder = self.get_updates_use_audio_in_video(
                 thinker_config=thinker_config,
@@ -1484,7 +1484,11 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
             )
 
         if not len(second_per_grid_ts) and len(video_grid_thw):
-            second_per_grids = torch.ones(len(video_grid_thw), dtype=torch.float32)
+            second_per_grid_ts = 2.0
+            second_per_grids = (
+                torch.ones(len(video_grid_thw), dtype=torch.float32)
+                * second_per_grid_ts
+            )
         else:
             second_per_grids = torch.tensor(second_per_grid_ts, dtype=torch.float32)
 
