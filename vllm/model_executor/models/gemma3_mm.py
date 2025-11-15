@@ -605,7 +605,7 @@ class Gemma3ForConditionalGeneration(
             return []
         return self._process_image_input(image_input)
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -627,10 +627,10 @@ class Gemma3ForConditionalGeneration(
         """
         # Early return for text-only inference (no multimodal data)
         if multimodal_embeddings is None or is_multimodal is None:
-            return super().get_input_embeddings(input_ids)
+            return super().embed_input_ids(input_ids)
 
         # Use interface default with OOV handling enabled
-        return super().get_input_embeddings(
+        return super().embed_input_ids(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
