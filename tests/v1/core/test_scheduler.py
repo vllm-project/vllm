@@ -2636,7 +2636,7 @@ def test_ec_connector_with_partial_cache_hit_multi_round(use_kv_connector):
     model_output = ModelRunnerOutput(
         req_ids=[request1.request_id],
         req_id_to_index={request1.request_id: 0},
-        sampled_token_ids=[[100]],
+        sampled_token_ids=[np.array([100])],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -2842,7 +2842,7 @@ def test_ec_connector_unable_to_allocate(use_kv_connector):
     MODEL_RUNNER_OUTPUT = ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index=req_to_index,
-        sampled_token_ids=[[1000]] * len(req_ids),
+        sampled_token_ids=[np.array([1000])] * len(req_ids),
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -2955,7 +2955,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     model_output = ModelRunnerOutput(
         req_ids=[request_low.request_id],
         req_id_to_index={request_low.request_id: 0},
-        sampled_token_ids=[[100]],
+        sampled_token_ids=[np.array([100])],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -3006,7 +3006,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
-        sampled_token_ids=[[100] for _ in requests],
+        sampled_token_ids=[np.array([100]) for _ in requests],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -3041,7 +3041,7 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
         req_id_to_index={req.request_id: i for i, req in enumerate(requests)},
-        sampled_token_ids=[[100], [100, 200]],
+        sampled_token_ids=[np.array([100]), np.array([100, 200])],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
@@ -3227,7 +3227,7 @@ def test_ec_connector_allocate_encoder_tokens_with_external_load(use_kv_connecto
     model_output = ModelRunnerOutput(
         req_ids=[request1.request_id, request2.request_id],
         req_id_to_index={request1.request_id: 0, request2.request_id: 1},
-        sampled_token_ids=[[100], [121]],
+        sampled_token_ids=[np.array([100]), np.array([121])],
         # spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
