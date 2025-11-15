@@ -11,6 +11,7 @@ import uuid
 from collections import defaultdict
 from unittest.mock import patch
 
+import numpy as np
 import pytest
 import ray
 import torch
@@ -407,6 +408,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
                 # `self.kv_cache_layout` is only forced to HND when vllm engine
                 # is started. We mock HND here.
                 kv_cache_layout="HND",
+                block_size=self.block_size,
             ),
             remote_tp_size=remote_tp_size,
         )
@@ -652,6 +654,7 @@ class TestNixlHandshake:
                 block_lens=worker.block_len_per_layer,
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout=mismatched_layout,
+                block_size=worker.block_size,
             )
 
             with pytest.raises(RuntimeError):
@@ -706,6 +709,7 @@ class TestNixlHandshake:
                 block_lens=[i * 2 for i in worker.block_len_per_layer],
                 attn_backend_name=worker.backend_name,
                 kv_cache_layout="HND",
+                block_size=worker.block_size,
             )
 
             # We don't check layout for homogeneous TP and MLA for now, as the
@@ -823,7 +827,7 @@ def test_kv_connector_stats_aggregation():
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
             req_id_to_index={f"req_{i}": 0},
-            sampled_token_ids=[[123]],  # dummy token
+            sampled_token_ids=[np.array([123])],  # dummy token
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[None],
@@ -904,7 +908,7 @@ def test_multi_kv_connector_stats_aggregation():
         output = ModelRunnerOutput(
             req_ids=[f"req_{i}"],
             req_id_to_index={f"req_{i}": 0},
-            sampled_token_ids=[[123]],
+            sampled_token_ids=[np.array([123])],
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[None],
@@ -962,7 +966,7 @@ def test_scheduler_kv_connector_stats_aggregation():
     model_output = ModelRunnerOutput(
         req_ids=["req_0"],
         req_id_to_index={"req_0": 0},
-        sampled_token_ids=[[123]],
+        sampled_token_ids=[np.array([123])],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[None],
