@@ -5,13 +5,13 @@ from importlib.util import find_spec
 import pytest
 import torch
 
-from vllm.compilation.activation_quant_fusion import (
-    SILU_MUL_OP,
-    ActivationQuantFusionPass,
-)
-from vllm.compilation.fusion import RMSNormQuantFusionPass
+from vllm.compilation.activation_quant_fusion import SILU_MUL_OP
 from vllm.compilation.noop_elimination import NoOpEliminationPass
 from vllm.compilation.post_cleanup import PostCleanupPass
+from vllm.compilation.rocm_aiter_fusion import (
+    RocmAiterRMSNormFp8GroupQuantFusionPass,
+    RocmAiterSiluMulFp8GroupQuantFusionPass,
+)
 from vllm.config import (
     CompilationConfig,
     CompilationMode,
@@ -158,7 +158,7 @@ def test_fusion_aiter_silu_and_mul_group_fp8_quant(
     )
 
     with set_current_vllm_config(config):
-        fusion_pass = ActivationQuantFusionPass(config)
+        fusion_pass = RocmAiterSiluMulFp8GroupQuantFusionPass(config)
 
         passes = [NoOpEliminationPass(config), fusion_pass, PostCleanupPass(config)]
         backend = TestBackend(*passes)
@@ -222,7 +222,7 @@ def test_fusion_aiter_rmsnorm_group_fp8_quant(
     with set_current_vllm_config(vllm_config):
         # Reshape pass is needed for the fusion pass to work
         noop_pass = NoOpEliminationPass(vllm_config)
-        fusion_pass = RMSNormQuantFusionPass(vllm_config)
+        fusion_pass = RocmAiterRMSNormFp8GroupQuantFusionPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
 
         backend = TestBackend(noop_pass, fusion_pass, cleanup_pass)

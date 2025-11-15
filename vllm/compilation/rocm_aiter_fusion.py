@@ -132,7 +132,7 @@ class RocmAiterRMSNormFp8GroupQuantFusionPass(VllmPatternMatcherPass):
         super().__init__(config)
 
         self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="rocm_aiter_rmsnorm_group_fp8_quant_fusion_pass"
+            pass_name="rocm_aiter_rms_norm_fp8_group_quant_fusion_pass"
         )
 
         # Make sure fused add patterns are before simple rms norm,
