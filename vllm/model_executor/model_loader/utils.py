@@ -6,14 +6,10 @@ import inspect
 import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 from typing_extensions import assert_never
-
-if TYPE_CHECKING:
-    pass
 
 from vllm.attention import Attention
 from vllm.attention.layer import MLAAttention
@@ -46,7 +42,6 @@ def initialize_model(
     if model_config is None:
         model_config = vllm_config.model_config
     if model_class is None:
-        # Use standard architecture resolution for all models
         model_class, _ = get_model_architecture(model_config)
 
     if vllm_config.quant_config is not None:
