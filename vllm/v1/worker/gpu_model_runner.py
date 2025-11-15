@@ -630,16 +630,6 @@ class GPUModelRunner(
             return
 
         if self.reorder_batch_threshold is not None:
-            # NOTE(lucas): currently no backend supports the custom masking
-            #  required for DCP with q_len > 1, so we assert here. Remove this
-            #  assert once the custom mask is support is added to FA3.
-            if (
-                self.dcp_world_size > 1
-                and envs.VLLM_ATTENTION_BACKEND != "FLASH_ATTN_MLA"
-            ):
-                assert self.reorder_batch_threshold == 1, (
-                    "DCP not support reorder_batch_threshold > 1 now."
-                )
             reorder_batch_to_split_decodes_and_prefills(
                 self.input_batch,
                 scheduler_output,
