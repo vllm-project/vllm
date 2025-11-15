@@ -18,7 +18,7 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
-from vllm.transformers_utils.utils import convert_model_repo_to_path
+from vllm.transformers_utils.utils import check_gguf_file, convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
 if TYPE_CHECKING:
@@ -113,11 +113,6 @@ def get_processor(
     """Load a processor for the given model name via HuggingFace."""
     if revision is None:
         revision = "main"
-
-    # Extract image_processor override if provided (for GGUF models).
-    # Pop before passing to AutoProcessor to avoid duplicate argument error.
-    image_processor_override = kwargs.pop("image_processor", None)
-
     try:
         processor_name = convert_model_repo_to_path(processor_name)
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
@@ -162,10 +157,6 @@ def get_processor(
             f"found type: {type(processor)}"
         )
 
-    # Apply image_processor override before caching (for GGUF models)
-    if image_processor_override is not None and hasattr(processor, "image_processor"):
-        processor.image_processor = image_processor_override
-
     return processor
 
 
@@ -184,7 +175,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
         if call_kwargs_annotations not in (None, inspect._empty):
             # get_type_hints will parse all type annotations at runtime,
             # and if an annotation refers to a type or
-            # name that hasn't been imported or defined, it will raise an error.
+            # name that hasn’t been imported or defined, it will raise an error.
             # So we use __annotations__ to get the raw annotations directly.
             return _collect_dynamic_keys_from_processing_kwargs(
                 get_args(call_kwargs_annotations)[0]
@@ -240,75 +231,28 @@ def cached_get_processor_without_dynamic_kwargs(
     return final_processor
 
 
-@lru_cache
-def _get_gemma3_image_processor(image_size: int):
-    """
-    Cache Gemma3ImageProcessor instances by image size.
-
-    This avoids creating new instances on every request, which would break
-    the processor cache since object instances are part of the cache key.
-
-    Args:
-        image_size: Image dimension (height=width) extracted from GGUF metadata
-    """
-    from transformers import Gemma3ImageProcessor
-
-    return Gemma3ImageProcessor(size={"height": image_size, "width": image_size})
-
-
 def cached_processor_from_config(
     model_config: "ModelConfig",
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    # GGUF models: load processor from tokenizer path since model path
-    # points to .gguf file, not HF model directory
-    if model_config.model.endswith(".gguf"):
-        from vllm.logger import init_logger
-
-        logger = init_logger(__name__)
-        processor_name = model_config.tokenizer
-        logger.info(
-            "GGUF model detected: loading processor from tokenizer path "
-            "%s instead of %s",
-            processor_name,
-            model_config.model,
+    if check_gguf_file(model_config.model):
+        assert not check_gguf_file(model_config.tokenizer), (
+            "For multimodal GGUF models, the original tokenizer "
+            "should be used to correctly load processor."
         )
+        model = model_config.tokenizer
+        revision = model_config.tokenizer_revision
     else:
-        processor_name = model_config.model
-
-    # GGUF Gemma3: pre-configure image_processor with dimensions from
-    # mmproj.gguf metadata before processor creation/caching
-    image_processor_override = None
-    if (
-        processor_name != model_config.model
-        and model_config.model.endswith(".gguf")
-        and "gemma-3" in processor_name.lower()
-    ):
-        # Extract image size from already-loaded vision config (no file re-reading)
-        image_size = model_config.hf_config.vision_config.image_size
-        # Use cached instance (keyed by image_size) to avoid breaking processor cache
-        image_processor_override = _get_gemma3_image_processor(image_size)
-        logger.info(
-            "GGUF Gemma3: Pre-configuring image_processor with %dx%d "
-            "(from mmproj.gguf metadata via %s)",
-            image_size,
-            image_size,
-            processor_name,
-        )
-
-    # Merge kwargs and add image_processor override if present
-    merged_kwargs = _merge_mm_kwargs(model_config, processor_cls, **kwargs)
-    if image_processor_override is not None:
-        # Extract and modify before caching to avoid cache mismatch
-        merged_kwargs["image_processor"] = image_processor_override
+        model = model_config.model
+        revision = model_config.revision
 
     return cached_get_processor_without_dynamic_kwargs(
-        processor_name,
-        revision=model_config.revision,
+        model,
+        revision=revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
-        **merged_kwargs,
+        **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
 
 
@@ -406,9 +350,19 @@ def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
 ):
+    if check_gguf_file(model_config.model):
+        assert not check_gguf_file(model_config.tokenizer), (
+            "For multimodal GGUF models, the original tokenizer "
+            "should be used to correctly load image processor."
+        )
+        model = model_config.tokenizer
+        revision = model_config.tokenizer_revision
+    else:
+        model = model_config.model
+        revision = model_config.revision
     return cached_get_image_processor(
-        model_config.model,
-        revision=model_config.revision,
+        model,
+        revision=revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
     )
