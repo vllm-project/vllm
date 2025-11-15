@@ -1138,7 +1138,9 @@ class Qwen3LLMForCausalLM(Qwen3ForCausalLM):
         self.config = config
 
         self.quant_config = quant_config
-        self.model = Qwen3LLMModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = Qwen3LLMModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:

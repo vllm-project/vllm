@@ -732,7 +732,7 @@ class ModelConfig:
         return self
 
     def _get_transformers_backend_cls(self) -> str:
-        """Determine which Transformers backend class will be used if
+        """Determine which Transformers modeling backend class will be used if
         `model_impl` is set to `transformers` or `auto`."""
         cls = "Transformers"
         # If 'hf_config != hf_text_config' it's a nested config, i.e. multimodal
@@ -746,8 +746,8 @@ class ModelConfig:
         # User specified value take precedence
         if self.runner != "auto":
             runner = self.runner
-        # Only consider Transformers backend pooling classes if we're wrapping an
-        # architecture that defaults to pooling. Otherwise, we return the LM class
+        # Only consider Transformers modeling backend pooling classes if we're wrapping
+        # an architecture that defaults to pooling. Otherwise, we return the LM class
         # and use adapters.
         if runner == "pooling" and task in {"embed", "classify"}:
             if task == "embed":
@@ -759,7 +759,7 @@ class ModelConfig:
         return cls
 
     def using_transformers_backend(self) -> bool:
-        """Check if the model is using the Transformers backend class."""
+        """Check if the model is using the Transformers modeling backend class."""
         used_cls = self._model_info.architecture
         transformers_backend_cls = self._get_transformers_backend_cls()
         return used_cls == transformers_backend_cls
