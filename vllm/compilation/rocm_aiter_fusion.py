@@ -12,16 +12,13 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+from .fusion import empty_bf16
 from .inductor_pass import enable_fake_mode
 from .matcher_utils import MatcherSiluAndMul
 from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
-
-
-def empty_bf16(*args, **kwargs):
-    return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
 
 
 AITER_RMS_GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
