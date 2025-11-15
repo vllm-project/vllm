@@ -121,9 +121,9 @@ if __name__ == "__main__":
 
     batch_size_list = [64, 128, 1024]
     vocab_size_list = [4096, 16384, 65536, 128000, 262144]
-    p_list = [None, "RAND", 0.4, 0.7, 0.9, 0.95, 0.99]
+    p_list = [None, "RAND"]
     # p_list = [None]
-    k_list = [None, "RAND", 5, 10, 50, 100, 200, 300, 3000]
+    k_list = [None, "RAND"]
     # k_list = [None]
     func_list = [apply_top_k_top_p, apply_top_k_top_p_triton]
 
