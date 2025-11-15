@@ -7,7 +7,7 @@ from collections.abc import Iterable, Set
 from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeGuard, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 from urllib.parse import ParseResult, urlparse
 from urllib.request import url2pathname
 
@@ -18,7 +18,6 @@ from PIL import Image, UnidentifiedImageError
 
 import vllm.envs as envs
 from vllm.connections import HTTPConnection, global_http_connection
-from vllm.utils.collection_utils import is_list_of
 from vllm.logger import init_logger
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.registry import ExtensionManager
@@ -512,16 +511,3 @@ def fetch_video(
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_video(video_url)
-
-
-def is_embeddings(data: object) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
-    """
-    Args:
-        data: List of tensor or tensor to tell whether it's a multimodal embedding input.
-    """
-    if isinstance(data, torch.Tensor):
-        return data.ndim == 3
-    if is_list_of(data, torch.Tensor):
-        return data[0].ndim == 2  # type: ignore[index]
-
-    return False
