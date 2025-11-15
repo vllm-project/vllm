@@ -212,6 +212,7 @@ class EagleProposer:
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
         mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        num_rejected_tokens_gpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
@@ -355,6 +356,10 @@ class EagleProposer:
             input_batch_size = batch_size
             cudagraph_runtime_mode = CUDAGraphMode.NONE
 
+        if num_rejected_tokens_gpu is not None:
+            # In padded drafter batch, we need to adjust the sequence lengths
+            common_attn_metadata.seq_lens -= num_rejected_tokens_gpu
+
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
         common_attn_metadata.query_start_loc = self.arange[: batch_size + 1]
@@ -391,15 +396,18 @@ class EagleProposer:
 
             # Increment the sequence lengths.
             common_attn_metadata.seq_lens += 1
-            common_attn_metadata.seq_lens_cpu += 1
+            if num_rejected_tokens_gpu is None:
+                # we skip this in padded drafter batch as we have already incremented
+                # the CPU-side seq lens and don't have rejection sampling results
+                # on the CPU yet.
+                common_attn_metadata.seq_lens_cpu += 1
+                common_attn_metadata.num_computed_tokens_cpu = (
+                    common_attn_metadata.seq_lens_cpu - 1
+                )
+
             # For the requests that exceed the max model length, we set the
             # sequence length to 1 to minimize their overheads in attention.
-
             common_attn_metadata.seq_lens.masked_fill_(exceeds_max_model_len, 1)
-
-            common_attn_metadata.num_computed_tokens_cpu = (
-                common_attn_metadata.seq_lens_cpu - 1
-            )
 
             # Compute the slot mapping.
             if self.uses_mrope:
@@ -657,12 +665,13 @@ class EagleProposer:
         )
 
         is_rejected_token_index_mask = ~((torch.cumsum(marker, dim=0)[:-1]).bool())
+        common_attn_metadata.slot_mapping[is_rejected_token_index_mask] = -1
 
         return (
             spec_common_attn_metadata,
             token_indices,
             token_indices_to_sample,
-            is_rejected_token_index_mask,
+            num_rejected_tokens_gpu,
         )
 
     def propose_tree(

@@ -2827,6 +2827,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     "sampled_token_ids should be a python list when"
                     "padded-batch is disabled."
                 )
+                valid_sampled_tokens_count = None
                 next_token_ids = self.drafter.prepare_next_token_ids_cpu(
                     sampled_token_ids,
                     self.requests,
@@ -2855,6 +2856,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
             if spec_decode_metadata is None:
                 token_indices_to_sample = None
+                num_rejected_tokens_gpu = None
                 # input_ids can be None for multimodal models.
                 target_token_ids = self.input_ids.gpu[:num_scheduled_tokens]
                 target_positions = self._get_positions(num_scheduled_tokens)
@@ -2868,7 +2870,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             else:
                 if self.speculative_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
-                    invalid_tokens_mask = None
+                    num_rejected_tokens_gpu = None
                     common_attn_metadata, token_indices = self.drafter.prepare_inputs(
                         common_attn_metadata,
                         sampled_token_ids,
@@ -2879,7 +2881,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                         common_attn_metadata,
                         token_indices,
                         token_indices_to_sample,
-                        invalid_tokens_mask,
+                        num_rejected_tokens_gpu,
                     ) = self.drafter.prepare_inputs_padded(
                         common_attn_metadata,
                         spec_decode_metadata,
@@ -2887,10 +2889,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     )
 
                 target_token_ids = self.input_ids.gpu[token_indices]
-
-                if invalid_tokens_mask is not None:
-                    positions_ref = self._get_positions(invalid_tokens_mask.shape[0])
-                    positions_ref[invalid_tokens_mask] = 0
                 target_positions = self._get_positions(token_indices)
                 if self.use_aux_hidden_state_outputs:
                     assert aux_hidden_states is not None
@@ -2917,6 +2915,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
+                num_rejected_tokens_gpu=num_rejected_tokens_gpu,
             )
 
         return draft_token_ids
