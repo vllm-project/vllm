@@ -837,61 +837,34 @@ def get_gguf_weight_type_map(
 
 
 def gguf_quant_weights_iterator(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str,
+    gguf_to_hf_name_map: dict[str, str],
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
     them to torch tensors.
-
-    Special handling for vision tower and multimodal projector weights,
-    which are unquantized F16 nn.Parameters and must retain .weight suffix.
     """
 
     reader = gguf.GGUFReader(gguf_file)
 
     for tensor in reader.tensors:
         if tensor.name in gguf_to_hf_name_map:
-            weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            # Vision tower and projector use F16 nn.Parameters (not quantized layers).
-            # Retain .weight suffix to distinguish from quantized GGUF weights.
-            is_vision_or_projector = name.startswith(
-                "vision_tower."
-            ) or name.startswith("multi_modal_projector.")
-
-            is_embedding_or_linear = (
-                "embed_tokens" in name
-                or "proj" in name
-                or "gate" in name
-                or "down" in name
-                or "up" in name
-                or "lm_head" in name
-            )
-
-            # Only rename to qweight for truly quantized layers.
-            # For Gemma3 vision/projector, F16/BF16 are unquantized nn.Parameters.
-            # (Other models may use F16/BF16 as quantized weights)
-            is_truly_quantized = weight_type.name not in ("F32", "F16", "BF16")
-            is_unquantized_fp = (
-                weight_type.name in ("F16", "BF16") and is_vision_or_projector
-            )
-
-            if (
-                is_truly_quantized
-                and not is_unquantized_fp
-                and is_embedding_or_linear
-                and not is_vision_or_projector
-            ):
-                # Truly quantized weights (Q4_0, Q8_0, etc.)
+            if weight_type.name not in ("F32", "F16", "BF16"):
                 weight_type_name = name.replace("weight", "qweight_type")
-                yield weight_type_name, torch.tensor(weight_type)
+                weight_type = torch.tensor(weight_type)
+                yield weight_type_name, weight_type
+
+                weight = tensor.data
                 name = name.replace("weight", "qweight")
-
-            param = torch.tensor(weight)
-
-            yield name, param
+                param = torch.tensor(weight)
+                yield name, param
+            else:
+                weight = tensor.data
+                param = torch.tensor(weight)
+                yield name, param
 
 
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:

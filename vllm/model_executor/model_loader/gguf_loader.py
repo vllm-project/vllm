@@ -3,6 +3,7 @@
 import itertools
 import os
 from collections.abc import Generator
+from pathlib import Path
 
 import gguf
 import torch
@@ -289,6 +290,31 @@ class GGUFModelLoader(BaseModelLoader):
 
         return gguf_to_hf_name_map
 
+    def _get_gguf_weight_type(
+        self,
+        model_config: ModelConfig,
+        model_name_or_path: str,
+        gguf_to_hf_name_map: dict[str, str],
+    ) -> dict[str, str]:
+        model_dir = Path(model_config.model).parent
+
+        # Detect companion mmproj.gguf file for multimodal models
+        mmproj_files = list(model_dir.glob("mmproj*.gguf"))
+        has_mmproj = len(mmproj_files) > 0
+
+        hf_config = model_config.hf_config
+        is_multimodal = has_mmproj and hasattr(hf_config, "vision_config")
+
+        weight_type_map = get_gguf_weight_type_map(
+            model_config.model, gguf_to_hf_name_map
+        )
+        if is_multimodal:
+            mm_proj_weight_type_map = get_gguf_weight_type_map(
+                str(mmproj_files[0]), gguf_to_hf_name_map
+            )
+            weight_type_map.update(mm_proj_weight_type_map)
+        return weight_type_map
+
     def _get_weights_iterator(
         self,
         model_config: ModelConfig,
@@ -306,7 +332,6 @@ class GGUFModelLoader(BaseModelLoader):
         Yields:
             Tuples of (parameter_name, tensor) for all model weights
         """
-        from pathlib import Path
 
         model_dir = Path(model_name_or_path).parent
 
@@ -365,14 +390,19 @@ class GGUFModelLoader(BaseModelLoader):
         ):
             model_config.hf_config.update({"tie_word_embeddings": True})
 
-        weight_type_map = get_gguf_weight_type_map(model_config.model, gguf_weights_map)
-
+        weight_type_map = self._get_gguf_weight_type(
+            model_config, local_model_path, gguf_weights_map
+        )
         # filter out unquantized modules to skip
         unquant_names = [
             name.removesuffix(".weight")
             for name, weight_type in weight_type_map.items()
-            if weight_type == "F32" and name.endswith(".weight")
+            if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
+        logger.debug(
+            "GGUF unquantized modules: %s",
+            unquant_names,
+        )
         vllm_config.quant_config.unquantized_modules.extend(unquant_names)
 
         target_device = torch.device(device_config.device)
