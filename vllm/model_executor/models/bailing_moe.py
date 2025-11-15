@@ -599,7 +599,7 @@ class BailingMoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
                     config.vocab_size,
                     config.hidden_size,
                     quant_config=quant_config,
-                    prefix=f"{prefix}.lm_head",
+                    prefix=maybe_prefix(prefix, "lm_head"),
                 )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
