@@ -2132,7 +2132,7 @@ def _get_and_verify_max_len(
         # that will be bigger than derived_max_model_len. We compare user input
         # with model_max_length and allow this override when it's smaller.
         model_max_length = getattr(hf_config, "model_max_length", None)
-        if model_max_length is None and max_model_len > model_max_length:
+        if model_max_length is None or max_model_len > model_max_length:
             msg = (
                 f"User-specified max_model_len ({max_model_len}) is greater "
                 f"than the derived max_model_len ({max_len_key}="
