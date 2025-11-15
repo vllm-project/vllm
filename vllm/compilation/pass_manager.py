@@ -5,6 +5,11 @@ import functools
 from torch import fx as fx
 
 from vllm import envs
+from vllm._aiter_ops import rocm_aiter_ops
+from vllm.compilation.rocm_aiter_fusion import (
+    RocmAiterRMSNormFp8GroupQuantFusionPass,
+    RocmAiterSiluMulFp8GroupQuantFusionPass,
+)
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -106,6 +111,9 @@ class PostGradPassManager(CustomGraphPass):
             if self.pass_config.enable_fusion:
                 self.passes += [RMSNormQuantFusionPass(config)]
                 self.passes += [ActivationQuantFusionPass(config)]
+                if rocm_aiter_ops.is_enabled():
+                    self.passes += [RocmAiterRMSNormFp8GroupQuantFusionPass(config)]
+                    self.passes += [RocmAiterSiluMulFp8GroupQuantFusionPass(config)]
 
             if self.pass_config.enable_attn_fusion:
                 self.passes += [AttnFusionPass(config)]

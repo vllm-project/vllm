@@ -7,6 +7,7 @@ import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.activation_quant_fusion import ActivationQuantPattern
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -20,18 +21,20 @@ from .vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
 
+if rocm_aiter_ops.is_enabled():
+    AITER_RMS_GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
+    AITER_RMS_ADD_GROUP_QUANT_OP = (
+        torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+    )
 
-AITER_RMS_GROUP_QUANT_OP = torch.ops.vllm.rocm_aiter_rmsnorm_fp8_group_quant.default
-AITER_RMS_ADD_GROUP_QUANT_OP = (
-    torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
-)
+    AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
+    AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
 
-AITER_RMS_OP = torch.ops.vllm.rocm_aiter_rms_norm.default
-AITER_RMS_ADD_OP = torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add.default
+    AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
 
-AITER_GROUP_FP8_QUANT_OP = torch.ops.vllm.rocm_aiter_group_fp8_quant.default
-
-FUSED_SILU_MUL_QUANT_OP = torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+    FUSED_SILU_MUL_QUANT_OP = (
+        torch.ops.vllm.rocm_aiter_act_mul_and_fp8_group_quant.default
+    )
 
 
 class AiterRMSFp8GroupQuantPattern:
