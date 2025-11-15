@@ -511,3 +511,4 @@ def fetch_video(
     media_io_kwargs = None if not video_io_kwargs else {"video": video_io_kwargs}
     media_connector = MediaConnector(media_io_kwargs=media_io_kwargs)
     return media_connector.fetch_video(video_url)
+    

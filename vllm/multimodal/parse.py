@@ -420,7 +420,7 @@ class MultiModalDataParser:
         ):
             return None
 
-        if cls.is_embeddings(data):
+        if self.is_embeddings(data):
             return AudioEmbeddingItems(data)
 
         data_items: list[AudioItem]
@@ -458,7 +458,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if cls.is_embeddings(data):
+        if self.is_embeddings(data):
             return ImageEmbeddingItems(data)
 
         if (
@@ -484,7 +484,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if cls.is_embeddings(data):
+        if self.is_embeddings(data):
             return VideoEmbeddingItems(data)
 
         data_items: list[VideoItem]
