@@ -56,7 +56,8 @@ hooks:
 plugins:
   - meta
   - search
-  - autorefs
+  - autorefs:
+      resolve_closest: true
   - awesome-nav
   - glightbox
   - git-revision-date-localized:
