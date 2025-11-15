@@ -756,9 +756,9 @@ class GLM4VForCausalLM(
     def get_language_model(self) -> torch.nn.Module:
         return self.transformer
 
-    get_input_embeddings = SupportsMultiModal.get_input_embeddings
+    embed_input_ids = SupportsMultiModal.embed_input_ids
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
