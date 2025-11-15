@@ -21,6 +21,7 @@ from typing_extensions import assert_never
 
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
+from .utils import is_embeddings
 
 from .audio import AudioResampler
 from .inputs import (
@@ -359,16 +360,6 @@ class MultiModalDataParser:
         )
         self.video_needs_metadata = video_needs_metadata
 
-    def _is_embeddings(
-        self, data: object
-    ) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
-        if isinstance(data, torch.Tensor):
-            return data.ndim == 3
-        if is_list_of(data, torch.Tensor):
-            return data[0].ndim == 2  # type: ignore[index]
-
-        return False
-
     def _is_empty(self, data: object) -> TypeGuard[None]:
         if isinstance(data, list):
             return len(data) == 0
@@ -420,7 +411,7 @@ class MultiModalDataParser:
         ):
             return None
 
-        if self._is_embeddings(data):
+        if is_embeddings(data):
             return AudioEmbeddingItems(data)
 
         data_items: list[AudioItem]
@@ -458,7 +449,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if self._is_embeddings(data):
+        if is_embeddings(data):
             return ImageEmbeddingItems(data)
 
         if (
@@ -484,7 +475,7 @@ class MultiModalDataParser:
         if self._is_empty(data):
             return None
 
-        if self._is_embeddings(data):
+        if is_embeddings(data):
             return VideoEmbeddingItems(data)
 
         data_items: list[VideoItem]
