@@ -556,6 +556,24 @@ class GPUModelRunner(
         if self.mm_budget:
             self.mm_budget.reset_cache()
 
+    @torch.inference_mode()
+    def init_fp8_kv_scales(self) -> None:
+        """
+        Reinitialize the scaling factor of the FP8 KV buffer.
+        This is necessary after waking the KV buffer from level 2 sleep,
+        because the scaling factor was not saved as buffers and was lost during the sleep.
+        """
+        if self.cache_config.cache_dtype != "fp8":
+            return
+        if not hasattr(self, "kv_caches") or not self.kv_caches:
+            return
+        for cache_tensor in self.kv_caches:
+            if cache_tensor is None:
+                continue
+            if hasattr(cache_tensor, "_scale"):
+                cache_tensor._scale.copy_(torch.zeros_like(cache_tensor._scale))
+        
+
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
             if self.uses_mrope:
