@@ -211,7 +211,7 @@ class Qwen2AudioMultiModalProcessor(BaseMultiModalProcessor[Qwen2AudioProcessing
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
-        if not mm_data.get("audio", []):
+        if not mm_data.get("audios", []):
             return self._call_hf_tokenizer(prompt, tok_kwargs)
 
         # NOTE - we rename audios -> audio in mm data because transformers has

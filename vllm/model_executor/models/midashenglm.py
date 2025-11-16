@@ -585,7 +585,7 @@ class MiDashengLMMultiModalProcessor(
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        if not mm_data.get("audio", []):
+        if not mm_data.get("audios", []):
             return self._call_hf_tokenizer(prompt, tok_kwargs)
 
         audios = mm_data.pop("audios", [])
