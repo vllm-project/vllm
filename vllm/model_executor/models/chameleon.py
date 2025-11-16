@@ -145,7 +145,7 @@ class ChameleonMultiModalProcessor(BaseMultiModalProcessor[ChameleonProcessingIn
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return BatchFeature(dict(input_ids=[prompt_ids]))
 
         return super()._call_hf_processor(
             prompt=prompt,

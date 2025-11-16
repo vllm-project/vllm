@@ -607,7 +607,7 @@ class MiDashengLMMultiModalProcessor(
         if not mm_data.get("audio", []):
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return BatchFeature(dict(input_ids=[prompt_ids]))
 
         mm_kwargs = dict(
             **mm_kwargs,

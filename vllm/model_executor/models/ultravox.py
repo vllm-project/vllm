@@ -172,7 +172,7 @@ class UltravoxMultiModalProcessor(BaseMultiModalProcessor[UltravoxProcessingInfo
                 prompt, add_special_tokens=False
             )
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return BatchFeature(dict(input_ids=[prompt_ids]))
 
         mm_data = dict(mm_data)
         audios = mm_data.pop("audios", [])

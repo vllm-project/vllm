@@ -402,12 +402,6 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
             processed_outputs["indicator_tokens"] = torch.tensor(indicator_tokens)
         return processed_outputs
 
-    def _apply_hf_processor_tokens_only(
-        self,
-        prompt_tokens: list[int],
-    ) -> list[int]:
-        return prompt_tokens
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,

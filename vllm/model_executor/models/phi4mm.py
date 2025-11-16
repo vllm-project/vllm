@@ -861,7 +861,7 @@ class Phi4MMMultiModalProcessor(BaseMultiModalProcessor[Phi4MMProcessingInfo]):
         if not mm_data:
             prompt_ids = self.info.get_tokenizer().encode(prompt)
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            return BatchFeature(dict(input_ids=[prompt_ids]))
 
         sr = self.info.get_feature_extractor(**mm_kwargs).sampling_rate
         if audio_data := mm_data.get("audios", []):
