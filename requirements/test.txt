@@ -620,7 +620,7 @@ omegaconf==2.3.0
     #   lightning
 open-clip-torch==2.32.0
     # via -r requirements/test.in
-openai-harmony==0.0.4
+openai-harmony==0.0.8
     # via gpt-oss
 opencensus==0.11.4
     # via ray
