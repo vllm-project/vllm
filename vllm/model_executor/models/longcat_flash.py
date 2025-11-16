@@ -347,25 +347,35 @@ class LongcatMoe(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits_full = self.router(hidden_states.to(self.rounter_params_dtype))
+        # Align to FusedMoE padded hidden size to avoid dim mismatch
+        padded_hidden = self.experts.hidden_size
+        if hidden_dim < padded_hidden:
+            hidden_states_padded = torch.nn.functional.pad(
+                hidden_states,
+                (0, padded_hidden - hidden_dim),
+                mode="constant",
+                value=0.0,
+            )
+        else:
+            hidden_states_padded = hidden_states
+
+        router_logits_full = self.router(
+            hidden_states_padded.to(self.rounter_params_dtype)
+        )
         zero_expert_result = self._compute_zero_expert_result(
-            hidden_states, router_logits_full
+            hidden_states_padded, router_logits_full
         )
 
         router_logits = router_logits_full[..., : self.experts.logical_num_experts]
         final_hidden_states = self.experts(
-            hidden_states=hidden_states, router_logits=router_logits
+            hidden_states=hidden_states_padded, router_logits=router_logits
         )
         if zero_expert_result is not None:
-            # Align hidden dims defensively before addition (deal with any kernel padding)
-            out_dim = final_hidden_states.size(-1)
-            add_dim = zero_expert_result.size(-1)
-            if add_dim != out_dim:
-                if add_dim > out_dim:
-                    zero_expert_result = zero_expert_result[..., :out_dim]
-                else:
-                    final_hidden_states = final_hidden_states[..., :add_dim]
             final_hidden_states = final_hidden_states + zero_expert_result
+
+        # Crop back to original hidden dimension if padded earlier
+        if padded_hidden != hidden_dim:
+            final_hidden_states = final_hidden_states[..., :hidden_dim]
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
