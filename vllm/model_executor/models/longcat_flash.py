@@ -357,6 +357,14 @@ class LongcatMoe(nn.Module):
             hidden_states=hidden_states, router_logits=router_logits
         )
         if zero_expert_result is not None:
+            # Align hidden dims defensively before addition (deal with any kernel padding)
+            out_dim = final_hidden_states.size(-1)
+            add_dim = zero_expert_result.size(-1)
+            if add_dim != out_dim:
+                if add_dim > out_dim:
+                    zero_expert_result = zero_expert_result[..., :out_dim]
+                else:
+                    final_hidden_states = final_hidden_states[..., :add_dim]
             final_hidden_states = final_hidden_states + zero_expert_result
 
         return final_hidden_states.view(num_tokens, hidden_dim)
