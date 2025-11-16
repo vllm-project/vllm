@@ -913,7 +913,25 @@ class CompilationConfig:
                     op,
                 )
 
-    def adjust_cudagraph_sizes_to_be_multipe_of(self, multiple_of: int):
+    def adjust_cudagraph_sizes_for_spec_decode(
+        self, uniform_decode_query_len: int, tensor_parallel_size: int
+    ):
+        multiple_of = uniform_decode_query_len
+        if tensor_parallel_size > 1:
+            multiple_of = max(uniform_decode_query_len, tensor_parallel_size)
+            if (
+                multiple_of % uniform_decode_query_len != 0
+                or multiple_of % tensor_parallel_size != 0
+            ):
+                raise ValueError(
+                    f"Can't determine cudagraph shapes that are both a "
+                    f"multiple of {uniform_decode_query_len} "
+                    f"(num_speculative_tokens + 1) required by spec-decode "
+                    f"and {tensor_parallel_size} (tensor_parallel_size) "
+                    f"required by sequence parallelism please adjust "
+                    f"num_speculative_tokens or disable sequence parallelism"
+                )
+
         if not self.cudagraph_capture_sizes or multiple_of <= 1:
             return
 
@@ -937,6 +955,9 @@ class CompilationConfig:
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
+
+        # Recompute after adjusting the cudagraph sizes
+        self.compute_bs_to_padded_graph_size()
 
     def compute_bs_to_padded_graph_size(self):
         # pre-compute the mapping from batch size to padded graph size

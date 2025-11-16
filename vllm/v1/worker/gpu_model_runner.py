@@ -4353,12 +4353,10 @@ class GPUModelRunner(
             and cudagraph_mode.separate_routine()
             and self.uniform_decode_query_len > 1
         ):
-            self.compilation_config.adjust_cudagraph_sizes_to_be_multipe_of(
-                self.uniform_decode_query_len
+            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+                self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
             )
             self.cudagraph_batch_sizes = self.compilation_config.cudagraph_capture_sizes
-            # Recompute after adjusting the cudagraph sizes
-            self.compilation_config.compute_bs_to_padded_graph_size()
 
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
