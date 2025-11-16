@@ -641,8 +641,8 @@ class GptOssModel(nn.Module):
             )
         else:
             return self._load_weights_other(
-                ep_rank_end,
                 ep_rank_start,
+                ep_rank_end,
                 heads_per_rank,
                 head_start,
                 weights,
