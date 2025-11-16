@@ -1081,6 +1081,7 @@ class InputProcessingContext:
 
         mm_config = self.model_config.get_multimodal_config()
         merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs.setdefault("return_tensors", "pt")
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -1088,7 +1089,6 @@ class InputProcessingContext:
             requires_kw_only=False,
             allow_var_kwargs=True,
         )
-        allowed_kwargs.setdefault("return_tensors", "pt")
 
         try:
             output = hf_processor(**data, **allowed_kwargs)
@@ -1454,6 +1454,38 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         return processor_data, passthrough_data
 
+    def _call_hf_tokenizer(
+        self,
+        prompt: str,
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        from transformers.feature_extraction_utils import BatchFeature
+
+        tok_kwargs = dict(tok_kwargs)
+        tok_kwargs.setdefault("return_tensors", None)
+
+        tokenizer = self.info.get_tokenizer()
+
+        allowed_kwargs = get_allowed_kwarg_only_overrides(
+            tokenizer.encode,
+            tok_kwargs,
+            requires_kw_only=False,
+            allow_var_kwargs=True,
+        )
+
+        prompt_ids = tokenizer.encode(prompt, **allowed_kwargs)
+        if isinstance(prompt_ids, torch.Tensor):
+            prompt_ids = prompt_ids.tolist()
+
+        prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
+        prompt_ids_batched = [prompt_ids]
+
+        tensor_type = tok_kwargs["return_tensors"]
+        if tensor_type == "pt":
+            prompt_ids_batched = torch.tensor(prompt_ids_batched)
+
+        return BatchFeature(dict(input_ids=prompt_ids_batched), tensor_type=tensor_type)
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1525,7 +1557,11 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         )
         processed_data.update(passthrough_data)
 
-        (prompt_ids,) = processed_data.pop("input_ids").tolist()
+        prompt_ids_batched = processed_data.pop("input_ids")
+        if isinstance(prompt_ids_batched, torch.Tensor):
+            prompt_ids_batched = prompt_ids_batched.tolist()
+
+        (prompt_ids,) = prompt_ids_batched
 
         is_update_applied = self._hf_processor_applies_updates(
             prompt_text=prompt_text,

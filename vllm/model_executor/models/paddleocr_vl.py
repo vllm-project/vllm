@@ -277,38 +277,20 @@ class PaddleOCRVLMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        processed_outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            tok_kwargs=tok_kwargs,
+        )
+
         if mm_data:
-            processed_outputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**mm_kwargs),
-                dict(text=prompt, **mm_data),
-                dict(**mm_kwargs, **tok_kwargs),
-            )
             num_patches_per_image = processed_outputs["image_grid_thw"].prod(-1)
             processed_outputs["pixel_values"] = processed_outputs["pixel_values"].split(
                 num_patches_per_image.tolist()
             )
-        else:
-            tokenizer = self.info.get_tokenizer()
-            tok_kwargs = dict(tok_kwargs)
-            tok_kwargs.setdefault("add_special_tokens", True)
-            tok_kwargs.setdefault("return_tensors", "pt")
-            processed_outputs = tokenizer(prompt, **tok_kwargs)
 
         return processed_outputs
-
-    def _apply_hf_processor_text_only(
-        self,
-        prompt_text: str,
-        tokenization_kwargs: Mapping[str, object],
-    ) -> list[int]:
-        processed_data = self._call_hf_processor(
-            prompt=prompt_text,
-            mm_data={},
-            mm_kwargs={},
-            tok_kwargs={**tokenization_kwargs, "return_tensors": None},
-        )
-
-        return processed_data.pop("input_ids")  # There is no extra batch dimension
 
     def _get_mm_fields_config(
         self,

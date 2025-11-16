@@ -585,6 +585,9 @@ class MiDashengLMMultiModalProcessor(
         mm_kwargs: Mapping[str, Any],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        if not mm_data.get("audio", []):
+            return self._call_hf_tokenizer(prompt, tok_kwargs)
+
         audios = mm_data.pop("audios", [])
 
         # + Padding
@@ -603,11 +606,6 @@ class MiDashengLMMultiModalProcessor(
 
         if processed_audios:
             mm_data["audio"] = processed_audios
-
-        if not mm_data.get("audio", []):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
-            prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
-            return BatchFeature(dict(input_ids=[prompt_ids]))
 
         mm_kwargs = dict(
             **mm_kwargs,
