@@ -126,11 +126,30 @@ def benchmark_model(
     llm.generate(warmup_requests, sampling_params)
     print("✓ Warmup complete")
 
-    # Actual benchmark
+    # Actual benchmark - track per-request timing
     print(f"\nRunning benchmark ({len(requests)} requests)...")
     start_time = time.time()
 
-    outputs = llm.generate(requests, sampling_params)
+    # Track individual request timings
+    request_start_times = []
+    request_end_times = []
+
+    # Generate one request at a time to get accurate per-request latency
+    # (For batched generation, use total time / num_requests as approximation)
+    outputs = []
+    if len(requests) <= 20:  # Only do per-request timing for small benchmarks
+        print("  (Measuring per-request latency...)")
+        for req in requests:
+            req_start = time.time()
+            output = llm.generate([req], sampling_params)
+            req_end = time.time()
+            outputs.extend(output)
+            request_start_times.append(req_start)
+            request_end_times.append(req_end)
+    else:
+        # For large benchmarks, use batched generation (faster but no per-request latency)
+        print("  (Using batched generation for speed...)")
+        outputs = llm.generate(requests, sampling_params)
 
     end_time = time.time()
     total_time = end_time - start_time
@@ -143,11 +162,13 @@ def benchmark_model(
     avg_latency = total_time / num_requests
 
     # Per-request latency distribution
-    per_request_latencies = [
-        output.metrics.finished_time - output.metrics.first_scheduled_time
-        for output in outputs
-        if output.metrics is not None
-    ]
+    if request_end_times:
+        per_request_latencies = [
+            end - start for start, end in zip(request_start_times, request_end_times)
+        ]
+    else:
+        # No per-request timing available (batched generation)
+        per_request_latencies = []
 
     results = {
         "model": model_name,
@@ -182,6 +203,10 @@ def benchmark_model(
         print(f"P50 Latency:       {results['p50_latency'] * 1000:.2f}ms")
         print(f"P90 Latency:       {results['p90_latency'] * 1000:.2f}ms")
         print(f"P99 Latency:       {results['p99_latency'] * 1000:.2f}ms")
+    else:
+        print(
+            f"P50/P90/P99:       N/A (use --num-requests ≤20 for per-request latency)"
+        )
     print(f"{'=' * 70}")
 
     return results
