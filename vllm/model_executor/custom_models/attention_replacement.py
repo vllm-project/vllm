@@ -10,9 +10,7 @@ or TrainableMLA) while preserving weights.
 Example usage:
     ```python
     from torchtitan.models.qwen3.model import Qwen3Model
-    from vllm.model_executor.layers.attention_replacement import (
-        replace_with_trainable_attention,
-    )
+    from vllm.model_executor.custom_models import replace_with_trainable_attention
 
     # Create TorchTitan model
     model = Qwen3Model(model_args)
@@ -24,8 +22,10 @@ Example usage:
 
 import torch.nn as nn
 
-from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
-from vllm.model_executor.layers.trainable_mla_attention import (
+from vllm.model_executor.custom_models.trainable_attention import (
+    TrainableFlashAttention,
+)
+from vllm.model_executor.custom_models.trainable_mla_attention import (
     MLAConfig,
     TrainableMLA,
 )

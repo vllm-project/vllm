@@ -62,7 +62,7 @@ The initialization code should look like this:
     Example usage:
 
     ```python
-    from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
+    from vllm.model_executor.custom_models import TrainableFlashAttention
 
     class MyDecoderLayer(nn.Module):
         def __init__(self, hidden_size: int, num_heads: int):

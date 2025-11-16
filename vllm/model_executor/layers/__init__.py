@@ -15,7 +15,7 @@ Example with Megatron-LM:
         MegatronRowParallelLinear,
         create_megatron_config,
     )
-    from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
+    from vllm.model_executor.custom_models import TrainableFlashAttention
 
 
     class MyModel(nn.Module):
@@ -35,13 +35,13 @@ Example with vLLM's built-in parallel layers:
         ColumnParallelLinear,
         RowParallelLinear,
     )
-    from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
+    from vllm.model_executor.custom_models import TrainableFlashAttention
     ```
 """
 
 # NOTE: TrainableFlashAttention is NOT imported here to avoid circular imports.
 # Users should import it directly:
-#   from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
+#   from vllm.model_executor.custom_models import TrainableFlashAttention
 
 # Import vLLM's parallel layers for convenience
 try:

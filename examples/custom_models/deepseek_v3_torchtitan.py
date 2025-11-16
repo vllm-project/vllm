@@ -26,16 +26,14 @@ import torch
 import torch.nn as nn
 
 from vllm.model_executor.custom_models import (
+    VLLMModelForCausalLM,
     convert_freqs_cis_to_real,
     create_mla_kv_cache_spec,
     load_external_weights,
+    replace_with_trainable_attention,
     store_positions_in_context,
 )
-from vllm.model_executor.layers.attention_replacement import (
-    replace_with_trainable_attention,
-)
 from vllm.model_executor.models import ModelRegistry
-from vllm.model_executor.models.custom_model_wrapper import VLLMModelForCausalLM
 from vllm.model_executor.parallel_context import ParallelContext
 
 

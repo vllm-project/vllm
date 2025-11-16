@@ -33,7 +33,7 @@ import tempfile
 import torch
 import torch.nn as nn
 
-from vllm.model_executor.layers.trainable_attention import (
+from vllm.model_executor.custom_models import (
     TrainableFlashAttention,  # vLLM's training-compatible attention
 )
 from vllm.model_executor.models import ModelRegistry

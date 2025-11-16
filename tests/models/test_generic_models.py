@@ -12,7 +12,7 @@ registers it with vLLM, and demonstrates both inference and training.
 
 IMPORTANT: We test vLLM's ACTUAL TrainableFlashAttention, not a mock!
 If the import fails, tests are skipped. This ensures we're testing the real
-implementation from vllm.model_executor.layers.trainable_attention.
+implementation from vllm.model_executor.custom_models.
 """
 
 from dataclasses import dataclass
@@ -23,7 +23,7 @@ import torch.nn as nn
 
 # vLLM imports - fail if not available (we're testing vLLM's implementation!)
 try:
-    from vllm.model_executor.layers.trainable_attention import TrainableFlashAttention
+    from vllm.model_executor.custom_models import TrainableFlashAttention
 
     VLLM_FLASH_ATTENTION_AVAILABLE = True
     IMPORT_ERROR_MSG = ""
