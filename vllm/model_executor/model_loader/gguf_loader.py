@@ -11,7 +11,7 @@ from transformers import AutoModelForCausalLM
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
-from vllm.model_executor.model_loader.base_loader import BaseModelLoader
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader, DownloadType
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -40,15 +40,13 @@ class GGUFModelLoader(BaseModelLoader):
             )
 
     def _prepare_weights(self, model_name_or_path: str):
-        if os.path.isfile(model_name_or_path):
+        download_type = self.get_download_type(model_name_or_path)
+
+        if download_type == DownloadType.LOCAL_FILE:
             return model_name_or_path
-        # for raw HTTPS link
-        if model_name_or_path.startswith(
-            ("http://", "https://")
-        ) and model_name_or_path.endswith(".gguf"):
-            return hf_hub_download(url=model_name_or_path)
-        # repo id/filename.gguf
-        if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
+        elif download_type == DownloadType.HUGGINGFACE_HUB:
+            if model_name_or_path.startswith(("http://", "https://")):
+                return hf_hub_download(url=model_name_or_path)
             repo_id, filename = model_name_or_path.rsplit("/", 1)
             return hf_hub_download(repo_id=repo_id, filename=filename)
         else:
@@ -174,3 +172,13 @@ class GGUFModelLoader(BaseModelLoader):
 
             process_weights_after_loading(model, model_config, target_device)
         return model
+
+    def get_download_type(self, model_name_or_path: str) -> DownloadType:
+        if os.path.isfile(model_name_or_path):
+            return DownloadType.LOCAL_FILE
+        if model_name_or_path.endswith(".gguf") and (
+            model_name_or_path.startswith(("http://", "https://"))
+            or "/" in model_name_or_path
+        ):
+            return DownloadType.HUGGINGFACE_HUB
+        return DownloadType.UNKNOWN
