@@ -12,12 +12,21 @@ Run with:
 """
 
 import argparse
+import os
+import sys
 import time
 
 import numpy as np
 
+# Add vLLM root to path so we can import the custom model
+script_dir = os.path.dirname(os.path.abspath(__file__))
+vllm_root = os.path.dirname(os.path.dirname(script_dir))
+sys.path.insert(0, vllm_root)
+
 # Import custom model to register it
-from examples.custom_models import deepseek_v3_torchtitan  # noqa: F401
+# This imports from examples/custom_models/deepseek_v3_torchtitan.py
+import examples.custom_models.deepseek_v3_torchtitan  # noqa: F401
+
 from vllm import LLM, SamplingParams
 
 
