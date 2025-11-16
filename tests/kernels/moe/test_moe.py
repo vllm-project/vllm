@@ -34,6 +34,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
+    get_marlin_moe_workspace_size,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
@@ -43,6 +44,7 @@ from vllm.model_executor.layers.fused_moe.moe_torch_iterative import (
     fused_moe as iterative_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    marlin_make_workspace_new,
     marlin_permute_bias,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -716,6 +718,9 @@ def test_fused_marlin_moe(
             a, w1_data.w_ref, w2_data.w_ref, score, topk, expert_map=e_map
         )
 
+    max_blocks_per_sm = get_marlin_moe_workspace_size(quant_type)
+    workspace = marlin_make_workspace_new(a.device, max_blocks_per_sm)
+
     marlin_output = fused_marlin_moe(
         a,
         w1_data.qweight,
@@ -739,6 +744,7 @@ def test_fused_marlin_moe(
         w2_zeros=w2_data.zeros,
         quant_type_id=quant_type.id,
         is_k_full=is_k_full,
+        workspace=workspace,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=5e-2, rtol=0)
@@ -789,6 +795,9 @@ def test_fused_marlin_moe_with_bias(m):
             a, w1_data.w_ref, w2_data.w_ref, score, topk, b_bias1, b_bias2
         )
 
+    max_blocks_per_sm = get_marlin_moe_workspace_size(quant_type)
+    workspace = marlin_make_workspace_new(a.device, max_blocks_per_sm)
+
     marlin_output = fused_marlin_moe(
         a,
         w1_data.qweight,
@@ -812,6 +821,7 @@ def test_fused_marlin_moe_with_bias(m):
         w2_zeros=w2_data.zeros,
         quant_type_id=quant_type.id,
         is_k_full=is_k_full,
+        workspace=workspace,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=5e-2, rtol=0)
@@ -1089,6 +1099,7 @@ def test_batched_fused_marlin_moe(
             kwargs = fused_marlin_moe_kwargs | {
                 "hidden_states": batched_hidden_states,
                 "expert_num_tokens": self.expert_num_tokens_cpu.to("cuda"),
+                "workspace": fused_marlin_moe_kwargs.get("workspace"),
             }
             batched_outputs = batched_fused_marlin_moe(**kwargs)
 
@@ -1118,11 +1129,15 @@ def test_batched_fused_marlin_moe(
         "is_k_full": True,
     }
 
+    max_blocks_per_sm = get_marlin_moe_workspace_size(quant_dtype)
+    workspace = marlin_make_workspace_new(a.device, max_blocks_per_sm)
+
     # Reference
     fused_marlin_moe_kwargs = kwargs | {
         "hidden_states": a,
         "topk_ids": topk_ids,
         "topk_weights": topk_weights,
+        "workspace": workspace,
     }
     ref_marlin_output = fused_marlin_moe(**fused_marlin_moe_kwargs)
 
