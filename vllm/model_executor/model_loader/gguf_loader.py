@@ -119,18 +119,6 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
-        # Gemma3 special cases: The HF multimodal projector weight
-        # don't have suffix but GGUF does, so we need to map them
-        # manually for simplicity.
-        if model_type == "gemma3":
-            gguf_to_hf_name_map["mm.input_projection.weight"] = (
-                "multi_modal_projector.mm_input_projection_weight"
-            )
-            # FIXME(Isotr0py): This is likely a bug from auto mapping,
-            # should revisit and investigate it in the future.
-            gguf_to_hf_name_map["mm.soft_emb_norm.weight"] = (
-                "multi_modal_projector.mm_soft_emb_norm.weight"
-            )
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():
@@ -180,23 +168,42 @@ class GGUFModelLoader(BaseModelLoader):
             """
             Map HuggingFace parameter name to GGUF tensor name.
 
-            Handles three categories:
-            1. Text backbone parameters via text_name_map
-            2. Vision tower parameters via vision_name_map with Gemma3-specific fixes:
-               - mm_input_projection_weight: no .weight suffix in GGUF
-               - FFN swap: ffn_down↔fc1, ffn_up↔fc2 (GGUF naming differs from vLLM)
-            3. Manual overrides in gguf_to_hf_name_map
+            This function handles the mismatch between HF parameter naming
+            conventions and gguf-py's expected format:
+            1. Strips 'model.' prefix (common in multimodal models)
+            2. Converts '_weight' suffix to '.weight' (Gemma3 compatibility)
+            3. Searches vision_name_map for multimodal parameters
+            4. Falls back to text_name_map for language model parameters
+
+            Args:
+                hf_name: Full HuggingFace parameter name (e.g.,
+                        'model.multi_modal_projector.mm_soft_emb_norm.weight')
+
+            Returns:
+                GGUF tensor name with suffix (e.g., 'mm.soft_emb_norm.weight')
+                or None if no mapping found
             """
+            # Strip 'language_model.' prefix for multimodal models - gguf-py
+            # tensor mappings expect parameter names without this prefix.
+            # Note: 'model.' prefix should be KEPT for text-only models as
+            # gguf-py expects it.
+            if hf_name.startswith("language_model."):
+                hf_name = hf_name[15:]  # Remove 'language_model.'
+
             # Parse parameter name and suffix
             if hf_name.endswith((".weight", ".bias")):
                 base_name, suffix = hf_name.rsplit(".", 1)
             else:
                 base_name, suffix = hf_name, ""
+                # Handle '_weight' suffix (Gemma3 naming: parameter ends with
+                # '_weight' instead of '.weight')
+                if base_name.endswith("_weight"):
+                    base_name = base_name[:-7]  # Remove '_weight'
+                    suffix = "weight"
 
             gguf_name = None
             # Priority 1: Search vision/projector parameters for multimodal models
             if vision_name_map is not None:
-                # Standard vision parameter lookup
                 gguf_name = vision_name_map.get_name(base_name)
 
             # Priority 2: Search text backbone parameters
@@ -212,13 +219,6 @@ class GGUFModelLoader(BaseModelLoader):
         unmapped_params = []
         for hf_name in state_dict:
             gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
-
-            # Try removing prefix for multimodal parameters
-            # (e.g., "language_model.model." -> "model.")
-            if gguf_name_with_suffix is None and "." in hf_name:
-                gguf_name_with_suffix = find_hf_name_in_tensor_map(
-                    hf_name.split(".", 1)[-1]
-                )
 
             # Track mapping success
             if gguf_name_with_suffix is not None:

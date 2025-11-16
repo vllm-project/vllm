@@ -41,6 +41,51 @@ def detect_gguf_multimodal(model: str) -> Path | None:
         return None
 
 
+def extract_vocab_size_from_gguf(model_path: str) -> int | None:
+    """Extract vocabulary size from GGUF file's embedding tensor.
+
+    Reads the token_embd.weight tensor shape to determine the actual
+    vocabulary size in the GGUF file. This is the source of truth for
+    GGUF models and may differ from the HuggingFace tokenizer config,
+    particularly for models with extended vocabularies (e.g., Unsloth).
+
+    Args:
+        model_path: Path to GGUF model file
+
+    Returns:
+        Vocabulary size (second dimension of token_embd.weight tensor)
+        or None if extraction fails
+
+    Note:
+        GGUF embedding tensor format: [hidden_size, vocab_size]
+        We extract vocab_size from shape[1]
+    """
+    try:
+        reader = gguf.GGUFReader(model_path)
+        for tensor in reader.tensors:
+            if tensor.name == "token_embd.weight":
+                # Tensor shape: [hidden_size, vocab_size]
+                vocab_size = int(tensor.shape[1])
+                logger.info(
+                    "Extracted vocab_size=%d from GGUF embedding tensor",
+                    vocab_size,
+                )
+                return vocab_size
+
+        logger.warning(
+            "Could not find token_embd.weight tensor in GGUF file: %s",
+            model_path,
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "Failed to extract vocab_size from GGUF file %s: %s",
+            model_path,
+            e,
+        )
+        return None
+
+
 def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | None":
     """Extract vision config parameters from mmproj.gguf metadata.
 
@@ -130,20 +175,24 @@ def maybe_patch_hf_config_from_gguf(
     model: str,
     hf_config: PretrainedConfig,
 ) -> PretrainedConfig:
-    """Patch HF config for GGUF multimodal Gemma3 models.
+    """Patch HF config for GGUF models.
 
-    If model has mmproj.gguf, patches the config:
-    - Forces Gemma3ForConditionalGeneration architecture
-    - Extracts and sets vision_config from mmproj.gguf
-    - Sets multimodal token indices
+    Applies GGUF-specific patches to HuggingFace config:
+    1. For multimodal models: patches architecture and vision config
+    2. For all GGUF models: overrides vocab_size from embedding tensor
+
+    This ensures compatibility with GGUF models that have extended
+    vocabularies (e.g., Unsloth) where the GGUF file contains more
+    tokens than the HuggingFace tokenizer config specifies.
 
     Args:
         model: Model path string
         hf_config: HuggingFace config to patch in-place
 
     Returns:
-        Updated HuggingFace config (unchanged if not Gemma3 GGUF multimodal)
+        Updated HuggingFace config
     """
+    # Patch multimodal config if mmproj.gguf exists
     mmproj_path = detect_gguf_multimodal(model)
     if mmproj_path is not None:
         vision_config = extract_vision_config_from_gguf(str(mmproj_path))
@@ -157,6 +206,23 @@ def maybe_patch_hf_config_from_gguf(
                 vision_config=vision_config,
                 architectures=["Gemma3ForConditionalGeneration"],
             )
-            return new_hf_config
+            hf_config = new_hf_config
+
+    # Override vocab_size from GGUF embedding tensor for all GGUF models
+    # This handles models with extended vocabularies (e.g., Unsloth)
+    if model.endswith(".gguf"):
+        vocab_size_from_gguf = extract_vocab_size_from_gguf(model)
+        if vocab_size_from_gguf is not None:
+            # Get text config (handles both regular and multimodal configs)
+            text_config = hf_config.get_text_config()
+            original_vocab_size = text_config.vocab_size
+
+            if original_vocab_size != vocab_size_from_gguf:
+                logger.info(
+                    "Overriding vocab_size: %d (HF config) → %d (GGUF file)",
+                    original_vocab_size,
+                    vocab_size_from_gguf,
+                )
+                text_config.vocab_size = vocab_size_from_gguf
 
     return hf_config
