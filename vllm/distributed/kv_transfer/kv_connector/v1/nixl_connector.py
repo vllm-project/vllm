@@ -225,8 +225,11 @@ class NixlConnector(KVConnectorBase_V1):
         self,
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
-        assert self.connector_scheduler is not None
-        return self.connector_scheduler.build_connector_meta(scheduler_output)
+        return (
+            self.connector_scheduler.build_connector_meta(scheduler_output)
+            if self.connector_scheduler is not None
+            else NixlConnectorMetadata()
+        )
 
     def request_finished(
         self,
