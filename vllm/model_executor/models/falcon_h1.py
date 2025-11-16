@@ -459,7 +459,7 @@ class FalconH1Model(nn.Module):
         else:
             self.final_layernorm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -474,7 +474,7 @@ class FalconH1Model(nn.Module):
                 hidden_states = inputs_embeds * self.embedding_multiplier
             else:
                 hidden_states = (
-                    self.get_input_embeddings(input_ids) * self.embedding_multiplier
+                    self.embed_input_ids(input_ids) * self.embedding_multiplier
                 )
         else:
             assert intermediate_tensors is not None
@@ -599,8 +599,8 @@ class FalconH1ForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

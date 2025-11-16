@@ -74,7 +74,11 @@ class EncoderOnlyAttention(Attention):
             block_size = 16
 
         underlying_attn_backend = get_attn_backend(
-            head_size, dtype, kv_cache_dtype, block_size
+            head_size,
+            dtype,
+            kv_cache_dtype,
+            block_size,
+            attn_type=AttentionType.ENCODER_ONLY,
         )
 
         attn_backend = create_encoder_only_attention_backend(underlying_attn_backend)
