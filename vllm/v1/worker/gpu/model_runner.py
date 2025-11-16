@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
@@ -652,23 +653,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def get_cudagraph_and_dp_padding(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> tuple[int, bool, torch.Tensor | None]:
+    ) -> tuple[int, CUDAGraphMode, torch.Tensor | None]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.dp_size == 1:
             # No DP. Only consider CUDA graphs.
             if total_num_scheduled_tokens == 0:
                 # Special case: no tokens to run.
-                return 0, False, None
+                return 0, CUDAGraphMode.NONE, None
 
             cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
                 scheduler_output, total_num_scheduled_tokens
             )
             if cudagraph_size is not None:
-                # Use CUDA graph.
-                return cudagraph_size, True, None
+                # Use full CUDA graph.
+                return cudagraph_size, CUDAGraphMode.FULL, None
             else:
                 # Fall back to eager mode.
-                return total_num_scheduled_tokens, False, None
+                return total_num_scheduled_tokens, CUDAGraphMode.NONE, None
 
         # Consider DP padding and CUDA graph.
         if total_num_scheduled_tokens == 0:
@@ -692,14 +693,14 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             # If all ranks can use CUDA graph, pad to the maximum number of tokens
             # across DP and use CUDA graph.
             num_tokens_after_padding = int(cudagraph_size_across_dp.max().item())
-            use_cudagraph = True
+            cudagraph_mode = CUDAGraphMode.FULL
         else:
             # If any of the ranks cannot use CUDA graph, use eager mode for all ranks.
             # No padding is needed except for ranks that have no tokens to run.
             num_tokens_across_dp = torch.clamp(num_tokens_across_dp, min=1)
             num_tokens_after_padding = num_tokens_across_dp[self.dp_rank]
-            use_cudagraph = False
-        return num_tokens_after_padding, use_cudagraph, num_tokens_across_dp
+            cudagraph_mode = CUDAGraphMode.NONE
+        return num_tokens_after_padding, cudagraph_mode, num_tokens_across_dp
 
     @torch.inference_mode()
     def execute_model(
@@ -717,7 +718,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # NOTE: Call this before the async barrier so CPU all-reduce and
         # GPU execution can overlap.
-        num_tokens_after_padding, use_cudagraph, num_tokens_across_dp = (
+        num_tokens_after_padding, cudagraph_mode, num_tokens_across_dp = (
             self.get_cudagraph_and_dp_padding(scheduler_output)
         )
         with async_barrier(self.input_prep_event):
@@ -762,7 +763,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampling_metadata = None
 
         # Run model.
-        if use_cudagraph:
+        if cudagraph_mode == CUDAGraphMode.FULL:
             # Run CUDA graph.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
@@ -775,6 +776,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
+                cudagraph_runtime_mode=cudagraph_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
             ):
                 hidden_states = self.model(

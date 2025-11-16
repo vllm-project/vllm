@@ -43,11 +43,9 @@ class CudaGraphManager:
         self.hidden_states: torch.Tensor | None = None
 
     def _init_padded_sizes(self) -> dict[int, int]:
-        if self.cudagraph_mode == CUDAGraphMode.NONE:
-            # CUDA graphs are disabled.
+        if not self.cudagraph_mode.has_full_cudagraphs():
+            # Full cuda graphs are not used.
             return {}
-        if self.cudagraph_mode.requires_piecewise_compilation():
-            raise NotImplementedError("Piecewise CUDA graphs are not supported")
 
         padded_sizes: dict[int, int] = {}
         assert len(self.cudagraph_sizes) > 0
@@ -66,15 +64,16 @@ class CudaGraphManager:
         scheduler_output: SchedulerOutput,
         num_tokens_after_padding: int,
     ) -> int | None:
-        if self.cudagraph_mode == CUDAGraphMode.NONE:
+        if not self.cudagraph_mode.has_full_cudagraphs():
             return None
-        if self.cudagraph_mode == CUDAGraphMode.FULL_DECODE_ONLY:
-            if any(x > 1 for x in scheduler_output.num_scheduled_tokens.values()):
+        if self.cudagraph_mode != CUDAGraphMode.FULL:
+            # TODO(woosuk): Support uniform decode with multiple tokens (spec decoding).
+            all_decode = all(
+                x == 1 for x in scheduler_output.num_scheduled_tokens.values()
+            )
+            if not all_decode:
                 # Prefill is included.
-                # TODO(woosuk): Support uniform decode (for spec decoding).
                 return None
-        else:
-            assert self.cudagraph_mode == CUDAGraphMode.FULL
         return self.padded_sizes.get(num_tokens_after_padding)
 
     def capture_graph(
