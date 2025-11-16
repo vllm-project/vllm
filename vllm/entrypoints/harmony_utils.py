@@ -222,9 +222,16 @@ def parse_response_input(
             response_msg["output"],
         )
     elif response_msg["type"] == "reasoning":
-        content = response_msg["content"]
-        assert len(content) == 1
-        msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        # pydantic returns a ValidatorIterator, so we unpack it via list()
+        content = list(response_msg["content"])
+        if len(content) == 1:
+            # TODO: this doesn't work
+            msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        else:
+            summary = list(response_msg["summary"])
+            assert len(summary) == 1
+            msg = Message.from_role_and_content(Role.ASSISTANT, summary[0]["text"])
+
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")

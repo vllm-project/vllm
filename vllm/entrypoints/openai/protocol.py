@@ -304,6 +304,7 @@ def get_logits_processors(
     return None
 
 
+# this is the type that is going in
 ResponseInputOutputItem: TypeAlias = (
     ResponseInputItemParam | ResponseReasoningItem | ResponseFunctionToolCall
 )
@@ -2212,6 +2213,7 @@ class ChatMessage(OpenAIBaseModel):
     tool_calls: list[ToolCall] = Field(default_factory=list)
 
     # vLLM-specific fields that are not in OpenAI spec
+    # TODO: use this
     reasoning: str | None = None
     reasoning_content: str | None = None
     """Deprecated: use `reasoning` instead."""

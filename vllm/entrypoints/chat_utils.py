@@ -244,6 +244,7 @@ class CustomChatCompletionMessageParam(TypedDict, total=False):
     """The reasoning content for interleaved thinking."""
 
 
+# this is the target type
 ChatCompletionMessageParam: TypeAlias = (
     OpenAIChatCompletionMessageParam
     | CustomChatCompletionMessageParam
@@ -1383,6 +1384,8 @@ def _parse_chat_message_content(
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
+    # TODO: get from reasoning_content?
+
     reasoning = message.get("reasoning") or message.get("reasoning_content")
     if content is None:
         content = []
