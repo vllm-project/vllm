@@ -38,7 +38,7 @@ vllm_root = os.path.dirname(os.path.dirname(script_dir))
 sys.path.insert(0, vllm_root)
 
 # Import vLLM first
-from vllm import LLM, SamplingParams
+from vllm import LLM, SamplingParams  # noqa: E402
 
 
 def import_custom_model():
@@ -126,30 +126,29 @@ def benchmark_model(
     llm.generate(warmup_requests, sampling_params)
     print("✓ Warmup complete")
 
-    # Actual benchmark - track per-request timing
+    # Actual benchmark - track timing in batches
     print(f"\nRunning benchmark ({len(requests)} requests)...")
     start_time = time.time()
 
-    # Track individual request timings
-    request_start_times = []
-    request_end_times = []
-
-    # Generate one request at a time to get accurate per-request latency
-    # (For batched generation, use total time / num_requests as approximation)
+    # Track per-request timing by generating in small batches
+    batch_size = min(max_batch_size, 8)  # Use smaller batches for timing granularity
     outputs = []
-    if len(requests) <= 20:  # Only do per-request timing for small benchmarks
-        print("  (Measuring per-request latency...)")
-        for req in requests:
-            req_start = time.time()
-            output = llm.generate([req], sampling_params)
-            req_end = time.time()
-            outputs.extend(output)
-            request_start_times.append(req_start)
-            request_end_times.append(req_end)
-    else:
-        # For large benchmarks, use batched generation (faster but no per-request latency)
-        print("  (Using batched generation for speed...)")
-        outputs = llm.generate(requests, sampling_params)
+    request_latencies = []
+
+    print(f"  (Generating in batches of {batch_size} for latency tracking...)")
+    for i in range(0, len(requests), batch_size):
+        batch = requests[i : i + batch_size]
+        batch_start = time.time()
+        batch_outputs = llm.generate(batch, sampling_params)
+        batch_end = time.time()
+        batch_time = batch_end - batch_start
+
+        outputs.extend(batch_outputs)
+
+        # Estimate per-request latency as batch_time / batch_size
+        # This is an approximation but better than nothing for batched generation
+        for _ in batch:
+            request_latencies.append(batch_time / len(batch))
 
     end_time = time.time()
     total_time = end_time - start_time
@@ -162,13 +161,14 @@ def benchmark_model(
     avg_latency = total_time / num_requests
 
     # Per-request latency distribution
-    if request_end_times:
-        per_request_latencies = [
-            end - start for start, end in zip(request_start_times, request_end_times)
-        ]
+    per_request_latencies = request_latencies if request_latencies else []
+    if per_request_latencies:
+        print(
+            f"  → Captured {len(per_request_latencies)} "
+            "per-request latency measurements"
+        )
     else:
-        # No per-request timing available (batched generation)
-        per_request_latencies = []
+        print("  → No per-request latencies available")
 
     results = {
         "model": model_name,
@@ -204,9 +204,7 @@ def benchmark_model(
         print(f"P90 Latency:       {results['p90_latency'] * 1000:.2f}ms")
         print(f"P99 Latency:       {results['p99_latency'] * 1000:.2f}ms")
     else:
-        print(
-            f"P50/P90/P99:       N/A (use --num-requests ≤20 for per-request latency)"
-        )
+        print("P50/P90/P99:       N/A (use --num-requests ≤20 for per-request latency)")
     print(f"{'=' * 70}")
 
     return results
@@ -372,7 +370,8 @@ def main():
                     speedup_str = "N/A"
 
                 print(
-                    f"{name:<25} {custom_val:<20.2f} {builtin_val:<20.2f} {speedup_str:<15}"
+                    f"{name:<25} {custom_val:<20.2f} "
+                    f"{builtin_val:<20.2f} {speedup_str:<15}"
                 )
 
         print(f"\n{'#' * 70}\n")
@@ -380,7 +379,8 @@ def main():
     elif "custom" in results:
         print("\n✓ Custom model benchmark completed successfully!")
         print(
-            f"   Throughput: {results['custom']['throughput']:.2f} tokens/s @ TP={args.tp}"
+            f"   Throughput: {results['custom']['throughput']:.2f} "
+            f"tokens/s @ TP={args.tp}"
         )
 
 
