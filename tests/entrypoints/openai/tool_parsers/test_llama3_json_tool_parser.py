@@ -150,6 +150,7 @@ def test_extract_tool_calls_deeply_nested_json(parser):
 
     # Verify the entire parameters object is captured
     import json
+    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert "location" in args
     assert args["location"]["city"] == "San Francisco"
@@ -171,6 +172,7 @@ def test_extract_tool_calls_very_deeply_nested_json(parser):
 
     # Verify the entire nested structure is captured
     import json
+    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["level1"]["level2"]["level3"]["value"] == "deep"
 
@@ -189,6 +191,7 @@ def test_extract_tool_calls_with_braces_in_strings(parser):
 
     # Verify the string with braces is captured correctly
     import json
+    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["query"] == "find users with status {active}"
 
@@ -206,6 +209,7 @@ def test_extract_tool_calls_with_code_snippets(parser):
 
     # Verify the code snippet is captured correctly
     import json
+    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["snippet"] == "function() { return {}; }"
 
@@ -223,5 +227,6 @@ def test_extract_tool_calls_with_escaped_quotes(parser):
 
     # Verify escaped quotes are handled correctly
     import json
+    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["text"] == 'He said "hello {world}"'
