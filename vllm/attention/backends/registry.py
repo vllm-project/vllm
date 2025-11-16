@@ -42,6 +42,9 @@ class AttentionBackendEnum(enum.Enum, metaclass=_AttentionBackendEnumMeta):
     """
 
     FLASH_ATTN = "vllm.v1.attention.backends.flash_attn.FlashAttentionBackend"
+    FLASH_SINK_ATTN = (
+        "vllm.v1.attention.backends.flash_sink_attn.FlashSinkAttentionBackend"
+    )
     TRITON_ATTN = "vllm.v1.attention.backends.triton_attn.TritonAttentionBackend"
     XFORMERS = "vllm.v1.attention.backends.xformers.XFormersAttentionBackend"
     ROCM_ATTN = "vllm.v1.attention.backends.rocm_attn.RocmAttentionBackend"

@@ -12,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     CrossAttentionSpec,
     FullAttentionSpec,
+    FullSinkAttentionSpec,
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
@@ -305,7 +306,8 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         dcp_world_size: int = 1,
     ) -> tuple[list[KVCacheBlock], ...]:
         assert isinstance(
-            kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
+            kv_cache_spec,
+            (FullAttentionSpec, FullSinkAttentionSpec, ChunkedLocalAttentionSpec),
         ), (
             "FullAttentionManager can only be used for full attention "
             "and chunked local attention groups"
@@ -720,6 +722,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     FullAttentionSpec: FullAttentionManager,
+    FullSinkAttentionSpec: FullAttentionManager,
     MLAAttentionSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,

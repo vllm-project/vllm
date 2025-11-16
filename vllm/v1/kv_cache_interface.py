@@ -158,6 +158,98 @@ class FullAttentionSpec(AttentionSpec):
 
 
 @dataclass(frozen=True)
+class FullSinkAttentionSpec(AttentionSpec):
+    head_size_v: int
+    sliding_window: int | None = None
+    attention_chunk_size: int | None = None
+
+    """
+    When hybrid allocator is disabled and the model contains both full 
+    attention layers and sliding window attention layers, sliding 
+    window attention are regarded as full attention in KV cache manager 
+    (blocks are allocated for all tokens), while computed as sliding window 
+    attention in model runner.
+    In this case, we use FullSinkAttentionSpec and record the sliding window size.
+    Default to None for not using sliding window attention.
+    """
+
+    def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+        max_model_len = vllm_config.model_config.max_model_len
+        dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
+        # Note(hc): each dcp rank only need save
+        # (max_model_len//dcp_world_size) tokens locally.
+        if dcp_world_size > 1:
+            max_model_len = cdiv(max_model_len, dcp_world_size)
+        return cdiv(max_model_len, self.block_size) * self.page_size_bytes
+
+    @classmethod
+    def merge_window_sizes(cls, window_sizes: set[int]) -> int | None:
+        if len(window_sizes) == 0:
+            return None
+        elif len(window_sizes) == 1:
+            return window_sizes.pop()
+        else:
+            raise ValueError(
+                "All attention layers in the same KV cache group must have the "
+                "same window size."
+            )
+
+    @classmethod
+    def merge(cls, specs: list[Self]) -> Self:
+        """
+        Merge a list of FullSinkAttentionSpec objects into a single
+        FullSinkAttentionSpec object.
+        """
+        assert all(isinstance(spec, FullSinkAttentionSpec) for spec in specs), (
+            "All attention layers in the same KV cache group must be "
+            "FullSinkAttentionSpec."
+        )
+
+        sliding_window = set(
+            spec.sliding_window for spec in specs if spec.sliding_window is not None
+        )
+        attention_chunk_size = set(
+            spec.attention_chunk_size
+            for spec in specs
+            if spec.attention_chunk_size is not None
+        )
+        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
+            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
+        )
+        merged_spec = cls(
+            block_size=specs[0].block_size,
+            num_kv_heads=specs[0].num_kv_heads,
+            head_size=specs[0].head_size,
+            head_size_v=specs[0].head_size_v,
+            dtype=specs[0].dtype,
+            sliding_window=cls.merge_window_sizes(sliding_window),
+            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
+        )
+        for spec in specs:
+            for f in fields(AttentionSpec):
+                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
+                    "All attention layers in the same KV cache group must have "
+                    "the same attention spec."
+                )
+        assert (merged_spec.sliding_window is not None) + (
+            merged_spec.attention_chunk_size is not None
+        ) <= 1, (
+            "Model with both sliding window layers and chunked local attention "
+            "layers is not supported."
+        )
+        return merged_spec
+
+    @property
+    def page_size_bytes(self) -> int:
+        return (
+            self.block_size
+            * self.num_kv_heads
+            * (self.head_size + self.head_size_v)
+            * get_dtype_size(self.dtype)
+        )
+
+
+@dataclass(frozen=True)
 class MLAAttentionSpec(FullAttentionSpec):
     # TODO(Lucas/Chen): less hacky way to do this
     cache_dtype_str: str | None = None
