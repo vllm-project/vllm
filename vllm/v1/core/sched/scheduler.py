@@ -37,7 +37,11 @@ from vllm.v1.core.sched.output import (
 )
 from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -708,6 +712,31 @@ class Scheduler(SchedulerInterface):
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
+
+    def preempt_request(
+        self,
+        scheduled_timestamp: float | None = None,
+        preempted_req: Request | None = None,
+    ) -> Request:
+        # Preempt a running request and move it back to the waiting queue.
+        if preempted_req is not None:
+            self.running.remove(preempted_req)
+        else:
+            preempted_req = self.running.pop()
+
+        self.kv_cache_manager.free(preempted_req)
+        self.encoder_cache_manager.free(preempted_req)
+        preempted_req.status = RequestStatus.PREEMPTED
+        preempted_req.num_computed_tokens = 0
+        preempted_req.num_preemptions += 1
+        if self.log_stats:
+            preempted_req.record_event(
+                EngineCoreEventType.PREEMPTED, scheduled_timestamp
+            )
+
+        self.waiting.prepend_request(preempted_req)
+
+        return preempted_req
 
     def _update_after_schedule(
         self,

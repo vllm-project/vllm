@@ -3,6 +3,7 @@
 
 import gc
 import itertools
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Iterator
@@ -98,6 +99,7 @@ from vllm.v1.attention.backends.utils import (
     split_attn_metadata,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+from vllm.v1.engine.exceptions import EngineLoopPausedError
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     ChunkedLocalAttentionSpec,
@@ -551,6 +553,12 @@ class GPUModelRunner(
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
+
+        self.pause_event = threading.Event()
+
+    def _check_pause_event(self):
+        if self.pause_event.is_set():
+            raise EngineLoopPausedError("Worker is paused.")
 
     def reset_mm_cache(self) -> None:
         if self.mm_budget:
@@ -2498,6 +2506,7 @@ class GPUModelRunner(
         Returns:
             Model output tensor
         """
+        self._check_pause_event()
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -3640,6 +3649,7 @@ class GPUModelRunner(
                     ubatch_slices=ubatch_slices,
                 ),
             ):
+                self._check_pause_event()
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
