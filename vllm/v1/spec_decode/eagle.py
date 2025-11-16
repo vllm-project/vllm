@@ -83,6 +83,9 @@ class EagleProposer:
         self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
+        self.eagle3_use_aux_hidden_state: bool = (
+            self._get_eagle3_use_aux_hidden_state_from_config()
+        )
 
         self.use_cuda_graph = False
 
@@ -225,9 +228,11 @@ class EagleProposer:
 
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
-            target_hidden_states = self.model.combine_hidden_states(
-                target_hidden_states
-            )
+            # Do not combine hidden states if eagle3 head does not use aux hidden states
+            if self.eagle3_use_aux_hidden_state:
+                target_hidden_states = self.model.combine_hidden_states(
+                    target_hidden_states
+                )
             assert target_hidden_states.shape[-1] == self.hidden_size
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
@@ -1147,6 +1152,22 @@ class EagleProposer:
             "Failed to find attention metadata builder for EAGLE layers."
         )
         return builder
+
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
+        """
+        Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
+        hidden states and directly uses the last layer output just like eagle1.
+        They might indicate this by setting "use_aux_hidden_state" to False
+        inside the "eagle_config" dict of their hf_config.
+        """
+        if self.method != "eagle3":
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
+        eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
+        if eagle_config is not None:
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
+        return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
