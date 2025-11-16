@@ -50,13 +50,16 @@ class AsyncOutput(AsyncModelRunnerOutput):
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
 
-        # NOTE(woosuk): The following code ensures compatibility with OSS vLLM.
+        # NOTE(woosuk): The following code is to ensure compatibility with
+        # the existing model runner.
         # Going forward, we should keep the data structures as NumPy arrays
         # rather than Python lists.
         sampled_token_ids_np = self.sampled_token_ids.numpy()
-        sampled_token_ids = sampled_token_ids_np.tolist()
-        for i, tokens in enumerate(sampled_token_ids):
-            del tokens[self.num_sampled_tokens[i] :]
+        num_reqs = sampled_token_ids_np.shape[0]
+        sampled_token_ids: list[np.ndarray] = [
+            sampled_token_ids_np[i, : self.num_sampled_tokens[i]]
+            for i in range(num_reqs)
+        ]
         self.model_runner_output.sampled_token_ids = sampled_token_ids
 
         if self.logprobs_tensors is not None:
