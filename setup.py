@@ -299,6 +299,18 @@ class cmake_build_ext(build_ext):
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
 
+        # copy vllm/third_party/triton_kernels/**/*.py from self.build_lib to
+        # current directory so that they can be included in the editable build
+        print(
+            f"Copying {self.build_lib}/vllm/third_party/triton_kernels "
+            "to vllm/third_party/triton_kernels"
+        )
+        shutil.copytree(
+            f"{self.build_lib}/vllm/third_party/triton_kernels",
+            "vllm/third_party/triton_kernels",
+            dirs_exist_ok=True,
+        )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -638,6 +650,9 @@ if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
 if _is_cuda():
+    # Optional since this doesn't get built (produce an .so file). This is just
+    # copying the relevant .py files from the source repository.
+    ext_modules.append(CMakeExtension(name="vllm.triton_kernels", optional=True))
     ext_modules.append(CMakeExtension(name="vllm.vllm_flash_attn._vllm_fa2_C"))
     if envs.VLLM_USE_PRECOMPILED or get_nvcc_cuda_version() >= Version("12.3"):
         # FA3 requires CUDA 12.3 or later
