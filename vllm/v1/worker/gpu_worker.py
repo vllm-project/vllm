@@ -189,6 +189,7 @@ class Worker(WorkerBase):
                 and self.parallel_config.distributed_executor_backend
                 not in ["ray", "external_launcher"]
                 and self.vllm_config.parallel_config.data_parallel_backend != "ray"
+                and self.vllm_config.parallel_config.nnodes_within_dp == 1
             ):
                 # Use local DP rank if available, otherwise use global DP rank.
                 dp_local_rank = self.parallel_config.data_parallel_rank_local
@@ -205,7 +206,14 @@ class Worker(WorkerBase):
                 assert self.local_rank < torch.cuda.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of bounds. "
                 )
-
+            visible_device_count = (
+                torch.cuda.device_count() if torch.cuda.is_available() else 0
+            )
+            assert self.parallel_config.local_world_size <= visible_device_count, (
+                f"local_world_size ({self.parallel_config.local_world_size}) must be "
+                f"less than or equal to the number of visible devices "
+                f"({visible_device_count})."
+            )
             self.device = torch.device(f"cuda:{self.local_rank}")
             current_platform.set_device(self.device)
 
