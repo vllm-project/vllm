@@ -156,5 +156,4 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
             use_fp8_dispatch=use_fp8_dispatch,
         )
-
     return prepare_finalize

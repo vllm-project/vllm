@@ -844,6 +844,7 @@ class FusedMoEConfig:
 
     num_local_experts: int
     moe_parallel_config: FusedMoEParallelConfig
+    is_sequence_parallel: bool
 
     # The activation type.
     in_dtype: torch.dtype
