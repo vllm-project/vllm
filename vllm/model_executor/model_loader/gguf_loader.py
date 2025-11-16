@@ -221,24 +221,6 @@ class GGUFModelLoader(BaseModelLoader):
                 # Standard vision parameter lookup
                 gguf_name = vision_name_map.get_name(base_name)
 
-                # Gemma3-specific FFN swap correction
-                # GGUF stores tensor shapes in reverse order (C-style row-major),
-                # causing automatic mapping to incorrectly assign:
-                #   fc1 → ffn_up (but actual loaded tensor shape matches ffn_down)
-                #   fc2 → ffn_down (but actual loaded tensor shape matches ffn_up)
-                # This swap corrects the mapping to match actual loaded shapes.
-                # Only apply for Gemma3 vision tower MLP layers.
-                if (
-                    gguf_name
-                    and "gemma" in model_config.model.lower()
-                    and ".mlp.fc" in base_name
-                ):
-                    # Swap ffn_up ↔ ffn_down to match actual tensor shapes
-                    if ".fc1" in base_name and "ffn_up" in gguf_name:
-                        gguf_name = gguf_name.replace("ffn_up", "ffn_down")
-                    elif ".fc2" in base_name and "ffn_down" in gguf_name:
-                        gguf_name = gguf_name.replace("ffn_down", "ffn_up")
-
             # Priority 2: Search text backbone parameters
             if gguf_name is None:
                 gguf_name = text_name_map.get_name(base_name)
