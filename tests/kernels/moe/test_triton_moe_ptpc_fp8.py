@@ -18,8 +18,6 @@ if current_platform.get_device_capability() < (9, 0):
     pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def native_w8a8_per_token_matmul(A, B, As, Bs, output_dtype=torch.float16):

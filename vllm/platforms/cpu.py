@@ -192,7 +192,7 @@ class CpuPlatform(Platform):
 
         scheduler_config = vllm_config.scheduler_config
         if (
-            scheduler_config.chunked_prefill_enabled
+            scheduler_config.enable_chunked_prefill
             or cache_config.enable_prefix_caching
         ) and cache_config.cache_dtype != "auto":
             raise RuntimeError(
@@ -339,7 +339,7 @@ class CpuPlatform(Platform):
             )
             vllm_config.scheduler_config.enable_chunked_prefill = False
             vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.scheduler_config.max_model_len,
+                vllm_config.model_config.max_model_len,
                 vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
             )
 
