@@ -16,6 +16,7 @@ from vllm.v1.attention.backends.mla.common import (
     MLACommonImpl,
     MLACommonMetadata,
     MLACommonMetadataBuilder,
+    QueryLenSupport,
 )
 from vllm.v1.attention.backends.utils import AttentionCGSupport
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -55,9 +56,8 @@ class AiterMLAMetadata(MLACommonMetadata[AiterMLADecodeMetadata]):
 class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
     # TODO(luka, lucas): audit this as part of:
     #  https://github.com/vllm-project/vllm/issues/22945
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.VARLEN
 
     def __init__(
         self,
@@ -271,7 +271,7 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
         assert isinstance(q, torch.Tensor)
         B = q.shape[0]
         o = torch.zeros(
-            B, self.num_heads, self.kv_lora_rank, dtype=q.dtype, device=q.device
+            B, self.num_heads, self.kv_lora_rank, dtype=torch.bfloat16, device=q.device
         )
 
         kv_buffer = kv_c_and_k_pe_cache.unsqueeze(2)
@@ -289,6 +289,8 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             attn_metadata.decode.paged_kv_indptr,
             attn_metadata.decode.paged_kv_indices,
             attn_metadata.decode.paged_kv_last_page_len,
+            q_scale=layer._q_scale,
+            kv_scale=layer._k_scale,
         )
 
         return o, None
