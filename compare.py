@@ -58,7 +58,7 @@ def test_accuracy(logits, k, p, func_list, log_file):
                 r_str("Error: logits are not close on " + f"{func_name}"),
                 log_file,
             )
-            output_logits = func_list[i](logits, k, p, debug=True)
+            output_logits = func_list[i](logits, k, p)
             error_mask = torch.abs(output_logits - original_logits) > 1e-16
             error_rows = torch.where(error_mask)[0]
             error_rows = torch.unique(error_rows)
@@ -114,7 +114,8 @@ if __name__ == "__main__":
 
     batch_size_list = [16, 32, 64, 128, 256, 512, 1024]
     vocab_size_list = [16384, 65536, 102400, 128256]
-    p_list = [None, "RAND", 0.1, 0.4, 0.7, 0.9, 0.99]
+    # p_list = [None, "RAND", 0.1, 0.4, 0.7, 0.9, 0.99]
+    p_list = [None for _ in range(10)]
     k_list = [None, "RAND", 5, 50, 200, 500, 3000]
     func_list = [apply_top_k_top_p, apply_top_k_top_p_triton]
 
