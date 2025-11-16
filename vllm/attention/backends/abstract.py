@@ -49,6 +49,9 @@ class AttentionBackend(ABC):
     supported_kernel_block_sizes: ClassVar[list[int | MultipleOf]] = [MultipleOf(1)]
     supported_kv_cache_dtypes: ClassVar[list["CacheDType"]] = ["auto"]
 
+    # Does attention's forward() include kv cache update?
+    forward_includes_kv_cache: bool = True
+
     @staticmethod
     @abstractmethod
     def get_name() -> str:
