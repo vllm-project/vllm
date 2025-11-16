@@ -423,7 +423,7 @@ def get_vllm_port() -> int | None:
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
 
-# The begin-* and end* here are used by the documentation generator
+# The start-* and end* here are used by the documentation generator
 # to extract the used env vars.
 
 # --8<-- [start:env-vars-definition]
