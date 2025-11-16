@@ -19,6 +19,7 @@ def test_python_error():
     """
     Test if Python error occurs when there's low-level
     error happening from the C++ side.
+    just adding something to test CI
     """
     allocator = CuMemAllocator.get_instance()
     total_bytes = torch.cuda.mem_get_info()[1]
