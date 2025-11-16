@@ -10,6 +10,7 @@ import torch
 from torch import nn
 from torch.nn.parameter import Parameter
 
+from vllm.attention.selector import get_mamba_attn_backend
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
@@ -181,6 +182,8 @@ class MambaMixer(MambaBase, CustomOp):
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
+
+        self.mamba_attn_backend = get_mamba_attn_backend(self.mamba_type)
 
     def _ssm_transform(
         self, x: torch.Tensor
@@ -453,9 +456,7 @@ class MambaMixer(MambaBase, CustomOp):
         return "mamba1"
 
     def get_attn_backend(self) -> type["AttentionBackend"]:
-        from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionBackend
-
-        return Mamba1AttentionBackend
+        return self.mamba_attn_backend
 
     def _time_proj_bias(self) -> torch.Tensor | None:
         if hasattr(self.dt_proj, "bias") and self.dt_proj.bias is not None:
