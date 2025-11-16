@@ -7,6 +7,7 @@ from transformers import PretrainedConfig
 
 from vllm.config.lora import LoRAConfig
 from vllm.distributed.utils import divide
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -17,6 +18,8 @@ from vllm.platforms import current_platform
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
+
+logger = init_logger(__name__)
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
@@ -31,6 +34,19 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         self.output_slices: tuple[int, ...]
         self.output_size: int
         self.n_slices: int
+
+        # NEW: Check if base layer is INT4 quantized
+        self._is_int4_quantized = self._check_int4_quantization()
+        self._materialized_weight: torch.Tensor | None = None
+
+        if self._is_int4_quantized:
+            logger.info(
+                "LoRA layer initialized with INT4 quantized base layer. "
+                "Materializing FP16 weights for LoRA compatibility."
+            )
+            # Materialize FP16 weights from packed INT4 buffers
+            # This creates LoRA-compatible weight tensors alongside packed buffers
+            self._materialize_int4_weights()
 
     def create_lora_weights(
         self,
@@ -119,6 +135,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         )
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        # For INT4 quantized layers:
+        # 1. Materialized FP16 weights (via self.weight property) allow LoRA attachment
+        # 2. Base forward pass uses optimized INT4 kernels via quant_method.apply()
+        # 3. LoRA delta is computed on activations and added to INT4 kernel output
+        # This hybrid approach maintains INT4 inference efficiency while supporting LoRA
         output = self.base_layer.quant_method.apply(self.base_layer, x, bias)
 
         # In Transformers modeling backend, x and output have extra batch dimension like
@@ -128,6 +149,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             output = output.flatten(0, 1)
             x = x.flatten(0, 1)
 
+        # Apply LoRA: computes x @ lora_A @ lora_B and adds to output
+        # For INT4 layers, this effectively applies: INT4_kernel(x) + x @ LoRA_AB
         lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
             output, x, self.lora_a_stacked, self.lora_b_stacked, 1.0, self.output_slices
         )
@@ -138,6 +161,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     @property
     def weight(self) -> torch.Tensor:
+        # For INT4 quantized layers, return materialized FP16 weights if available
+        # This allows LoRA to attach to a proper weight tensor
+        if self._is_int4_quantized and self._materialized_weight is not None:
+            return self._materialized_weight
+
         # unquantizedLinear
         if hasattr(self.base_layer, "weight"):
             return self.base_layer.weight
@@ -161,4 +189,89 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         if hasattr(self.base_layer, "bias"):
             return self.base_layer.bias
         else:
+            return None
+
+    def _check_int4_quantization(self) -> bool:
+        """
+        Check if the base layer is using INT4 quantization.
+
+        Returns:
+            True if base layer has INT4 packed weights
+        """
+        # Check for packed weights (compressed-tensors INT4 format)
+        has_packed = hasattr(self.base_layer, "weight_packed") or (
+            hasattr(self.base_layer, "weight")
+            and hasattr(self.base_layer.weight, "dtype")
+            and self.base_layer.weight.dtype == torch.uint8
+        )
+
+        # Check for quantization scales (confirms it's quantized)
+        has_scales = hasattr(self.base_layer, "weight_scale")
+
+        return has_packed and has_scales
+
+    def _materialize_int4_weights(self) -> None:
+        """
+        Materialize FP16 weights from INT4 packed buffers for LoRA compatibility.
+
+        This creates LoRA-compatible weight tensors alongside the packed buffers.
+        The materialized weights are used for LoRA attachment while the packed
+        buffers continue to be used by the INT4 quantized kernels.
+        """
+        try:
+            unpacked_weights = self.get_unpacked_weights()
+            if unpacked_weights is not None:
+                self._materialized_weight = unpacked_weights
+                logger.info(
+                    f"Materialized INT4 weights to FP16: shape={unpacked_weights.shape}, "
+                    f"dtype={unpacked_weights.dtype}, device={unpacked_weights.device}"
+                )
+            else:
+                logger.warning(
+                    "Failed to materialize INT4 weights. "
+                    "LoRA may not attach correctly to this layer."
+                )
+        except Exception as e:
+            logger.error(
+                f"Error during INT4 weight materialization: {e}. "
+                f"LoRA attachment may fail for this layer."
+            )
+            self._materialized_weight = None
+
+    def get_unpacked_weights(self) -> torch.Tensor | None:
+        """
+        Get unpacked FP16 weights for INT4 quantized layers.
+
+        This is useful for operations that need access to dequantized weights,
+        such as merging LoRA adapters into the base weights or fine-tuning.
+
+        For inference-only use cases, this is typically not needed since
+        LoRA operates directly on the input activations.
+
+        Returns:
+            Unpacked FP16 weights, or None if layer is not INT4 quantized
+        """
+        if not self._is_int4_quantized:
+            return None
+
+        try:
+            from vllm.lora.int4_utils import get_unpacker
+
+            unpacker = get_unpacker()
+            # Generate unique name for caching
+            layer_name = f"{id(self.base_layer)}"
+
+            unpacked = unpacker.unpack_module(
+                module=self.base_layer,
+                module_name=layer_name,
+                output_dtype=torch.float16,
+            )
+
+            return unpacked
+        except Exception as e:
+            logger.warning(
+                "Failed to unpack INT4 weights: %s. "
+                "Inference will still work using quantized kernels.",
+                e,
+            )
             return None
