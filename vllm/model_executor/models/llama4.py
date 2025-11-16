@@ -54,6 +54,7 @@ from vllm.model_executor.models.utils import sequence_parallel_chunk
 from .llama import LlamaForCausalLM, LlamaMLP, LlamaModel
 from .utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     extract_layer_index,
     fast_topk,
     is_pp_missing_parameter,
@@ -738,6 +739,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.moe_layers = []
         example_moe = None
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             assert isinstance(layer, Llama4DecoderLayer)
             if isinstance(layer.feed_forward, Llama4MoE):
                 # Pick last one layer since the first ones may be dense layers.
@@ -774,6 +778,9 @@ class Llama4ForCausalLM(LlamaForCausalLM, MixtureOfExperts):
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
         for layer in self.model.layers:
+            if isinstance(layer, PPMissingLayer):
+                continue
+
             if isinstance(layer.feed_forward, Llama4MoE):
                 moe = layer.feed_forward
                 moe.n_local_physical_experts = num_local_physical_experts
