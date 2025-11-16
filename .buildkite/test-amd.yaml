@@ -1098,14 +1098,8 @@ steps:
 - label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  agent_pool: mi325_1
+  gpu: b200
   mirror_hardwares: [amdproduction]
-  optional: true # run on nightlies
-  source_file_dependencies:
-  - tests/evals/gpt_oss
-  - vllm/model_executor/models/gpt_oss.py
-  - vllm/model_executor/layers/quantization/mxfp4.py
-  - vllm/v1/attention/backends/flashinfer.py
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
