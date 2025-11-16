@@ -83,7 +83,7 @@ class EagleProposer:
         self.draft_indexer_metadata_builder: AttentionMetadataBuilder | None = None
         self.attn_layer_names: list[str] = []
         self.indexer_layer_names: list[str] = []
-        self.eagle3_use_aux_hidden_state: bool | None = (
+        self.eagle3_use_aux_hidden_state: bool = (
             self._get_eagle3_use_aux_hidden_state_from_config()
         )
 
@@ -229,10 +229,7 @@ class EagleProposer:
         if self.method == "eagle3":
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             # Do not combine hidden states if eagle3 head does not use aux hidden states
-            if (
-                self.eagle3_use_aux_hidden_state
-                or self.eagle3_use_aux_hidden_state is None
-            ):
+            if self.eagle3_use_aux_hidden_state:
                 target_hidden_states = self.model.combine_hidden_states(
                     target_hidden_states
                 )
@@ -492,7 +489,7 @@ class EagleProposer:
 
     def prepare_next_token_ids_cpu(
         self,
-        sampled_token_ids: list[list[int]],
+        sampled_token_ids: list[np.ndarray],
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
         num_scheduled_tokens: dict[str, int],
@@ -507,7 +504,7 @@ class EagleProposer:
         req_ids = gpu_input_batch.req_ids
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(sampled_token_ids):
-            if token_ids:
+            if token_ids.shape[0] > 0:
                 # Common case.
                 next_token_id = token_ids[-1]
             else:
@@ -518,10 +515,9 @@ class EagleProposer:
                 seq_len = req_state.num_computed_tokens + num_scheduled_tokens[req_id]
                 next_token_id = req_state.get_token_id(seq_len)
             next_token_ids.append(next_token_id)
-        next_token_ids = torch.tensor(
+        return torch.tensor(
             next_token_ids, dtype=torch.int32, device=self.input_ids.device
         )
-        return next_token_ids
 
     def prepare_next_token_ids_padded(
         self,
@@ -1000,6 +996,7 @@ class EagleProposer:
             target_language_model = target_model.get_language_model()
         else:
             target_language_model = target_model
+
         # share embed_tokens with the target model if needed
         if get_pp_group().world_size == 1:
             if hasattr(target_language_model.model, "embed_tokens"):
@@ -1011,51 +1008,92 @@ class EagleProposer:
                     "Target model does not have 'embed_tokens' or 'embedding' attribute"
                 )
 
-            # Check if shapes match and we found the embedding
-            eagle_shape = self.model.model.embed_tokens.weight.shape
-            target_shape = target_embed_tokens.weight.shape
-            if eagle_shape == target_shape:
-                logger.info(
-                    "Assuming the EAGLE head shares the same vocab embedding"
-                    " with the target model."
-                )
-                del self.model.model.embed_tokens
-                self.model.model.embed_tokens = target_embed_tokens
+            share_embeddings = False
+            if hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE model
+                if not self.model.has_own_embed_tokens:
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model without its own embed_tokens in the"
+                        " checkpoint. Sharing target model embedding weights with the"
+                        " draft model."
+                    )
+                elif (
+                    isinstance(target_embed_tokens.weight, torch.Tensor)
+                    and isinstance(self.model.model.embed_tokens.weight, torch.Tensor)
+                    and torch.equal(
+                        target_embed_tokens.weight, self.model.model.embed_tokens.weight
+                    )
+                ):
+                    share_embeddings = True
+                    logger.info(
+                        "Detected EAGLE model with embed_tokens identical to the target"
+                        " model. Sharing target model embedding weights with the draft"
+                        " model."
+                    )
+                else:
+                    logger.info(
+                        "Detected EAGLE model with distinct embed_tokens weights. "
+                        "Keeping separate embedding weights from the target model."
+                    )
             else:
+                # MTP model
+                share_embeddings = True
                 logger.info(
-                    "The EAGLE head's vocab embedding will be loaded separately"
-                    " from the target model."
+                    "Detected MTP model. "
+                    "Sharing target model embedding weights with the draft model."
                 )
+
+            if share_embeddings:
+                if hasattr(self.model.model, "embed_tokens"):
+                    del self.model.model.embed_tokens
+                self.model.model.embed_tokens = target_embed_tokens
         else:
             logger.info(
-                "The EAGLE head's vocab embedding will be loaded separately"
+                "The draft model's vocab embedding will be loaded separately"
                 " from the target model."
             )
 
         # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3":
-            if hasattr(target_language_model, "lm_head"):
-                logger.info("Loading EAGLE LM head weights from the target model.")
-                self.model.lm_head = target_language_model.lm_head
-        else:
-            if (
-                hasattr(self.model, "lm_head")
-                and hasattr(target_language_model, "lm_head")
-                and not self.model.has_own_lm_head
-            ):
+        share_lm_head = False
+        if hasattr(self.model, "has_own_lm_head"):
+            # EAGLE model
+            if not self.model.has_own_lm_head:
+                share_lm_head = True
                 logger.info(
-                    "Assuming the EAGLE head shares the same lm_head"
-                    " with the target model."
+                    "Detected EAGLE model without its own lm_head in the checkpoint. "
+                    "Sharing target model lm_head weights with the draft model."
                 )
-                del self.model.lm_head
-                self.model.lm_head = target_language_model.lm_head
+            elif (
+                hasattr(target_language_model, "lm_head")
+                and isinstance(target_language_model.lm_head.weight, torch.Tensor)
+                and isinstance(self.model.lm_head.weight, torch.Tensor)
+                and torch.equal(
+                    target_language_model.lm_head.weight, self.model.lm_head.weight
+                )
+            ):
+                share_lm_head = True
+                logger.info(
+                    "Detected EAGLE model with lm_head identical to the target model. "
+                    "Sharing target model lm_head weights with the draft model."
+                )
             else:
                 logger.info(
-                    "The EAGLE head's lm_head will be loaded separately"
-                    " from the target model."
+                    "Detected EAGLE model with distinct lm_head weights. "
+                    "Keeping separate lm_head weights from the target model."
                 )
+        else:
+            # MTP model
+            share_lm_head = True
+            logger.info(
+                "Detected MTP model. "
+                "Sharing target model lm_head weights with the draft model."
+            )
+
+        if share_lm_head and hasattr(target_language_model, "lm_head"):
+            if hasattr(self.model, "lm_head"):
+                del self.model.lm_head
+            self.model.lm_head = target_language_model.lm_head
 
     @torch.inference_mode()
     def dummy_run(
@@ -1115,20 +1153,20 @@ class EagleProposer:
         )
         return builder
 
-    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool | None:
+    def _get_eagle3_use_aux_hidden_state_from_config(self) -> bool:
         """
         Some eagle3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use auxiliary
         hidden states and directly uses the last layer output just like eagle1.
         They might indicate this by setting "use_aux_hidden_state" to False
-        inside the "eagle_config" dict of their hf_config. Retrieve this flag
-        and return None if not found.
+        inside the "eagle_config" dict of their hf_config.
         """
         if self.method != "eagle3":
-            return None
-        use_aux_hidden_state: bool | None = None
+            return False
+        # Assume that eagle3 heads use aux hidden states by default
+        use_aux_hidden_state = True
         eagle_config = getattr(self.draft_model_config.hf_config, "eagle_config", None)
         if eagle_config is not None:
-            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", None)
+            use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:

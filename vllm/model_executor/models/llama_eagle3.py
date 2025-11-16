@@ -23,7 +23,7 @@ from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -260,8 +260,6 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
-        # Will be set to True if lm_head is found during weight loading
-        self.has_own_lm_head = False
 
     def embed_input_ids(
         self,
@@ -323,11 +321,10 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 includes_draft_id_mapping = True
             elif "lm_head" not in name:
                 name = "model." + name
-            else:
-                self.has_own_lm_head = True
             if "embed_tokens" in name:
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
+            process_eagle_weight(self, name)
 
         skip_substrs = []
         if not includes_draft_id_mapping:
