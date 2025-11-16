@@ -33,6 +33,7 @@ from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
 from vllm.utils.func_utils import deprecate_kwargs
 from vllm.utils.math_utils import cdiv
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
@@ -112,6 +113,16 @@ class AsyncLLM(EngineClient):
             tokenizer = None
         else:
             tokenizer = init_tokenizer_from_configs(self.model_config)
+
+        try:
+            self.policy = SchedulingPolicy(self.vllm_config.scheduler_config.policy)
+        except ValueError as e:
+            raise ValueError(
+                f"Unknown scheduling policy: {self.vllm_config.scheduler_config.policy}"
+            ) from e
+        self.request_queue = create_request_queue(self.policy)
+        self.n_request_in_core = 0
+        self.max_request_in_core = self.vllm_config.scheduler_config.max_num_seqs * 2
 
         self.processor = Processor(self.vllm_config, tokenizer)
         self.io_processor = get_io_processor(
@@ -334,14 +345,25 @@ class AsyncLLM(EngineClient):
         index: int,
         queue: RequestOutputCollector,
     ):
-        # Add the request to OutputProcessor (this process).
-        self.output_processor.add_request(request, prompt, parent_req, index, queue)
-
-        # Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core.add_request_async(request)
+        self.request_queue.add_request((request, prompt, parent_req, index, queue))
+        await self._push_request()
 
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
+
+    async def _push_request(self):
+        # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
+        # Therefore, keep most requests waiting outside the core.
+        for i in range(self.max_request_in_core - self.n_request_in_core):
+            if not self.request_queue:
+                break
+
+            request, prompt, parent_req, index, queue = self.request_queue.pop_request()
+            # Add the request to OutputProcessor (this process).
+            self.output_processor.add_request(request, prompt, parent_req, index, queue)
+            # Add the EngineCoreRequest to EngineCore (separate process).
+            await self.engine_core.add_request_async(request)
+            self.n_request_in_core += 1
 
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
@@ -476,6 +498,11 @@ class AsyncLLM(EngineClient):
                     # 1) Pull EngineCoreOutputs from the EngineCore.
                     outputs = await engine_core.get_output_async()
                     num_outputs = len(outputs.outputs)
+
+                    for output in outputs.outputs:
+                        if output.finished:
+                            self.n_request_in_core -= num_outputs
+                    await self._push_request()
 
                     iteration_stats = (
                         IterationStats() if (log_stats and num_outputs) else None

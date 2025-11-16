@@ -3,6 +3,7 @@
 
 import itertools
 from collections.abc import Callable, Sequence
+from multiprocessing.pool import ThreadPool
 from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 from tqdm.auto import tqdm
 from typing_extensions import TypeVar, deprecated
 
+import vllm.envs as envs
 from vllm.beam_search import (
     BeamSearchInstance,
     BeamSearchOutput,
@@ -81,6 +83,7 @@ from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.processor import ProcessorPool
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
 if TYPE_CHECKING:
@@ -346,6 +349,7 @@ class LLM:
         self.engine_class = type(self.llm_engine)
 
         self.request_counter = Counter()
+        self.request_queue = []
         self.default_sampling_params: dict[str, Any] | None = None
 
         supported_tasks = self.llm_engine.get_supported_tasks()
@@ -353,8 +357,14 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.processor = self.llm_engine.processor
         self.io_processor = self.llm_engine.io_processor
+
+        if envs.VLLM_NUM_PREPROCESSOR > 0:
+            self.pool = ThreadPool(envs.VLLM_NUM_PREPROCESSOR)
+            self.processor = ProcessorPool(self.llm_engine.processor)
+        else:
+            self.pool = None
+            self.processor = self.llm_engine.processor
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer()
@@ -1668,7 +1678,7 @@ class LLM:
         *,
         lora_request: LoRARequest | None,
         priority: int,
-    ) -> tuple[EngineCoreRequest, dict[str, Any]]:
+    ) -> tuple[EngineCoreRequest, dict[str, Any], str, tuple]:
         """Use the Processor to process inputs for LLMEngine."""
         tokenization_kwargs: dict[str, Any] = {}
         _validate_truncation_size(
@@ -1685,7 +1695,18 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
-        return engine_request, tokenization_kwargs
+
+        prompt_text, _, _ = get_prompt_components(engine_prompt)
+
+        return (
+            engine_request,
+            tokenization_kwargs,
+            prompt_text,
+            (request_id, params, lora_request, priority),
+        )
+
+    def process_inputs(self, kwargs):
+        return self._process_inputs(**kwargs)
 
     def _add_request(
         self,
@@ -1694,25 +1715,15 @@ class LLM:
         lora_request: LoRARequest | None = None,
         priority: int = 0,
     ) -> str:
-        prompt_text, _, _ = get_prompt_components(prompt)
         request_id = str(next(self.request_counter))
-
-        engine_request, tokenization_kwargs = self._process_inputs(
-            request_id,
-            prompt,
-            params,
-            lora_request=lora_request,
-            priority=priority,
-        )
-
-        self.llm_engine.add_request(
-            request_id,
-            engine_request,
-            params,
-            lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-            priority=priority,
-            prompt_text=prompt_text,
+        self.request_queue.append(
+            {
+                "request_id": request_id,
+                "engine_prompt": prompt,
+                "params": params,
+                "lora_request": lora_request,
+                "priority": priority,
+            }
         )
         return request_id
 
@@ -1734,10 +1745,49 @@ class LLM:
         outputs: list[RequestOutput | PoolingRequestOutput] = []
         total_in_toks = 0
         total_out_toks = 0
-        while self.llm_engine.has_unfinished_requests():
+
+        # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
+        # Therefore, keep most requests waiting outside the core.
+        # Todo: Whether to support priority scheduling?
+        max_request_in_core = (
+            self.llm_engine.vllm_config.scheduler_config.max_num_seqs * 2
+        )
+        n_request_in_core = 0
+        n_waited_request = len(self.request_queue)
+
+        if self.pool is not None:
+            tasks = self.pool.imap_unordered(self.process_inputs, self.request_queue)
+        else:
+            tasks = (self.process_inputs(t) for t in self.request_queue)
+
+        while n_waited_request or self.llm_engine.has_unfinished_requests():
+            for i in range(max_request_in_core - n_request_in_core):
+                if n_waited_request == 0:
+                    break
+
+                (
+                    engine_request,
+                    tokenization_kwargs,
+                    prompt_text,
+                    (request_id, params, lora_request, priority),
+                ) = next(tasks)
+                n_waited_request -= 1
+                n_request_in_core += 1
+
+                self.llm_engine.add_request(
+                    request_id,
+                    engine_request,
+                    params,
+                    lora_request=lora_request,
+                    tokenization_kwargs=tokenization_kwargs,
+                    priority=priority,
+                    prompt_text=prompt_text,
+                )
+
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:
+                    n_request_in_core -= 1
                     outputs.append(output)
                     if use_tqdm:
                         if isinstance(output, RequestOutput):
@@ -1762,6 +1812,8 @@ class LLM:
 
         if use_tqdm:
             pbar.close()
+
+        self.request_queue.clear()
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.

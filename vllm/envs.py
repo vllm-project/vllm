@@ -226,6 +226,7 @@ if TYPE_CHECKING:
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_FLAT_LOGPROBS: bool = False
+    VLLM_NUM_PREPROCESSOR: int = 0
 
 
 def get_default_cache_root():
@@ -1504,6 +1505,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # After enabled, PromptLogprobs and SampleLogprobs would populated as
     # FlatLogprobs.
     "VLLM_FLAT_LOGPROBS": lambda: bool(int(os.getenv("VLLM_FLAT_LOGPROBS", "0"))),
+
+    "VLLM_NUM_PREPROCESSOR": lambda: int(os.getenv("VLLM_NUM_PREPROCESSOR", "0")),
 }
 
 # --8<-- [end:env-vars-definition]
