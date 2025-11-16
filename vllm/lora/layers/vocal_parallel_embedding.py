@@ -159,7 +159,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None,
     ) -> bool:
-        return type(source_layer) is VocabParallelEmbedding
+        return (
+            type(source_layer) is VocabParallelEmbedding
+            or type(source_layer)
+            is VocabParallelEmbedding.op_registry_oot[VocabParallelEmbedding.__name__]
+        )
 
     @property
     def weight(self):
