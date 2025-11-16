@@ -2092,6 +2092,12 @@ class GPUModelRunner(
         """
         if not self.parallel_config.enable_eplb:
             return
+        if is_profile and self.parallel_config.eplb_config.load_initial_load_window: # Maybe we can get rid of that
+            return
+        if (
+            self.parallel_config.eplb_config.static
+        ):
+            return
 
         assert self.eplb_state is not None
         model = self.get_model()
@@ -3153,6 +3159,10 @@ class GPUModelRunner(
                 old_global_expert_indices,
                 rank_mapping,
             )
+            if self.parallel_config.eplb_config.load_path is not None:
+                self.eplb_state.rearrange(self.model)
+                if self.parallel_config.eplb_config.save_dir is None:
+                    self.eplb_state = None
 
         if (
             self.vllm_config.compilation_config.mode

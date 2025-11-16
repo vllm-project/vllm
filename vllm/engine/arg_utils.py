@@ -10,6 +10,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import MISSING, dataclass, fields, is_dataclass
 from itertools import permutations
+from pathlib import Path
 from types import UnionType
 from typing import (
     TYPE_CHECKING,
