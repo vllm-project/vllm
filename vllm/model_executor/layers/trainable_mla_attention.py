@@ -193,7 +193,7 @@ class TrainableMLA(nn.Module):
 
             print(f"  ✓ Created vLLM MLAAttention for {layer_name}")
 
-        except (ImportError, RuntimeError, AttributeError) as e:
+        except (ImportError, RuntimeError, AttributeError, AssertionError) as e:
             # vLLM not available or not in vLLM context - use manual implementation
             print(f"  ⚠️  Could not create vLLM MLAAttention: {e}")
             pass
@@ -407,7 +407,7 @@ class TrainableMLA(nn.Module):
                     positions = torch.arange(
                         total_tokens, device=hidden_states_flat.device
                     )
-            except (ImportError, AttributeError):
+            except (ImportError, AttributeError, AssertionError):
                 # Training mode: sequential positions
                 positions = torch.arange(total_tokens, device=hidden_states_flat.device)
 
@@ -416,6 +416,7 @@ class TrainableMLA(nn.Module):
             q = self.wq(hidden_states_flat)  # [total_tokens, n_heads * qk_head_dim]
         else:
             q = self.wq_a(hidden_states_flat)  # [total_tokens, q_lora_rank]
+            assert self.q_norm is not None  # q_norm exists when q_lora_rank > 0
             q = self.wq_b(self.q_norm(q))  # [total_tokens, n_heads * qk_head_dim]
 
         # Reshape: [total_tokens, n_heads, qk_head_dim]

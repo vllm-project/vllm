@@ -19,7 +19,6 @@ from vllm.attention.utils.fa_utils import is_flash_attn_varlen_func_available
 if is_flash_attn_varlen_func_available():
     from vllm.attention.utils.fa_utils import (
         flash_attn_varlen_func,
-        reshape_and_cache_flash,
     )
 
 from vllm.config import VllmConfig
@@ -44,9 +43,10 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
         # Create TorchTitan-compatible module (separate projections)
         attn = TrainableFlashAttention(
-            hidden_size=768, num_heads=12,
+            hidden_size=768,
+            num_heads=12,
             use_fused_qkv=False,  # Separate wq/wk/wv for compatibility
-            use_qk_norm=True,     # QK normalization like Qwen3
+            use_qk_norm=True,  # QK normalization like Qwen3
         )
 
         # Use in training
@@ -128,9 +128,7 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
             )
         else:
             # Separate projections (TorchTitan compatibility)
-            self.wq = nn.Linear(
-                hidden_size, num_heads * self.head_dim, bias=False
-            )
+            self.wq = nn.Linear(hidden_size, num_heads * self.head_dim, bias=False)
             self.wk = nn.Linear(
                 hidden_size, self.num_kv_heads * self.head_dim, bias=False
             )
@@ -157,8 +155,11 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
         # This delegates all the complex KV cache logic to vLLM
         try:
             from vllm.config import get_current_vllm_config
+
             config = get_current_vllm_config()
-            cache_config = config.cache_config if hasattr(config, 'cache_config') else None
+            cache_config = (
+                config.cache_config if hasattr(config, "cache_config") else None
+            )
 
             # Generate unique prefix for this attention layer
             # vLLM expects format "layers.X" for layer index extraction
@@ -219,7 +220,8 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        freqs_cis: torch.Tensor | None = None,  # RoPE frequencies (TorchTitan compatibility)
+        freqs_cis: torch.Tensor
+        | None = None,  # RoPE frequencies (TorchTitan compatibility)
         attention_mask: torch.Tensor | None = None,
         **kwargs,  # Accept any additional vLLM-specific kwargs
     ) -> torch.Tensor:
@@ -281,33 +283,38 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
             k = self.k_norm(k)
 
         # DEBUG: Log layer 0 values to compare with TorchTitan
-        is_layer_0 = not hasattr(self, '_debug_logged')
+        is_layer_0 = not hasattr(self, "_debug_logged")
         if is_layer_0 and total_tokens > 1 and total_tokens < 100:  # Skip warmup
             self._debug_logged = True
-            print(f"\n[VLLM ATT DEBUG] Layer 0 - Input")
+            print("\n[VLLM ATT DEBUG] Layer 0 - Input")
             print(f"  hidden_states.shape: {hidden_states.shape}")
             print(f"  total_tokens: {total_tokens}")
-            print(f"  q (before RoPE)[0,0,:5]: {q[0,0,:5]}")
-            print(f"  k (before RoPE)[0,0,:5]: {k[0,0,:5]}")
+            print(f"  q (before RoPE)[0,0,:5]: {q[0, 0, :5]}")
+            print(f"  k (before RoPE)[0,0,:5]: {k[0, 0, :5]}")
 
         # Apply RoPE if freqs_cis is provided (TorchTitan integration)
         if freqs_cis is not None:
             # Get positions from vLLM forward context
             try:
                 from vllm.forward_context import get_forward_context
+
                 forward_ctx = get_forward_context()
 
                 # Try to get positions from custom attribute set by wrapper
                 positions = None
-                if hasattr(forward_ctx, '_torchtitan_positions'):
+                if hasattr(forward_ctx, "_torchtitan_positions"):
                     positions = forward_ctx._torchtitan_positions
                     # Debug: Log positions during generation, not just warmup
-                    unique_pos = torch.unique(positions[:min(100, len(positions))])
-                    if len(unique_pos) > 1 or unique_pos[0] != 0:  # Skip warmup with all zeros
-                        if not hasattr(self, '_rope_gen_debug'):
+                    unique_pos = torch.unique(positions[: min(100, len(positions))])
+                    if (
+                        len(unique_pos) > 1 or unique_pos[0] != 0
+                    ):  # Skip warmup with all zeros
+                        if not hasattr(self, "_rope_gen_debug"):
                             self._rope_gen_debug = True
                             print(f"\n[ROPE GEN] Got real positions: {unique_pos[:20]}")
-                            print(f"[ROPE GEN] total_tokens: {total_tokens}, freqs_cis.shape: {freqs_cis.shape}")
+                            print(
+                                f"[ROPE GEN] total_tokens: {total_tokens}, freqs_cis.shape: {freqs_cis.shape}"
+                            )
                 else:
                     # Fallback to sequential positions
                     positions = torch.arange(total_tokens, device=q.device)
@@ -346,13 +353,13 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                 if is_layer_0 and total_tokens > 1 and total_tokens < 100:
                     print(f"  RoPE applied with positions: {unique_pos[:10]}")
                     print(f"  freqs_cis.shape: {freqs_cis.shape}")
-                    print(f"  q (after RoPE)[0,0,:5]: {q[0,0,:5]}")
-                    print(f"  k (after RoPE)[0,0,:5]: {k[0,0,:5]}")
+                    print(f"  q (after RoPE)[0,0,:5]: {q[0, 0, :5]}")
+                    print(f"  k (after RoPE)[0,0,:5]: {k[0, 0, :5]}")
 
-            except (ImportError, AttributeError, IndexError) as e:
+            except (ImportError, AttributeError, IndexError, AssertionError) as e:
                 # If we can't get positions, fall through without RoPE
                 # This will happen in pure training mode
-                if not hasattr(self, '_rope_error'):
+                if not hasattr(self, "_rope_error"):
                     self._rope_error = True
                     print(f"\n[ROPE DEBUG] Error applying RoPE: {e}")
                 pass
@@ -415,7 +422,9 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                     is_causal=self.causal and attention_mask is None,
                 )
 
-                attn_output = attn_output.transpose(1, 2)  # [batch, seq_len, heads, dim]
+                attn_output = attn_output.transpose(
+                    1, 2
+                )  # [batch, seq_len, heads, dim]
                 attn_output = attn_output.reshape(
                     total_tokens, self.num_heads, self.head_dim
                 )
@@ -429,8 +438,8 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
         # DEBUG: Log attention output for layer 0
         if is_layer_0 and total_tokens > 1 and total_tokens < 100:
-            print(f"  attn_output (before o_proj)[0,:5]: {attn_output[0,:5]}")
-            print(f"  output (after o_proj)[0,:5]: {output[0,:5]}")
+            print(f"  attn_output (before o_proj)[0,:5]: {attn_output[0, :5]}")
+            print(f"  output (after o_proj)[0,:5]: {output[0, :5]}")
 
         # Restore original shape if input was batched
         if input_is_batched:
