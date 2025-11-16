@@ -112,7 +112,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 "prompt_logprobs is not compatible with prompt embeds."
             )
 
-        request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+        request_id = self._internal_request_id(raw_request, "cmpl", request.request_id)
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)

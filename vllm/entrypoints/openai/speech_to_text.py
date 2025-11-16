@@ -161,7 +161,7 @@ class OpenAISpeechToText(OpenAIServing):
                 "Currently only support response_format `text` or `json`"
             )
 
-        request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
+        request_id = self._internal_request_id(raw_request, self.task_type)
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
