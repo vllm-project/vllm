@@ -30,7 +30,14 @@ async def lifespan(app: FastAPI):
         prefiller_base_url = f"http://{host}:{port}/v1"
         app.state.prefill_clients.append(
             {
-                "client": httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+                "client": httpx.AsyncClient(
+                    timeout=None,
+                    base_url=prefiller_base_url,
+                    limits=httpx.Limits(
+                        max_connections=None,
+                        max_keepalive_connections=None,
+                    ),
+                ),
                 "host": host,
                 "port": port,
                 "id": i,
@@ -42,7 +49,14 @@ async def lifespan(app: FastAPI):
         decoder_base_url = f"http://{host}:{port}/v1"
         app.state.decode_clients.append(
             {
-                "client": httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
+                "client": httpx.AsyncClient(
+                    timeout=None,
+                    base_url=decoder_base_url,
+                    limits=httpx.Limits(
+                        max_connections=None,
+                        max_keepalive_connections=None,
+                    ),
+                ),
                 "host": host,
                 "port": port,
                 "id": i,
@@ -168,6 +182,10 @@ async def send_request_to_service(
         endpoint, json=req_data, headers=headers
     )
     response.raise_for_status()
+
+    # read/consume the response body to release the connection
+    # otherwise, it would http.ReadError
+    await response.aread()
 
     return response
 
