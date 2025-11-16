@@ -41,12 +41,9 @@ logger = init_logger(__name__)
 class GGUFConfig(QuantizationConfig):
     """Config class for GGUF."""
 
-    def __init__(
-        self, unquantized_modules: list[str] | None = None, model_arch: str = ""
-    ) -> None:
+    def __init__(self, unquantized_modules: list[str] | None = None) -> None:
         super().__init__()
         self.unquantized_modules = unquantized_modules or []
-        self.model_arch = model_arch
 
     def __repr__(self) -> str:
         return "GGUFConfig()"
@@ -67,9 +64,7 @@ class GGUFConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
-        # Extract model_arch from config if available
-        model_arch = config.get("model_arch", "")
-        return cls(model_arch=model_arch)
+        return cls()
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -79,13 +74,13 @@ class GGUFConfig(QuantizationConfig):
                 prefix, self.unquantized_modules, self.packed_modules_mapping
             ):
                 return UnquantizedLinearMethod()
-            return GGUFLinearMethod(self, self.model_arch)
+            return GGUFLinearMethod(self)
         elif isinstance(layer, VocabParallelEmbedding):
             if is_layer_skipped_gguf(
                 prefix, self.unquantized_modules, self.packed_modules_mapping
             ):
                 return UnquantizedEmbeddingMethod()
-            return GGUFEmbeddingMethod(self, self.model_arch)
+            return GGUFEmbeddingMethod(self)
         elif isinstance(layer, FusedMoE):
             return GGUFMoEMethod(self, layer.moe_config)
         return None
@@ -177,10 +172,7 @@ MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 
 
 def _fused_mul_mat_gguf(
-    x: torch.Tensor,
-    qweight: torch.Tensor,
-    qweight_type: int,
-    target_dtype: torch.dtype | None = None,
+    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
 ) -> torch.Tensor:
     if qweight_type in IMATRIX_QUANT_TYPES:
         mmvq_safe = 8 if qweight.shape[0] > 5120 else 16
@@ -190,15 +182,9 @@ def _fused_mul_mat_gguf(
     # so input to logits generator is empty which causes invalid parameter
     if x.shape[0] == 0:
         return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
-    # Unquantized weights (F16/BF16) use direct matrix multiplication
+    # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
-        # GGUF stores some weights as F16, but the model may use bfloat16 for
-        # computation. Convert weight dtype to match target_dtype (typically
-        # params_dtype=bfloat16) to ensure consistency in mixed-precision.
-        weight = qweight
-        if target_dtype is not None and weight.dtype != target_dtype:
-            weight = weight.to(target_dtype)
-        return x @ weight.T
+        return x @ qweight.T
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
@@ -209,9 +195,7 @@ def _fused_mul_mat_gguf(
     elif qweight_type in DEQUANT_TYPES:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         shape = (qweight.shape[0], qweight.shape[1] // type_size * block_size)
-        # Use target_dtype if provided, otherwise fall back to x.dtype
-        dequant_dtype = target_dtype if target_dtype is not None else x.dtype
-        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, dequant_dtype)
+        weight = ops.ggml_dequantize(qweight, qweight_type, *shape, x.dtype)
         y = x @ weight.T
     else:
         # Raise an error if the quantization type is not supported.
@@ -226,7 +210,6 @@ def _fused_mul_mat_gguf_fake(
     x: torch.Tensor,
     qweight: torch.Tensor,
     qweight_type: int,
-    target_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
 
@@ -385,13 +368,7 @@ def _apply_gguf_embedding(
     dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     if qweight_type in UNQUANTIZED_TYPES:
-        # torch.embedding preserves weight tensor dtype (F16 for GGUF).
-        # Convert result to model's computation dtype (typically bfloat16)
-        # to maintain consistency throughout forward pass.
-        result = torch.embedding(qweight, x)
-        if dtype is not None and result.dtype != dtype:
-            result = result.to(dtype)
-        return result
+        return torch.embedding(qweight, x)
     elif qweight_type in DEQUANT_TYPES:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
         x_flat = x.flatten()
@@ -435,9 +412,7 @@ class GGUFLinearMethod(LinearMethodBase):
         quant_config: The GGUF quantization config.
     """
 
-    def __init__(self, quant_config: GGUFConfig, model_arch: str = ""):
-        self.model_arch = model_arch.lower()
-        self.is_gemma3 = "gemma3" in self.model_arch
+    def __init__(self, quant_config: GGUFConfig):
         self.quant_config = quant_config
 
     def create_weights(
@@ -451,9 +426,6 @@ class GGUFLinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ):
         self.params_dtype = params_dtype
-        # Gemma3 isolation: only apply dtype conversion for Gemma3 models
-        self.target_dtype = params_dtype if self.is_gemma3 else None
-
         output_size_per_partition = sum(output_partition_sizes)
 
         tensor_shape = (output_size_per_partition, input_size_per_partition)
@@ -552,18 +524,14 @@ class GGUFLinearMethod(LinearMethodBase):
                 qweight_type = layer.qweight_type.shard_weight_type[idx]
                 result.append(
                     fused_mul_mat_gguf(
-                        x,
-                        qweight[start:end, :offset].contiguous(),
-                        qweight_type,
-                        self.target_dtype,
+                        x, qweight[start:end, :offset].contiguous(), qweight_type
                     )
                 )
             out = torch.cat(result, axis=1)
         else:
             qweight = layer.qweight
             qweight_type = layer.qweight_type.weight_type
-            # Gemma3 isolation: only apply dtype conversion for Gemma3
-            out = fused_mul_mat_gguf(x, qweight, qweight_type, self.target_dtype)
+            out = fused_mul_mat_gguf(x, qweight, qweight_type)
         if bias is not None:
             out.add_(bias)
         return out
