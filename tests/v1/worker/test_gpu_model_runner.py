@@ -483,7 +483,10 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     # Permutation that gets you back to expected kv shape
     for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
 
-        def rnd_stride_order(test_stride=test_stride):
+        def rnd_stride_order(
+            include_num_layers_dimension: bool = False, test_stride=test_stride
+        ):
+            assert not include_num_layers_dimension
             return test_stride
 
         # Patch the attention backend class and re-trigger the KV cache creation

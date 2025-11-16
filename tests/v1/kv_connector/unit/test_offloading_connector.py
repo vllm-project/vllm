@@ -92,7 +92,7 @@ class MockOffloadingSpec(OffloadingSpec):
         return self.manager
 
     def get_handlers(
-        self, _
+        self, _, __
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         yield GPULoadStoreSpec, MockLoadStoreSpec, self.handler
         yield MockLoadStoreSpec, GPULoadStoreSpec, self.handler

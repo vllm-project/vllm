@@ -142,3 +142,14 @@ class KVConnectorModelRunnerMixin:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_kv_connector_stats()
         return None
+
+    @staticmethod
+    def kv_connector_prefers_cross_layer_blocks() -> bool:
+        """
+        Returns whether a KV connector is configured and prefers
+        KV data to be contiguous across layers
+        (for speeding up KV data transfers).
+        """
+        if not has_kv_transfer_group():
+            return False
+        return get_kv_transfer_group().prefer_cross_layer_blocks()
