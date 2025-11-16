@@ -49,9 +49,6 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
-    VLLM_ATTENTION_BACKEND: str | None = None
-    VLLM_PP_LAYER_PARTITION: str | None = None
-    VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
     VLLM_CPU_MOE_PREPACK: bool = True
