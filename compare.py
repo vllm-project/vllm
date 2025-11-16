@@ -36,7 +36,7 @@ def print_to_log(s, log_file):
         f.write(s + "\n")
 
 
-def test_accuracy(logits, k, p, func_list):
+def test_accuracy(logits, k, p, func_list, log_file):
     input_logit_list = [logits.clone().detach() for i in range(len(func_list))]
     original_logits = func_list[0](input_logit_list[0], k, p)
     output_correct_list = []
@@ -67,7 +67,7 @@ def test_accuracy(logits, k, p, func_list):
             error_cols = torch.unique(error_cols)
             num_error_cols = error_cols.shape[0]
             print_to_log(
-                f"num_error_rows: {num_error_rows} - {error_rows}",
+                f"num_error_rows: {num_error_rows} - {error_rows}\n" + \
                 f"num_error_cols: {num_error_cols} - {error_cols}",
                 log_file,
             )
@@ -112,12 +112,10 @@ def test_time(logits, k, p, test_func, num_runs=30, num_warmup=5):
 if __name__ == "__main__":
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    batch_size_list = [64, 128, 1024]
-    vocab_size_list = [4096, 16384, 65536, 128000, 262144]
-    p_list = [None, "RAND"]
-    # p_list = [None]
-    k_list = [None, "RAND"]
-    # k_list = [None]
+    batch_size_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    vocab_size_list = [16384, 65536, 102400, 128256]
+    p_list = [None, "RAND", 0.1, 0.4, 0.7, 0.9, 0.99]
+    k_list = [None, "RAND", 5, 50, 200, 500, 3000]
     func_list = [apply_top_k_top_p, apply_top_k_top_p_triton]
 
     log_file = f"triton_topk_topp_test_{date_str}.log"
@@ -134,9 +132,8 @@ if __name__ == "__main__":
 
     with open(csv_file, "w") as f:
         f.write(
-            "dist_generator,batch_size,vocab_size,p,k,triton_correct,\n"
-            "test_correct,torch_time_taken,triton_time_taken,test_time_taken,\n"
-            "triton_speedup,test_speedup\n"
+            "dist_generator,batch_size,vocab_size,p,k,triton_correct,"
+            "torch_time_taken,triton_time_taken,triton_speedup\n"
         )
 
     for batch_size, vocab_size, p, k in product(
@@ -177,38 +174,23 @@ if __name__ == "__main__":
                 + f"{k}",
                 log_file,
             )
-            correct_list = test_accuracy(logits, k_tensor, p_tensor, func_list)
-            for i in range(len(func_list) - 1):
-                is_correct = correct_list[i]
-                if not is_correct:
-                    print_to_log(
-                        f"Error: logits are not close for "
-                        f"function {func_list[i + 1].__name__}, "
-                        f" batch_size: {batch_size},"
-                        f" vocab_size: {vocab_size}, dist_generator: "
-                        f"{dist_generator}, p: {p}, k: {k}",
-                        log_file,
-                    )
-            time_list = []
-            for func in func_list:
-                time_taken = test_time(logits, k_tensor, p_tensor, test_func=func)
-                time_list.append(time_taken)
-            print_to_log(b_str("torch_time_taken: ") + f"{time_list[0]}", log_file)
-            print_to_log(b_str("test_time_taken: ") + f"{time_list[1]}", log_file)
+            correct_list = \
+                test_accuracy(logits, k_tensor, p_tensor, func_list, log_file)
+            # time_list = []
+            # for func in func_list:
+            #     time_taken = test_time(logits, k_tensor, p_tensor, test_func=func)
+            #     time_list.append(time_taken)
+            # print_to_log(b_str("torch_time_taken: ") + f"{time_list[0]}", log_file)
+            # print_to_log(b_str("triton_time_taken: ") + f"{time_list[1]}", log_file)
             # print_to_log(
-            #     b_str("test_time_taken: ") + f"{time_list[2]}", log_file)
-            print_to_log(
-                g_str("test Speedup over Torch: ")
-                + f"{time_list[0] / time_list[1]:.8f}x",
-                log_file,
-            )
-            # print_to_log(
-            #     y_str("Test Speedup over Torch: ") +
-            # f"{time_list[0] / time_list[2]:.8f}x", log_file)
-            with open(csv_file, "a") as f:
-                f.write(
-                    f"{dist_generator},{batch_size},{vocab_size},{p},{k},"
-                    f"{correct_list[0]},{time_list[0]},"
-                    f"{time_list[0] / time_list[1]:.8f}\n"
-                )
-            print_to_log(y_str("--------------------------------\n"), log_file)
+            #     g_str("test Speedup over Torch: ")
+            #     + f"{time_list[0] / time_list[1]:.8f}x",
+            #     log_file,
+            # )
+            # with open(csv_file, "a") as f:
+            #     f.write(
+            #         f"{dist_generator},{batch_size},{vocab_size},{p},{k},"
+            #         f"{correct_list[0]},{time_list[0]},{time_list[1]},"
+            #         f"{time_list[0] / time_list[1]:.8f}\n"
+            #     )
+            # print_to_log(y_str("--------------------------------\n"), log_file)
