@@ -179,8 +179,7 @@ def test_extract_tool_calls_with_braces_in_strings(parser):
     # Test with braces inside string values
     # This is a regression test for string-awareness in JSON extraction
     model_output = (
-        '{"name": "search", '
-        '"parameters": {"query": "find users with status {active}"}}'
+        '{"name": "search", "parameters": {"query": "find users with status {active}"}}'
     )
     result = parser.extract_tool_calls(model_output, None)
 
@@ -197,8 +196,7 @@ def test_extract_tool_calls_with_braces_in_strings(parser):
 def test_extract_tool_calls_with_code_snippets(parser):
     # Test with code snippets containing braces
     model_output = (
-        '{"name": "code_tool", '
-        '"parameters": {"snippet": "function() { return {}; }"}}'
+        '{"name": "code_tool", "parameters": {"snippet": "function() { return {}; }"}}'
     )
     result = parser.extract_tool_calls(model_output, None)
 
@@ -215,8 +213,7 @@ def test_extract_tool_calls_with_code_snippets(parser):
 def test_extract_tool_calls_with_escaped_quotes(parser):
     # Test with escaped quotes in strings
     model_output = (
-        '{"name": "test", '
-        '"parameters": {"text": "He said \\"hello {world}\\""}}'
+        '{"name": "test", "parameters": {"text": "He said \\"hello {world}\\""}}'
     )
     result = parser.extract_tool_calls(model_output, None)
 
