@@ -93,9 +93,11 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NB: Don't use torch.narrow here. torch.narrow triggers some
         # Dynamic Shape specialization in torch.compile
+        num_tokens = x.shape[0]
+        indices_1 = self.punica_wrapper._embeddings_indices[1][:num_tokens]
 
         full_lora_a_embeddings = F.embedding(
-            x,
+            x + indices_1,
             self.lora_a_stacked_2d,
         )
         full_output = self.base_layer.forward(x)

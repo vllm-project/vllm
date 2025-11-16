@@ -46,13 +46,23 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         torch.ops.xla.dynamo_set_buffer_donor_(self._token_lora_indices, True)
         torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices, True)
         torch.ops.xla.dynamo_set_buffer_donor_(self._sampler_indices_padded, True)
+        torch.ops.xla.dynamo_set_buffer_donor_(self._embeddings_indices, True)
         torch.ops.xla.dynamo_set_buffer_donor_(self._lora_indices_per_batch, True)
 
         torch._dynamo.mark_dynamic(self._token_lora_indices, 0)
+        torch._dynamo.mark_dynamic(self._embeddings_indices, 1)
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
 
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
+
+    @property
+    def embeddings_indices(self) -> torch.Tensor:
+        """
+        This property provides access to the indices used for lora embeddings,
+        specifically for VocabParallelEmbeddingWithLoRA.
+        """
+        return self._embeddings_indices[:]
 
     @property
     def sampler_indices_padded(self) -> torch.Tensor:
@@ -282,6 +292,7 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
+        extra_vocab_size: int,
     ):
         # Make sure we don't accidentally collect outside operations
         torch_xla.sync()
@@ -295,12 +306,14 @@ class PunicaWrapperTPU(PunicaWrapperBase):
             base_indices,
             sampler_indices,
             sampler_indices_padded,
+            embeddings_indices,
             indices_len,
         ) = convert_mapping(
             mapping,
             lora_index_to_id,
             max_loras,
             vocab_size,
+            extra_vocab_size,
             "cpu",
         )
         self._token_lora_indices = self._pad_to_shape(
@@ -311,6 +324,9 @@ class PunicaWrapperTPU(PunicaWrapperBase):
         ).to(self.device)
         self._sampler_indices_padded = self._pad_to_shape(
             sampler_indices_padded, self._sampler_indices_padded.shape, dims=1
+        ).to(self.device)
+        self._embeddings_indices = self._pad_to_shape(
+            embeddings_indices, self._embeddings_indices.shape, dims=2
         ).to(self.device)
         self.indices_len[:] = indices_len
 
