@@ -1,0 +1,15 @@
+# For vllm script, with -t option (tensor parallel size).
+# bash .buildkite/lm-eval-harness/run-lm-eval-mmlupro-vllm-baseline.sh -m deepseek-ai/DeepSeek-R1 -b 128 -l 250 -f 5 -t 8
+model_name: "deepseek-ai/DeepSeek-R1"
+tasks:
+- name: "mmlu_pro"
+  metrics:
+  - name: "exact_match,custom-extract"
+    value: 0.80
+limit: 2 # will run on 250 * 14 subjects = 3500 samples
+num_fewshot: 5
+trust_remote_code: True
+rtol: 0.05
+vllm_args:
+  enable_expert_parallel: true
+  gpu_memory_utilization: 0.95
