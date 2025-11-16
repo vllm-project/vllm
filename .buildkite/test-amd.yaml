@@ -1095,7 +1095,7 @@ steps:
     # test_fp8_kv_scale_compile requires FlashAttention (not supported on default L4/L40)
     - pytest -v -s tests/compile/test_full_graph.py::test_fp8_kv_scale_compile
 
-- label: Blackwell GPT-OSS Eval
+- label: ROCm GPT-OSS Eval
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   agent_pool: mi325_1
