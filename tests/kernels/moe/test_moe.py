@@ -83,8 +83,6 @@ FUSED_MOE_WN16_MNK_FACTORS = [
 ]
 
 vllm_config = VllmConfig()
-vllm_config.scheduler_config.max_num_seqs = 128
-vllm_config.scheduler_config.max_model_len = 8192
 
 
 def run_moe_test(
