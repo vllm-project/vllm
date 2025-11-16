@@ -83,7 +83,7 @@ class Scheduler(SchedulerInterface):
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.scheduler_config.max_model_len
+        self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
@@ -1010,8 +1010,8 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = (
-                sampled_token_ids[req_index] if sampled_token_ids else []
+            generated_token_ids: list[int] = (
+                sampled_token_ids[req_index].tolist() if sampled_token_ids else []
             )
 
             scheduled_spec_token_ids = (
