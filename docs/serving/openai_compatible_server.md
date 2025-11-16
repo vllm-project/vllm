@@ -49,7 +49,7 @@ We currently support the following OpenAI APIs:
     - *Note: `suffix` parameter is not supported.*
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
-    - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+    - *Note: `user` parameter is ignored.*
 - [Embeddings API](#embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../models/pooling_models.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
