@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Literal, get_args, overload
+from typing import TYPE_CHECKING, Any, Literal, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -64,11 +64,23 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
+if TYPE_CHECKING:
+    from .naive_epdp_prepare_finalize import (
+        NaiveEPDPPrepareAndFinalize as NaiveEPDPPrepareAndFinalizeType,
+    )
+else:
+    NaiveEPDPPrepareAndFinalizeType = Any
+
+NaiveEPDPPrepareAndFinalize: NaiveEPDPPrepareAndFinalizeType | None = None
+
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record
-    from .naive_epdp_prepare_finalize import NaiveEPDPPrepareAndFinalize
+    from .naive_epdp_prepare_finalize import (
+        NaiveEPDPPrepareAndFinalize as _NaiveEPDPPrepareAndFinalizeClass,
+    )
+
+    NaiveEPDPPrepareAndFinalize = _NaiveEPDPPrepareAndFinalizeClass
 else:
-    NaiveEPDPPrepareAndFinalize = None  # type: ignore[assignment]
 
     def eplb_map_to_physical_and_record(
         topk_ids: torch.Tensor,
