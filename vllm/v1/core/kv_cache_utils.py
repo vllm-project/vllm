@@ -686,7 +686,7 @@ def check_enough_kv_cache_memory(
     # When CPU offloading is enabled, effective memory is GPU + CPU offload
     cpu_offload_bytes = int(vllm_config.cache_config.cpu_offload_gb * GiB_bytes)
     effective_available_memory = available_memory + cpu_offload_bytes
-    
+
     if effective_available_memory <= 0:
         raise ValueError(
             "No available memory for the cache blocks. "
