@@ -208,7 +208,7 @@ def test_mistral_format(
     with vllm_runner(
         model,
         dtype=dtype,
-        tokenizer_mode="auto",
+        tokenizer_mode="hf",
         load_format="safetensors",
         config_format="hf",
     ) as hf_format_model:
