@@ -1240,6 +1240,91 @@ def grouped_topk(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
+def select_valid_physical_experts(
+    topk_ids_long: torch.Tensor,
+    logical_to_physical_map: torch.Tensor,
+    logical_replica_count: torch.Tensor,
+    pos_indices: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Select valid (non-masked) physical experts for each logical expert assignment.
+    
+    For health-based masking, some expert replicas may be marked as -1 (masked).
+    This function ensures we select valid replicas by avoiding -1 indices.
+    
+    Args:
+        topk_ids_long: Logical expert IDs for each token.
+            Shape: (num_tokens, topk)
+        logical_to_physical_map: Maps logical experts to physical expert replicas.
+            Shape: (num_logical_experts, max_replicas_per_expert)
+            Values can be -1 for masked or padding replicas.
+        logical_replica_count: Number of replicas for each logical expert.
+            Shape: (num_logical_experts,)
+        pos_indices: Flattened position indices for pseudo-random selection.
+            Shape: (num_tokens, topk)
+    
+    Returns:
+        physical_ids: Selected physical expert IDs (guaranteed non--1 if possible).
+            Shape: (num_tokens, topk)
+    """
+    # Get all physical replicas for each logical expert
+    # Shape: (num_tokens, topk, max_replicas)
+    physical_replicas = logical_to_physical_map[topk_ids_long]
+    
+    replica_count = logical_replica_count[topk_ids_long]
+    # Use max(1, count) to avoid division by zero when all replicas are masked
+    safe_replica_count = torch.clamp(replica_count, min=1)
+    # Use (token position) modulo (replica count) to get pseudo-random starting point
+    starting_replica_idx = (pos_indices % safe_replica_count)
+    
+    # Simple approach: Try the initial selection, if it's -1, find next valid replica
+    # with wrap-around to maintain pseudo-random distribution
+    
+    # Initial selection using simple modulo (same as original code)
+    replica_indices = starting_replica_idx.unsqueeze(-1)
+    physical_ids = torch.gather(physical_replicas, dim=-1, index=replica_indices).squeeze(-1)
+    
+    # Check if any selections resulted in -1 (masked)
+    masked_selections = physical_ids == -1
+    
+    # For masked selections, find the next valid replica with wrap-around
+    if masked_selections.any():
+        # For positions that got -1, search for first valid replica starting from
+        # starting_replica_idx and wrapping around
+        # Shape: (num_tokens, topk, max_replicas)
+        is_valid = physical_replicas >= 0
+        max_replicas = physical_replicas.shape[-1]
+        
+        # Create circular replica indices starting from starting_replica_idx
+        # Shape: (num_tokens, topk, max_replicas)
+        # For each position, this creates: [start, start+1, ..., max-1, 0, 1, ..., start-1]
+        offsets = torch.arange(max_replicas, device=physical_replicas.device, dtype=torch.long)
+        circular_indices = (starting_replica_idx.unsqueeze(-1) + offsets) % max_replicas
+        
+        # Gather validity mask in circular order
+        # Shape: (num_tokens, topk, max_replicas)
+        circular_valid = torch.gather(is_valid, dim=-1, index=circular_indices)
+        
+        # Find first valid position in circular order
+        # Shape: (num_tokens, topk)
+        first_valid_offset = torch.argmax(circular_valid.to(torch.int32), dim=-1)
+        
+        # Map back to actual replica index
+        first_valid_circular_idx = (starting_replica_idx + first_valid_offset) % max_replicas
+        
+        # Get the first valid physical ID in circular order
+        first_valid_physical_id = torch.gather(
+            physical_replicas,
+            dim=-1,
+            index=first_valid_circular_idx.unsqueeze(-1)
+        ).squeeze(-1)
+        
+        # Replace -1 values with first valid replica (in circular order)
+        physical_ids = torch.where(masked_selections, first_valid_physical_id, physical_ids)
+    
+    return physical_ids
+
+
 @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
 def eplb_map_to_physical_and_record(
     topk_ids: torch.Tensor,
@@ -1267,25 +1352,35 @@ def eplb_map_to_physical_and_record(
     """
 
     # 1. Convert the logical expert ids to physical expert ids
-    # Directly select a random replica for each logical expert
-
+    # Select a valid (non-masked) replica for each logical expert
+    
     # In case `indices_type` is not `torch.long` or `torch.int`,
     # e.g. `torch.uint32` as required by dispatch/combine kernels
     topk_ids_long = topk_ids.long()
-    # Use (token position) modulo (replica count)
-    # to deterministically choose a replica
-    replica_count = logical_replica_count[topk_ids_long]
-    # Flatten-position based index, reshaped back to `topk_ids` shape
+    
+    # Flatten-position based index for pseudo-random replica selection
     pos_indices = torch.arange(
         topk_ids.numel(), device=topk_ids.device, dtype=torch.long
     ).reshape_as(topk_ids)
-    # Compute pseudo-random indices by modulo
-    replica_indices = (pos_indices % replica_count).unsqueeze(-1)
-    physical_ids = (
-        logical_to_physical_map[topk_ids_long].gather(-1, replica_indices).squeeze(-1)
+    
+    # Select valid physical experts, skipping any masked (-1) replicas
+    physical_ids = select_valid_physical_experts(
+        topk_ids_long=topk_ids_long,
+        logical_to_physical_map=logical_to_physical_map,
+        logical_replica_count=logical_replica_count,
+        pos_indices=pos_indices,
     )
-
+    
     topk_ids = physical_ids
+    
+    # Sanity check: Verify no -1 indices remain after selection
+    # If this fails, it means either:
+    # (1) All replicas of an expert are masked (invalid system state), or
+    # (2) Bug in select_valid_physical_experts logic
+    assert (topk_ids >= 0).all(), (
+        f"Found {(topk_ids == -1).sum().item()} invalid expert indices (-1) after "
+        f"replica selection. All experts must have at least one valid (non-masked) replica."
+    )
 
     # 2. Record expert load metrics.
 

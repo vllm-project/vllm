@@ -662,6 +662,7 @@ class MixtureOfExperts(Protocol):
         expert_load_view: Tensor,
         logical_to_physical_map: Tensor,
         logical_replica_count: Tensor,
+        expert_latency_view: Tensor | None = None,
     ) -> None:
         """
         Register the EPLB state in the MoE model.
@@ -678,6 +679,8 @@ class MixtureOfExperts(Protocol):
             expert_load_view: A view of the expert load metrics tensor.
             logical_to_physical_map: Mapping from logical to physical experts.
             logical_replica_count: Count of replicas for each logical expert.
+            expert_latency_view: Optional view of expert latency tensor for
+                health monitoring. Shape: [num_moe_layers, num_physical_experts].
         """
         for layer_idx, layer in enumerate(self.moe_layers):
             # Register the expert weights.
@@ -688,6 +691,19 @@ class MixtureOfExperts(Protocol):
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
             )
+
+    def get_expert_latencies(self) -> Tensor | None:
+        """
+        Get the expert latency tensor for all MoE layers.
+        Each MoE layer writes its per-expert latency to a slice of this tensor.
+        This follows the same pattern as expert_load_view in EPLB.
+        
+        Returns:
+            Tensor of shape (num_moe_layers, num_physical_experts) containing
+            latency in milliseconds (0 if expert was inactive), or None if
+            latency tracking is not enabled.
+        """
+        ...
 
     def update_physical_experts_metadata(
         self,

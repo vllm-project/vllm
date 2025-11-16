@@ -274,19 +274,36 @@ def rearrange_expert_weights_inplace(
         rank_mapping: A dictionary mapping old rank to new rank.
     """
     if rank_mapping is not None:
-        if len(rank_mapping) == ep_group.size():
-            # scale down
-            new_global_expert_indices = _map_new_expert_indices_with_rank_mapping(
-                new_global_expert_indices,
-                rank_mapping,
-            )
-        else:
-            # scale up
-            old_global_expert_indices = _map_old_expert_indices_with_rank_mapping(
-                old_global_expert_indices,
-                rank_mapping,
-                ep_group.size(),
-            )
+        # Check if shapes already match before applying any mapping transformation.
+        # 
+        # For HEALTH-BASED MASKING (fault tolerance):
+        #   - rebalance_masked_experts() returns full ep_size tensors with -1 for masked ranks
+        #   - Both old and new tensors have shape (layers, ep_size * experts_per_rank)
+        #   - Shapes match → NO expert mapping needed → Skip transformation
+        #   - We can directly proceed to expert weight shuffling
+        # 
+        # For ELASTIC SCALING (scale-up/down):
+        #   - Actual ep_size changes between old and new configurations
+        #   - New tensor has different size than old tensor
+        #   - Shapes don't match → expert mapping IS needed → Apply transformation
+        #
+        if old_global_expert_indices.shape[1] != new_global_expert_indices.shape[1]:
+            if len(rank_mapping) == ep_group.size():
+                # Scale down: new tensor is smaller, expand it to match old size
+                # Example: 96 experts (3 ranks) → 128 slots (4 ranks, with 1 rank being removed)
+                new_global_expert_indices = _map_new_expert_indices_with_rank_mapping(
+                    new_global_expert_indices,
+                    rank_mapping,
+                )
+            else:
+                # Scale up: old tensor is smaller, expand it to match new size
+                # Example: 96 experts (3 ranks) → 128 slots (4 ranks, with 1 rank being added)
+                old_global_expert_indices = _map_old_expert_indices_with_rank_mapping(
+                    old_global_expert_indices,
+                    rank_mapping,
+                    ep_group.size(),
+                )
+        # else: Shapes match (health-based masking) - no expert mapping transformation needed
 
     assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
 
@@ -298,6 +315,12 @@ def rearrange_expert_weights_inplace(
 
     ep_rank = ep_group.rank()
     ep_size = ep_group.size()
+    # After mapping transformations, num_physical_experts includes slots for all ranks
+    # (including masked ones), so it should equal ep_size * local_experts
+    # For health-based masking: rebalance_masked_experts() maintains full ep_size representation
+    # For scale-up: _map_old_expert_indices_with_rank_mapping() expands old to match new ep_size
+    # For scale-down: _map_new_expert_indices_with_rank_mapping() expands new to match old
+    # For normal rearrangement: both tensors already at full ep_size
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     # A buffer to hold the expert weights in one layer during the exchange.
