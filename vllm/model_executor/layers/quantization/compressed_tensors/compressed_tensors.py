@@ -85,6 +85,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         kv_cache_scheme: dict[str, Any] | None = None,
         config: dict[str, Any] | None = None,
         transform_config: dict[str, Any] | None = None,
+        lora_compatible: bool = False,
+        lora_target_modules: list[str] | None = None,
     ):
         super().__init__()
         self.ignore = ignore
@@ -96,6 +98,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.sparsity_ignore_list = sparsity_ignore_list
         self.config = config
 
+        # NEW: LoRA compatibility
+        self.lora_compatible = lora_compatible
+        self.lora_target_modules = lora_target_modules or []
+
         if transform_config:
             self.transform_config = TransformConfig.model_validate(transform_config)
         else:
@@ -103,6 +109,17 @@ class CompressedTensorsConfig(QuantizationConfig):
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
+
+    def is_lora_compatible(self) -> bool:
+        """
+        Check if this quantized model supports LoRA adapters.
+
+        Returns:
+            True if the model can be used with LoRA adapters
+        """
+        # LoRA is compatible with pack_quantized (INT4) and marlin_24 formats
+        compatible_formats = ["pack_quantized", "marlin_24"]
+        return self.lora_compatible and self.quant_format in compatible_formats
 
     def get_supported_act_dtypes(cls) -> list[torch.dtype]:
         return [torch.float32, torch.float16, torch.bfloat16]
@@ -171,6 +188,17 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
         transform_config = config.get("transform_config")
 
+        # NEW: Extract LoRA compatibility metadata
+        lora_compatible = config.get("lora_compatible", False)
+        lora_target_modules = config.get("lora_target_modules", [])
+
+        if lora_compatible:
+            logger.info(
+                "Model is LoRA compatible with INT4 quantization. "
+                "Target modules: %s",
+                lora_target_modules,
+            )
+
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
@@ -179,6 +207,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             sparsity_ignore_list=sparsity_ignore_list,
             config=config,
             transform_config=transform_config,
+            lora_compatible=lora_compatible,
+            lora_target_modules=lora_target_modules,
         )
 
     @classmethod
