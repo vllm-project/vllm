@@ -477,19 +477,28 @@ class TrainingManager:
         scheduler_type: str,
     ):
         """Setup learning rate scheduler."""
-        if scheduler_type == "cosine":
-            lr_lambda = partial(
-                _get_cosine_schedule_with_warmup_lr_lambda,
-                num_warmup_steps=num_warmup_steps,
-                num_training_steps=num_training_steps,
-                num_cycles=0.5,
-            )
-            scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=-1)
-        elif scheduler_type == "linear":
-            scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=num_training_steps)
-        else:
-            raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+        from transformers import get_scheduler
+        scheduler = get_scheduler(
+            scheduler_type,
+            optimizer=optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+        )
         return scheduler
+
+        # if scheduler_type == "cosine":
+        #     lr_lambda = partial(
+        #         _get_cosine_schedule_with_warmup_lr_lambda,
+        #         num_warmup_steps=num_warmup_steps,
+        #         num_training_steps=num_training_steps,
+        #         num_cycles=0.5,
+        #     )
+        #     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=-1)
+        # elif scheduler_type == "linear":
+        #     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=num_training_steps)
+        # else:
+        #     raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
+        # return scheduler
 
 
     def _setup_optimizer(self, weight_decay: float, learning_rate: float):
@@ -498,6 +507,10 @@ class TrainingManager:
             {
                 "params": list(self.trainable_lora_params),
                 "weight_decay": weight_decay,
+            },
+            {
+                "params": [],
+                "weight_decay": 0.0,
             }
         ]
         optimizer_kwargs = {
@@ -514,7 +527,8 @@ class TrainingManager:
         return optimizer
 
 
-    def _setup_optimizer_and_scheduler(self, weight_decay: float = 0.0, learning_rate: float = 1e-4, scheduler_type: str = "cosine"):
+    # TODO(girfan): Pass scheduler type as an argument from earlier.
+    def _setup_optimizer_and_scheduler(self, weight_decay: float = 0.0, learning_rate: float = 1e-4, scheduler_type: str = "constant"):
         if self.optimizer is not None and self.scheduler is not None:
             return
 
@@ -539,11 +553,11 @@ class TrainingManager:
 
             # TODO(girfan): HACK
             # combine model parameters and trainable parameters
-            all_params = trainable_params + list(self.model.parameters())
+            # all_params = trainable_params + list(self.model.parameters())
 
             grad_norm = torch.nn.utils.clip_grad_norm_(
-                # trainable_params,
-                all_params,
+                trainable_params,
+                # all_params,
                 max_norm=self.max_grad_norm,
             )
             self.grad_norm = grad_norm
@@ -557,7 +571,26 @@ class TrainingManager:
             total_norm = total_norm**0.5
             self.grad_norm = total_norm
 
+        # import pandas as pd
+        # # save the weights before step as pandas dataframe to csv
+        # for i, param in enumerate(self.optimizer.param_groups[0]['params']):
+        #     if param.data is not None:
+        #         df = pd.DataFrame({
+        #             "weight": param.data.flatten().tolist(),
+        #         })
+        #         df.to_csv(f"vllm_weights_before_step_{i}.csv", index=False)
+        # ss
+
         self.optimizer.step()
+
+        # import pandas as pd
+        # for i, param in enumerate(self.optimizer.param_groups[0]['params']):
+        #     if param.data is not None:
+        #         df = pd.DataFrame({
+        #             "weight": param.data.flatten().tolist(),
+        #         })
+        #         df.to_csv(f"vllm_weights_after_step_{i}.csv", index=False)
+        # ss
 
         # Save learning rate before update
         learning_rate = self.get_learning_rate()
@@ -577,9 +610,3 @@ class TrainingManager:
             last_lr = last_lr.item()
 
         return last_lr
-
-
-    def capture_input_tensors(self, input_ids: torch.Tensor, labels: torch.Tensor):
-        """Capture input tensors for debugging/comparison purposes."""
-        self.captured_input_ids = input_ids.detach().clone()
-        self.captured_labels = labels.detach().clone()

@@ -948,29 +948,48 @@ class XFormersAttentionImpl(AttentionImpl):
         # Now q, k, v all have shape [batch, num_heads, seq_len, head_dim]
         # This matches Transformers format exactly: [4, 32, 512, 64]
 
-        # Handle attention mask
+        # Handle attention mask - reshape to match PEFT format [batch, 1, seq_len, seq_len]
         dropout = 0.0
         scaling = self.scale
         is_causal = False
+        attn_mask = None
 
-        if ATTN_MASK is None:
-            # Load attention_mask from PEFT: shape [4, 1, 512, 512], dtype bool
-            import pandas as pd
-            df = pd.read_csv("inputs/transformers_attn_mask.csv")
+        if attn_metadata.training_attention_mask is not None:
+            mask_data = attn_metadata.training_attention_mask
+            if isinstance(mask_data, dict) and 'masks' in mask_data:
+                # Extract individual masks and sequence lengths
+                masks_per_req = mask_data['masks']  # List of [seq_len_i, seq_len_i] tensors
+                seq_lens_list = mask_data['seq_lens']    # List of seq_len_i integers
 
-            # PEFT has [4, 1, 512, 512]
-            peft_batch = 4
-            peft_seq_len = 512
-            peft_mask = torch.tensor(df["attn_mask"].values, dtype=torch.bool, device=q.device).reshape(
-                peft_batch, 1, peft_seq_len, peft_seq_len
-            )
+                # Verify we have the right number of masks
+                if len(masks_per_req) != batch_size:
+                    raise ValueError(f"Number of masks ({len(masks_per_req)}) doesn't match batch_size ({batch_size})")
 
-            # Use the mask as-is (already in correct shape for SDPA)
-            ATTN_MASK = peft_mask
-            print(f"vLLM loaded ATTN_MASK shape: {ATTN_MASK.shape}, dtype: {ATTN_MASK.dtype}")
+                # Stack masks to create batched format: [batch, 1, seq_len, seq_len]
+                # Each mask is [seq_len_i, seq_len_i], we add head dim and batch them
+                batched_masks = []
+                for i, mask in enumerate(masks_per_req):
+                    # Verify mask shape matches expected seq_len
+                    if mask.shape[0] != seq_len or mask.shape[1] != seq_len:
+                        raise ValueError(
+                            f"Mask {i} shape {mask.shape} doesn't match expected [{seq_len}, {seq_len}]. "
+                            f"seq_lens_list: {seq_lens_list}, batch_size: {batch_size}"
+                        )
+                    # Add head dimension: [seq_len, seq_len] -> [1, seq_len, seq_len]
+                    mask_with_head = mask.unsqueeze(0)
+                    batched_masks.append(mask_with_head)
 
-        attn_mask = ATTN_MASK
+                # Stack along batch dimension: [batch, 1, seq_len, seq_len]
+                attn_mask = torch.stack(batched_masks, dim=0)
 
+                # Verify shape matches PEFT format
+                if attn_mask.shape != (batch_size, 1, seq_len, seq_len):
+                    raise ValueError(
+                        f"Attention mask shape {attn_mask.shape} doesn't match expected [{batch_size}, 1, {seq_len}, {seq_len}]. "
+                        f"Individual mask shapes: {[m.shape for m in masks_per_req]}, seq_lens_list: {seq_lens_list}"
+                    )
+
+        # # Debug: save attention mask
         # import pandas as pd
         # df = pd.DataFrame({
         #     "attn_mask": attn_mask.flatten().tolist(),

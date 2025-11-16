@@ -444,28 +444,37 @@ class LLM:
         # Evaluation configuration
         eval_dataset: Optional[Sequence[dict[str, Any]]] = None,
         eval_steps: Optional[int] = None,
+        # Tokenization control
+        is_tokenized: bool = False,
     ) -> Sequence[dict[str, Any]]:
-        # Tokenize the dataset
-        tokenizer = self.get_tokenizer()
-        self.set_tokenizer_pad_token(tokenizer.eos_token)
-
-        if eval_dataset is not None:
-            data_list = train_dataset + eval_dataset
+        # Tokenize the dataset if not already tokenized
+        if is_tokenized:
+            # Data is already tokenized, use directly
+            tokenized_train_dataset = Dataset.from_dict(train_dataset) if isinstance(train_dataset, dict) else Dataset.from_list(train_dataset)
+            if eval_dataset is not None:
+                tokenized_eval_dataset = Dataset.from_dict(eval_dataset) if isinstance(eval_dataset, dict) else Dataset.from_list(eval_dataset)
         else:
-            data_list = train_dataset
-        dataset = Dataset.from_list(data_list)
-        tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
+            # Tokenize the dataset
+            tokenizer = self.get_tokenizer()
+            self.set_tokenizer_pad_token(tokenizer.eos_token)
 
-        # # print the first 4 tokenized dataset
-        # print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
-        # print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
-        # print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
-        # print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
+            if eval_dataset is not None:
+                data_list = train_dataset + eval_dataset
+            else:
+                data_list = train_dataset
+            dataset = Dataset.from_list(data_list)
+            tokenized_dataset = dataset.map(lambda sample: tokenize(tokenizer, sample, max_length), batched=True, batch_size=len(dataset))
 
-        # Split the tokenized dataset into train and eval
-        tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
-        if eval_dataset is not None:
-            tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
+            # # print the first 4 tokenized dataset
+            # print(f"First 4 tokenized dataset: {tokenized_dataset[:4]}")
+            # print(f"First 4 tokenized dataset input_ids: {tokenized_dataset[:4]['input_ids']}")
+            # print(f"First 4 tokenized dataset attention_mask: {tokenized_dataset[:4]['attention_mask']}")
+            # print(f"First 4 tokenized dataset labels: {tokenized_dataset[:4]['labels']}")
+
+            # Split the tokenized dataset into train and eval
+            tokenized_train_dataset = tokenized_dataset.select(range(len(train_dataset)))
+            if eval_dataset is not None:
+                tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
 
         num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
         num_training_steps = num_steps_per_epoch * num_epochs
@@ -587,9 +596,29 @@ class LLM:
 
         # Create the training request
         prompt_token_ids = sample["input_ids"]
-        prompt_str = sample["text"]
+        # prompt_str = sample["text"]
+        prompt_str = ""
         labels = sample["labels"]
-        training_attention_mask = sample["attention_mask"]
+        
+        # Convert 1D attention mask to 2D causal mask (matching PEFT behavior)
+        # Input: [seq_len] with 1 for real tokens, 0 for padding
+        # Output: [seq_len, seq_len] with causal + padding mask
+        attention_mask_1d = sample["attention_mask"]
+        seq_len = len(attention_mask_1d)
+        
+        # Create 2D causal mask: lower triangular (causal) AND respecting padding
+        # This matches what PEFT/Transformers creates internally
+        import torch
+        # Create causal mask (lower triangular)
+        causal_mask = torch.tril(torch.ones((seq_len, seq_len), dtype=torch.bool))
+        
+        # Apply padding mask: a token can only attend to non-padded tokens
+        # Convert 1D mask to 2D by broadcasting
+        padding_mask_2d = torch.tensor(attention_mask_1d, dtype=torch.bool).unsqueeze(0).expand(seq_len, -1)
+        
+        # Combine: causal AND padding
+        training_attention_mask = causal_mask & padding_mask_2d
+        
         request_id = str(next(self.request_counter))
 
         training_request = Request(

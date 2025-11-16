@@ -500,6 +500,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 scheduler_output,
                 decode_threshold=self.reorder_batch_threshold)
 
+
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties
@@ -1054,10 +1055,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     logger.warning(f"Request {req_id} missing training_attention_mask")
 
             if all_masks_found and training_attention_masks_per_req:
-                # Store as dict for attention backend to construct block diagonal mask
+                # Don't create block diagonal here - pass masks as a dict
+                # The attention backend will reshape them to match PEFT format [batch, 1, seq_len, seq_len]
                 training_attention_mask = {
                     'masks': training_attention_masks_per_req,
-                    'seq_lens': seq_lens_per_req,
+                    'seq_lens': seq_lens_per_req
                 }
 
         use_spec_decode = len(
@@ -2531,6 +2533,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Select the hidden states for the tokens we want
                 # (logits_indices was prepared in _prepare_inputs - for training it includes ALL tokens)
                 hidden_states = hidden_states[logits_indices]
+                # save hidden_states to a csv file
+                # import pandas as pd
+                # df = pd.DataFrame({
+                #     "hidden_states": hidden_states.flatten().tolist(),
+                # })
+                # df.to_csv(f"vllm_slices_hidden_states.csv", index=False)
+                # ss
 
                 # Compute logits for loss calculation
                 # For training, we need logits for all tokens (achieved via logits_indices)
@@ -2602,7 +2611,6 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Create a single tensor for loss and logits for this batch
                 logits = torch.stack(all_logits, dim=0)
                 labels = torch.stack(all_labels, dim=0)
-                input_ids_tensor = torch.stack(all_input_ids, dim=0)
 
                 # Capture input tensors for debugging/comparison
                 # self.training_manager.capture_input_tensors(input_ids_tensor, labels)
@@ -2619,6 +2627,20 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     num_items_in_batch=num_items_in_batch
                 )
 
+                # save labels to a csv file
+                # import pandas as pd
+                # df = pd.DataFrame({
+                #     "labels": labels.flatten().tolist(),
+                # })
+                # df.to_csv(f"vllm_labels.csv", index=False)
+
+                # # save loss to a csv file
+                # df = pd.DataFrame({
+                #     "loss": tr_loss.flatten().tolist(),
+                # })
+                # df.to_csv(f"vllm_loss.csv", index=False)
+                # ss
+
                 if not is_eval_batch:
                     # import csv
                     # with open('vllm_weights.csv', 'w') as f:
@@ -2630,16 +2652,19 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
                     # Backward pass
                     tr_loss.backward()
+                    cur_loss = tr_loss.detach()
 
+                    # import csv
                     # with open('vllm_gradients.csv', 'w') as f:
                     #     writer = csv.writer(f)
                     #     writer.writerow(['parameter', 'gradient'])
                     #     for param in self.training_manager.optimizer.param_groups[0]['params']:
                     #         if param.grad is not None:
                     #             writer.writerow([param.name, param.grad.flatten().tolist()])
+                    # ss
 
                     # Add loss and step the training manager
-                    self.training_manager.add_loss(tr_loss.detach())
+                    self.training_manager.add_loss(cur_loss)
                     self.training_manager.step()
                 else:
                     # Store eval loss
