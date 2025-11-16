@@ -54,22 +54,30 @@ python examples/custom_models/qwen3_torchtitan.py
 Benchmark custom models against vLLM's built-in implementations:
 
 ```bash
-# Benchmark DeepSeek V3 with TP=8, 100 requests, batch size 32
-python examples/custom_models/benchmark_deepseek_v3.py \
-    --model deepseek-ai/DeepSeek-V3-Base \
-    --tp 8 \
-    --num-requests 100 \
-    --max-batch-size 32 \
-    --max-tokens 128
+# Benchmark custom model (default)
+PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepseek_v3.py \
+    --num-requests 10 \
+    --max-batch-size 4 \
+    --max-model-len 8192
 
-# Quick benchmark (10 requests)
-python examples/custom_models/benchmark_deepseek_v3.py \
+# Benchmark vLLM's built-in DeepSeek V3
+PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepseek_v3.py \
+    --use-builtin \
     --num-requests 10 \
     --max-batch-size 4
 
-# Only benchmark custom model (skip built-in comparison)
-python examples/custom_models/benchmark_deepseek_v3.py \
-    --skip-builtin
+# Compare both side-by-side
+PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepseek_v3.py \
+    --run-both \
+    --num-requests 10 \
+    --max-batch-size 4
+
+# Full benchmark with TP=8
+PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepseek_v3.py \
+    --tp 8 \
+    --num-requests 100 \
+    --max-batch-size 32 \
+    --max-model-len 8192
 ```
 
 The benchmark measures:
@@ -77,6 +85,26 @@ The benchmark measures:
 - **Requests/sec**: Request processing rate
 - **Latency**: P50/P90/P99 latency distribution
 - **Initialization time**: Model loading time
+
+**Comparing Custom vs Built-in:**
+
+Use `--run-both` to run both benchmarks sequentially and see a comparison table:
+
+```bash
+PYTHONPATH=/home/bwasti/oss/vllm python examples/custom_models/benchmark_deepseek_v3.py \
+    --run-both \
+    --num-requests 10
+```
+
+This will output:
+```
+Metric                    Custom               Built-in             Speedup
+--------------------------------------------------------------------------------
+Throughput (tok/s)        1028.11              945.23               1.09x
+Requests/sec              8.03                 7.39                 1.09x
+Avg Latency (ms)          124.50               135.23               1.09x
+...
+```
 
 ## Key Components
 
