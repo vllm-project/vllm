@@ -228,6 +228,10 @@ class P2pNcclConnector(KVConnectorBase_V1):
                     layer, kv_cache, request.block_ids, request.request_id
                 )
 
+                self.p2p_nccl_engine.pop_recv_store_after_recv(
+                    request.request_id + "#" + layer_name
+                )
+
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
         paged buffer.
@@ -431,7 +435,9 @@ class P2pNcclConnector(KVConnectorBase_V1):
                 num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
                 num_tokens = num_scheduled_tokens + num_computed_tokens
                 assert req_id in self.chunked_prefill
-                assert new_block_ids is not None
+                # allow None when scheduler_output has no new_block_ids for this req_id
+                if new_block_ids is None:
+                    new_block_ids = ([],)
                 block_ids = new_block_ids[0]
                 if not resumed_from_preemption:
                     block_ids = self.chunked_prefill[req_id][0] + block_ids
