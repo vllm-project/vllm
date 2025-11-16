@@ -629,6 +629,7 @@ class EplbState:
                 num_groups,
                 num_nodes,
                 num_gpus,
+                eplb_model_state.physical_to_logical_map,
             )
 
             # Update expert weights
