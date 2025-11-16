@@ -14,6 +14,7 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.cache import processor_cache_from_config
 from vllm.multimodal.inputs import MultiModalFeatureSpec, MultiModalUUIDDict
+from vllm.multimodal.parse import MultiModalDataParser
 from vllm.multimodal.processing import EncDecMultiModalProcessor
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
@@ -270,6 +271,12 @@ class Processor:
             raise ValueError(
                 f"Choice '{params.structured_outputs.choice}' cannot be an empty list"  # noqa: E501
             )
+        # Reject empty string grammar early to avoid engine-side crashes
+        if (
+            isinstance(params.structured_outputs.grammar, str)
+            and params.structured_outputs.grammar.strip() == ""
+        ):
+            raise ValueError("structured_outputs.grammar cannot be an empty string")
 
         if backend.startswith("xgrammar"):
             # xgrammar with no fallback
@@ -334,7 +341,12 @@ class Processor:
 
         mm_uuids: dict[str, list[str | None] | str] = {}
         for modality, data in mm_data.items():
-            n = len(data) if isinstance(data, list) else 1
+            # Hash each item for embedding inputs.
+            n = (
+                len(data)
+                if isinstance(data, list) or MultiModalDataParser.is_embeddings(data)
+                else 1
+            )
             mm_uuids[modality] = [f"{request_id}-{modality}-{i}" for i in range(n)]
         return mm_uuids
 
@@ -568,6 +580,22 @@ class Processor:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+        if (
+            prompt_len == max_prompt_len
+            and prompt_type == "decoder"
+            and not model_config.is_multimodal_model
+            and self.model_config.runner_type != "pooling"
+        ):
+            suggestion = (
+                "Make sure that `max_model_len` is no smaller than the "
+                "number of text tokens (prompt + requested output tokens)."
+            )
+            raise ValueError(
+                f"The {prompt_type} prompt (length {prompt_len}) plus the number of "
+                f"requested output tokens (at least 1) is longer than the maximum "
+                f"model length of {max_prompt_len}. {suggestion}"
+            )
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         return self.input_preprocessor.stat_mm_cache()

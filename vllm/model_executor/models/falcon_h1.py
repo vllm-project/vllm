@@ -30,7 +30,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -424,21 +423,15 @@ class FalconH1Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
-        lora_vocab = (
-            (lora_config.lora_extra_vocab_size * (lora_config.max_loras or 1))
-            if lora_config
-            else 0
-        )
-        self.vocab_size = config.vocab_size + lora_vocab
-        self.org_vocab_size = config.vocab_size
+
+        self.vocab_size = config.vocab_size
+
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
                 self.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
             )
             self.embedding_multiplier = config.embedding_multiplier
         else:
@@ -468,7 +461,7 @@ class FalconH1Model(nn.Module):
         else:
             self.final_layernorm = PPMissingLayer()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -483,7 +476,7 @@ class FalconH1Model(nn.Module):
                 hidden_states = inputs_embeds * self.embedding_multiplier
             else:
                 hidden_states = (
-                    self.get_input_embeddings(input_ids) * self.embedding_multiplier
+                    self.embed_input_ids(input_ids) * self.embedding_multiplier
                 )
         else:
             assert intermediate_tensors is not None
@@ -572,7 +565,7 @@ class FalconH1ForCausalLM(
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
+
         scheduler_config = vllm_config.scheduler_config
 
         self.quant_config = vllm_config.quant_config
@@ -584,21 +577,11 @@ class FalconH1ForCausalLM(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.tie_word_embeddings = config.tie_word_embeddings
-        self.unpadded_vocab_size = config.vocab_size
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=(
-                    DEFAULT_VOCAB_PADDING_SIZE
-                    # We need bigger padding if using lora for kernel
-                    # compatibility
-                    if not lora_config
-                    else lora_config.lora_vocab_padding_size
-                ),
                 prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.lm_head_multiplier = config.lm_head_multiplier
@@ -607,7 +590,7 @@ class FalconH1ForCausalLM(
             # Used to track and store by the Mamba cache between steps.
 
             self.logits_processor = LogitsProcessor(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.vocab_size,
                 scale=config.lm_head_multiplier,
             )
@@ -618,8 +601,8 @@ class FalconH1ForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

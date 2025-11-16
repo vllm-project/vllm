@@ -26,7 +26,7 @@ from vllm.model_executor.models.deepseek_v2 import (
 )
 from vllm.utils import init_logger
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -73,7 +73,7 @@ class DeepseekV2Model(nn.Module):
         self.hnorm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
         self.norm = RMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -222,8 +222,8 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
         self.num_moe_layers = self.config.num_hidden_layers
         self.set_moe_parameters()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -250,6 +250,7 @@ class EagleDeepseekV3ForCausalLM(DeepseekV3ForCausalLM):
             name, loaded_weight = inputs
             if "lm_head" not in name:
                 name = "model." + name
+            process_eagle_weight(self, name)
             return name, loaded_weight
 
         loader = AutoWeightsLoader(

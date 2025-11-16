@@ -39,6 +39,13 @@ set(PYTHON_SUPPORTED_VERSIONS "3.10" "3.11" "3.12" "3.13")
 # Supported AMD GPU architectures.
 set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx942;gfx950;gfx1030;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
 
+# ROCm installation prefix. Default to /opt/rocm but allow override via
+# -DROCM_PATH=/your/rocm/path when invoking cmake.
+if(NOT DEFINED ROCM_PATH)
+  set(ROCM_PATH "/opt/rocm" CACHE PATH "ROCm installation prefix")
+else()
+  set(ROCM_PATH ${ROCM_PATH} CACHE PATH "ROCm installation prefix" FORCE)
+endif()
 #
 # Supported/expected torch versions for CUDA/ROCm.
 #
@@ -237,10 +244,27 @@ set_gencode_flags_for_srcs(
   SRCS "${VLLM_CUMEM_EXT_SRC}"
   CUDA_ARCHS "${CUDA_ARCHS}")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
+if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   message(STATUS "Enabling cumem allocator extension.")
-  # link against cuda driver library
-  list(APPEND CUMEM_LIBS CUDA::cuda_driver)
+  if(VLLM_GPU_LANG STREQUAL "CUDA")
+    # link against cuda driver library
+    list(APPEND CUMEM_LIBS CUDA::cuda_driver)
+  else()
+    # link against rocm driver library. Prefer an absolute path to
+    # libamdhip64.so inside ${ROCM_PATH}/lib if available, otherwise fall
+    # back to linking by name "amdhip64".
+    find_library(AMDHIP64_LIB
+      NAMES amdhip64 libamdhip64.so
+      PATHS ${ROCM_PATH}/lib
+      NO_DEFAULT_PATH)
+    if(AMDHIP64_LIB)
+      message(STATUS "Found libamdhip64 at ${AMDHIP64_LIB}")
+      list(APPEND CUMEM_LIBS ${AMDHIP64_LIB})
+    else()
+      message(WARNING "libamdhip64 not found in ${ROCM_PATH}/lib; falling back to linking 'amdhip64' by name")
+      list(APPEND CUMEM_LIBS amdhip64)
+    endif()
+  endif()
   define_extension_target(
     cumem_allocator
     DESTINATION vllm
@@ -265,6 +289,7 @@ set(VLLM_EXT_SRC
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
+  "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
   "csrc/sampler.cu"
   "csrc/cuda_view.cu"
@@ -330,7 +355,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Keep building Marlin for 9.0 as there are some group sizes and shapes that
   # are not supported by Machete yet.
   # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_ARCHS)
 
     #
@@ -836,7 +861,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
 
   # Hadacore kernels
-  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0;8.9;9.0" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
     set(SRCS "csrc/quantization/hadamard/hadacore/hadamard_transform_cuda.cu")
     set_gencode_flags_for_srcs(
@@ -914,7 +939,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
   # 9.0 for latest bf16 atomicAdd PTX
-  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.7;9.0+PTX" "${CUDA_ARCHS}")
+  cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
 
     #
