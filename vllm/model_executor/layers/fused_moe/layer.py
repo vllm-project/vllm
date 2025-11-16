@@ -788,9 +788,7 @@ class FusedMoE(CustomOp):
             global_num_experts, dtype=torch.long, **device_kwargs
         )
         owner = torch.remainder(global_indices, ep_size)
-        local_index = torch.div(
-            global_indices, ep_size, rounding_mode="floor"
-        )
+        local_index = torch.div(global_indices, ep_size, rounding_mode="floor")
         base = global_num_experts // ep_size
         remainder = global_num_experts % ep_size
         physical_offset = owner * base
@@ -798,9 +796,7 @@ class FusedMoE(CustomOp):
             remainder_tensor = torch.tensor(
                 remainder, dtype=torch.long, **device_kwargs
             )
-            physical_offset = physical_offset + torch.minimum(
-                owner, remainder_tensor
-            )
+            physical_offset = physical_offset + torch.minimum(owner, remainder_tensor)
 
         global_to_physical = physical_offset + local_index
         physical_to_global = torch.empty_like(global_to_physical)
