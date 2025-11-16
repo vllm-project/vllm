@@ -42,7 +42,6 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    DEFAULT_VOCAB_PADDING_SIZE,
     ParallelLMHead,
     VocabParallelEmbedding,
 )
@@ -250,7 +249,7 @@ class Starcoder2Model(nn.Module):
             ["hidden_states"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -264,7 +263,7 @@ class Starcoder2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
@@ -319,28 +318,23 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.vocab_size = config.vocab_size
-        self.unpadded_vocab_size = config.vocab_size
+
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
-            self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
-                self.unpadded_vocab_size,
+                config.vocab_size,
                 config.hidden_size,
-                org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=quant_config,
                 prefix=f"{prefix}.lm_head",
             )
-        self.logits_processor = LogitsProcessor(
-            self.unpadded_vocab_size, config.vocab_size
-        )
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

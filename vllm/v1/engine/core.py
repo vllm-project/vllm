@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import gc
 import os
 import queue
 import signal
@@ -27,9 +26,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils.gc_utils import maybe_attach_gc_debug_callback
+from vllm.utils.gc_utils import (
+    freeze_gc_heap,
+    maybe_attach_gc_debug_callback,
+)
 from vllm.utils.hashing import get_hash_fn_by_name
-from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.v1.core.kv_cache_utils import (
@@ -41,7 +42,6 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
 from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
@@ -63,6 +63,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -117,29 +118,13 @@ class EngineCore:
         self.structured_output_manager = StructuredOutputManager(vllm_config)
 
         # Setup scheduler.
-        if isinstance(vllm_config.scheduler_config.scheduler_cls, str):
-            Scheduler = resolve_obj_by_qualname(
-                vllm_config.scheduler_config.scheduler_cls
-            )
-        else:
-            Scheduler = vllm_config.scheduler_config.scheduler_cls
-
-        # This warning can be removed once the V1 Scheduler interface is
-        # finalized and we can maintain support for scheduler classes that
-        # implement it
-        if Scheduler is not V1Scheduler:
-            logger.warning(
-                "Using configured V1 scheduler class %s. "
-                "This scheduler interface is not public and "
-                "compatibility may not be maintained.",
-                vllm_config.scheduler_config.scheduler_cls,
-            )
+        Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
         if len(kv_cache_config.kv_cache_groups) == 0:
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
             logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.chunked_prefill_enabled = False
+            vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
@@ -213,6 +198,10 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+
+        # Mark the startup heap as static so that it's ignored by GC.
+        # Reduces pause times of oldest generation collections.
+        freeze_gc_heap()
 
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
@@ -333,17 +322,21 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        scheduler_output = self.scheduler.schedule()
-        future = self.model_executor.execute_model(scheduler_output, non_block=True)
-        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-        with self.log_error_detail(scheduler_output):
-            model_output = future.result()
-            if model_output is None:
-                model_output = self.model_executor.sample_tokens(grammar_output)
+        with record_function_or_nullcontext("core step: schedule"):
+            scheduler_output = self.scheduler.schedule()
 
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
+        with record_function_or_nullcontext("core step: execute_model"):
+            future = self.model_executor.execute_model(scheduler_output, non_block=True)
+            grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+            with self.log_error_detail(scheduler_output):
+                model_output = future.result()
+                if model_output is None:
+                    model_output = self.model_executor.sample_tokens(grammar_output)
+
+        with record_function_or_nullcontext("core step: update_from_output"):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -381,32 +374,49 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            scheduler_output = self.scheduler.schedule()
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
+            with record_function_or_nullcontext("core step_with_batch_queue: schedule"):
+                scheduler_output = self.scheduler.schedule()
+            with record_function_or_nullcontext(
+                "core step_with_batch_queue: execute_model"
+            ):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
             model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
             if scheduler_output.pending_structured_output_tokens:
-                # We need to defer sampling until we have processed the model output
-                # from the prior step.
-                deferred_scheduler_output = scheduler_output
-                # Block-wait for execute to return (continues running async on the GPU).
-                with self.log_error_detail(scheduler_output):
-                    exec_result = exec_future.result()
-                    assert exec_result is None
+                with record_function_or_nullcontext(
+                    "core step_with_batch_queue: pending_structured_output_tokens"
+                ):
+                    # We need to defer sampling until we have processed the model output
+                    # from the prior step.
+                    deferred_scheduler_output = scheduler_output
+                    # Block-wait for execute to return
+                    # (continues running async on the GPU).
+                    with self.log_error_detail(scheduler_output):
+                        exec_result = exec_future.result()
+                        assert exec_result is None
             else:
-                # We aren't waiting for any tokens, get any grammar output immediately.
-                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+                with record_function_or_nullcontext(
+                    "core step_with_batch_queue: get_grammar_bitmask"
+                ):
+                    # We aren't waiting for any tokens, get any grammar
+                    # output immediately.
+                    grammar_output = self.scheduler.get_grammar_bitmask(
+                        scheduler_output
+                    )
                 # Block-wait for execute to return (continues running async on the GPU).
                 with self.log_error_detail(scheduler_output):
                     exec_result = exec_future.result()
 
                 if exec_result is None:
-                    # Call sample tokens.
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
+                    with record_function_or_nullcontext(
+                        "core step_with_batch_queue: sample_tokens"
+                    ):
+                        # Call sample tokens.
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
                 else:
                     # No sampling required (e.g. all requests finished).
                     future = cast(Future[ModelRunnerOutput], exec_future)
@@ -426,27 +436,34 @@ class EngineCore:
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
-
-        # Block until the next result is available.
-        future, scheduler_output = batch_queue.pop()
-        with self.log_error_detail(scheduler_output):
-            model_output = future.result()
-
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, model_output
-        )
+        with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
+            # Block until the next result is available.
+            future, scheduler_output = batch_queue.pop()
+            with self.log_error_detail(scheduler_output):
+                model_output = future.result()
+        with record_function_or_nullcontext(
+            "core step_with_batch_queue: update_from_output"
+        ):
+            engine_core_outputs = self.scheduler.update_from_output(
+                scheduler_output, model_output
+            )
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            # We now have the tokens needed to compute the bitmask for the
-            # deferred request. Get the bitmask and call sample tokens.
-            grammar_output = self.scheduler.get_grammar_bitmask(
-                deferred_scheduler_output
-            )
-            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
-            batch_queue.appendleft((future, deferred_scheduler_output))
+            with record_function_or_nullcontext(
+                "core step_with_batch_queue: deferred_scheduler_output"
+            ):
+                # We now have the tokens needed to compute the bitmask for the
+                # deferred request. Get the bitmask and call sample tokens.
+                grammar_output = self.scheduler.get_grammar_bitmask(
+                    deferred_scheduler_output
+                )
+                future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True
+                )
+                batch_queue.appendleft((future, deferred_scheduler_output))
 
         return engine_core_outputs, model_executed
 
@@ -639,11 +656,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # Mark the startup heap as static so that it's ignored by GC.
-        # Reduces pause times of oldest generation collections.
-        gc.collect()
-        gc.freeze()
 
         # If enable, attach GC debugger after static variable freeze.
         maybe_attach_gc_debug_callback()

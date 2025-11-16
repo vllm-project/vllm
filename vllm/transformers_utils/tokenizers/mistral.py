@@ -121,8 +121,8 @@ def _prepare_apply_chat_template_tools_and_messages(
     #
     # [1]: https://github.com/mistralai/mistral-common/blob/f4a06998b75ed78bbf5aaf569590b772ea26c9f6/src/mistral_common/protocol/instruct/messages.py#L80
     for message in messages:
-        # Remove reasoning_content as unsupported by Mistral
-        _ = message.pop("reasoning_content", None)  # type: ignore
+        # Remove reasoning as unsupported by Mistral
+        _ = message.pop("reasoning", None)  # type: ignore
 
     # The Mistral client, in comparison to the OpenAI client, requires the
     # "parameters" dict and the "description" string to be present
