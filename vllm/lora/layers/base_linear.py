@@ -223,8 +223,11 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             if unpacked_weights is not None:
                 self._materialized_weight = unpacked_weights
                 logger.info(
-                    f"Materialized INT4 weights to FP16: shape={unpacked_weights.shape}, "
-                    f"dtype={unpacked_weights.dtype}, device={unpacked_weights.device}"
+                    "Materialized INT4 weights to FP16: shape=%s, dtype=%s, "
+                    "device=%s",
+                    unpacked_weights.shape,
+                    unpacked_weights.dtype,
+                    unpacked_weights.device,
                 )
             else:
                 logger.warning(
@@ -233,8 +236,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
                 )
         except Exception as e:
             logger.error(
-                f"Error during INT4 weight materialization: {e}. "
-                f"LoRA attachment may fail for this layer."
+                "Error during INT4 weight materialization: %s. "
+                "LoRA attachment may fail for this layer.",
+                e,
             )
             self._materialized_weight = None
 

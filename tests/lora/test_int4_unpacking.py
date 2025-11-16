@@ -66,9 +66,7 @@ class TestINT4Unpacker:
         scales = torch.tensor([1.0, 2.0], dtype=torch.float16)
         zero_points = torch.tensor([0.0, 1.0], dtype=torch.float16)
 
-        unpacked = unpacker.unpack_int4_weights(
-            packed, scales, zero_points=zero_points
-        )
+        unpacked = unpacker.unpack_int4_weights(packed, scales, zero_points=zero_points)
 
         assert unpacked.shape == (2, 4)
         assert unpacked.dtype == torch.float16

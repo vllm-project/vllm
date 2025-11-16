@@ -5,7 +5,6 @@ This module provides utilities to unpack INT4 quantized weights to floating-poin
 format, enabling LoRA adapter injection on compressed models.
 """
 
-
 import torch
 
 from vllm.logger import init_logger
@@ -112,9 +111,7 @@ class INT4Unpacker:
         elif scales.ndim == 2:
             # Grouped scale
             if group_size is None:
-                raise ValueError(
-                    "group_size must be provided for grouped quantization"
-                )
+                raise ValueError("group_size must be provided for grouped quantization")
             scales_expanded = scales.unsqueeze(2).repeat(1, 1, group_size)
             scales_flat = scales_expanded.view(out_features, -1)[:, :in_features].to(
                 output_dtype
@@ -161,9 +158,7 @@ class INT4Unpacker:
         elif hasattr(module, "weight") and module.weight.dtype == torch.uint8:
             packed_weights = module.weight
         else:
-            logger.debug(
-                "Module %s does not have packed INT4 weights", module_name
-            )
+            logger.debug("Module %s does not have packed INT4 weights", module_name)
             return None
 
         # Get quantization parameters
@@ -210,9 +205,7 @@ class INT4Unpacker:
             return unpacked
 
         except Exception as e:
-            logger.error(
-                "Failed to unpack INT4 weights for %s: %s", module_name, e
-            )
+            logger.error("Failed to unpack INT4 weights for %s: %s", module_name, e)
             return None
 
     def is_int4_quantized(self, module: torch.nn.Module) -> bool:

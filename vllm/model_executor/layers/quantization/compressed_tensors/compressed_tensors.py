@@ -194,8 +194,7 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if lora_compatible:
             logger.info(
-                "Model is LoRA compatible with INT4 quantization. "
-                "Target modules: %s",
+                "Model is LoRA compatible with INT4 quantization. Target modules: %s",
                 lora_target_modules,
             )
 

@@ -11,8 +11,9 @@ Prerequisites:
 - LoRA adapters trained for your task
 """
 
-from vllm import LLM, SamplingParams
 import torch
+
+from vllm import LLM, SamplingParams
 
 
 def main():
@@ -33,7 +34,7 @@ def main():
     )
 
     print("✓ Model loaded successfully")
-    print(f"  Memory usage: ~5.25 GB (vs ~14 GB for FP16)")
+    print("  Memory usage: ~5.25 GB (vs ~14 GB for FP16)")
 
     # Step 2: Check LoRA compatibility
     print("\n[2/4] Checking LoRA compatibility...")
@@ -193,14 +194,15 @@ def demo_unpacking():
     )
 
     if unpacked is not None:
-        print(f"\n  ✓ Unpacked successfully!")
+        print("\n  ✓ Unpacked successfully!")
         print(f"    Unpacked shape: {unpacked.shape}")
         print(f"    Unpacked dtype: {unpacked.dtype}")
-        print(f"    Memory: {unpacked.element_size() * unpacked.nelement() / 1024**2:.2f} MB")
+        mem_mb = unpacked.element_size() * unpacked.nelement() / 1024**2
+        print(f"    Memory: {mem_mb:.2f} MB")
 
         # Check cache
         stats = unpacker.get_cache_stats()
-        print(f"\n  Cache stats:")
+        print("\n  Cache stats:")
         print(f"    Size: {stats['size']} entries")
         print(f"    Hits: {stats['hits']}")
         print(f"    Misses: {stats['misses']}")
