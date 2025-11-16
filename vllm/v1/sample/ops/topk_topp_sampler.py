@@ -50,6 +50,10 @@ class TopKTopPSampler(nn.Module):
 
             if envs.VLLM_USE_TRITON_SAMPLER:
                 logger.info_once("Using Triton for top-p & top-k sampling.")
+                if envs.VLLM_USE_FLASHINFER_SAMPLER:
+                    logger.info_once(
+                        "Overriding FlashInfer with Triton for top-p & top-k sampling."
+                    )
                 self.forward = self.forward_triton
             else:
                 logger.warning_once(
@@ -231,16 +235,6 @@ def apply_top_k_only(
 
     The logits tensor may be updated in-place.
     """
-    if k is None:
-        return logits
-    max_top_k = k.max().item()
-
-    # --- FIX: Handle k=0 edge case ---
-    # If the max k is 0, all rows are 0. Mask everything and exit.
-    if max_top_k == 0:
-        logits.fill_(-float("inf"))
-        return logits
-
     no_top_k_mask = k == logits.shape[1]
     # Set non-top-k rows to 1 so that we can gather.
     k = k.masked_fill(no_top_k_mask, 1)
@@ -265,7 +259,7 @@ def random_sample(
     causes CPU-GPU synchronization.
     """
     q = torch.empty_like(probs)
-    # VOCAB_SIZEOTE(woosuk): To batch-process the requests without their own seeds,
+    # NOTE(woosuk): To batch-process the requests without their own seeds,
     # which is the common case, we first assume that every request does
     # not have its own seed. Then, we overwrite the values for the requests
     # that have their own seeds.
@@ -291,11 +285,11 @@ def flashinfer_sample(
     However, this function is faster because it avoids sorting the logits tensor
     via rejection sampling.
 
-    VOCAB_SIZEOTE: The outputs of this function do not necessarily match the outputs of
+    NOTE: The outputs of this function do not necessarily match the outputs of
     the `random_sample` function. It only guarantees that the outputs are
     statistically equivalent.
 
-    VOCAB_SIZEOTE: This function includes CPU-GPU synchronization, while `random_sample`
+    NOTE: This function includes CPU-GPU synchronization, while `random_sample`
     does not. Call this function at the end of the forward pass to minimize
     the synchronization overhead.
     """

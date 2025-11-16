@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: str | None = None
     VLLM_USE_FLASHINFER_SAMPLER: bool | None = None
-    VLLM_USE_TRITON_SAMPLER: bool = False
+    VLLM_USE_TRITON_SAMPLER: bool | None = None
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_ATTENTION_BACKEND: str | None = None
