@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import itertools
 import os
 from collections.abc import Generator
-from pathlib import Path
 
 import gguf
 import torch
@@ -24,6 +22,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_weight_type_map,
     gguf_quant_weights_iterator,
 )
+from vllm.transformers_utils.gguf_utils import detect_gguf_multimodal
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 logger = init_logger(__name__)
@@ -244,21 +243,18 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path: str,
         gguf_to_hf_name_map: dict[str, str],
     ) -> dict[str, str]:
-        model_dir = Path(model_config.model).parent
-
-        # Detect companion mmproj.gguf file for multimodal models
-        mmproj_files = list(model_dir.glob("mmproj*.gguf"))
-        has_mmproj = len(mmproj_files) > 0
-
-        hf_config = model_config.hf_config
-        is_multimodal = has_mmproj and hasattr(hf_config, "vision_config")
-
         weight_type_map = get_gguf_weight_type_map(
             model_config.model, gguf_to_hf_name_map
         )
+        is_multimodal = hasattr(model_config.hf_config, "vision_config")
         if is_multimodal:
+            mmproj_file = detect_gguf_multimodal(model_name_or_path)
+            assert mmproj_file is not None, (
+                "Could not find mm_proj file for multimodal GGUF model"
+            )
+            logger.info("Loading extra mm_proj weights from %s...", mmproj_file)
             mm_proj_weight_type_map = get_gguf_weight_type_map(
-                str(mmproj_files[0]), gguf_to_hf_name_map
+                mmproj_file, gguf_to_hf_name_map
             )
             weight_type_map.update(mm_proj_weight_type_map)
         return weight_type_map
@@ -280,41 +276,18 @@ class GGUFModelLoader(BaseModelLoader):
         Yields:
             Tuples of (parameter_name, tensor) for all model weights
         """
-
-        model_dir = Path(model_name_or_path).parent
-
-        # Detect companion mmproj.gguf file for multimodal models
-        mmproj_files = list(model_dir.glob("mmproj*.gguf"))
-        has_mmproj = len(mmproj_files) > 0
-
         hf_config = model_config.hf_config
-        is_multimodal = has_mmproj and hasattr(hf_config, "vision_config")
+        is_multimodal = hasattr(hf_config, "vision_config")
 
         if is_multimodal:
-            # Multimodal: Load weights from both main GGUF and mmproj.gguf
-            # Using unified gguf_to_hf_name_map for both files - iterator naturally
-            # filters to only tensors present in each file
-
-            # Load language model weights from main GGUF file
-            logger.info("Loading language model weights from main GGUF file...")
-            backbone_iter = gguf_quant_weights_iterator(
-                model_name_or_path, gguf_to_hf_name_map
+            # Load mm_proj (mm_encoder + projector) for multimodal weights
+            mmproj_file = detect_gguf_multimodal(model_name_or_path)
+            assert mmproj_file is not None, (
+                "Could not find mm_proj file for multimodal GGUF model"
             )
+            yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
 
-            # Load vision tower + projector weights from mmproj GGUF file
-            mmproj_path = str(mmproj_files[0])
-            logger.info(
-                "Loading vision/projector weights from %s...", mmproj_files[0].name
-            )
-            mmproj_iter = gguf_quant_weights_iterator(mmproj_path, gguf_to_hf_name_map)
-
-            # Chain iterators: backbone first, then vision/projector
-            yield from itertools.chain(backbone_iter, mmproj_iter)
-        else:
-            # Text-only: Load from single GGUF file
-            yield from gguf_quant_weights_iterator(
-                model_name_or_path, gguf_to_hf_name_map
-            )
+        yield from gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model)
