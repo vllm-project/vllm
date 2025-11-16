@@ -233,7 +233,9 @@ def get_quant_config(
 
     # GGUF doesn't have config file
     if model_config.quantization in ("gguf", "inc"):
-        return quant_cls()
+        # Pass model architecture for quantization-specific dtype handling
+        model_arch = model_config.architectures[0] if model_config.architectures else ""
+        return quant_cls(model_arch=model_arch)  # type: ignore[call-arg]
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config", None)
@@ -511,7 +513,8 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
     """
     Exclude files that are not needed for inference.
 
-    See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+    See:
+    https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
     """
     blacklist = [
         "training_args.bin",
@@ -674,11 +677,11 @@ def runai_safetensors_weights_iterator(
             device=device,
             is_distributed=is_distributed,
         )
+
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
         )
-
         tensor_iter = tqdm(
             streamer.get_tensors(),
             total=total_tensors,
@@ -741,7 +744,9 @@ def fastsafetensors_weights_iterator(
                 nogds = True
                 logger.warning_once(
                     "GDS not enabled, setting `nogds=True`.\n"
-                    "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
+                    "For more information, see: "
+                    "https://github.com/foundation-model-stack/"
+                    "fastsafetensors?tab=readme-ov-file#basic-api-usages"
                 )
                 loader = _init_loader(pg, device, f_list, nogds=nogds)
                 fb = loader.copy_files_to_device()
@@ -832,11 +837,16 @@ def get_gguf_weight_type_map(
 
 
 def gguf_quant_weights_iterator(
-    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
+    gguf_file: str,
+    gguf_to_hf_name_map: dict[str, str],
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
-    them to torch tensors
+    them to torch tensors.
+    Be careful of the order of yielding weight types and weights data,
+    we have to yield all weight types first before yielding any weights.
+    Otherwise it would cause issue when loading weights with for packed
+    layer with different quant types.
     """
 
     reader = gguf.GGUFReader(gguf_file)
@@ -846,7 +856,7 @@ def gguf_quant_weights_iterator(
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
 
-            if weight_type.name != "F32":
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 weight_type_name = name.replace("weight", "qweight_type")
                 weight_type = torch.tensor(weight_type)
                 yield weight_type_name, weight_type
@@ -856,7 +866,7 @@ def gguf_quant_weights_iterator(
             weight = tensor.data
             weight_type = tensor.tensor_type
             name = gguf_to_hf_name_map[tensor.name]
-            if weight_type.name != "F32":
+            if weight_type.name not in ("F32", "BF16", "F16"):
                 name = name.replace("weight", "qweight")
             param = torch.tensor(weight)
             yield name, param
@@ -1028,7 +1038,9 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         remapped_name = name.replace(".kv_scale", ".attn.k_scale")
         if remapped_name not in params_dict:
             logger.warning_once(
-                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
+                "Found kv_scale in the checkpoint (e.g. %s), but not found "
+                "the expected name in the model (e.g. %s). kv_scale is not "
+                "loaded.",
                 name,
                 remapped_name,
             )

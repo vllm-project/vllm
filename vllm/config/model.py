@@ -33,10 +33,14 @@ from vllm.transformers_utils.config import (
     try_get_generation_config,
     try_get_safetensors_metadata,
     try_get_tokenizer_config,
+    uses_custom_attention_masks,
     uses_mrope,
 )
+from vllm.transformers_utils.gguf_utils import (
+    maybe_patch_hf_config_from_gguf,
+)
 from vllm.transformers_utils.runai_utils import ObjectStorageModel, is_runai_obj_uri
-from vllm.transformers_utils.utils import maybe_model_redirect
+from vllm.transformers_utils.utils import check_gguf_file, maybe_model_redirect
 from vllm.utils.import_utils import LazyLoader
 from vllm.utils.torch_utils import common_broadcastable_dtype
 
@@ -64,6 +68,7 @@ else:
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
+
 
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
@@ -450,6 +455,12 @@ class ModelConfig:
         self.model = maybe_model_redirect(self.model)
         # The tokenizer is consistent with the model by default.
         if self.tokenizer is None:
+            if check_gguf_file(self.model):
+                raise ValueError(
+                    "Using a tokenizer is mandatory when loading a GGUF model. "
+                    "Please specify the tokenizer path or name using the "
+                    "--tokenizer argument."
+                )
             self.tokenizer = self.model
         if self.tokenizer_revision is None:
             self.tokenizer_revision = self.revision
@@ -508,6 +519,10 @@ class ModelConfig:
             hf_overrides_kw=hf_overrides_kw,
             hf_overrides_fn=hf_overrides_fn,
         )
+        hf_config = maybe_patch_hf_config_from_gguf(
+            self.model,
+            hf_config,
+        )
 
         self.hf_config = hf_config
         if dict_overrides:
@@ -523,6 +538,7 @@ class ModelConfig:
 
         architectures = self.architectures
         registry = self.registry
+
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 
@@ -1604,6 +1620,10 @@ class ModelConfig:
     @property
     def uses_mrope(self) -> bool:
         return uses_mrope(self.hf_config)
+
+    @property
+    def uses_custom_attention_masks(self) -> bool:
+        return uses_custom_attention_masks(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:

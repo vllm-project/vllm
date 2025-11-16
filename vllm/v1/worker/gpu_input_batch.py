@@ -46,6 +46,9 @@ class CachedRequestState:
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
 
+    # GEMMA3 MULTIMODAL: Track image token positions for mask generation
+    image_positions: list[int] | None = None
+
     def __post_init__(self):
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             self.prompt_token_ids, self.prompt_embeds
