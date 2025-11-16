@@ -8,9 +8,20 @@ Compares performance of:
 2. vLLM's built-in DeepSeek implementation
 
 Run from vLLM root:
+    # Custom model only (default)
     python examples/custom_models/benchmark_deepseek_v3.py \\
         --num-requests 10 \\
         --max-batch-size 4
+
+    # Built-in only
+    python examples/custom_models/benchmark_deepseek_v3.py \\
+        --use-builtin \\
+        --num-requests 10
+
+    # Both (for comparison)
+    python examples/custom_models/benchmark_deepseek_v3.py \\
+        --run-both \\
+        --num-requests 10
 """
 
 import argparse
@@ -29,11 +40,17 @@ sys.path.insert(0, vllm_root)
 # Import vLLM first
 from vllm import LLM, SamplingParams
 
-# Import custom model from same directory to register it
-deepseek_path = os.path.join(script_dir, "deepseek_v3_torchtitan.py")
-spec = importlib.util.spec_from_file_location("deepseek_v3_torchtitan", deepseek_path)
-deepseek_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(deepseek_module)
+
+def import_custom_model():
+    """Import custom model to register it with vLLM."""
+    deepseek_path = os.path.join(script_dir, "deepseek_v3_torchtitan.py")
+    spec = importlib.util.spec_from_file_location(
+        "deepseek_v3_torchtitan", deepseek_path
+    )
+    deepseek_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(deepseek_module)
+    print("✓ Custom model registered")
+    return deepseek_module
 
 
 def generate_requests(num_requests: int = 100, prompt_len: int = 128) -> list[str]:
@@ -200,9 +217,19 @@ def main():
         help="Maximum model context length (limits KV cache allocation)",
     )
     parser.add_argument(
+        "--use-builtin",
+        action="store_true",
+        help="Use vLLM's built-in DeepSeek implementation (don't import custom)",
+    )
+    parser.add_argument(
+        "--run-both",
+        action="store_true",
+        help="Run both custom and built-in for comparison",
+    )
+    parser.add_argument(
         "--skip-custom",
         action="store_true",
-        help="Skip custom model benchmark (only run built-in)",
+        help="Skip custom model benchmark",
     )
     parser.add_argument(
         "--skip-builtin",
@@ -212,9 +239,26 @@ def main():
 
     args = parser.parse_args()
 
+    # Determine which benchmarks to run
+    run_custom = not args.use_builtin and not args.skip_custom
+    run_builtin = args.use_builtin or args.run_both
+    if args.run_both:
+        run_custom = True  # Run both
+
     print(f"\n{'#' * 70}")
     print("DeepSeek V3 Benchmark: TorchTitan vs Built-in")
     print(f"{'#' * 70}")
+    if run_custom and run_builtin:
+        print("Mode: Comparing Custom vs Built-in")
+    elif run_custom:
+        print("Mode: Custom model only")
+    elif run_builtin:
+        print("Mode: Built-in model only")
+
+    # Import custom model if needed
+    if run_custom:
+        print("\nImporting custom model...")
+        import_custom_model()
 
     # Generate requests
     print(f"\nGenerating {args.num_requests} requests...")
@@ -224,10 +268,11 @@ def main():
     results = {}
 
     # Benchmark custom model (TorchTitan)
-    if not args.skip_custom:
+    if run_custom:
         try:
-            # Custom model is registered as "DeepSeekV3TorchTitan"
-            # But we can still use the HF model name since it auto-detects
+            print("\n" + "=" * 70)
+            print("CUSTOM MODEL (TorchTitan + vLLM MLA)")
+            print("=" * 70)
             results["custom"] = benchmark_model(
                 model_name=args.model,
                 requests=requests,
@@ -243,22 +288,19 @@ def main():
             traceback.print_exc()
 
     # Benchmark built-in vLLM model
-    if not args.skip_builtin:
+    if run_builtin:
         try:
-            # Use vLLM's built-in DeepSeek implementation
-            # (This would require a different model path or architecture)
-            print("\n⚠️  Built-in vLLM DeepSeek implementation comparison skipped.")
-            print(
-                "   To compare, specify a different --model that uses vLLM's native implementation."
+            print("\n" + "=" * 70)
+            print("BUILT-IN vLLM MODEL")
+            print("=" * 70)
+            results["builtin"] = benchmark_model(
+                model_name=args.model,
+                requests=requests,
+                tp_size=args.tp,
+                max_batch_size=args.max_batch_size,
+                max_tokens=args.max_tokens,
+                max_model_len=args.max_model_len,
             )
-            # Uncomment below if you have a native vLLM DeepSeek model:
-            # results['builtin'] = benchmark_model(
-            #     model_name="vllm-builtin-deepseek",
-            #     requests=requests,
-            #     tp_size=args.tp,
-            #     max_batch_size=args.max_batch_size,
-            #     max_tokens=args.max_tokens,
-            # )
         except Exception as e:
             print(f"\n❌ Built-in model benchmark failed: {e}")
             import traceback
