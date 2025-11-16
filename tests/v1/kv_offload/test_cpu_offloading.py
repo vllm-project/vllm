@@ -95,6 +95,8 @@ def test_cpu_offloading(cpu_block_size: int) -> None:
     llm = LLM(
         model="meta-llama/Llama-3.2-1B-Instruct",
         gpu_memory_utilization=0.5,
+        # Cap max_model_len so test fixtures fit on 12 GB GPUs (RTX 3060 class)
+        max_model_len=32768,
         kv_events_config=kv_events_config,
         kv_transfer_config=kv_transfer_config,
     )
