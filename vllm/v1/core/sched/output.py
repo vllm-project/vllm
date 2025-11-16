@@ -36,6 +36,7 @@ else:
 class NewRequestData:
     req_id: str
     prompt_token_ids: list[int] | None
+    prefill_token_ids: list[int] | None
     mm_features: list[MultiModalFeatureSpec]
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
@@ -53,6 +54,7 @@ class NewRequestData:
         return cls(
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
+            prefill_token_ids=request._all_token_ids,
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
@@ -175,6 +177,7 @@ class SchedulerOutput:
     # This can be used for cascade attention.
     num_common_prefix_blocks: list[int]
 
+    preempted_req_ids: set[str]
     # Request IDs that are finished in between the previous and the current
     # steps. This is used to notify the workers about the finished requests
     # so that they can free the cached states for those requests.
@@ -192,6 +195,21 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    @classmethod
+    def make_empty(cls) -> "SchedulerOutput":
+        return cls(
+            scheduled_new_reqs=[],
+            scheduled_cached_reqs=CachedRequestData.make_empty(),
+            num_scheduled_tokens={},
+            total_num_scheduled_tokens=0,
+            scheduled_spec_decode_tokens={},
+            scheduled_encoder_inputs={},
+            num_common_prefix_blocks=[],
+            preempted_req_ids=set(),
+            finished_req_ids=set(),
+            free_encoder_mm_hashes=[],
+        )
 
 
 @dataclass
