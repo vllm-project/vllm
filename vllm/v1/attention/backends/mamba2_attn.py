@@ -180,7 +180,7 @@ class Mamba2AttentionMetadataBuilder(
             self.use_spec_decode = False
         
         
-        if self.compilation_config.full_cuda_graph and self.use_spec_decode:
+        if self.compilation_config.cudagraph_mode.has_full_cudagraphs() and self.use_spec_decode:
             raise ValueError("Full CUDA graph is not supported for Mamba2AttentionBackend and specdec. Remove this once for-loop on ssm kernel update is removed")
         # Pre-allocate tensors for CUDA graph support (similar to GDN)
         self.decode_cudagraph_max_bs = min(
@@ -321,6 +321,8 @@ class Mamba2AttentionMetadataBuilder(
                 else state_indices_tensor
             )
             non_spec_query_start_loc = common_attn_metadata.query_start_loc
+            # spec_token_indx = None
+            # non_spec_token_indx = None
         else:
             # Have spec decode - compute counts EXCLUDING spec sequences
             query_lens = (
@@ -468,7 +470,7 @@ class Mamba2AttentionMetadataBuilder(
             and num_decodes == 0
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             # Pad for CUDA graph (pure spec decode batch)
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_spec_decode_tokens)
@@ -507,13 +509,13 @@ class Mamba2AttentionMetadataBuilder(
         # CUDA graph padding for non-spec decode
         elif (
             num_decodes <= self.decode_cudagraph_max_bs
-            and self.compilation_config.full_cuda_graph
+            and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             # Pad state tensor for CUDA graph (regular decode only)
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_decodes)
-            self.state_indices_tensor[:num_decodes].copy_(
-                non_spec_state_indices_tensor, non_blocking=True
-            )
+            # self.state_indices_tensor[:num_decodes].copy_(
+            #     non_spec_state_indices_tensor, non_blocking=True
+            # )
             non_spec_state_indices_tensor = self.state_indices_tensor[:num_input_tokens]
             non_spec_state_indices_tensor[num_decodes:] = PAD_SLOT_ID
             

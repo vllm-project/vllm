@@ -652,7 +652,6 @@ def rejection_greedy_sample_kernel(
     # return
     if not rejected:
         # If all tokens are accepted, append the bonus token.
-        print(f"[SMOR], from:rejection_greedy_sample_kernel, all tokens are accepted, appending bonus token")
         bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
         tl.store(
             output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
@@ -717,7 +716,6 @@ def rejection_random_sample_kernel(
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.
-        print(f"[SMOR], from:rejection_random_sample_kernel, all tokens are accepted, appending bonus token")
         bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
         tl.store(
             output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,

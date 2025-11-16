@@ -530,7 +530,6 @@ class MambaMixer2(MambaBase, CustomOp):
         # stay the same and reused for all mamba layers in the same iteration
         attn_metadata: AttentionMetadata = forward_context.attn_metadata
     
-
         assert self.cache_config is not None
         mamba_block_size = self.cache_config.mamba_block_size
         prefix_caching_enabled = self.cache_config.enable_prefix_caching
@@ -724,7 +723,8 @@ class MambaMixer2(MambaBase, CustomOp):
             if has_initial_states_p is not None and prep_initial_states:
                 kernel_ssm_indices = state_indices_tensor_p
                 if prefix_caching_enabled:
-                    kernel_ssm_indices = state_indices_tensor_p.gather(
+                    # TODO smor- not verified, need to look after indices 
+                    kernel_ssm_indices = non_spec_state_indices_tensor.gather(
                         1, block_idx_last_computed_token_p.unsqueeze(1)
                     ).squeeze(1)
                 initial_states = torch.where(
@@ -850,10 +850,6 @@ class MambaMixer2(MambaBase, CustomOp):
                 #   block_idx_first_scheduled_token_d >
                 #       block_idx_last_computed_token_d
             else:
-                # Without caactivation=ching, read and write in-place to the same blocks:
-                # state_indices_tensor_d_input = state_indices_tensor_d
-                # state_indices_tensor_d_output = state_indices_tensor_d
-                
                 has_spec_decode = spec_sequence_masks is not None and spec_sequence_masks.any() # should be revisit towards cuda graph support
                 
                 # Prepare SSM parameters (shared by all decode paths)
