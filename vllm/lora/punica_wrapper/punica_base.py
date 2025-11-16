@@ -31,6 +31,7 @@ class PunicaWrapperABC(ABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
+        extra_vocab_size: int,
         **kwargs,
     ) -> None:
         """
@@ -144,9 +145,14 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._sampler_indices_padded = torch.empty(
             max_num_batched_tokens, dtype=torch.long, device=device
         )
-        # 3 is the number of indices tensors.
-        # base_indices, sampler_indices, sampler_indices_padded
-        self.indices_len: list[int | None] = [None] * 3
+        self._embeddings_indices = torch.empty(
+            2, max_num_batched_tokens, dtype=torch.long, device=device
+        )
+
+        # 4 is the number of indices tensors.
+        # base_indices, sampler_indices, sampler_indices_padded,
+        # embeddings_indices
+        self.indices_len: list[int | None] = [None] * 4
         # these attributes are the information required for sgmv kernel
         self._seq_start_locs = torch.empty(max_batches, dtype=torch.long, device=device)
         self._seq_lengths = torch.empty(max_batches, dtype=torch.long, device=device)
@@ -166,17 +172,20 @@ class PunicaWrapperBase(PunicaWrapperABC):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
+        extra_vocab_size: int,
     ):
         (
             base_indices,
             sampler_indices,
             sampler_indices_padded,
+            embeddings_indices,
             indices_len,
         ) = convert_mapping(
             mapping,
             lora_index_to_id,
             max_loras,
             vocab_size,
+            extra_vocab_size,
             self.device,
         )
         self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
@@ -184,6 +193,10 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self._sampler_indices_padded[: sampler_indices_padded.shape[0]].copy_(
             sampler_indices_padded
         )
+        self._embeddings_indices[
+            : embeddings_indices.shape[0], : embeddings_indices.shape[1]
+        ].copy_(embeddings_indices)
+
         self.indices_len[:] = indices_len
 
     def _update_prefill_metadata(self, token_lora_tensor: torch.Tensor) -> None:
@@ -257,15 +270,27 @@ class PunicaWrapperBase(PunicaWrapperABC):
         indices_padded_len = self.indices_len[2]
         return self._sampler_indices_padded[:indices_padded_len]
 
+    @property
+    def embeddings_indices(self) -> torch.Tensor:
+        """
+        This property provides access to the indices used for lora embeddings,
+        specifically for VocabParallelEmbeddingWithLoRA.
+        """
+        embeddings_indices_len = self.indices_len[3]
+        return self._embeddings_indices[:, :embeddings_indices_len]
+
     def update_metadata(
         self,
         mapping: "LoRAMapping",
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
+        extra_vocab_size: int,
         **kwargs,
     ):
-        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
+        self._update_base_metadata(
+            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
+        )
 
         if mapping.is_prefill:
             # Update metadata required for prefill-related operators.
