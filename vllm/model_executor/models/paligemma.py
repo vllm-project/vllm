@@ -150,10 +150,10 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
         if not mm_data:
-            prompt_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
+            tok_kwargs = dict(tok_kwargs)
+            tok_kwargs.setdefault("add_special_tokens", False)
+            return self._call_hf_tokenizer(prompt, tok_kwargs)
 
         return super()._call_hf_processor(
             prompt=prompt,
