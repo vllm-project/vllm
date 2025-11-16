@@ -650,7 +650,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     )
     if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
     else None,
-    # If set, vllm will use triton sampler, will override flashinfer sampler.
+    # If set, vllm will use triton sampler. This will override the flashinfer sampler.
     "VLLM_USE_TRITON_SAMPLER": lambda: bool(
         int(os.environ.get("VLLM_USE_TRITON_SAMPLER", "0"))
     )

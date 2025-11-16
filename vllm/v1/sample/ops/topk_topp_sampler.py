@@ -49,18 +49,13 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_native
 
             if envs.VLLM_USE_TRITON_SAMPLER:
-                logger.info_once("Using Triton for top-p & top-k sampling.")
                 if envs.VLLM_USE_FLASHINFER_SAMPLER:
                     logger.info_once(
-                        "Overriding FlashInfer with Triton for top-p & top-k sampling."
+                        "Overriding FlashInfer top-p & top-k sampling with "
+                        "Triton top-p & top-k sampling."
                     )
-                self.forward = self.forward_triton
-            else:
-                logger.warning_once(
-                    "Triton top-p/top-k sampling is available but disabled "
-                    "by default. Set VLLM_USE_TRITON_SAMPLER=1 to opt in "
-                    "after verifying accuracy for your workloads."
-                )
+                else:
+                    logger.info_once("Using Triton for top-p & top-k sampling.")
                 self.forward = self.forward_native
         elif current_platform.is_cpu():
             arch = current_platform.get_cpu_architecture()
