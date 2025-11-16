@@ -198,6 +198,7 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -341,7 +342,10 @@ class EngineCore:
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
-        if self.use_spec_decode and model_executed:
+        # When using async scheduling we can't get draft token ids in advance,
+        # so we update draft token ids in the worker process and don't
+        # need to update draft token ids here.
+        if not self.async_scheduling and self.use_spec_decode and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
