@@ -89,16 +89,8 @@ class Qwen3TorchTitanForCausalLM(VLLMModelForCausalLM):
         self.parallel_context = parallel_context
 
         # Replace attention with vLLM's TrainableFlashAttention
+        # (This happens before TP so TP can shard the attention weights)
         replace_with_trainable_attention(self.model, use_mla=False)
-
-        # Synchronize weights across TP ranks
-        if parallel_context is not None:
-            tp_size = parallel_context.get_tensor_parallel_world_size()
-            if tp_size > 1:
-                import torch.distributed as dist
-
-                for param in self.model.parameters():
-                    dist.broadcast(param.data, src=0)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         """Convert input token IDs to embeddings."""
@@ -201,11 +193,41 @@ def build_qwen3_torchtitan(vllm_config, parallel_context: ParallelContext) -> nn
     Returns:
         Qwen3TorchTitanForCausalLM instance
     """
+    # Create model
     model = Qwen3TorchTitanForCausalLM(
         vllm_config=vllm_config, parallel_context=parallel_context
     )
 
-    # Convert to dtype if specified
+    # Apply tensor parallelism if TP > 1
+    # This must happen AFTER model creation and attention replacement
+    # but BEFORE dtype conversion (to avoid dtype issues with DTensors)
+    if parallel_context is not None:
+        tp_size = parallel_context.get_tensor_parallel_world_size()
+        if tp_size > 1:
+            from torch.distributed.device_mesh import init_device_mesh
+            from torchtitan.models.qwen3.infra.parallelize import apply_non_moe_tp
+
+            print(f"🔧 Applying Tensor Parallelism (TP={tp_size})...")
+
+            # Create DeviceMesh for TorchTitan
+            tp_mesh = init_device_mesh(
+                "cuda",
+                (tp_size,),
+                mesh_dim_names=("tp",),
+            )
+
+            # Apply TorchTitan's tensor parallelism to shard weights
+            apply_non_moe_tp(
+                model.model,
+                tp_mesh=tp_mesh,
+                loss_parallel=False,  # Don't shard the output for loss computation
+                enable_float8_tensorwise_tp=False,
+                enable_async_tp=False,
+            )
+
+            print(f"✅ Applied Tensor Parallelism (TP={tp_size})")
+
+    # Convert to dtype if specified (happens after TP)
     if hasattr(vllm_config, "model_config") and hasattr(
         vllm_config.model_config, "dtype"
     ):
