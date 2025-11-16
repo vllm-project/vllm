@@ -1,11 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.forward_context import get_forward_context
 import math
 
 import torch
 
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
+try:
+    import flashinfer
+except:
+    flashinfer = None
+from vllm.logger import init_logger
 
 from .base import RotaryEmbeddingBase
 from .common import (
@@ -15,7 +22,10 @@ from .common import (
     yarn_linear_ramp_mask,
 )
 
+import vllm.envs as envs
 
+
+logger = init_logger(__name__)
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
         return 1.0
@@ -57,8 +67,17 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             * attn_factor
         )
         super().__init__(
-            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
+            head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype, has_flashinfer
         )
+        self.fuse_rotary_fp8 = (
+            self.dtype == current_platform.fp8_dtype()
+            and envs.VLLM_FLASHINFER_FUSE_MLA_ROPE_FP8
+            and has_flashinfer()
+        )
+        if self.fuse_rotary_fp8:
+            self.cos_sin_cache_float32 = self.cos_sin_cache.to(torch.float32)
+            logger.info("fuse_rotary_fp8")
+            assert flashinfer is not None
 
     def _compute_inv_freq(self, scaling_factor: float) -> torch.Tensor:
         pos_freqs = self.base ** (
@@ -111,7 +130,9 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        query_nope: torch.Tensor | None = None,
+        key_nope: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None] | tuple [torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
         self._match_cos_sin_cache_dtype(query)
@@ -120,7 +141,28 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
-
+        if query_nope is not None and key_nope is not None:
+            q_out = torch.empty_like(query, dtype=self.dtype)
+            k_out = torch.empty_like(key, dtype=self.dtype)
+            q_nope_out = torch.empty_like(query_nope, dtype=self.dtype)
+            k_nope_out = torch.empty_like(key_nope, dtype=self.dtype)
+            flashinfer.rope.mla_rope_quantize_fp8(
+                query,
+                key,
+                query_nope,
+                key_nope,
+                self.cos_sin_cache_float32,
+                positions,
+                is_neox=self.is_neox_style,
+                q_rope_out=q_out,
+                k_rope_out=k_out,
+                q_nope_out=q_nope_out,
+                k_nope_out=k_nope_out,
+                quant_scale_q=1.0,
+                quant_scale_kv=1.0,
+                enable_pdl=False,
+            )
+            return q_out, k_out, q_nope_out, k_nope_out
         cos_sin = self.cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
@@ -152,8 +194,10 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
+        query_nope: torch.Tensor | None = None,
+        key_nope: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_native(positions, query, key, offsets)
+        return self.forward_native(positions, query, key, offsets, query_nope, key_nope)
 
     def forward_cuda(
         self,
@@ -161,5 +205,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         query: torch.Tensor,
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
+        query_nope: torch.Tensor | None = None,
+        key_nope: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return self.forward_native(positions, query, key, offsets)
+        return self.forward_native(positions, query, key, offsets, query_nope, key_nope)
