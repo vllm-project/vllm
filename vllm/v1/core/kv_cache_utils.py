@@ -642,9 +642,7 @@ def estimate_max_model_len(
         vllm_config.model_config.max_model_len = model_len
         try:
             # Calculate memory needed for the given model length
-            memory_needed = max_memory_usage_bytes(
-                vllm_config, kv_cache_spec.values()
-            )
+            memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
         finally:
             vllm_config.model_config.max_model_len = previous_model_len
 
