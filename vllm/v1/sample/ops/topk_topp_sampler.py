@@ -367,6 +367,23 @@ _PERCENTILE_TO_STD_TABLE = [
 # fmt: on
 
 
+def apply_top_k_top_p_triton(
+    logits: torch.Tensor,
+    k: torch.Tensor | None,
+    p: torch.Tensor | None,
+    debug: bool = False,
+) -> torch.Tensor:
+    """
+    Uses pivot-based algorithm to filter --> sort
+    """
+    if k is None and p is None:
+        return logits
+    elif p is None and k is not None:
+        return apply_top_k_only_triton(logits, k)
+    else:
+        return apply_top_p_filtered(logits, k, p)
+
+
 @triton.jit
 def _topk_triton_kernel(
     LOGITS,
@@ -410,10 +427,6 @@ def _topk_triton_kernel(
         sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
         outlier_pivot = avg_logit + sigma * std_logit
         num_outliers = tl.zeros((), dtype=tl.uint32)
-
-        sum_logit = tl.sum(logits_blk)
-        min_logit_value = tl.min(logits_blk)
-        max_logit_value = tl.max(logits_blk)
 
         # First pass: compute max and min logits and gather outliers
         for i in range(0, search_iters):
@@ -710,7 +723,7 @@ def top_k_top_p_filter(
                 if p_fil_pivot == -float("inf"):
                     p_fil_pivot = p_fil_pivot_0
 
-        # Third pass: Mask top-k, calculate exp logits and sum
+        # Third pass: Calculate exp logits and sum with top-k mask
         if not DO_TOP_K:
             k_pivot = -float("inf")
 
@@ -736,7 +749,7 @@ def top_k_top_p_filter(
             probs_blk = probs_blk / sum_exp_logits
             tl.store(BUFFER_ROW + offs_n, probs_blk, mask=mask_n)
 
-        # Fifth pass : Gather filtered values
+        # Fifth pass : Gather filtered values with top-k mask
         write_pos = tl.zeros((), dtype=tl.int32)
         sum_probs = tl.zeros((), dtype=tl.float32)
         FILTERED_LOGITS_ROW = FILTERED_LOGITS + row_id * (P_FIL + 1)
@@ -749,7 +762,6 @@ def top_k_top_p_filter(
             probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
 
             keep_mask = (logits_blk >= p_fil_pivot) & mask_n
-            n_kept = tl.sum(keep_mask, dtype=tl.int32)
             cpos = tl.cumsum(keep_mask) - 1 + write_pos
             final_mask = keep_mask & (cpos < P_FIL)
             write_idx = tl.where(final_mask, cpos, P_FIL)
@@ -844,20 +856,3 @@ def apply_top_p_filtered(
     logits.fill_(-float("inf"))
     logits.scatter_(dim=1, index=logits_sort_indices, src=logits_sort)
     return logits
-
-
-def apply_top_k_top_p_triton(
-    logits: torch.Tensor,
-    k: torch.Tensor | None,
-    p: torch.Tensor | None,
-    debug: bool = False,
-) -> torch.Tensor:
-    """
-    Uses pivot-based algorithm to filter --> sort
-    """
-    if k is None and p is None:
-        return logits
-    elif p is None and k is not None:
-        return apply_top_k_only_triton(logits, k)
-    else:
-        return apply_top_p_filtered(logits, k, p)

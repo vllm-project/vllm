@@ -3,20 +3,8 @@
 from datetime import datetime
 from itertools import product
 
-import torch
-
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-torch.cuda.manual_seed_all(42)
-import random
-
-import numpy as np
-
-random.seed(42)
-np.random.seed(42)
-torch.backends.cudnn.deterministic = True
-torch.backends.cudnn.benchmark = False
 import regex as re
+import torch
 
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -78,8 +66,11 @@ def test_accuracy(logits, k, p, func_list):
             error_cols = torch.where(error_mask)[1]
             error_cols = torch.unique(error_cols)
             num_error_cols = error_cols.shape[0]
-            print_to_log(f"num_error_rows: {num_error_rows} - {error_rows}", log_file)
-            print_to_log(f"num_error_cols: {num_error_cols} - {error_cols}", log_file)
+            print_to_log(
+                f"num_error_rows: {num_error_rows} - {error_rows}",
+                f"num_error_cols: {num_error_cols} - {error_cols}",
+                log_file,
+            )
             row_to_show = 5 if num_error_rows > 5 else num_error_rows
             logits_to_show = torch.sort(
                 output_logits[error_rows], descending=True
@@ -92,7 +83,7 @@ def test_accuracy(logits, k, p, func_list):
             ).values
             original_logits_to_show = original_logits_to_show[:row_to_show, :20]
             print_to_log(f"original_logits: {original_logits_to_show}", log_file)
-            assert False
+            raise ValueError("Logits are not close")
     return output_correct_list
 
 
@@ -143,8 +134,9 @@ if __name__ == "__main__":
 
     with open(csv_file, "w") as f:
         f.write(
-            "dist_generator,batch_size,vocab_size,p,k,triton_correct,test_correct"
-            "torch_time_taken,triton_time_taken,test_time_taken,triton_speedup,test_speedup\n"
+            "dist_generator,batch_size,vocab_size,p,k,triton_correct,\n"
+            "test_correct,torch_time_taken,triton_time_taken,test_time_taken,\n"
+            "triton_speedup,test_speedup\n"
         )
 
     for batch_size, vocab_size, p, k in product(
@@ -190,7 +182,8 @@ if __name__ == "__main__":
                 is_correct = correct_list[i]
                 if not is_correct:
                     print_to_log(
-                        f"Error: logits are not close for function {func_list[i + 1].__name__},"
+                        f"Error: logits are not close for "
+                        f"function {func_list[i + 1].__name__}, "
                         f" batch_size: {batch_size},"
                         f" vocab_size: {vocab_size}, dist_generator: "
                         f"{dist_generator}, p: {p}, k: {k}",
