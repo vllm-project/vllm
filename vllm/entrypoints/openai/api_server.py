@@ -17,6 +17,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+from multiprocessing import shared_memory
 from typing import Annotated, Any, Literal
 
 import model_hosting_container_standards.sagemaker as sagemaker_standards
@@ -130,6 +131,17 @@ logger = init_logger("vllm.entrypoints.openai.api_server")
 ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL = "endpoint-load-metrics-format"
 
 _running_tasks: set[asyncio.Task] = set()
+
+
+def set_sleep_signal(value: int = 1, shared_memory_name: str = "sleep_signal") -> None:
+    try:
+        shm = shared_memory.SharedMemory(name=shared_memory_name, create=False, size=4)
+    except Exception:
+        shm = shared_memory.SharedMemory(name=shared_memory_name, create=True, size=4)
+
+    if shm is not None:
+        shm.buf[0:4] = value.to_bytes(4, "little")
+        shm.close()
 
 
 @asynccontextmanager
@@ -1082,6 +1094,8 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/sleep")
     async def sleep(raw_request: Request):
+        set_sleep_signal(1)
+
         # get POST params
         level = raw_request.query_params.get("level", "1")
         await engine_client(raw_request).sleep(int(level))
@@ -1091,6 +1105,8 @@ if envs.VLLM_SERVER_DEV_MODE:
 
     @router.post("/wake_up")
     async def wake_up(raw_request: Request):
+        set_sleep_signal(0)
+
         tags = raw_request.query_params.getlist("tags")
         if tags == []:
             # set to None to wake up all tags if no tags are provided
