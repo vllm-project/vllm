@@ -4,17 +4,19 @@ from datetime import datetime
 from itertools import product
 
 import torch
+
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
 torch.cuda.manual_seed_all(42)
 import random
+
 import numpy as np
+
 random.seed(42)
 np.random.seed(42)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 import regex as re
-
 
 from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
@@ -155,7 +157,7 @@ if __name__ == "__main__":
         logits_list = [("RANDN", logits_randn)]
 
         if p == "RAND":
-            p_tensor = torch.rand((batch_size,), device="cuda") * 0.95 + 0.05
+            p_tensor = torch.rand((batch_size,), device="cuda") * 0.98 + 0.01
         elif p is not None:
             p_tensor = torch.full((batch_size,), p, device="cuda")
         else:
@@ -194,7 +196,6 @@ if __name__ == "__main__":
                         f"{dist_generator}, p: {p}, k: {k}",
                         log_file,
                     )
-            print_to_log("Test accuracy passed! Now testing speedup...", log_file)
             time_list = []
             for func in func_list:
                 time_taken = test_time(logits, k_tensor, p_tensor, test_func=func)
