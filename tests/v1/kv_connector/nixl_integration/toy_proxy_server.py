@@ -224,6 +224,7 @@ async def _handle_completions(api: str, request: Request):
 
         # Extract the needed fields
         response_json = response.json()
+        await response.aclose()  # CRITICAL: Release connection back to pool
         kv_transfer_params = response_json.get("kv_transfer_params", {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
