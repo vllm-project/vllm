@@ -204,6 +204,7 @@ if TYPE_CHECKING:
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
+    VLLM_RESPONSES_API_USE_MCP_TYPES: bool = False
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
@@ -1405,6 +1406,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Allows harmony instructions to be injected on system messages
     "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": lambda: bool(
         int(os.getenv("VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS", "0"))
+    ),
+    # Enable new MCP type strategy for Responses API where MCP tools are identified
+    # by recipient prefix. If enabled, recipients starting with "functions." are
+    # treated as function calls; all other recipients are treated as MCP tools.
+    "VLLM_RESPONSES_API_USE_MCP_TYPES": lambda: bool(
+        int(os.getenv("VLLM_RESPONSES_API_USE_MCP_TYPES", "0"))
     ),
     # Enable automatic retry when tool call JSON parsing fails
     # If enabled, returns an error message to the model to retry
