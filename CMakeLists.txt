@@ -90,6 +90,21 @@ endif()
 #
 find_package(Torch REQUIRED)
 
+# Log '+PTX' only when it appears as an arch suffix (e.g., 8.9+PTX)
+if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
+  string(REPLACE "," ";" _vllm_archs "$ENV{TORCH_CUDA_ARCH_LIST}")
+  string(REPLACE " " ";" _vllm_archs "${_vllm_archs}")
+  foreach(_tok ${_vllm_archs})
+    string(TOUPPER _tok_up "${_tok}")
+    if(_tok_up MATCHES "\\+PTX$")
+      message(STATUS
+        "TORCH_CUDA_ARCH_LIST contains '+PTX'; PTX entries are ignored by vLLM "
+        "(expected when using torch defaults). Remove '+PTX' to silence.")
+      break()
+    endif()
+  endforeach()
+endif()
+
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
