@@ -2513,9 +2513,9 @@ class CPUDNNLGEMMHandler:
         self.n = -1
         self.k = -1
 
-    def __del__(self):
-        if self.handler is not None:
-            torch.ops._C.release_dnnl_matmul_handler(self.handler)
+    # def __del__(self):
+    #     if self.handler is not None:
+    #         torch.ops._C.release_dnnl_matmul_handler(self.handler)
 
 
 _supports_onednn = bool(hasattr(torch.ops._C, "create_onednn_mm_handler"))
@@ -2700,6 +2700,31 @@ def cpu_attention_with_kv_cache(
         scheduler_metadata,
         s_aux,
     )
+
+
+def cpu_gemm_wna16(
+    input: torch.Tensor,
+    q_weight: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor | None,
+    g_idx: torch.Tensor | None,
+    bias: torch.Tensor | None,
+    pack_factor: int,
+    isa_hint: str,
+) -> torch.Tensor:
+    output = torch.empty((input.size(0), scales.size(1)), dtype=input.dtype)
+    torch.ops._C.cpu_gemm_wna16(
+        input,
+        q_weight,
+        output,
+        scales,
+        zeros,
+        g_idx,
+        bias,
+        pack_factor,
+        isa_hint,
+    )
+    return output
 
 
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
