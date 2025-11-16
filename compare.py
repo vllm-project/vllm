@@ -112,7 +112,7 @@ def test_time(logits, k, p, test_func, num_runs=30, num_warmup=5):
 if __name__ == "__main__":
     date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    batch_size_list = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024]
+    batch_size_list = [16, 32, 64, 128, 256, 512, 1024]
     vocab_size_list = [16384, 65536, 102400, 128256]
     p_list = [None, "RAND", 0.1, 0.4, 0.7, 0.9, 0.99]
     k_list = [None, "RAND", 5, 50, 200, 500, 3000]

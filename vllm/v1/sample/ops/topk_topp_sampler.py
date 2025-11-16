@@ -386,7 +386,8 @@ def apply_top_k_top_p_triton(
     elif p is None and k is not None:
         return apply_top_k_only_triton(logits, k)
     else:
-        return apply_top_p_filtered(logits, k, p)
+        logits_top_k = apply_top_k_only_triton(logits, k)
+        return apply_top_p_filtered(logits_top_k, logits, k, p)
 
 
 @triton.jit
@@ -442,6 +443,7 @@ def _topk_triton_kernel(
 
             max_logit = tl.maximum(max_logit, tl.max(logits_blk))
             min_logit = tl.minimum(min_logit, tl.min(logits_blk))
+
             outlier_mask = (logits_blk > outlier_pivot) & mask_n
             num_blk_outliers = tl.sum(outlier_mask)
             cumulative_pos = tl.cast(
@@ -529,6 +531,8 @@ def apply_top_k_only_triton(
 
     The logits tensor will be updated out-of-place.
     """
+    if k is None:
+        return logits
 
     batch_size, vocab_size = logits.shape
     NUM_PROGRAMS = batch_size  # Non-persistent kernel
@@ -618,7 +622,7 @@ def top_k_top_p_filter(
             )
             num_outliers += num_blk_outliers
 
-            write_idx = tl.where(outlier_mask, cumulative_pos, 0)
+            write_idx = tl.where(outlier_mask, cumulative_pos, -1)
             tl.store(BUFFER_ROW + write_idx, logits_blk, mask=outlier_mask)
 
         max_range = max_logit
@@ -639,9 +643,9 @@ def top_k_top_p_filter(
             p_fil_min_range = min_range
 
             # Second passes: Quaternary search for pivots (nlog_4(n))
+            num_iters = 0
             k_pivot = -float("inf")
             p_fil_pivot = -float("inf")
-            num_iters = 0
             while k_pivot == -float("inf") or p_fil_pivot == -float("inf"):
                 k_pivot_0 = (k_max_range - k_min_range) * 1.0 / 4.0 + k_min_range
                 k_pivot_1 = (k_max_range - k_min_range) * 2.0 / 4.0 + k_min_range
@@ -686,19 +690,19 @@ def top_k_top_p_filter(
                         k_pivot = k_pivot_1
                     elif k_pivots_num_2 == k:
                         k_pivot = k_pivot_2
-                # If none of the pivots are equal to k, we update the range
-                elif k_pivots_num_2 > k:
-                    k_min_range = k_pivot_2
-                elif k_pivots_num_1 > k:
-                    k_min_range = k_pivot_1
-                elif k_pivots_num_0 > k:
-                    k_min_range = k_pivot_0
-                if k_pivots_num_0 < k:
-                    k_max_range = k_pivot_0
-                elif k_pivots_num_1 < k:
-                    k_max_range = k_pivot_1
-                elif k_pivots_num_2 < k:
-                    k_max_range = k_pivot_2
+                    # If none of the pivots are equal to k, we update the range
+                    elif k_pivots_num_2 > k:
+                        k_min_range = k_pivot_2
+                    elif k_pivots_num_1 > k:
+                        k_min_range = k_pivot_1
+                    elif k_pivots_num_0 > k:
+                        k_min_range = k_pivot_0
+                    if k_pivots_num_0 < k:
+                        k_max_range = k_pivot_0
+                    elif k_pivots_num_1 < k:
+                        k_max_range = k_pivot_1
+                    elif k_pivots_num_2 < k:
+                        k_max_range = k_pivot_2
 
                 # Check if any of the pivots are equal to P_FIL
                 if p_fil_pivot == -float("inf"):
@@ -708,24 +712,24 @@ def top_k_top_p_filter(
                         p_fil_pivot = p_fil_pivot_1
                     elif p_fil_pivots_num_2 == P_FIL:
                         p_fil_pivot = p_fil_pivot_2
-                # If none of the pivots are equal to P_FIL, we update the range
-                elif p_fil_pivots_num_2 > P_FIL:
-                    p_fil_min_range = p_fil_pivot_2
-                elif p_fil_pivots_num_1 > P_FIL:
-                    p_fil_min_range = p_fil_pivot_1
-                elif p_fil_pivots_num_0 > P_FIL:
-                    p_fil_min_range = p_fil_pivot_0
-                if p_fil_pivots_num_0 < P_FIL:
-                    p_fil_max_range = p_fil_pivot_0
-                elif p_fil_pivots_num_1 < P_FIL:
-                    p_fil_max_range = p_fil_pivot_1
-                elif p_fil_pivots_num_2 < P_FIL:
-                    p_fil_max_range = p_fil_pivot_2
+                    # If none of the pivots are equal to P_FIL, we update the range
+                    elif p_fil_pivots_num_2 > P_FIL:
+                        p_fil_min_range = p_fil_pivot_2
+                    elif p_fil_pivots_num_1 > P_FIL:
+                        p_fil_min_range = p_fil_pivot_1
+                    elif p_fil_pivots_num_0 > P_FIL:
+                        p_fil_min_range = p_fil_pivot_0
+                    if p_fil_pivots_num_0 < P_FIL:
+                        p_fil_max_range = p_fil_pivot_0
+                    elif p_fil_pivots_num_1 < P_FIL:
+                        p_fil_max_range = p_fil_pivot_1
+                    elif p_fil_pivots_num_2 < P_FIL:
+                        p_fil_max_range = p_fil_pivot_2
 
                 num_iters += 1
                 if num_iters >= 32 or (
-                    tl.abs(k_min_range - k_max_range) < 1e-16
-                    and tl.abs(p_fil_min_range - p_fil_max_range) < 1e-16
+                    (tl.abs(k_min_range - k_max_range) < 1e-16 and k_pivot != -float("inf"))
+                    and (tl.abs(p_fil_min_range - p_fil_max_range) < 1e-16 and p_fil_pivot != -float("inf"))
                 ):
                     if k_pivot == -float("inf"):
                         k_pivot = k_pivot_0
@@ -781,6 +785,7 @@ def top_k_top_p_filter(
                 logits_blk = tl.where(top_k_mask, logits_blk, -float("inf"))
 
                 # Gather filtered values
+                tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
                 tl.store(FILTERED_LOGITS_ROW + write_idx, logits_blk, mask=f_mask)
                 tl.store(FILTERED_INDICES_ROW + write_idx, offs_n, mask=f_mask)
                 tl.store(FILTERED_PROBS_ROW + write_idx, probs_blk, mask=f_mask)
@@ -794,6 +799,7 @@ def top_k_top_p_filter(
 
 
 def apply_top_p_filtered(
+    logits_top_k: torch.Tensor,
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -805,6 +811,7 @@ def apply_top_p_filtered(
 
     max_k = k.max().item() if k is not None else 0
     if max_k > vocab_size / 10:
+        print("Max k too large, falling back to top-k-top-p")
         return apply_top_k_top_p(logits, k, p)
 
     BLOCK_SIZE = 8192
@@ -849,13 +856,23 @@ def apply_top_p_filtered(
         num_warps=NUM_WARPS,
         num_stages=NUM_STAGES,
     )
-
-    if torch.any(sum_filtered_probs < p):
-        return apply_top_k_top_p(logits, k, p)
+ 
+    print(f"filtered_logits: {filtered_logits.shape}")
 
     logits_sort, sort_indices = filtered_logits.sort(dim=-1, descending=False)
     logits_sort_indices = torch.gather(filtered_indices, -1, sort_indices)
-    sorted_probs = torch.gather(filtered_probs, -1, sort_indices)
+
+    assert torch.allclose(logits_top_k, logits), "Top k Logits are not close"
+
+
+    logit_probs = torch.softmax(logits, dim=-1)
+    sorted_probs = torch.gather(logit_probs, -1, logits_sort_indices)
+    sum_filtered_probs = torch.sum(sorted_probs, dim=-1)
+    # sorted_probs = torch.gather(filtered_probs, -1, sort_indices)
+
+    if torch.any(sum_filtered_probs < p):
+        print("Falling back to top-k-top-p")
+        return apply_top_k_top_p(logits, k, p)
 
     sum_non_outliers = (1.0 - sum_filtered_probs).unsqueeze(-1)
     probs_sum = torch.cumsum(sorted_probs, dim=-1) + sum_non_outliers
