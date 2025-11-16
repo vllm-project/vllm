@@ -14,7 +14,6 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.protocol import Device
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -96,8 +95,9 @@ class LLMEngine:
         )
 
         # OutputProcessor (convert EngineCoreOutputs --> RequestOutput).
+        stream_interval = self.vllm_config.scheduler_config.stream_interval
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats
+            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
         )
         endpoint = self.observability_config.otlp_traces_endpoint
         if endpoint is not None:
@@ -281,11 +281,11 @@ class LLMEngine:
             return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
-        with record_function_or_nullcontext("llm_genine step: get_output"):
+        with record_function_or_nullcontext("llm_engine step: get_output"):
             outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        with record_function_or_nullcontext("llm_genine step: process_outputs"):
+        with record_function_or_nullcontext("llm_engine step: process_outputs"):
             iteration_stats = IterationStats() if self.log_stats else None
             processed_outputs = self.output_processor.process_outputs(
                 outputs.outputs,
@@ -295,11 +295,11 @@ class LLMEngine:
             self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
-        with record_function_or_nullcontext("llm_genine step: abort_requests"):
+        with record_function_or_nullcontext("llm_engine step: abort_requests"):
             self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
-        with record_function_or_nullcontext("llm_genine step: record_stats"):
+        with record_function_or_nullcontext("llm_engine step: record_stats"):
             if self.logger_manager is not None and outputs.scheduler_stats is not None:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
@@ -320,7 +320,7 @@ class LLMEngine:
         self.processor.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
-    def reset_prefix_cache(self, device: Device | None = None):
+    def reset_prefix_cache(self):
         self.engine_core.reset_prefix_cache()
 
     def sleep(self, level: int = 1):
