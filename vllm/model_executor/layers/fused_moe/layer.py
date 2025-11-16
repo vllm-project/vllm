@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
-from typing import Any, Literal, get_args, overload
+from typing import Literal, get_args, overload
 
 import torch
 import torch.nn.functional as F
@@ -64,7 +64,6 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-NaiveEPDPPrepareAndFinalize: Any
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record
     from .naive_epdp_prepare_finalize import NaiveEPDPPrepareAndFinalize
@@ -1782,9 +1781,7 @@ class FusedMoE(CustomOp):
 
             final_hidden_states = self.quant_method.apply(
                 layer=self,
-                x=hidden_states_combined
-                if do_naive_dispatch_combine
-                else hidden_states,
+                x=hidden_states,
                 router_logits=router_logits,
                 top_k=self.top_k,
                 renormalize=self.renormalize,
