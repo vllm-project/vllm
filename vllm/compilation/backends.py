@@ -18,6 +18,7 @@ from torch._dispatch.python import enable_python_dispatcher
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
+from vllm.compilation.nanoflow import manager as nano_manager
 from vllm.compilation.partition_rules import (
     inductor_partition_rule_context,
     should_split,
@@ -707,9 +708,14 @@ class VllmBackend:
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
         ):
-            return VllmSerializableFunction(
-                graph, example_inputs, self.prefix, self.split_gm
-            )
+            if self.compilation_config.enable_nano_batch_split:
+                return nano_manager.get_callable(
+                    self.split_gm, self.compilation_config, local_cache_dir
+                )
+            else:
+                return VllmSerializableFunction(
+                    graph, example_inputs, self.prefix, self.split_gm
+                )
 
         # if we need to copy input buffers for cudagraph
         from torch._guards import detect_fake_mode
