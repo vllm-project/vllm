@@ -65,13 +65,10 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         lora_index_to_id: list[int | None],
         max_loras: int,
         vocab_size: int,
-        extra_vocab_size: int,
         **kwargs,
     ):
         self.is_prefill = mapping.is_prefill
-        self._update_base_metadata(
-            mapping, lora_index_to_id, max_loras, vocab_size, extra_vocab_size
-        )
+        self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
         # Prepare cuda kernel metadata tensors
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)

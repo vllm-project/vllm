@@ -93,14 +93,6 @@ class LoRAModel:
             loras=self.loras.copy(),
         )
 
-    @property
-    def extra_vocab_size(self) -> int:
-        return (
-            max(lora.extra_vocab_size for lora in self.loras.values())
-            if self.loras
-            else 0
-        )
-
     def get_lora(self, module_name: str) -> LoRALayerWeights | None:
         """Get LoRA for a given module by name"""
         return self.loras.get(module_name, None)
@@ -117,7 +109,6 @@ class LoRAModel:
         peft_helper: PEFTHelper,
         device: str = "cuda",
         dtype: torch.dtype | None = None,
-        embeddings: dict[str, torch.Tensor] | None = None,
         target_embedding_padding: int | None = None,
         embedding_modules: dict[str, str] | None = None,
         embedding_padding_modules: list[str] | None = None,
@@ -131,20 +122,8 @@ class LoRAModel:
                 tensor_name, weights_mapper
             )
             if module_name not in loras:
-                lora_embeddings_tensor = None
-                if embeddings:
-                    assert embedding_modules is not None
-                    embeddings_module = next(
-                        (k for k in embedding_modules if k in module_name), None
-                    )
-                    if embeddings_module:
-                        lora_embeddings_tensor = embeddings[
-                            embedding_modules[embeddings_module]
-                        ].to(device=device, dtype=dtype)
-                        if pin_memory:
-                            lora_embeddings_tensor = lora_embeddings_tensor.pin_memory()
                 loras[module_name] = LoRALayerWeights.from_config(
-                    module_name, peft_helper, lora_embeddings_tensor
+                    module_name, peft_helper
                 )
 
             if is_lora_a:
@@ -206,10 +185,10 @@ class LoRAModel:
         lora_tensor_path = os.path.join(lora_dir, "adapter_model.safetensors")
         lora_bin_file_path = os.path.join(lora_dir, "adapter_model.bin")
         lora_pt_file_path = os.path.join(lora_dir, "adapter_model.pt")
-        new_embeddings_tensor_path = os.path.join(
-            lora_dir, "new_embeddings.safetensors"
-        )
-        new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
+        # new_embeddings_tensor_path = os.path.join(
+        #     lora_dir, "new_embeddings.safetensors"
+        # )
+        # new_embeddings_bin_file_path = os.path.join(lora_dir, "new_embeddings.bin")
         tensors: dict[str, torch.Tensor] = {}
         unexpected_modules: list[list[str] | str] = []
 
@@ -300,21 +279,12 @@ class LoRAModel:
         else:
             raise ValueError(f"{lora_dir} doesn't contain tensors")
 
-        embeddings = None
-        if os.path.isfile(new_embeddings_tensor_path):
-            embeddings = safetensors.torch.load_file(new_embeddings_tensor_path)
-        elif os.path.isfile(new_embeddings_bin_file_path):
-            embeddings = torch.load(
-                new_embeddings_bin_file_path, map_location=device, weights_only=True
-            )
-
         return cls.from_lora_tensors(
             lora_model_id=get_lora_id() if lora_model_id is None else lora_model_id,
             tensors=tensors,
             peft_helper=peft_helper,
             device=device,
             dtype=dtype,
-            embeddings=embeddings,
             target_embedding_padding=target_embedding_padding,
             embedding_modules=embedding_modules,
             embedding_padding_modules=embedding_padding_modules,
@@ -474,7 +444,6 @@ class LoRAModelManager:
                     index,
                     module_lora.lora_a,
                     module_lora.lora_b,
-                    module_lora.embeddings_tensor,
                 )
             else:
                 module.reset_lora(index)
@@ -505,7 +474,6 @@ class LoRAModelManager:
             self.lora_index_to_id,
             self.lora_slots + 1,
             self.vocab_size,
-            self.lora_config.lora_extra_vocab_size,
         )
 
     def remove_all_adapters(self):
@@ -616,7 +584,6 @@ class LoRAModelManager:
                 if parts[-1] in embedding_modules:
                     input_dim = (
                         module.base_layer.org_vocab_size
-                        + self.lora_config.lora_extra_vocab_size
                         if hasattr(module.base_layer, "org_vocab_size")
                         else module.base_layer.weight.shape[1]
                     )
@@ -625,11 +592,6 @@ class LoRAModelManager:
                         if hasattr(module.base_layer, "embedding_dim")
                         else module.base_layer.weight.shape[0]
                     )
-                    embeddings_tensor_dim = (
-                        module.base_layer.embedding_dim
-                        if hasattr(module.base_layer, "embedding_dim")
-                        else module.base_layer.weight.shape[1]
-                    )
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name,
                         input_dim,
@@ -637,7 +599,6 @@ class LoRAModelManager:
                         rank,
                         module.lora_a_stacked[0].dtype,
                         "cpu",
-                        embeddings_tensor_dim=embeddings_tensor_dim,
                     )
                 else:
                     lora = LoRALayerWeights.create_dummy_lora_weights(
