@@ -53,9 +53,10 @@ class ShortConvAttentionMetadataBuilder(
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
 
+        assert self._reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata, decode_threshold=self._reorder_batch_threshold
             )
         )
 
