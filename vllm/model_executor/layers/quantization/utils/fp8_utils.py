@@ -332,17 +332,10 @@ class W8A8BlockFp8LinearOp:
 
         if input_scale is not None:
             q_input = input_2d
-        # MI350 case uses triton kernel
-        elif use_triton:
-            q_input, input_scale = per_token_group_quant_fp8(
-                input_2d,
-                self.act_quant_group_shape.col,
-                column_major_scales=False,
-                use_ue8m0=False,
-            )
-        # MI300 uses tuned AITER ASM/C++ kernel
         else:
-            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(input_2d)
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(
+                input_2d, self.act_quant_group_shape.col, use_triton
+            )
 
         return gemm_a8w8_blockscale_op(
             q_input,
