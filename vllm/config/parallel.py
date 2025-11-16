@@ -68,18 +68,6 @@ class EPLBConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    master_addr: str = "127.0.0.1"
-    """distributed master address for multi-node distributed 
-    inference when distributed_executor_backend is mp."""
-    master_port: int = 29501
-    """distributed master port for multi-node distributed 
-    inference when distributed_executor_backend is mp."""
-    node_rank: int = 0
-    """distributed node rank for multi-node distributed 
-    inference when distributed_executor_backend is mp."""
-    nnodes: int = 1
-    """num of nodes for multi-node distributed 
-    inference when distributed_executor_backend is mp."""
     pipeline_parallel_size: int = 1
     """Number of pipeline parallel groups."""
     tensor_parallel_size: int = 1
@@ -222,6 +210,18 @@ class ParallelConfig:
     class is dynamically inherited by the worker class. This is used to inject
     new attributes and methods to the worker class for use in collective_rpc
     calls."""
+    master_addr: str = "127.0.0.1"
+    """distributed master address for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    master_port: int = 29501
+    """distributed master port for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    node_rank: int = 0
+    """distributed node rank for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
+    nnodes: int = 1
+    """num of nodes for multi-node distributed 
+    inference when distributed_executor_backend is mp."""
 
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
