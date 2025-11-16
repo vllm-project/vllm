@@ -54,6 +54,7 @@ def create_scheduler(
     async_scheduling: bool = False,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
+    global_cache_hit_threshold: float = 0.0,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -78,6 +79,7 @@ def create_scheduler(
         disable_chunked_mm_input=disable_chunked_mm_input,
         enable_chunked_prefill=True,
         async_scheduling=async_scheduling,
+        global_cache_hit_threshold=global_cache_hit_threshold,
     )
     model_config = ModelConfig(
         model=model,
@@ -165,8 +167,8 @@ _none_hash_initialized = False
 
 def create_requests(
     num_requests: int,
-    num_tokens: int = 10,
     mm_hashes_list: list[list[str]] | None = None,
+    num_tokens: int | list[int] = 10,
     mm_positions: list[list[PlaceholderRange]] | None = None,
     max_tokens: int = 16,
     stop_token_ids: list[int] | None = None,
@@ -174,12 +176,14 @@ def create_requests(
     same_prompt: bool = False,
     block_size: int = 16,
     req_ids: list[str] | None = None,
+    cache_hit_thresholds: list[float | None] | None = None,
 ) -> list[Request]:
     global _none_hash_initialized
     if not _none_hash_initialized:
         init_none_hash(sha256)
         _none_hash_initialized = True
-
+    if cache_hit_thresholds is not None:
+        assert len(cache_hit_thresholds) == num_requests
     block_hasher = get_request_block_hasher(block_size, sha256)
     sampling_params = SamplingParams(
         ignore_eos=False,
@@ -237,7 +241,16 @@ def create_requests(
             )
             mm_features.append(mm_feature)
 
-        prompt_token_ids = [0] * num_tokens if same_prompt else [i] * num_tokens
+        request_num_tokens: int = (
+            num_tokens[i] if isinstance(num_tokens, list) else num_tokens
+        )
+        prompt_token_ids = (
+            [0] * request_num_tokens if same_prompt else [i] * request_num_tokens
+        )
+        if cache_hit_thresholds is not None:
+            cache_hit_threshold = cache_hit_thresholds[i]
+        else:
+            cache_hit_threshold = None
         request = Request(
             request_id=req_ids[i],
             prompt_token_ids=prompt_token_ids,
@@ -246,6 +259,7 @@ def create_requests(
             mm_features=mm_features if mm_features else None,
             eos_token_id=EOS_TOKEN_ID,
             block_hasher=block_hasher,
+            cache_hit_threshold=cache_hit_threshold,
         )
         requests.append(request)
     return requests
