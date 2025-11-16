@@ -155,7 +155,7 @@ def check_model_outputs(
     "model",
     [pytest.param(test_config, marks=test_config.marks) for test_config in MODELS],
 )
-@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("tp_size", [1])
