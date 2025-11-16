@@ -1250,13 +1250,42 @@ def pytest_addoption(parser):
 
 
 def pytest_collection_modifyitems(config, items):
-    if config.getoption("--optional"):
-        # --optional given in cli: do not skip optional tests
-        return
-    skip_optional = pytest.mark.skip(reason="need --optional option to run")
-    for item in items:
-        if "optional" in item.keywords:
-            item.add_marker(skip_optional)
+    if not config.getoption("--optional"):
+        skip_optional = pytest.mark.skip(reason="need --optional option to run")
+        for item in items:
+            if "optional" in item.keywords:
+                item.add_marker(skip_optional)
+
+    from vllm.platforms import current_platform
+
+    # Skip encoder-decoder models on ROCm: https://github.com/vllm-project/vllm/issues/27442
+    ENCODER_DECODER_MODELS = [
+        # Encoder-decoder models
+        "openai/whisper-small",
+        "openai/whisper-large-v3-turbo",
+        # Encoder-only models (cross-encoders, embedding models)
+        "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        "intfloat/e5-small",
+        "intfloat/multilingual-e5-small",
+        "BAAI/bge-reranker-base",
+        "BAAI/bge-reranker-v2-m3",
+        "BAAI/bge-base-en-v1.5",
+        "Snowflake/snowflake-arctic-embed-m-v1.5",
+        "sentence-transformers/all-MiniLM-L12-v2",
+        "sentence-transformers/stsb-roberta-base-v2",
+    ]
+
+    if current_platform.is_rocm():
+        skip_encoder_decoder = pytest.mark.skip(
+            reason="Encoder-decoder models not supported on ROCm (all ROCm attention backends only support decoder-only models)"
+        )
+        for item in items:
+            if "encoder_decoder" in item.keywords:
+                if any(
+                    encoder_model in item.nodeid
+                    for encoder_model in ENCODER_DECODER_MODELS
+                ):
+                    item.add_marker(skip_encoder_decoder)
 
 
 @pytest.fixture(scope="session")

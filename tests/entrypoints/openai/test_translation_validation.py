@@ -84,6 +84,7 @@ async def test_basic_audio_with_lora(mary_had_lamb):
 
 # NOTE: (NickLucche) the large-v3-turbo model was not trained on translation!
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_basic_audio(foscolo, client_and_model):
     client, model_name = client_and_model
     translation = await client.audio.translations.create(
@@ -99,6 +100,7 @@ async def test_basic_audio(foscolo, client_and_model):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_audio_prompt(foscolo, client_and_model):
     client, model_name = client_and_model
     # Condition whisper on starting text
@@ -117,6 +119,7 @@ async def test_audio_prompt(foscolo, client_and_model):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_streaming_response(foscolo, client_and_model, server):
     client, model_name = client_and_model
     translation = ""
@@ -168,6 +171,7 @@ async def test_streaming_response(foscolo, client_and_model, server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_stream_options(foscolo, server):
     server, model_name = server
     url = server.url_for("v1/audio/translations")
@@ -207,6 +211,7 @@ async def test_stream_options(foscolo, server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.encoder_decoder
 async def test_long_audio_request(foscolo, client_and_model):
     client, model_name = client_and_model
     if model_name == "google/gemma-3n-E2B-it":
