@@ -5,48 +5,29 @@ from typing import Any
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend, AttentionType
+from vllm.attention.backends.abstract import AttentionBackend
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backends.utils import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    SlidingWindowSpec,
 )
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.utils import bind_kv_cache
 
 
-def get_kv_cache_spec(
-    vllm_config: VllmConfig,
-    kv_cache_dtype: torch.dtype,
-) -> dict[str, KVCacheSpec]:
-    block_size = vllm_config.cache_config.block_size
-
+def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     for layer_name, attn_module in attn_layers.items():
-        assert attn_module.attn_type == AttentionType.DECODER
-        if attn_module.sliding_window is not None:
-            kv_cache_spec[layer_name] = SlidingWindowSpec(
-                block_size=block_size,
-                num_kv_heads=attn_module.num_kv_heads,
-                head_size=attn_module.head_size,
-                dtype=kv_cache_dtype,
-                sliding_window=attn_module.sliding_window,
-            )
-        else:
-            kv_cache_spec[layer_name] = FullAttentionSpec(
-                block_size=block_size,
-                num_kv_heads=attn_module.num_kv_heads,
-                head_size=attn_module.head_size,
-                dtype=kv_cache_dtype,
-            )
+        # Skip modules that don't need KV cache (eg encoder-only attention)
+        if spec := attn_module.get_kv_cache_spec(vllm_config):
+            kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 
 

@@ -154,7 +154,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         return self.model
 
     def get_kv_cache_spec(self):
-        return get_kv_cache_spec(self.vllm_config, self.kv_cache_dtype)
+        return get_kv_cache_spec(self.vllm_config)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
