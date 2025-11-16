@@ -358,21 +358,19 @@ def apply_top_k_top_p_triton(
     logits: torch.Tensor,
     k: torch.Tensor | None,
     p: torch.Tensor | None,
-    debug: bool = False,
 ) -> torch.Tensor:
     """
     Uses pivot-based algorithm to filter --> sort
     """
-    # Fallback to torch for small batch sizes
-    if logits.shape[0] < 16:
-        return apply_top_k_top_p(logits, k, p)
 
     if k is None and p is None:
         return logits
-    elif p is None and k is not None:
+    if p is None and k is not None:
         return apply_top_k_only_triton(logits, k)
-    else:
-        return apply_top_k_top_p_filtered(logits, k, p)
+    # Fallback to torch for small batch sizes for top-p
+    if logits.shape[0] < 16 or logits.shape[1] < 32768:
+        return apply_top_k_top_p(logits, k, p)
+    return apply_top_k_top_p_filtered(logits, k, p)
 
 
 @triton.jit
@@ -769,7 +767,6 @@ def top_k_top_p_filter(
             logits_blk = tl.where(top_k_mask, logits_blk, -float("inf"))
 
             # Gather filtered values
-            tl.store(LOGITS_ROW + offs_n, logits_blk, mask=mask_n)
             tl.store(FILTERED_LOGITS_ROW + write_idx, logits_blk, mask=f_mask)
             tl.store(FILTERED_INDICES_ROW + write_idx, offs_n, mask=f_mask)
             tl.store(FILTERED_PROBS_ROW + write_idx, probs_blk, mask=f_mask)
@@ -806,7 +803,9 @@ def apply_top_k_top_p_filtered(
     buffer = torch.empty(
         (NUM_PROGRAMS, vocab_size), device=logits.device, dtype=torch.float32
     )
-    p_filter = int(max_k * 1.2) if k is not None else int(vocab_size / 32)
+    p_filter = (
+        min(int(max_k * 1.2), vocab_size - 1) if k is not None else int(vocab_size / 32)
+    )
     filtered_logits = torch.full(
         (batch_size, p_filter), -float("inf"), device=logits.device
     )
