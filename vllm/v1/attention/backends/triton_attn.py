@@ -54,7 +54,7 @@ def slice_and_stitch_three_decode(
     cpx_size: int,
     has_A: bool,
     prefill_decode_match: bool,
-    num_batches: int
+    num_batches: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
 
     slice_idx = 0
@@ -64,7 +64,7 @@ def slice_and_stitch_three_decode(
         out2 = torch.narrow(t2, 0, 0, 1)
         out3 = torch.narrow(t3, 0, 0, 1)
 
-    elif (prefill_decode_match):
+    elif prefill_decode_match:
         start = has_A
         length = num_batches
         out1 = torch.narrow(t1, 0, start, num_batches)
@@ -89,7 +89,7 @@ def slice_and_stitch_three(
     cpx_size: int,
     has_A: bool,
     prefill_decode_match: bool,
-    prefill_match: bool
+    prefill_match: bool,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """
     Slice-and-stitch along dim=0 for three tensors.
@@ -112,7 +112,7 @@ def slice_and_stitch_three(
     base = N // cpx_size
     extra = N % cpx_size
 
-    if (starscream_rank < extra):
+    if starscream_rank < extra:
         slice_len = base + 1
         slice_idx = starscream_rank * (base + 1)
     else:
@@ -127,9 +127,9 @@ def slice_and_stitch_three(
         num_batches = M1 // N
         base_offset = 0
 
-    pieces1: List[torch.Tensor] = []
-    pieces2: List[torch.Tensor] = []
-    pieces3: List[torch.Tensor] = []
+    pieces1: list[torch.Tensor] = []
+    pieces2: list[torch.Tensor] = []
+    pieces3: list[torch.Tensor] = []
 
     # Include A if requested
     if has_A and starscream_rank == d_idx:
@@ -138,7 +138,7 @@ def slice_and_stitch_three(
         pieces3.append(t3[0:1])
 
     # Add per-batch slices with clipping
-    if (prefill_decode_match):
+    if prefill_decode_match:
         for b in range(num_batches):
             batch_start = base_offset + b * N
             start = batch_start + slice_idx
@@ -155,12 +155,17 @@ def slice_and_stitch_three(
             pieces3.append(t3[start:end])
 
     if (len(pieces1) == 0):
-        return torch.empty_like(t1), torch.empty_like(t2), torch.full_like(t3, -1), slice_idx
+        return (
+            torch.empty_like(t1), 
+            torch.empty_like(t2), 
+            torch.full_like(t3, -1), 
+            slice_idx,
+            )
 
     return (
         torch.cat(pieces1, dim=0).contiguous(),
         torch.cat(pieces2, dim=0).contiguous(),
-        torch.cat(pieces3, dim=0).contiguous(), 
+        torch.cat(pieces3, dim=0).contiguous(),
         slice_idx,
     )
 
@@ -450,31 +455,53 @@ class TritonAttentionImpl(AttentionImpl):
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         key_cache, value_cache = kv_cache.unbind(1)
-        if (self.enable_starscream):
+        if self.enable_starscream:
             query = cpx_model_parallel_all_gather(query.contiguous(), dim=-2)
 
             max_seqlen_q = attn_metadata.max_query_len
             seqused_k = attn_metadata.seq_lens
             batch_size = self.num_prompts
-            has_A = (len(seqused_k) == batch_size)
+            has_A = len(seqused_k) == batch_size
 
             seq_lens_np = attn_metadata.seq_lens_np
 
             d_idx = (seq_lens_np[0] - 1) % self.cpx_size
             non_cold_location_match = (seq_lens_np[-1] - 1) % self.cpx_size
 
-            prefill_match = (max_seqlen_q > 1)
-            decode_match = (non_cold_location_match == self.starscream_rank)
-            cold_start_match = (d_idx == self.starscream_rank)
+            prefill_match = max_seqlen_q > 1
+            decode_match = bool(non_cold_location_match == self.starscream_rank)
+            cold_start_match = bool(d_idx == self.starscream_rank)
 
             prefill_decode_match = prefill_match or decode_match
 
             num_batches = len(seqused_k) - has_A
 
             if (prefill_match):
-                out1, out2, out3, slice_idx = slice_and_stitch_three(key, value, attn_metadata.slot_mapping, max_seqlen_q, d_idx, self.starscream_rank, self.cpx_size, has_A, prefill_decode_match, prefill_match)
+                out1, out2, out3, slice_idx = slice_and_stitch_three(
+                        key, 
+                        value, 
+                        attn_metadata.slot_mapping, 
+                        max_seqlen_q, 
+                        d_idx, 
+                        self.starscream_rank, 
+                        self.cpx_size, 
+                        has_A, 
+                        prefill_decode_match, 
+                        prefill_match, 
+                        )
             else:
-                out1, out2, out3, slice_idx = slice_and_stitch_three_decode(key, value, attn_metadata.slot_mapping, max_seqlen_q, d_idx, self.starscream_rank, self.cpx_size, has_A, prefill_decode_match, num_batches)
+                out1, out2, out3, slice_idx = slice_and_stitch_three_decode(
+                        key, 
+                        value, 
+                        attn_metadata.slot_mapping, 
+                        max_seqlen_q, 
+                        d_idx, 
+                        self.starscream_rank, 
+                        self.cpx_size, 
+                        has_A, 
+                        prefill_decode_match, 
+                        num_batches,
+                        )
 
             location_match = cold_start_match or prefill_decode_match
         else:
@@ -495,15 +522,15 @@ class TritonAttentionImpl(AttentionImpl):
                 #  (because some explicit casts (e.g. float8_e4m3fnuz)
                 #   are not supported)
             triton_reshape_and_cache_flash(
-                out1,#key,
-                out2,#value,
+                out1,   # key,
+                out2,   # value,
                 key_cache,
                 value_cache,
-                out3,#attn_metadata.slot_mapping,
-                location_match,
+                out3,   # attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                location_match,
             )
 
         if self.kv_cache_dtype.startswith("fp8"):

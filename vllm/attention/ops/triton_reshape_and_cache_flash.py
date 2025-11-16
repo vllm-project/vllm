@@ -97,10 +97,10 @@ def triton_reshape_and_cache_flash(
     # [num_blocks, block_size, num_heads, head_size]
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,  # [num_tokens]
-    location_match: bool,
     kv_cache_dtype: str,  # "auto", "fp8"
     k_scale: torch.Tensor,  # float32
     v_scale: torch.Tensor,  # float32
+    location_match: bool = True,
 ):
     num_tokens = key.shape[0]
     num_heads = key.shape[1]
