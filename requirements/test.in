@@ -43,6 +43,7 @@ schemathesis>=3.39.15 # Required for openai schema test.
 # quantization
 bitsandbytes==0.46.1
 buildkite-test-collector==0.1.9
+torchao==0.14.1
 
 
 genai_perf==0.0.8

@@ -170,6 +170,7 @@ steps:
   - tests/compile/test_basic_correctness
   - examples/offline_inference/rlhf.py
   - examples/offline_inference/rlhf_colocate.py
+  - examples/offline_inference/rlhf_online_quant.py
   - tests/examples/offline_inference/data_parallel.py
   - tests/v1/distributed
   - tests/v1/engine/test_engine_core_client.py
@@ -206,6 +207,7 @@ steps:
   - pushd ../examples/offline_inference
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 RAY_DEDUP_LOGS=0 python3 rlhf_colocate.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_online_quant.py  
   - popd
 
 - label: Distributed Tests (8 GPUs) # 4min
