@@ -9,6 +9,7 @@ from pytest import MarkDecorator
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm.assets.image import ImageAsset
+from vllm.utils.torch_utils import set_default_torch_num_threads
 
 from ....conftest import PromptImageInput, VllmRunner
 from ...utils import check_logprobs_close
@@ -51,13 +52,16 @@ def run_multimodal_gguf_test(
     num_logprobs: int,
 ):
     # Run gguf model.
-    with vllm_runner(
-        model_name=model.gguf_model,
-        enforce_eager=True,
-        tokenizer_name=model.original_model,
-        dtype=dtype,
-        max_model_len=model.max_model_len,
-    ) as gguf_model:
+    with (
+        set_default_torch_num_threads(1),
+        vllm_runner(
+            model_name=model.gguf_model,
+            enforce_eager=True,
+            tokenizer_name=model.original_model,
+            dtype=dtype,
+            max_model_len=model.max_model_len,
+        ) as gguf_model,
+    ):
         gguf_outputs = gguf_model.generate_greedy_logprobs(
             prompts=model.prompt,
             max_tokens=max_tokens,
