@@ -344,48 +344,6 @@ class CPUGPTQLinearMethod(LinearMethodBase):
         )
         layer.qweight.data = weight
 
-        # convert to ref weight
-        # ref_weight = unpack_cols(
-        #     packed_weight,
-        #     bits,
-        #     p_w_k,
-        #     p_w_n * pack_factor
-        # ).view(p_w_k, p_w_n, pack_factor)
-        # ref_weight = ref_weight.permute(0, 2, 1).
-        # reshape(input_size, output_size).float()
-        # if self.quant_config.desc_act:
-        #     g_idx = layer.g_idx.data
-        # else:
-        #     group_size = self.quant_config.group_size
-        #     group_num = input_size // group_size
-        #     g_idx = torch.arange(group_num)
-        #     g_idx = g_idx.repeat_interleave(group_size)
-        # ref_scales = layer.scales[g_idx, :].float()
-        # ref_weight = (ref_weight - 8) * ref_scales
-        # ref_weight = ref_weight.to(dtype=layer.scales.dtype)
-        # layer.qweight.data = ref_weight.to(dtype=layer.scales.dtype)
-        # print("ref_weight: ", ref_weight[:, 0:16])
-
-        # input = torch.randn((1243, input_size,), dtype=layer.scales.dtype)
-        # ref_output = input @ ref_weight
-        # print("ref_output: ", ref_output)
-        # output = cpu_gemm_wna16(
-        #     input,
-        #     layer.qweight.data,
-        #     layer.scales.data,
-        #     layer.qzeros,
-        #     layer.g_idx,
-        #     None,
-        #     pack_factor,
-        #     isa_hint,
-        # )
-        # print("output: ", output)
-        # atol, rtol = 1e-4, 1e-4
-        # torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
-        # f"{torch.max(torch.abs(output - ref_output))}",
-
-        # assert False, "stop here"
-
     def apply(
         self,
         layer: torch.nn.Module,
@@ -627,19 +585,6 @@ class CPUAWQLinearMethod(LinearMethodBase):
             .contiguous()
         )
 
-        # ref_weight = weight.float()
-        # group_size = self.quant_config.group_size
-        # g_idx = torch.arange(group_num)
-        # g_idx = g_idx.repeat_interleave(group_size)
-        # ref_zeros = zeros.float()[g_idx,:]
-        # ref_scales = layer.scales.float()[g_idx,:]
-        # ref_weight = (ref_weight - ref_zeros) * ref_scales
-        # # layer.qweight.data = ref_weight.to(layer.scales.dtype)
-        # print("ref_weight: ", ref_weight[:, 0:16])
-        # print("ref_zeros: ", ref_zeros[0, 0:16])
-        # print("ref_scales: ", ref_scales[0, 0:16])
-        # print("ref_weight_part: ", ref_weight[0:2, 0:16])
-
         zeros = pack_cols(zeros, bits, group_num, output_size).contiguous()
         # make 16 output channel as a block and transpose to
         # the make the block contigous
@@ -653,29 +598,12 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.qweight.data = weight
         layer.qzeros.data = zeros
 
-        # input = torch.randn((1243, input_size,), dtype=layer.scales.dtype)
-        # output = cpu_gemm_wna16(
-        #     input,
-        #     layer.qweight.data,
-        #     layer.scales.data,
-        #     layer.qzeros.data,
-        #     None,
-        #     None,
-        #     pack_factor,
-        #     isa_hint,
-        # )
-        # assert False, "stop here"
-
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        # x = x @ layer.qweight.data
-        # if bias is not None:
-        #     x += bias
-        # return x
         x = cpu_gemm_wna16(
             input=x,
             q_weight=layer.qweight,
