@@ -69,7 +69,6 @@ else:
 
 logger = init_logger(__name__)
 
-
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify", "reward"]
 ConvertOption = Literal["auto", ConvertType]
@@ -538,7 +537,6 @@ class ModelConfig:
 
         architectures = self.architectures
         registry = self.registry
-
         is_generative_model = registry.is_text_generation_model(architectures, self)
         is_pooling_model = registry.is_pooling_model(architectures, self)
 

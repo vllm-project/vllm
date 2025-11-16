@@ -120,12 +120,15 @@ class GGUFModelLoader(BaseModelLoader):
                 gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
                     f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
                 )
-        # Gemma3 special cases: The multimodal projector requires explicit
-        # mappings for the input projection and normalization layer.
+        # Gemma3 special cases: The HF multimodal projector weight
+        # don't have suffix but GGUF does, so we need to map them
+        # manually for simplicity.
         if model_type == "gemma3":
             gguf_to_hf_name_map["mm.input_projection.weight"] = (
                 "multi_modal_projector.mm_input_projection_weight"
             )
+            # FIXME(Isotr0py): This is likely a bug from auto mapping,
+            # should revisit and investigate it in the future.
             gguf_to_hf_name_map["mm.soft_emb_norm.weight"] = (
                 "multi_modal_projector.mm_soft_emb_norm.weight"
             )
@@ -160,30 +163,6 @@ class GGUFModelLoader(BaseModelLoader):
             )
 
         state_dict = dummy_model.state_dict()
-
-        # Log parameter distribution for debugging
-        if is_multimodal:
-            total_params = len(state_dict)
-            language_params = sum(
-                1
-                for p in state_dict
-                if "language_model" in p
-                or "model.embed" in p
-                or "model.layers" in p
-                or "lm_head" in p
-            )
-            vision_params = sum(1 for p in state_dict if "vision_tower" in p)
-            projector_params = sum(
-                1 for p in state_dict if "multi_modal_projector" in p
-            )
-            logger.info(
-                "Dummy model parameters: %d total "
-                "(%d language, %d vision, %d projector)",
-                total_params,
-                language_params,
-                vision_params,
-                projector_params,
-            )
         if hf_checkpoint_map := getattr(
             dummy_model, "_checkpoint_conversion_mapping", None
         ):
@@ -236,7 +215,7 @@ class GGUFModelLoader(BaseModelLoader):
             gguf_name_with_suffix = find_hf_name_in_tensor_map(hf_name)
 
             # Try removing prefix for multimodal parameters
-            # (e.g., "model.vision_tower" -> "vision_tower")
+            # (e.g., "language_model.model." -> "model.")
             if gguf_name_with_suffix is None and "." in hf_name:
                 gguf_name_with_suffix = find_hf_name_in_tensor_map(
                     hf_name.split(".", 1)[-1]
@@ -257,22 +236,6 @@ class GGUFModelLoader(BaseModelLoader):
                 f"({len(unmapped_params)}): "
                 f"{unmapped_params}"
             )
-
-        logger.info(
-            "Mapped %d parameters (%d vision/projector, %d backbone)",
-            len(gguf_to_hf_name_map),
-            sum(
-                1
-                for p in gguf_to_hf_name_map.values()
-                if "vision_tower" in p or "multi_modal_projector" in p
-            ),
-            sum(
-                1
-                for p in gguf_to_hf_name_map.values()
-                if "vision_tower" not in p and "multi_modal_projector" not in p
-            ),
-        )
-
         return gguf_to_hf_name_map
 
     def _get_gguf_weight_type(

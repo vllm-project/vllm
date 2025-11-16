@@ -609,20 +609,8 @@ class Gemma3ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # GGUF models: image_token_index (262144) exceeds vocab size (262144).
-        # HF models: image_token_index may also be out-of-vocabulary.
-        # Using handle_oov_mm_token=True avoids embedding lookup for these tokens.
         handle_oov_mm_token: bool = True,
     ) -> torch.Tensor:
-        """Get input embeddings with out-of-vocabulary multimodal token handling.
-
-        For GGUF Gemma3 models, the image token ID (262144) exceeds the
-        vocabulary size (0-262143). By setting handle_oov_mm_token=True,
-        we skip embedding lookup for OOV tokens and rely on vision embeddings.
-
-        This delegates to the SupportsMultiModal interface default implementation,
-        which filters multimodal tokens before calling the embedding layer.
-        """
         # Early return for text-only inference (no multimodal data)
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
