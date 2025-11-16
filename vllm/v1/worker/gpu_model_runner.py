@@ -2480,9 +2480,10 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         assert all(req.training_params and req.training_params.num_warmup_steps == num_warmup_steps for req in scheduler_output.scheduled_new_reqs if req.is_training)
 
         # Set the training manager parameters
-        self.training_manager.gradient_accumulation_steps = gradient_accumulation_steps
-        self.training_manager.num_training_steps = num_training_steps
-        self.training_manager.num_warmup_steps = num_warmup_steps
+        if not is_eval_batch:
+            self.training_manager.gradient_accumulation_steps = gradient_accumulation_steps
+            self.training_manager.num_training_steps = num_training_steps
+            self.training_manager.num_warmup_steps = num_warmup_steps
 
         # Run the model WITHOUT torch.inference_mode() to enable gradients
         with (set_forward_context(

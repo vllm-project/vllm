@@ -476,8 +476,16 @@ class LLM:
             if eval_dataset is not None:
                 tokenized_eval_dataset = tokenized_dataset.select(range(len(train_dataset), len(train_dataset) + len(eval_dataset)))
 
-        num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
-        num_training_steps = num_steps_per_epoch * num_epochs
+        # Check if this is eval-only mode (no training data)
+        is_eval_only = len(tokenized_train_dataset) == 0
+        
+        if not is_eval_only:
+            num_steps_per_epoch = math.ceil(len(tokenized_train_dataset) / batch_size)
+            num_training_steps = num_steps_per_epoch * num_epochs
+        else:
+            # Eval-only mode: no training steps
+            num_steps_per_epoch = 0
+            num_training_steps = 0
 
         # num_examples = 800
         # batch_size = 4
@@ -501,7 +509,7 @@ class LLM:
 
         def _run_eval():
             if eval_dataset is None:
-                return
+                return []
             max_eval_batch_size = 8
             eval_batch_size = min(max_eval_batch_size, len(tokenized_eval_dataset))
             total_eval_steps = math.ceil(len(tokenized_eval_dataset) / eval_batch_size)
@@ -515,38 +523,43 @@ class LLM:
                         eval_losses.append(output.loss)
                     eval_pbar.update(1)
                 # Report the mean loss of the eval batch.
-                mean_loss = sum(eval_losses) / len(eval_losses)
-                logger.info(f"eval loss = {mean_loss:.6f}")
+                if len(eval_losses) > 0:
+                    mean_loss = sum(eval_losses) / len(eval_losses)
+                    logger.info(f"eval loss = {mean_loss:.6f}")
+            return eval_losses
 
-        total_steps = (num_epochs * num_steps_per_epoch // gradient_accumulation_steps)
-        completed_steps = 0
+        # Run training (skip if eval-only mode)
+        if not is_eval_only:
+            total_steps = (num_epochs * num_steps_per_epoch // gradient_accumulation_steps)
+            completed_steps = 0
 
-        with tqdm(total=total_steps, desc="Training Progress") as pbar:
-            for _ in range(num_epochs):
-                train_iter = iter(tokenized_train_dataset)  # Reset per epoch
-                for _ in range(0, num_steps_per_epoch, gradient_accumulation_steps):
-                    for _ in range(gradient_accumulation_steps):
-                        _run_batch(train_iter, batch_size, lora_request, is_eval=False)
+            with tqdm(total=total_steps, desc="Training Progress") as pbar:
+                for _ in range(num_epochs):
+                    train_iter = iter(tokenized_train_dataset)  # Reset per epoch
+                    for _ in range(0, num_steps_per_epoch, gradient_accumulation_steps):
+                        for _ in range(gradient_accumulation_steps):
+                            _run_batch(train_iter, batch_size, lora_request, is_eval=False)
 
-                    pbar.update(1)
-                    completed_steps += 1
+                        pbar.update(1)
+                        completed_steps += 1
 
-                    if eval_steps is not None:
-                        if completed_steps % eval_steps == 0:
-                            _run_eval()
+                        if eval_steps is not None:
+                            if completed_steps % eval_steps == 0:
+                                _run_eval()
 
-        # Run eval at the end
-        _run_eval()
+        # Run eval at the end (always, even in eval-only mode)
+        final_eval_losses = _run_eval()
 
         # Get captured tensors from training manager
         training_manager = self.llm_engine.model_executor.driver_worker.model_runner.training_manager
         captured_input_ids = training_manager.captured_input_ids
         captured_labels = training_manager.captured_labels
 
-        # TODO(girfan): Implement this.
+        # TODO(girfan): Implement proper train_losses collection
         total_steps = 0
         train_losses = []
-        eval_losses = []
+        eval_losses = [loss for loss in final_eval_losses] if final_eval_losses else []
+        
         return {
             'train_losses': train_losses,
             'eval_losses': eval_losses,
@@ -554,7 +567,7 @@ class LLM:
                 'total_steps': total_steps,
                 'num_epochs': num_epochs,
                 'final_train_loss': train_losses[-1]['loss'] if train_losses else None,
-                'final_eval_loss': eval_losses[-1]['eval_loss'] if eval_losses else None,
+                'final_eval_loss': eval_losses[-1] if eval_losses else None,
             },
             'captured_input_ids': captured_input_ids,
             'captured_labels': captured_labels,

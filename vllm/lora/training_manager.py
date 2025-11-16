@@ -2,52 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import re
-import json
-import os
-from typing import Dict, List, Optional, Set
-from functools import partial
+from typing import List, Optional, Set
 
-import math
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.optim.lr_scheduler import LinearLR
-from safetensors.torch import save_file
 
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 from vllm.lora.layers.column_parallel_linear import MergedQKVParallelLinearWithLoRA
-from vllm.lora.models import LoRAModel
 from vllm.lora.worker_manager import WorkerLoRAManager
 from vllm.lora.request import LoRARequest
 from vllm.lora.training_state import TrainingState
 
+from transformers import get_scheduler
+
 
 logger = init_logger(__name__)
-
-
-def _get_cosine_schedule_with_warmup_lr_lambda(
-    current_step: int, *, num_warmup_steps: int, num_training_steps: int, num_cycles: float, min_lr_rate: float = 0.0
-):
-    if current_step < num_warmup_steps:
-        return float(current_step) / float(max(1, num_warmup_steps))
-    progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-    factor = 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress))
-    factor = factor * (1 - min_lr_rate) + min_lr_rate
-    return max(0, factor)
-
-
-def get_decay_parameter_names(model) -> list[str]:
-    """
-    Get all parameter names that weight decay will be applied to.
-
-    This function filters out parameters in two ways:
-    1. By layer type (instances of layers specified in ALL_LAYERNORM_LAYERS)
-    2. By parameter name patterns (containing 'bias', or variation of 'norm')
-    """
-    forbidden_name_patterns = [r"bias", r"layernorm", r"rmsnorm", r"(?:^|\.)norm(?:$|\.)", r"_norm(?:$|\.)"]
-    decay_parameters = get_parameter_names(model, [nn.LayerNorm], forbidden_name_patterns)
-    return decay_parameters
 
 
 def get_parameter_names(model, forbidden_layer_types, forbidden_layer_names=None):
@@ -73,29 +43,6 @@ def get_parameter_names(model, forbidden_layer_types, forbidden_layer_names=None
     ]
     print(f"result: {result}")
     return result
-
-
-# TODO(girfan): Either use this or remove this. Need to fix the way decay parameters are obtained. Is that correct?
-def create_optimizer(model, weight_decay: float = 0.0, lr: float = 0.0001):
-    decay_parameters = get_decay_parameter_names(model)
-    optimizer_grouped_parameters = [
-        {
-            "params": [
-                p for n, p in model.named_parameters() if (n in decay_parameters and p.requires_grad)
-            ],
-            "weight_decay": weight_decay,
-        },
-        {
-            "params": [
-                p for n, p in model.named_parameters() if (n not in decay_parameters and p.requires_grad)
-            ],
-            "weight_decay": 0.0,
-        },
-    ]
-
-    optimizer_kwargs = {'lr': lr, 'betas': (0.9, 0.999), 'eps': 1e-08, 'fused': True}
-    optimizer = torch.optim.AdamW(optimizer_grouped_parameters, **optimizer_kwargs)
-    return optimizer
 
 
 class TrainingManager:
@@ -477,7 +424,6 @@ class TrainingManager:
         scheduler_type: str,
     ):
         """Setup learning rate scheduler."""
-        from transformers import get_scheduler
         scheduler = get_scheduler(
             scheduler_type,
             optimizer=optimizer,
@@ -485,20 +431,6 @@ class TrainingManager:
             num_training_steps=num_training_steps,
         )
         return scheduler
-
-        # if scheduler_type == "cosine":
-        #     lr_lambda = partial(
-        #         _get_cosine_schedule_with_warmup_lr_lambda,
-        #         num_warmup_steps=num_warmup_steps,
-        #         num_training_steps=num_training_steps,
-        #         num_cycles=0.5,
-        #     )
-        #     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch=-1)
-        # elif scheduler_type == "linear":
-        #     scheduler = LinearLR(optimizer, start_factor=1.0, end_factor=0.0, total_iters=num_training_steps)
-        # else:
-        #     raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
-        # return scheduler
 
 
     def _setup_optimizer(self, weight_decay: float, learning_rate: float):

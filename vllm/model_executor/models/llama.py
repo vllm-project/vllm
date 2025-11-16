@@ -253,9 +253,6 @@ class LlamaAttention(nn.Module):
         global IS_TRAINING
         global IS_LOGGED
 
-        if IS_TRAINING:
-            print("IS_TRAINING is True")
-
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
@@ -299,7 +296,7 @@ class LlamaAttention(nn.Module):
         #     print(f"vLLM positions: {positions_flat[:10]}")
 
         # TODO(girfan): HACK!!
-        # q, k = self.rotary_emb(positions, q, k)
+        q, k = self.rotary_emb(positions, q, k)
 
         # cos, sin = positions
         # q, k = apply_rotary_pos_emb(q, k, cos, sin)
@@ -446,7 +443,7 @@ class LlamaDecoderLayer(nn.Module):
 
         # Fully Connected
         residual = hidden_states
-        hidden_states, _ = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = residual + hidden_states
         return hidden_states, None
@@ -576,7 +573,12 @@ class LlamaModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        ret = self.norm(hidden_states, residual)
+        # if ret is a tuple, then return the first element
+        if isinstance(ret, tuple):
+            hidden_states, _ = ret
+        else:
+            hidden_states = ret
 
         # if IS_TRAINING:
         #     import pandas as pd

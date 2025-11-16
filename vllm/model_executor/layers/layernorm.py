@@ -213,22 +213,29 @@ class RMSNorm(CustomOp):
         x = x.to(torch.float32)
         variance = x.pow(2).mean(-1, keepdim=True)
         x = x * torch.rsqrt(variance + self.variance_epsilon)
-        return self.weight * x.to(input_dtype), None
+        out = self.weight * x.to(input_dtype)
+        if residual is None:
+            return out
+        else:
+            return out, residual
 
     def forward_cuda(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
-        if self.variance_size_override is not None:
-            return self.forward_native(x, residual)
+        # TODO(girfan): Undo this! Issue is: when doing eval, we use the other one but still are in forward_training in llama.py. Need to fix it.
+        return self.forward_native(x, residual)
 
-        add_residual = residual is not None
-        if add_residual:
-            return fused_add_rms_norm(x, residual, self.weight.data,
-                                      self.variance_epsilon)
-        else:
-            return rms_norm(x, self.weight.data, self.variance_epsilon)
+        # if self.variance_size_override is not None:
+        #     return self.forward_native(x, residual)
+
+        # add_residual = residual is not None
+        # if add_residual:
+        #     return fused_add_rms_norm(x, residual, self.weight.data,
+        #                               self.variance_epsilon)
+        # else:
+        #     return rms_norm(x, self.weight.data, self.variance_epsilon)
 
     def forward_hip(
         self,
