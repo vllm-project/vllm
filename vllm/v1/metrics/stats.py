@@ -220,6 +220,8 @@ class IterationStats:
         self.num_generation_tokens = 0
         self.num_prompt_tokens = 0
         self.num_preempted_reqs = 0
+        # Num of prompt tokens that have been computed locally.
+        self.num_local_prompt_tokens = 0
         self.finished_requests: list[FinishedRequestStats] = []
         self.max_num_generation_tokens_iter: list[int] = []
         self.n_params_iter: list[int] = []
@@ -250,6 +252,9 @@ class IterationStats:
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
             self.num_prompt_tokens += prompt_len
+            self.num_local_prompt_tokens += (
+                prompt_len - output.num_external_computed_tokens
+            )
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
