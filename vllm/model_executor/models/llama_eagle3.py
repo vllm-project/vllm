@@ -23,7 +23,7 @@ from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
 
 logger = init_logger(__name__)
 
@@ -174,7 +174,7 @@ class LlamaModel(nn.Module):
             eps=self.config.rms_norm_eps,
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -185,7 +185,7 @@ class LlamaModel(nn.Module):
         input_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if input_embeds is None:
-            input_embeds = self.get_input_embeddings(input_ids)
+            input_embeds = self.embed_input_ids(input_ids)
         assert hidden_states.shape[-1] == input_embeds.shape[-1]
 
         residual = None
@@ -263,13 +263,13 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: NestedTensors | None = None,
         is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
@@ -326,6 +326,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             if "embed_tokens" in name:
                 includes_embed_tokens = True
             model_weights[name] = loaded_weight
+            process_eagle_weight(self, name)
 
         skip_substrs = []
         if not includes_draft_id_mapping:
