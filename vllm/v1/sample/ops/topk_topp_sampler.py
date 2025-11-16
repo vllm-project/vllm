@@ -200,6 +200,7 @@ def apply_top_k_top_p(
 
         # Avoid sorting vocab for top-k only case.
         return apply_top_k_only(logits, k)
+
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
 
     if k is not None:
