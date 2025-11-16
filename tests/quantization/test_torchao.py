@@ -6,6 +6,10 @@ import importlib.util
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.torchao_utils import (
+    maybe_get_torchao_config_for_moe_layer,
+)
+
 DTYPE = ["bfloat16"]
 
 TORCHAO_AVAILABLE = importlib.util.find_spec("torchao") is not None
@@ -395,6 +399,85 @@ def test_opt_125m_int4wo_model_running_preshuffled_kernel_online_quant(
         output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
 
         assert output
+
+
+# TODO(before land): check if we can run this in vLLM CI or not
+@pytest.mark.skipif(not TORCHAO_AVAILABLE, reason="torchao is not available")
+def test_maybe_get_torchao_config_for_moe_layer():
+    from torchao.quantization import (
+        Float8DynamicActivationFloat8WeightConfig,
+        FqnToConfig,
+    )
+
+    # example moe_prefix from Qwen/Qwen1.5-MoE-A2.7B
+    moe_prefix = "model.layers.1.mlp.experts"
+    single_config = Float8DynamicActivationFloat8WeightConfig()
+
+    # direct match of all three linears
+    fqn_to_config = FqnToConfig(
+        {
+            "model.layers.1.mlp.experts.gate_proj": single_config,
+            "model.layers.1.mlp.experts.up_proj": single_config,
+            "model.layers.1.mlp.experts.down_proj": single_config,
+        }
+    )
+    moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+        fqn_to_config,
+        moe_prefix,
+    )
+    assert moe_layer_config == single_config
+
+    # no direct match
+    fqn_to_config = FqnToConfig({})
+    moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+        fqn_to_config,
+        moe_prefix,
+    )
+    assert moe_layer_config is None
+
+    # directly specified configs with mismatch
+    fqn_to_config = FqnToConfig(
+        {
+            "model.layers.1.mlp.experts.gate_proj": single_config,
+            "model.layers.1.mlp.experts.up_proj": single_config,
+            "model.layers.1.mlp.experts.down_proj": None,
+        }
+    )
+    with pytest.raises(AssertionError) as exc:
+        moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+            fqn_to_config,
+            moe_prefix,
+        )
+        assert "inconsistent configs" in exc
+
+    # regex match of all three linears
+    fqn_to_config = FqnToConfig(
+        {
+            "re:.*gate_proj": single_config,
+            "re:.*up_proj": single_config,
+            "re:.*down_proj": single_config,
+        }
+    )
+    moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+        fqn_to_config,
+        moe_prefix,
+    )
+    assert moe_layer_config == single_config
+
+    # regex match with mismatch
+    fqn_to_config = FqnToConfig(
+        {
+            "re:.*gate_proj": single_config,
+            "re:.*up_proj": None,
+            "re:.*down_proj": single_config,
+        }
+    )
+    with pytest.raises(AssertionError) as exc:
+        moe_layer_config = maybe_get_torchao_config_for_moe_layer(
+            fqn_to_config,
+            moe_prefix,
+        )
+        assert "inconsistent configs" in exc
 
 
 if __name__ == "__main__":
