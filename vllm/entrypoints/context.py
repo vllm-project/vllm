@@ -239,24 +239,21 @@ class ParsableContext(ConversationContext):
         self.chat_template_content_format = chat_template_content_format
         self.tool_dicts = tool_dicts
 
-    def append_output(
-        self, output: RequestOutput | list[CustomChatCompletionMessageParam]
-    ) -> None:
+    def append_output(self, output: RequestOutput) -> None:
         self.last_output = output
-        if isinstance(output, RequestOutput):
-            self.num_prompt_tokens = len(output.prompt_token_ids or [])
-            self.num_cached_tokens = output.num_cached_tokens or 0
-            self.num_output_tokens += len(output.outputs[0].token_ids or [])
+        self.num_prompt_tokens = len(output.prompt_token_ids or [])
+        self.num_cached_tokens = output.num_cached_tokens or 0
+        self.num_output_tokens += len(output.outputs[0].token_ids or [])
 
-            # output_token_ids = output.outputs[0].token_ids
-            # for token_id in output_token_ids:
-            #     self.parser.process(token_id)
-            self.parser.process(output.outputs[0])
-        else:
-            self.parser.chat_completion_messages.extend(output)
+        # output_token_ids = output.outputs[0].token_ids
+        # for token_id in output_token_ids:
+        #     self.parser.process(token_id)
+        self.parser.process(output.outputs[0])
 
-    def append_tool_output(self, output) -> None:
-        raise NotImplementedError("Should not be called.")
+    def append_tool_output(
+        self, output: list[CustomChatCompletionMessageParam]
+    ) -> None:
+        self.parser.chat_completion_messages.extend(output)
 
     def need_builtin_tool_call(self) -> bool:
         """Return true if the last message is a MCP tool call"""

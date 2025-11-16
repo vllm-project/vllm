@@ -54,10 +54,8 @@ class StreamableParser:
         pass
 
     def process(self, output: CompletionOutput) -> "StreamableParser":
-        reasoning_content, content = (
-            self.reasoning_parser_instance.extract_reasoning_content(
-                output.text, request=None
-            )
+        reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
+            output.text, request=None
         )
         if reasoning_content:
             new_content = ChatCompletionContentPartTextParam(
