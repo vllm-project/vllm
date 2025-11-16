@@ -42,6 +42,12 @@ def check_ubatch_thresholds(
         return num_tokens >= config.dbo_prefill_token_threshold
 
 
+def check_cudagraph_threshold(
+    config: ParallelConfig, num_tokens: int, uniform_decode: bool
+):
+    return uniform_decode and num_tokens <= config.dbo_decode_token_threshold * 1.5
+
+
 def create_ubatch_slices(
     num_scheduled_tokens: np.ndarray, split_point: int
 ) -> UBatchSlices:
