@@ -8,6 +8,7 @@ This directory contains examples demonstrating how to integrate custom models wi
 
 - **`deepseek_v3_torchtitan.py`**: DeepSeek V3 model using TorchTitan's implementation with vLLM's MLA attention
 - **`qwen3_torchtitan.py`**: Qwen3 model using TorchTitan's implementation with vLLM's flash attention
+- **`benchmark_deepseek_v3.py`**: Benchmark comparing custom DeepSeek V3 with vLLM's built-in implementation
 
 These examples show how to:
 1. Import external model implementations (e.g., from TorchTitan)
@@ -47,6 +48,35 @@ python examples/custom_models/deepseek_v3_torchtitan.py
 # Test Qwen3
 python examples/custom_models/qwen3_torchtitan.py
 ```
+
+### Benchmarking
+
+Benchmark custom models against vLLM's built-in implementations:
+
+```bash
+# Benchmark DeepSeek V3 with TP=8, 100 requests, batch size 32
+python examples/custom_models/benchmark_deepseek_v3.py \
+    --model deepseek-ai/DeepSeek-V3-Base \
+    --tp 8 \
+    --num-requests 100 \
+    --max-batch-size 32 \
+    --max-tokens 128
+
+# Quick benchmark (10 requests)
+python examples/custom_models/benchmark_deepseek_v3.py \
+    --num-requests 10 \
+    --max-batch-size 4
+
+# Only benchmark custom model (skip built-in comparison)
+python examples/custom_models/benchmark_deepseek_v3.py \
+    --skip-builtin
+```
+
+The benchmark measures:
+- **Throughput**: Tokens generated per second
+- **Requests/sec**: Request processing rate
+- **Latency**: P50/P90/P99 latency distribution
+- **Initialization time**: Model loading time
 
 ## Key Components
 
