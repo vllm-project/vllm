@@ -1068,7 +1068,7 @@ steps:
     # this runner has 2 GPUs available even though num_gpus=2 is not set
     - pytest -v -s tests/compile/test_fusion_all_reduce.py
     # Limit to Inductor partition, no custom ops, and allreduce & attn fusion to reduce running time
-    # Wrap with quotes to escape yaml 
+    # Wrap with quotes to escape yaml
     - "pytest -v -s tests/compile/test_fusions_e2e.py::test_tp2_attn_quant_allreduce_rmsnorm -k 'True and Llama-3.1 and -quant_fp8 and -rms_norm'"
 
 - label: Blackwell Fusion E2E Tests # 30 min
@@ -1098,7 +1098,8 @@ steps:
 - label: Blackwell GPT-OSS Eval
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
-  gpu: b200
+  agent_pool: mi325_1
+  mirror_hardwares: [amdproduction]
   optional: true # run on nightlies
   source_file_dependencies:
   - tests/evals/gpt_oss
