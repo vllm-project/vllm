@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import enum
-import hashlib
 from collections import Counter
 from collections.abc import Callable
 from dataclasses import asdict, field
@@ -159,7 +158,7 @@ class PassConfig:
             current_platform.get_device_capability().to_int(), {}
         )
 
-    def uuid(self):
+    def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -515,18 +514,27 @@ class CompilationConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        factors: list[Any] = []
-        factors.append(self.mode)
-        factors.append(self.backend)
-        factors.append(self.custom_ops)
-        factors.append(self.splitting_ops)
-        factors.append(self.use_inductor)
-        factors.append(self.use_inductor_graph_partition)
-        factors.append(self.inductor_compile_config)
-        factors.append(self.inductor_passes)
-        factors.append(self.pass_config.uuid())
-        factors.append(self.compile_cache_save_format)
-        return hashlib.sha256(str(factors).encode()).hexdigest()
+        # Opt-out: default-include declared fields; keep a tiny exclude set;
+        # normalize types; keep SHA-256. For nested opaque configs, include a
+        # stable identifier (e.g., pass_config.compute_hash()) instead of object id.
+
+        ignored_factors = {
+            # Paths/dirs and runtime/metrics that don’t affect compiled graph
+            "debug_dump_path",
+            "cache_dir",
+            "local_cache_dir",
+            "bs_to_padded_graph_size",
+            "traced_files",
+            "compilation_time",
+            "static_forward_context",
+            "pass_config",  # handled separately below
+        }
+
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, ignored_factors)
+        factors["pass_config"] = self.pass_config.compute_hash()
+        return hash_factors(factors)
 
     def __repr__(self) -> str:
         exclude = {
