@@ -7,27 +7,33 @@ Compares performance of:
 1. Custom DeepSeek V3 (TorchTitan + vLLM MLA)
 2. vLLM's built-in DeepSeek implementation
 
-Run with:
-    python examples/custom_models/benchmark_deepseek_v3.py --model deepseek-ai/DeepSeek-V3-Base --tp 8
+Run from vLLM root:
+    python examples/custom_models/benchmark_deepseek_v3.py \\
+        --num-requests 10 \\
+        --max-batch-size 4
 """
 
 import argparse
+import importlib.util
 import os
 import sys
 import time
 
 import numpy as np
 
-# Add vLLM root to path so we can import the custom model
+# Add vLLM root to path
 script_dir = os.path.dirname(os.path.abspath(__file__))
 vllm_root = os.path.dirname(os.path.dirname(script_dir))
 sys.path.insert(0, vllm_root)
 
-# Import custom model to register it
-# This imports from examples/custom_models/deepseek_v3_torchtitan.py
-import examples.custom_models.deepseek_v3_torchtitan  # noqa: F401
-
+# Import vLLM first
 from vllm import LLM, SamplingParams
+
+# Import custom model from same directory to register it
+deepseek_path = os.path.join(script_dir, "deepseek_v3_torchtitan.py")
+spec = importlib.util.spec_from_file_location("deepseek_v3_torchtitan", deepseek_path)
+deepseek_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(deepseek_module)
 
 
 def generate_requests(num_requests: int = 100, prompt_len: int = 128) -> list[str]:
@@ -63,6 +69,7 @@ def benchmark_model(
     tp_size: int = 8,
     max_batch_size: int = 32,
     max_tokens: int = 128,
+    max_model_len: int = 8192,
 ) -> dict:
     """Benchmark a model with given requests."""
     print(f"\n{'=' * 70}")
@@ -70,6 +77,7 @@ def benchmark_model(
     print(f"{'=' * 70}")
     print(f"Config: TP={tp_size}, Max Batch Size={max_batch_size}")
     print(f"Requests: {len(requests)}, Output Tokens: {max_tokens}")
+    print(f"Max Model Length: {max_model_len}")
 
     # Create LLM instance
     print("\nInitializing LLM...")
@@ -80,6 +88,7 @@ def benchmark_model(
         tensor_parallel_size=tp_size,
         max_num_batched_tokens=max_batch_size * max_tokens,
         max_num_seqs=max_batch_size,
+        max_model_len=max_model_len,  # Limit KV cache allocation
         trust_remote_code=True,
         enforce_eager=True,  # Disable CUDA graph for fair comparison
     )
@@ -185,6 +194,12 @@ def main():
         "--prompt-len", type=int, default=128, help="Prompt length (tokens)"
     )
     parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=8192,
+        help="Maximum model context length (limits KV cache allocation)",
+    )
+    parser.add_argument(
         "--skip-custom",
         action="store_true",
         help="Skip custom model benchmark (only run built-in)",
@@ -219,6 +234,7 @@ def main():
                 tp_size=args.tp,
                 max_batch_size=args.max_batch_size,
                 max_tokens=args.max_tokens,
+                max_model_len=args.max_model_len,
             )
         except Exception as e:
             print(f"\n❌ Custom model benchmark failed: {e}")
