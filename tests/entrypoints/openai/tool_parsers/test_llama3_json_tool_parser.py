@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
+
 import pytest
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
@@ -132,3 +134,91 @@ def test_extract_tool_calls_multiple_json_with_surrounding_text(parser):
     assert result.tool_calls[0].function.name == "searchTool"
     assert result.tool_calls[1].function.name == "getOpenIncidentsTool"
     assert result.tool_calls[2].function.name == "searchTool"
+
+
+def test_extract_tool_calls_deeply_nested_json(parser):
+    # Test with deeply nested JSON (more than 2 levels)
+    # This is a regression test for the regex pattern bug
+    model_output = (
+        '{"name": "get_current_conditions", '
+        '"parameters": {"location": {"city": "San Francisco", "state": "CA"}, '
+        '"unit": "Fahrenheit"}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_current_conditions"
+
+    # Verify the entire parameters object is captured
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert "location" in args
+    assert args["location"]["city"] == "San Francisco"
+    assert args["location"]["state"] == "CA"
+    assert args["unit"] == "Fahrenheit"
+
+
+def test_extract_tool_calls_very_deeply_nested_json(parser):
+    # Test with very deeply nested JSON (3+ levels)
+    model_output = (
+        '{"name": "complex_tool", '
+        '"parameters": {"level1": {"level2": {"level3": {"value": "deep"}}}}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "complex_tool"
+
+    # Verify the entire nested structure is captured
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["level1"]["level2"]["level3"]["value"] == "deep"
+
+
+def test_extract_tool_calls_with_braces_in_strings(parser):
+    # Test with braces inside string values
+    # This is a regression test for string-awareness in JSON extraction
+    model_output = (
+        '{"name": "search", "parameters": {"query": "find users with status {active}"}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "search"
+
+    # Verify the string with braces is captured correctly
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["query"] == "find users with status {active}"
+
+
+def test_extract_tool_calls_with_code_snippets(parser):
+    # Test with code snippets containing braces
+    model_output = (
+        '{"name": "code_tool", "parameters": {"snippet": "function() { return {}; }"}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "code_tool"
+
+    # Verify the code snippet is captured correctly
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["snippet"] == "function() { return {}; }"
+
+
+def test_extract_tool_calls_with_escaped_quotes(parser):
+    # Test with escaped quotes in strings
+    model_output = (
+        '{"name": "test", "parameters": {"text": "He said \\"hello {world}\\""}}'
+    )
+    result = parser.extract_tool_calls(model_output, None)
+
+    assert result.tools_called is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "test"
+
+    # Verify escaped quotes are handled correctly
+    args = json.loads(result.tool_calls[0].function.arguments)
+    assert args["text"] == 'He said "hello {world}"'
