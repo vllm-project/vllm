@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+import json
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
 from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import Llama3JsonToolParser
@@ -148,9 +149,7 @@ def test_extract_tool_calls_deeply_nested_json(parser):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].function.name == "get_current_conditions"
 
-    # Verify the entire parameters object is captured
-    import json
-    
+    # Verify the entire parameters object is captured    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert "location" in args
     assert args["location"]["city"] == "San Francisco"
@@ -171,8 +170,6 @@ def test_extract_tool_calls_very_deeply_nested_json(parser):
     assert result.tool_calls[0].function.name == "complex_tool"
 
     # Verify the entire nested structure is captured
-    import json
-    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["level1"]["level2"]["level3"]["value"] == "deep"
 
@@ -190,8 +187,6 @@ def test_extract_tool_calls_with_braces_in_strings(parser):
     assert result.tool_calls[0].function.name == "search"
 
     # Verify the string with braces is captured correctly
-    import json
-    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["query"] == "find users with status {active}"
 
@@ -208,8 +203,6 @@ def test_extract_tool_calls_with_code_snippets(parser):
     assert result.tool_calls[0].function.name == "code_tool"
 
     # Verify the code snippet is captured correctly
-    import json
-    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["snippet"] == "function() { return {}; }"
 
@@ -226,7 +219,5 @@ def test_extract_tool_calls_with_escaped_quotes(parser):
     assert result.tool_calls[0].function.name == "test"
 
     # Verify escaped quotes are handled correctly
-    import json
-    
     args = json.loads(result.tool_calls[0].function.arguments)
     assert args["text"] == 'He said "hello {world}"'
