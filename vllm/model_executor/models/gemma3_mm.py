@@ -526,17 +526,14 @@ class Gemma3ForConditionalGeneration(
 
         self.vision_tower = SiglipVisionModel(
             config.vision_config,
-            quant_config=quant_config,
+            quant_config,
             prefix=maybe_prefix(prefix, "vision_tower"),
         )
         self.multi_modal_projector = Gemma3MultiModalProjector(config)
 
-        # GGUF compatibility: use config directly if text-only
-        text_config = getattr(config, "text_config", config)
-
         self.language_model = init_vllm_registered_model(
             vllm_config=vllm_config,
-            hf_config=text_config,
+            hf_config=config.text_config,
             prefix=maybe_prefix(prefix, "language_model"),
             architectures=["Gemma3ForCausalLM"],
         )
@@ -594,6 +591,7 @@ class Gemma3ForConditionalGeneration(
             pixel_values,
         )
         image_embeds = self.multi_modal_projector(image_features)
+
         return [e.flatten(0, 1) for e in image_embeds.split(num_patches.tolist())]
 
     def get_language_model(self) -> torch.nn.Module:
@@ -603,6 +601,7 @@ class Gemma3ForConditionalGeneration(
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
+
         return self._process_image_input(image_input)
 
     def embed_input_ids(

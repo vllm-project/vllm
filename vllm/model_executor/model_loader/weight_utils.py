@@ -511,8 +511,7 @@ def filter_files_not_needed_for_inference(hf_weights_files: list[str]) -> list[s
     """
     Exclude files that are not needed for inference.
 
-    See:
-    https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
+    See https://github.com/huggingface/transformers/blob/v4.34.0/src/transformers/trainer.py#L227-L233
     """
     blacklist = [
         "training_args.bin",
@@ -675,11 +674,11 @@ def runai_safetensors_weights_iterator(
             device=device,
             is_distributed=is_distributed,
         )
-
         total_tensors = sum(
             len(tensors_meta)
             for tensors_meta in streamer.files_to_tensors_metadata.values()
         )
+
         tensor_iter = tqdm(
             streamer.get_tensors(),
             total=total_tensors,
@@ -742,9 +741,7 @@ def fastsafetensors_weights_iterator(
                 nogds = True
                 logger.warning_once(
                     "GDS not enabled, setting `nogds=True`.\n"
-                    "For more information, see: "
-                    "https://github.com/foundation-model-stack/"
-                    "fastsafetensors?tab=readme-ov-file#basic-api-usages"
+                    "For more information, see: https://github.com/foundation-model-stack/fastsafetensors?tab=readme-ov-file#basic-api-usages"
                 )
                 loader = _init_loader(pg, device, f_list, nogds=nogds)
                 fb = loader.copy_files_to_device()
@@ -835,8 +832,7 @@ def get_gguf_weight_type_map(
 
 
 def gguf_quant_weights_iterator(
-    gguf_file: str,
-    gguf_to_hf_name_map: dict[str, str],
+    gguf_file: str, gguf_to_hf_name_map: dict[str, str]
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """
     Iterate over the quant weights in the model gguf files and convert
@@ -1036,9 +1032,7 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:
         remapped_name = name.replace(".kv_scale", ".attn.k_scale")
         if remapped_name not in params_dict:
             logger.warning_once(
-                "Found kv_scale in the checkpoint (e.g. %s), but not found "
-                "the expected name in the model (e.g. %s). kv_scale is not "
-                "loaded.",
+                "Found kv_scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv_scale is not loaded.",  #  noqa: E501
                 name,
                 remapped_name,
             )
