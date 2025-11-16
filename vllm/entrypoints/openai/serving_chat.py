@@ -1141,34 +1141,54 @@ class OpenAIServingChat(OpenAIServing):
                                     delta_message.tool_calls[0].function.arguments
                                 )
 
-                            # get the expected call based on partial JSON
-                            # parsing which "autocompletes" the JSON
-                            expected_call = json.dumps(
-                                tool_parser.prev_tool_call_arr[index].get(
-                                    "arguments", {}
-                                ),
-                                ensure_ascii=False,
+                            # Guard against out-of-sync parser state from custom
+                            # parsers. Only backfill if the computed index is valid
+                            # for both prev_tool_call_arr and streamed_args_for_tool.
+                            can_backfill = (
+                                index >= 0
+                                and index < len(tool_parser.prev_tool_call_arr)
+                                and index < len(tool_parser.streamed_args_for_tool)
                             )
+                            if not can_backfill:
+                                logger.debug(
+                                    "Skipping unstreamed tool-args backfill",
+                                    "due to parser state mismatch ",
+                                    "(prev=%d, streamed=%d, index=%d)",
+                                    len(tool_parser.prev_tool_call_arr),
+                                    len(tool_parser.streamed_args_for_tool),
+                                    index,
+                                )
+                            else:
+                                # get the expected call based on partial JSON
+                                # parsing which "autocompletes" the JSON
+                                expected_call = json.dumps(
+                                    tool_parser.prev_tool_call_arr[index].get(
+                                        "arguments", {}
+                                    ),
+                                    ensure_ascii=False,
+                                )
 
-                            # get what we've streamed so far for arguments
-                            # for the current tool
-                            actual_call = tool_parser.streamed_args_for_tool[index]
-                            if latest_delta_len > 0:
-                                actual_call = actual_call[:-latest_delta_len]
+                                # get what we've streamed so far for arguments
+                                # for the current tool
+                                actual_call = tool_parser.streamed_args_for_tool[index]
+                                if latest_delta_len > 0:
+                                    actual_call = actual_call[:-latest_delta_len]
 
-                            # check to see if there's anything left to stream
-                            remaining_call = expected_call.replace(actual_call, "", 1)
-                            # set that as a delta message
-                            delta_message = DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=index,
-                                        function=DeltaFunctionCall(
-                                            arguments=remaining_call
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
-                            )
+                                # check to see if there's anything left to stream
+                                remaining_call = expected_call.replace(
+                                    actual_call, "", 1
+                                )
+                                # set that as a delta message
+                                delta_message = DeltaMessage(
+                                    tool_calls=[
+                                        DeltaToolCall(
+                                            index=index,
+                                            function=DeltaFunctionCall(
+                                                arguments=remaining_call
+                                            ).model_dump(exclude_none=True),
+                                        )
+                                    ]
+                                )
 
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
