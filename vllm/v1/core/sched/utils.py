@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from multiprocessing import shared_memory
 
 import torch
 
@@ -69,4 +70,18 @@ def check_stop(
     ):
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         return True
+
+    # Check if the model is sleeping
+    sleep_signal = 0
+    shared_memory_name = "sleep_signal"
+    try:
+        shm = shared_memory.SharedMemory(name=shared_memory_name)
+        sleep_signal = int.from_bytes(shm.buf[0:4], "little")
+        shm.close()
+    except Exception:
+        pass
+    if sleep_signal == 1:
+        request.status = RequestStatus.FINISHED_STOPPED
+        return True
+
     return False
