@@ -146,10 +146,7 @@ class TrainableMLA(nn.Module):
         try:
             from vllm.attention.layer import MLAAttention
             from vllm.config import get_current_vllm_config
-            from vllm.model_executor.layers.linear import (
-                ColumnParallelLinear,
-                UnquantizedLinearMethod,
-            )
+            from vllm.model_executor.layers.linear import ColumnParallelLinear
 
             # Get vLLM config if available
             try:
@@ -342,7 +339,9 @@ class TrainableMLA(nn.Module):
             # The tensor is complex data stored in real format
             # We need to extract real and imaginary parts
             # Actually this shouldn't happen, but handle it anyway
-            print(f"[DEBUG] freqs_for_tokens shape: {freqs_for_tokens.shape}, dtype: {freqs_for_tokens.dtype}")
+            print(
+                f"[DEBUG] freqs_for_tokens shape: {freqs_for_tokens.shape}, dtype: {freqs_for_tokens.dtype}"
+            )
             print(f"[DEBUG] x shape: {x.shape}")
             # This format is ambiguous - assume it needs to be duplicated
             cos = freqs_for_tokens
@@ -351,8 +350,12 @@ class TrainableMLA(nn.Module):
             # freqs_for_tokens is already real, split it into cos and sin
             # Assume format: [total_tokens, qk_rope_head_dim] where first half is cos, second is sin
             half_dim = freqs_for_tokens.shape[-1] // 2
-            cos = freqs_for_tokens[..., :half_dim]  # [total_tokens, qk_rope_head_dim//2]
-            sin = freqs_for_tokens[..., half_dim:]  # [total_tokens, qk_rope_head_dim//2]
+            cos = freqs_for_tokens[
+                ..., :half_dim
+            ]  # [total_tokens, qk_rope_head_dim//2]
+            sin = freqs_for_tokens[
+                ..., half_dim:
+            ]  # [total_tokens, qk_rope_head_dim//2]
 
         return self.apply_rotary_emb_with_cos_sin(x, cos, sin)
 
@@ -395,12 +398,15 @@ class TrainableMLA(nn.Module):
             # Try to get from vLLM forward context
             try:
                 from vllm.forward_context import get_forward_context
+
                 forward_ctx = get_forward_context()
-                if hasattr(forward_ctx, '_torchtitan_positions'):
+                if hasattr(forward_ctx, "_torchtitan_positions"):
                     positions = forward_ctx._torchtitan_positions
                 else:
                     # Fallback: sequential positions
-                    positions = torch.arange(total_tokens, device=hidden_states_flat.device)
+                    positions = torch.arange(
+                        total_tokens, device=hidden_states_flat.device
+                    )
             except (ImportError, AttributeError):
                 # Training mode: sequential positions
                 positions = torch.arange(total_tokens, device=hidden_states_flat.device)
@@ -427,7 +433,9 @@ class TrainableMLA(nn.Module):
             freqs_cos = freqs_cis.real  # [max_seq_len, qk_rope_head_dim//2]
             freqs_sin = freqs_cis.imag  # [max_seq_len, qk_rope_head_dim//2]
             # Concatenate for easier indexing
-            freqs_real = torch.cat([freqs_cos, freqs_sin], dim=-1)  # [max_seq_len, qk_rope_head_dim]
+            freqs_real = torch.cat(
+                [freqs_cos, freqs_sin], dim=-1
+            )  # [max_seq_len, qk_rope_head_dim]
         else:
             freqs_real = freqs_cis
 
@@ -435,12 +443,18 @@ class TrainableMLA(nn.Module):
         positions_flat = positions.flatten()[:total_tokens]
         max_pos = freqs_real.shape[0] - 1
         positions_clamped = torch.clamp(positions_flat, 0, max_pos)
-        freqs_for_tokens = freqs_real.index_select(0, positions_clamped)  # [total_tokens, qk_rope_head_dim]
+        freqs_for_tokens = freqs_real.index_select(
+            0, positions_clamped
+        )  # [total_tokens, qk_rope_head_dim]
 
         # Split into cos and sin
         half_dim = self.qk_rope_head_dim // 2
-        cos_for_tokens = freqs_for_tokens[..., :half_dim]  # [total_tokens, qk_rope_head_dim//2]
-        sin_for_tokens = freqs_for_tokens[..., half_dim:]  # [total_tokens, qk_rope_head_dim//2]
+        cos_for_tokens = freqs_for_tokens[
+            ..., :half_dim
+        ]  # [total_tokens, qk_rope_head_dim//2]
+        sin_for_tokens = freqs_for_tokens[
+            ..., half_dim:
+        ]  # [total_tokens, qk_rope_head_dim//2]
 
         # Apply RoPE to q_pe: [total_tokens, num_heads, qk_rope_head_dim]
         q_pe = self.apply_rotary_emb_with_cos_sin(q_pe, cos_for_tokens, sin_for_tokens)
@@ -449,7 +463,9 @@ class TrainableMLA(nn.Module):
         q = torch.cat([q_nope, q_pe], dim=-1)
 
         # Key-value projection
-        kv = self.wkv_a(hidden_states_flat)  # [total_tokens, kv_lora_rank + qk_rope_head_dim]
+        kv = self.wkv_a(
+            hidden_states_flat
+        )  # [total_tokens, kv_lora_rank + qk_rope_head_dim]
 
         # Split into compressed KV and K_PE
         kv_c, k_pe = torch.split(kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -457,7 +473,9 @@ class TrainableMLA(nn.Module):
         # Apply RoPE to k_pe: [total_tokens, qk_rope_head_dim]
         # Reshape to [total_tokens, 1, qk_rope_head_dim] for apply_rotary_emb
         k_pe = k_pe.unsqueeze(1)  # [total_tokens, 1, qk_rope_head_dim]
-        k_pe = self.apply_rotary_emb_with_cos_sin(k_pe, cos_for_tokens, sin_for_tokens)  # [total_tokens, 1, qk_rope_head_dim]
+        k_pe = self.apply_rotary_emb_with_cos_sin(
+            k_pe, cos_for_tokens, sin_for_tokens
+        )  # [total_tokens, 1, qk_rope_head_dim]
 
         # Normalize compressed KV
         kv_c_normed = self.kv_norm(kv_c)  # [total_tokens, kv_lora_rank]
@@ -474,11 +492,17 @@ class TrainableMLA(nn.Module):
         else:
             # Training mode or fallback: manual implementation
             # Decompress KV
-            kv = self.wkv_b(kv_c_normed)  # [total_tokens, n_heads * (qk_nope_head_dim + v_head_dim)]
-            kv = kv.view(total_tokens, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+            kv = self.wkv_b(
+                kv_c_normed
+            )  # [total_tokens, n_heads * (qk_nope_head_dim + v_head_dim)]
+            kv = kv.view(
+                total_tokens, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
 
             # Split into K_nope and V
-            k_nope, v = torch.split(kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k_nope, v = torch.split(
+                kv, [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+            )
 
             # Concatenate K_nope with broadcasted K_PE
             # k_pe shape: [total_tokens, 1, qk_rope_head_dim]
@@ -511,7 +535,9 @@ class TrainableMLA(nn.Module):
 
             # Transpose back and reshape: [total_tokens, n_heads * v_head_dim]
             attn_output = attn_output.transpose(1, 2).contiguous()
-            attn_output = attn_output.reshape(total_tokens, self.num_heads * self.v_head_dim)
+            attn_output = attn_output.reshape(
+                total_tokens, self.num_heads * self.v_head_dim
+            )
 
         # Output projection: [total_tokens, hidden_size]
         output = self.wo(attn_output)

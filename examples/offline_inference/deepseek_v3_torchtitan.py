@@ -22,7 +22,6 @@ Example:
     ```
 """
 
-
 import torch
 import torch.nn as nn
 
@@ -218,7 +217,9 @@ class DeepSeekV3TorchTitanForCausalLM(nn.Module):
             # Concatenate cos and sin: [max_seq_len, qk_rope_head_dim]
             freqs_real = torch.cat([freqs_cos, freqs_sin], dim=-1)
             self.model.freqs_cis = freqs_real
-            print(f"  ✓ Converted freqs_cis: {self.model.freqs_cis.shape} ({self.model.freqs_cis.dtype})")
+            print(
+                f"  ✓ Converted freqs_cis: {self.model.freqs_cis.shape} ({self.model.freqs_cis.dtype})"
+            )
 
         print("=" * 70)
         print("✅ Model built successfully!")
@@ -267,10 +268,11 @@ class DeepSeekV3TorchTitanForCausalLM(nn.Module):
         if positions is not None:
             try:
                 from vllm.forward_context import get_forward_context
+
                 forward_ctx = get_forward_context()
                 # Store positions in a custom attribute
                 forward_ctx._torchtitan_positions = positions
-            except:
+            except Exception:
                 pass
 
         # Get embeddings
@@ -374,7 +376,7 @@ class DeepSeekV3TorchTitanForCausalLM(nn.Module):
             # Check if it's a layer-specific weight
             if "layers" in hf_name:
                 # Extract layer number
-                import re
+                import regex as re
 
                 layer_match = re.search(r"layers\.(\d+)\.", hf_name)
                 if layer_match:
