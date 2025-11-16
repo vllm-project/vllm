@@ -561,8 +561,11 @@ async def client_main(
         f"{Color.CYAN}Started client {client_id}: max_num_requests={args.max_num_requests}, max_active_conversations={args.max_active_conversations}{Color.RESET}"  # noqa: E501
     )
 
-    random.seed(args.seed)
-    np.random.seed(args.seed)
+    # Set unique seed per client (each client runs in its own process)
+    # Add 1 to ensure no client uses the same seed as the main process
+    client_seed = args.seed + client_id + 1
+    random.seed(client_seed)
+    np.random.seed(client_seed)
 
     # Active conversations
     active_convs: ConversationsMap = {}
@@ -1490,6 +1493,7 @@ async def main() -> None:
             f"Invalid --warmup-percentage={args.warmup_percentage}"
         ) from None
 
+    # Set global seeds for main process
     random.seed(args.seed)
     np.random.seed(args.seed)
 
