@@ -97,6 +97,9 @@ class ConstantList(Generic[T], Sequence):
     def __repr__(self):
         return f"ConstantList({self._x})"
 
+    def copy(self) -> list[T]:
+        return self._x.copy()
+
 
 class CpuGpuBuffer:
     """Buffer to easily copy tensors between CPU and GPU."""

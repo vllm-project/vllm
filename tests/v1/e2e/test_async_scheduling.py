@@ -65,9 +65,8 @@ def test_without_spec_decoding(
         (True, "mp", True, None, False),
         (True, "uni", True, None, False),
         (False, "mp", True, None, True),
-        # Async scheduling + preemption + chunked prefill needs to be fixed (WIP)
-        # (True, "mp", True, None, True),
-        # (True, "uni", True, None, True),
+        (True, "mp", True, None, True),
+        (True, "uni", True, None, True),
     ]
 
     run_tests(
@@ -103,9 +102,8 @@ def test_with_spec_decoding(monkeypatch: pytest.MonkeyPatch):
         (False, "mp", True, spec_config_short, True),
         (True, "uni", True, spec_config, False),
         (True, "uni", True, spec_config_short, False),
-        # Async scheduling + preemption + chunked prefill needs to be fixed (WIP)
-        #  (True, "mp", True, spec_config, True),
-        #  (True, "uni", True, spec_config_short, True),
+        (True, "mp", True, spec_config, True),
+        (True, "uni", True, spec_config_short, True),
     ]
 
     run_tests(
