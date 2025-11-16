@@ -653,23 +653,23 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
     def get_cudagraph_and_dp_padding(
         self,
         scheduler_output: SchedulerOutput,
-    ) -> tuple[int, CUDAGraphMode, torch.Tensor | None]:
+    ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if self.dp_size == 1:
             # No DP. Only consider CUDA graphs.
             if total_num_scheduled_tokens == 0:
                 # Special case: no tokens to run.
-                return 0, CUDAGraphMode.NONE, None
+                return CUDAGraphMode.NONE, 0, None
 
             cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
                 scheduler_output, total_num_scheduled_tokens
             )
             if cudagraph_size is not None:
                 # Use full CUDA graph.
-                return cudagraph_size, CUDAGraphMode.FULL, None
+                return CUDAGraphMode.FULL, cudagraph_size, None
             else:
                 # Fall back to eager mode.
-                return total_num_scheduled_tokens, CUDAGraphMode.NONE, None
+                return CUDAGraphMode.NONE, total_num_scheduled_tokens, None
 
         # Consider DP padding and CUDA graph.
         if total_num_scheduled_tokens == 0:
@@ -700,7 +700,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             num_tokens_across_dp = torch.clamp(num_tokens_across_dp, min=1)
             num_tokens_after_padding = num_tokens_across_dp[self.dp_rank]
             cudagraph_mode = CUDAGraphMode.NONE
-        return num_tokens_after_padding, cudagraph_mode, num_tokens_across_dp
+        return cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp
 
     @torch.inference_mode()
     def execute_model(
@@ -718,7 +718,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         # NOTE: Call this before the async barrier so CPU all-reduce and
         # GPU execution can overlap.
-        num_tokens_after_padding, cudagraph_mode, num_tokens_across_dp = (
+        cudagraph_mode, num_tokens_after_padding, num_tokens_across_dp = (
             self.get_cudagraph_and_dp_padding(scheduler_output)
         )
         with async_barrier(self.input_prep_event):
