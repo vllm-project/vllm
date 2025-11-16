@@ -357,8 +357,27 @@ class Gemma3nAttention(nn.Module):
             offset = 2 if self.sliding_window is not None else 1
             kv_shared_layer_index = first_kv_shared_layer_idx - offset
             if kv_shared_layer_index >= 0:
+                # Different model wrappers expose layer parameters under
+                # different parent attributes.
+                # For example:
+                #   - Gemma3nForCausalLM → parameters live under "model.layers"
+                #   - Gemma3nForConditionalGeneration →
+                #     under "language_model.model.layers"
+                # This logic extracts the portion of the parameter name
+                # *before* ".layers."
+                # so downstream code can consistently reference the correct
+                # model root regardless of which wrapper class was used.
+                if ".layers." in prefix:
+                    param_name_before_layers = prefix.split(".layers.")[0]
+                else:
+                    raise ValueError(
+                        "Unexpected prefix format for Gemma3nAttention: "
+                        f"'{prefix}'. The prefix is expected to contain "
+                        "'.layers.' to correctly determine the KV sharing "
+                        "target layer."
+                    )
                 # Only the greater layer is required to specify sharing.
-                kv_sharing_target_layer_name = f"language_model.model.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
+                kv_sharing_target_layer_name = f"{param_name_before_layers}.layers.{kv_shared_layer_index}.self_attn.attn"  # noqa: E501
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -666,7 +685,7 @@ class Gemma3nSelfDecoder(nn.Module):
             per_layer_inputs = per_layer_projection
         return per_layer_inputs
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids) * self.embed_scale
 
     def altup_embed(self, hidden_states_0: torch.Tensor) -> torch.Tensor:
@@ -693,7 +712,7 @@ class Gemma3nSelfDecoder(nn.Module):
         if inputs_embeds is not None:
             hidden_states_0 = inputs_embeds
         else:
-            hidden_states_0 = self.get_input_embeddings(input_ids)
+            hidden_states_0 = self.embed_input_ids(input_ids)
 
         adjusted_per_layer_inputs = self.get_per_layer_inputs(
             hidden_states_0, per_layer_inputs
@@ -862,8 +881,8 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
     def get_per_layer_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.self_decoder.get_per_layer_input_embeddings(input_ids)
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.self_decoder.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.self_decoder.embed_input_ids(input_ids)
 
     def fast_prefill_forward(
         self,
@@ -1095,8 +1114,7 @@ class Gemma3nForCausalLM(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
-        lora_config = vllm_config.lora_config
-        del lora_config  # Unused.
+
         super().__init__()
         self.config = config
         self.cache_config = vllm_config.cache_config
@@ -1107,8 +1125,8 @@ class Gemma3nForCausalLM(nn.Module):
             config.vocab_size, soft_cap=config.final_logit_softcapping
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

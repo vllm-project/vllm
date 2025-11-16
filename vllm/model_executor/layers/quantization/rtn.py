@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE, FusedMoEMethodBase
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -376,8 +377,6 @@ class RTNMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError("EPLB not supported for `RTNMoEMethod` yet.")
 
@@ -396,7 +395,7 @@ class RTNMoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        return torch.ops.vllm.fused_marlin_moe(
+        return fused_marlin_moe(
             x,
             layer.w13_weight,
             layer.w2_weight,

@@ -162,7 +162,7 @@ def check_logprobs_close(
 
             # Test prompt logprobs closeness
             if prompt_logprobs_0 is not None and prompt_logprobs_1 is not None:
-                # Both sequences' prompt logprobs lists are not `None``
+                # Both sequences' prompt logprobs lists are not `None`
                 # (although individual list elements may be `None`);
                 # for each token's logprobs:
                 for idx, (logprobs_elem_0, logprobs_elem_1) in enumerate(
@@ -309,7 +309,9 @@ def build_model_context(
         limit_mm_per_prompt=limit_mm_per_prompt,
         mm_processor_cache_gb=mm_processor_cache_gb,
         hf_overrides=model_info.hf_overrides,
-        skip_tokenizer_init=model_info.skip_tokenizer_init,
+        skip_tokenizer_init=model_info.require_embed_inputs,
+        enable_prompt_embeds=model_info.require_embed_inputs,
+        enable_mm_embeds=model_info.require_embed_inputs,
         enforce_eager=model_info.enforce_eager,
         **model_config_kwargs,
     )

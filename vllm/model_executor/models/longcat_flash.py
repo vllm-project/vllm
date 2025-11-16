@@ -114,7 +114,7 @@ class FlashConfig(PretrainedConfig):
         attention_dropout=0.0,
         mla_scale_q_lora=False,
         mla_scale_kv_lora=False,
-        torch_dtype="bfloat16",
+        dtype="bfloat16",
         params_dtype="bfloat16",
         router_dtype="float32",
         router_bias=False,
@@ -130,7 +130,7 @@ class FlashConfig(PretrainedConfig):
             bos_token_id=bos_token_id,
             eos_token_id=eos_token_id,
             tie_word_embeddings=tie_word_embeddings,
-            torch_dtype=torch_dtype,
+            dtype=dtype,
             params_dtype=params_dtype,
             router_dtype=router_dtype,
             topk_method=topk_method,
@@ -498,7 +498,7 @@ class FlashModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -512,7 +512,7 @@ class FlashModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -554,7 +554,6 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         config = FlashConfig(**vllm_config.model_config.hf_config.__dict__)
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
 
         self.config = config
         config.intermediate_size = (
@@ -562,7 +561,7 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if hasattr(config, "ffn_hidden_size")
             else config.intermediate_size
         )
-        self.lora_config = lora_config
+
         self.quant_config = quant_config
 
         self.model = FlashModel(
@@ -584,8 +583,8 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

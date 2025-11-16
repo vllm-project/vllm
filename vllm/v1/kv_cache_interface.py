@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from math import prod
 
 import torch
@@ -10,7 +10,8 @@ from typing_extensions import Self
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.utils import cdiv, get_dtype_size
+from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
 
@@ -42,6 +43,12 @@ class KVCacheSpec:
             The KV cache size in bytes
         """
         raise NotImplementedError
+
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        """
+        Create a new KVCacheSpec from self but replacing the block size.
+        """
+        return replace(self, block_size=block_size)
 
     @classmethod
     def merge(cls, specs: list[Self]) -> Self:

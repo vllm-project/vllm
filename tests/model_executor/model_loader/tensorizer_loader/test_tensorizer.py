@@ -27,7 +27,7 @@ from vllm.model_executor.model_loader.tensorizer import (
 from vllm.model_executor.model_loader.tensorizer_loader import (
     BLACKLISTED_TENSORIZER_ARGS,
 )
-from vllm.utils import PlaceholderModule
+from vllm.utils.import_utils import PlaceholderModule
 
 from .conftest import DummyExecutor, assert_from_collective_rpc
 

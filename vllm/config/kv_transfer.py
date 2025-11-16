@@ -27,7 +27,7 @@ class KVTransferConfig:
     engine_id: str | None = None
     """The engine id for KV transfers."""
 
-    kv_buffer_device: str | None = "cuda"
+    kv_buffer_device: str = "cuda"
     """The device used by kv connector to buffer the KV cache. Choices are 
     'cuda' and 'cpu'."""
 
@@ -61,6 +61,9 @@ class KVTransferConfig:
     """The Python module path to dynamically load the KV connector from.
     Only supported in V1."""
 
+    enable_permute_local_kv: bool = False
+    """Experiment feature flag to enable HND to NHD KV Transfer"""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -91,7 +94,7 @@ class KVTransferConfig:
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError(
-                "Please specify kv_disagg_role when kv_connector "
+                "Please specify kv_role when kv_connector "
                 f"is set, supported roles are {get_args(KVRole)}"
             )
 

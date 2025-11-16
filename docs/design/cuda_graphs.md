@@ -17,7 +17,7 @@ In this document we will discuss the:
     In this document, we refer to pure decode (`max_query_len=1`) or speculative decode (`max_query_len =1+num_spec_tokens`) as **uniform decode** batches, and the opposite would be **non-uniform** batches (i.e., prefill or mixed prefill-decode batches).
 
 !!! note
-    The following contents are mostly based on the last commit of <gh-pr:20059>.
+    The following contents are mostly based on the last commit of <https://github.com/vllm-project/vllm/pull/20059>.
 
 ## Motivation
 
@@ -92,7 +92,7 @@ where `num_tokens` can be the padded token length, and `uniform_decode` is deter
 The goal of this structure is to uniquely identify a (padded) batch with minimal possible items corresponding to a CUDA Graphs item. We are safe to exclude items like `uniform_query_len` because it is a constant at runtime for a certain setup currently. For example, it should be either `1` for a commonly pure decode or `1+num_spec_tokens` for a validation phase of speculative decode.
 
 !!! note
-    The prototype of `BatchDescriptor` may be extended for more general situations in the future, e.g., include more items, like `uniform_query_len` to support multiple different uniform decode lengths settings (<gh-pr:23679>), or other modifications needed to support CUDA Graphs for models whose inputs are not necessarily token length aware (for example, some multi-modal inputs).
+    The prototype of `BatchDescriptor` may be extended for more general situations in the future, e.g., include more items, like `uniform_query_len` to support multiple different uniform decode lengths settings (<https://github.com/vllm-project/vllm/pull/23679>), or other modifications needed to support CUDA Graphs for models whose inputs are not necessarily token length aware (for example, some multi-modal inputs).
 
 ### `CudagraphDispatcher`
 
@@ -106,9 +106,11 @@ The dispatch code looks like:
 batch_descriptor=BatchDescriptor(num_tokens=num_input_tokens, uniform_decode=...)
 runtime_mode, batch_descriptor = cudagraphdispatcher.dispatch(batch_descriptor)
 # execution
-with set_forward_context(..., 
-            cudagraph_runtime_mode=runtime_mode, 
-            batch_descriptor=batch_descriptor):
+with set_forward_context(
+    ..., 
+    cudagraph_runtime_mode=runtime_mode, 
+    batch_descriptor=batch_descriptor,
+):
      output = self.model(...)
 ```
 
@@ -165,7 +167,7 @@ class AttentionCGSupport(enum.Enum):
     """NO CUDA Graphs support"""
 ```
 
-Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation level. For the complete fallback policy, please see the code of [initialize_cudagraph_capture][vllm.v1.worker.gpu_model_runner.GPUModelRunner.initialize_cudagraph_capture].
+Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation mode. For the complete fallback policy, please see the code for [this][vllm.v1.worker.gpu_model_runner.GPUModelRunner._check_and_update_cudagraph_mode].
 
 The following table lists backends that support full CUDA Graphs at the time of writing.
 
@@ -175,8 +177,9 @@ The following table lists backends that support full CUDA Graphs at the time of 
 | FlashAttention v3 | `ALWAYS` | has unified routine for both batches, so `FULL` mode is good |
 | Triton Attention | `ALWAYS` | prefer `FULL_AND_PIECEWISE` since it has different kernels for prefill/mixed and pure decode batches |
 | AITER FlashAttention | `UNIFORM_BATCH`| |
-| FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | |
+| FlashInfer | `UNIFORM_SINGLE_TOKEN_DECODE` | Will be set to `UNIFORM_BATCH` when using TRTLLM attention on Blackwell |
 | FlashMLA | `UNIFORM_BATCH` | |
+| FlashInferMLA | `UNIFORM_BATCH` | |
 | AITER MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | CUTLASS MLA | `UNIFORM_SINGLE_TOKEN_DECODE` | |
 | Mamba attention| `UNIFORM_SINGLE_TOKEN_DECODE` | |
@@ -200,12 +203,12 @@ os.environ.setdefault("VLLM_LOGGING_LEVEL", "DEBUG")
 import vllm
 from vllm.config import CUDAGraphMode
 
-compilation_config = {"level": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
+compilation_config = {"mode": 3, "cudagraph_mode": "FULL_AND_PIECEWISE"}
 model = vllm.LLM(
-            model="meta-llama/Llama-3.1-8B-Instruct",
-            dtype='auto',
-            compilation_config = compilation_config,
-        )
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    dtype="auto",
+    compilation_config=compilation_config,
+)
 sampling_params = vllm.SamplingParams(
     temperature=0,  # greedy decoding
     max_tokens=1024,
@@ -215,16 +218,6 @@ outputs = model.generate(
     sampling_params=sampling_params,
 )
 ```
-
-### Migration from legacy flags
-
-Legacy `use_cudagraph` and `full_cuda_graph` are unified by `cudagraph_mode`:
-
-* `use_cudagraph=False` → `NONE`.
-* `use_cudagraph=True` and `full_cuda_graph=False` → `PIECEWISE`.
-* `full_cuda_graph=True` → directly set `FULL` and rely on the graceful fallback policy.
-
-As they are deprecated and will be removed in the next major or minor release, i.e., v0.11.0 or v1.0.0, we recommend using cudagraph_mode instead.
 
 ### Piecewise compilation and full graph custom passes (attention fusion, sequence parallelism)
 

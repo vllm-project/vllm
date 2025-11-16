@@ -15,6 +15,7 @@ from pydantic.dataclasses import dataclass
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
 
@@ -58,6 +59,7 @@ class StructuredOutputsParams:
                 self.choice is not None,
                 self.grammar is not None,
                 self.json_object is not None,
+                self.structural_tag is not None,
             ]
         )
         if count > 1:
@@ -65,6 +67,37 @@ class StructuredOutputsParams:
                 "You can only use one kind of structured outputs constraint "
                 f"but multiple are specified: {self.__dict__}"
             )
+
+    def all_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+                "structural_tag",
+            )
+        )
+
+    def all_non_structural_tag_constraints_none(self) -> bool:
+        """
+        Returns True if all structured-output constraint fields are None.
+        """
+        return all(
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+            )
+        )
 
 
 @dataclass
@@ -90,6 +123,7 @@ class RequestOutputKind(Enum):
 
 
 class SamplingParams(
+    PydanticMsgspecMixin,
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
     # required for @cached_property.
@@ -220,6 +254,8 @@ class SamplingParams(
     generated token can complete the sequence."""
     _bad_words_token_ids: list[list[int]] | None = None
 
+    skip_reading_prefix_cache: bool = None
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -306,10 +342,10 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        # how we deal with `best_of``:
-        # if `best_of`` is not set, we default to `n`;
-        # if `best_of`` is set, we set `n`` to `best_of`,
-        # and set `_real_n`` to the original `n`.
+        # how we deal with `best_of`:
+        # if `best_of` is not set, we default to `n`;
+        # if `best_of` is set, we set `n` to `best_of`,
+        # and set `_real_n` to the original `n`.
         # when we return the result, we will check
         # if we need to return `n` or `_real_n` results
         if self.best_of:
@@ -379,6 +415,12 @@ class SamplingParams(
             )
             self.structured_outputs = self.guided_decoding
             self.guided_decoding = None
+
+        if self.skip_reading_prefix_cache is None:
+            # If prefix caching is enabled,
+            # the output of prompt logprobs may less than n_prompt_tokens,
+            # we need to skip reading cache at this request.
+            self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):

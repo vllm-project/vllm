@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from transformers import video_processing_utils
 import torch
 import torch.nn as nn
 import triton
@@ -15,13 +14,6 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 
 logger = init_logger(__name__)
-
-try:
-    import flashinfer.sampling
-
-    is_flashinfer_available = True
-except ImportError:
-    is_flashinfer_available = False
 
 
 class TopKTopPSampler(nn.Module):
@@ -41,50 +33,37 @@ class TopKTopPSampler(nn.Module):
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and current_platform.is_cuda()
         ):
-            if is_flashinfer_available:
-                flashinfer_version = flashinfer.__version__
-                if version.parse(flashinfer_version) < version.parse("0.2.3"):
-                    logger.warning_once(
-                        "FlashInfer version >= 0.2.3 required. "
-                        "Falling back to default sampling implementation."
-                    )
-                    self.forward = self.forward_native
-                elif envs.VLLM_USE_FLASHIVOCAB_SIZEFER_SAMPLER is not False:
-                    # VOCAB_SIZEOTE(woosuk): The V0 sampler doesn't use FlashInfer for
-                    # sampling unless VLLM_USE_FLASHIVOCAB_SIZEFER_SAMPLER=1 (i.e., by
-                    # default it is unused). For backward compatibility, we set
-                    # `VLLM_USE_FLASHIVOCAB_SIZEFER_SAMPLER` as None by default and
-                    # interpret it differently in V0 and V1 samplers: In V0,
-                    # None means False, while in V1, None means True. This is
-                    # why we use the condition
-                    # `envs.VLLM_USE_FLASHIVOCAB_SIZEFER_SAMPLER is not False` here.
-                    logger.info_once("Using FlashInfer for top-p & top-k sampling.")
-                    self.forward = self.forward_cuda
-                elif envs.VLLM_USE_TRITOVOCAB_SIZE_SAMPLER is not False:
-                    logger.info_once("Using Triton for top-p & top-k sampling.")
-                    self.forward = self.forward_triton
-                else:
-                    logger.warning_once(
-                        "FlashInfer is available, but it is not enabled. "
-                        "Falling back to the PyTorch-native implementation of "
-                        "top-p & top-k sampling. For the best performance, "
-                        "please set VLLM_USE_FLASHIVOCAB_SIZEFER_SAMPLER=1."
-                    )
-                    self.forward = self.forward_native
+            if envs.VLLM_USE_FLASHINFER_SAMPLER:
+                # Users must opt in explicitly via VLLM_USE_FLASHINFER_SAMPLER=1.
+                logger.info_once(
+                    "Using FlashInfer for top-p & top-k sampling.",
+                    scope="global",
+                )
+                self.forward = self.forward_cuda
             else:
-                if envs.VLLM_USE_TRITOVOCAB_SIZE_SAMPLER is not False:
-                    logger.info_once("Using Triton for top-p & top-k sampling.")
-                    self.forward = self.forward_triton
-                else:
-                    logger.warning_once(
-                        "FlashInfer is not available. Falling back to the "
-                        "PyTorch-native implementation of top-p & top-k "
-                        "sampling. For the best performance, please install "
-                        "FlashInfer."
-                    )
-                    self.forward = self.forward_native
+                logger.debug_once(
+                    "FlashInfer top-p/top-k sampling is available but disabled "
+                    "by default. Set VLLM_USE_FLASHINFER_SAMPLER=1 to opt in "
+                    "after verifying accuracy for your workloads."
+                )
+                self.forward = self.forward_native
+
+            if envs.VLLM_USE_TRITON_SAMPLER:
+                logger.info_once("Using Triton for top-p & top-k sampling.")
+                self.forward = self.forward_triton
+            else:
+                logger.warning_once(
+                    "Triton top-p/top-k sampling is available but disabled "
+                    "by default. Set VLLM_USE_TRITON_SAMPLER=1 to opt in "
+                    "after verifying accuracy for your workloads."
+                )
+                self.forward = self.forward_native
         elif current_platform.is_cpu():
-            if current_platform.get_cpu_architecture() == CpuArchEnum.RISCV:
+            arch = current_platform.get_cpu_architecture()
+            # Fall back to native implementation for POWERPC and RISCV.
+            # On PowerPC argmax produces incorrect output with torch.compile.
+            # PR: https://github.com/vllm-project/vllm/pull/26987
+            if arch in (CpuArchEnum.RISCV, CpuArchEnum.POWERPC):
                 self.forward = self.forward_native
             else:
                 self.forward = self.forward_cpu
@@ -177,15 +156,6 @@ class TopKTopPSampler(nn.Module):
         elif self.logprobs_mode == "processed_logprobs":
             logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
 
-        # VOCAB_SIZEote: this is a workaround for
-        # https://github.com/pytorch/pytorch/pull/151218
-        @torch.compile(dynamic=True)
-        def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
-            probs = logits.softmax(dim=-1, dtype=torch.float32)
-            q = torch.empty_like(probs)
-            q.exponential_()
-            return probs.div(q).argmax(dim=-1).view(-1)
-
         if len(generators) != logits.shape[0]:
             return compiled_random_sample(logits), logits_to_return
         else:
@@ -196,6 +166,16 @@ class TopKTopPSampler(nn.Module):
                 q[i].exponential_(generator=generator)
 
             return probs.div_(q).argmax(dim=-1).view(-1), logits_to_return
+
+
+# Note: this is a workaround for
+# https://github.com/pytorch/pytorch/pull/151218
+@torch.compile(dynamic=True)
+def compiled_random_sample(logits: torch.Tensor) -> torch.Tensor:
+    probs = logits.softmax(dim=-1, dtype=torch.float32)
+    q = torch.empty_like(probs)
+    q.exponential_()
+    return probs.div(q).argmax(dim=-1).view(-1)
 
 
 def apply_top_k_top_p(
@@ -319,6 +299,13 @@ def flashinfer_sample(
     does not. Call this function at the end of the forward pass to minimize
     the synchronization overhead.
     """
+    import flashinfer
+
+    if version.parse(flashinfer.__version__) < version.parse("0.2.3"):
+        raise ImportError(
+            "FlashInfer version >= 0.2.3 required for top-k and top-p sampling. "
+        )
+
     assert not (k is None and p is None)
     if k is None:
         # Top-p only.
@@ -436,8 +423,7 @@ def _topk_triton_kernel(
         for i in range(0, search_iters):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask_n = offs_n < search_range
-            logits_blk = \
-                tl.load(search_addr + offs_n, mask=mask_n, other=avg_logit)
+            logits_blk = tl.load(search_addr + offs_n, mask=mask_n, other=avg_logit)
 
             max_logit = tl.maximum(max_logit, tl.max(logits_blk))
             min_logit = tl.minimum(min_logit, tl.min(logits_blk))
@@ -597,7 +583,7 @@ def top_k_top_p_filter(
         sq_avg_logit = tl.sum(logits_blk * logits_blk) / num_mask
         std_logit = tl.sqrt(sq_avg_logit - avg_logit * avg_logit)
 
-        percentile = tl.cast(P_FIL * 2.0 / VOCAB_SIZE * 100 + 4, tl.uint32) 
+        percentile = tl.cast(P_FIL * 2.0 / VOCAB_SIZE * 100 + 4, tl.uint32)
         percentile = tl.minimum(percentile, 99)
         sigma = tl.load(PERCENTILE_TO_STD_TABLE + percentile)
         outlier_pivot = avg_logit + sigma * std_logit
@@ -607,8 +593,7 @@ def top_k_top_p_filter(
         for i in range(0, search_iters):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask_n = offs_n < search_range
-            logits_blk = \
-                tl.load(search_addr + offs_n, mask=mask_n, other=avg_logit)
+            logits_blk = tl.load(search_addr + offs_n, mask=mask_n, other=avg_logit)
             probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
 
             max_logit = tl.maximum(max_logit, tl.max(logits_blk))
@@ -727,7 +712,10 @@ def top_k_top_p_filter(
             num_iters += 1
             if num_iters >= 32 or (
                 (tl.abs(k_min_range - k_max_range) < 1e-16 and k_pivot != -float("inf"))
-                and (tl.abs(p_fil_min_range - p_fil_max_range) < 1e-16 and p_fil_pivot != -float("inf"))
+                and (
+                    tl.abs(p_fil_min_range - p_fil_max_range) < 1e-16
+                    and p_fil_pivot != -float("inf")
+                )
             ):
                 if k_pivot == -float("inf"):
                     k_pivot = k_pivot_0
@@ -742,8 +730,7 @@ def top_k_top_p_filter(
         for i in range(0, NUM_TILES):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask_n = offs_n < VOCAB_SIZE
-            logits_blk = \
-                tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf"))
+            logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf"))
 
             top_k_mask = logits_blk > k_pivot
             logits_blk = tl.where(top_k_mask, logits_blk, -float("inf"))
@@ -770,8 +757,7 @@ def top_k_top_p_filter(
         for i in range(0, NUM_TILES):
             offs_n = i * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
             mask_n = offs_n < VOCAB_SIZE
-            logits_blk = \
-                tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf"))
+            logits_blk = tl.load(LOGITS_ROW + offs_n, mask=mask_n, other=-float("inf"))
             probs_blk = tl.load(BUFFER_ROW + offs_n, mask=mask_n, other=0.0)
 
             keep_mask = (logits_blk > p_fil_pivot) & mask_n
@@ -793,8 +779,6 @@ def top_k_top_p_filter(
         tl.store(SUM_EXCLUDED_PROBS + row_id, sum_excluded_probs)
 
 
-
-
 def apply_top_k_top_p_filtered(
     logits: torch.Tensor,
     k: torch.Tensor,
@@ -807,8 +791,8 @@ def apply_top_k_top_p_filtered(
 
     # If k is too large, speedup is not significant as the filtered set is large.
     max_k = k.max().item() if k is not None else 0
-    # Probabilty value is not guaranteed to be equivalent to the PyTorch implementation 
-    # in the distribution tail due to floating point non-associativity.  
+    # Probability value is not guaranteed to be equivalent to the PyTorch implementation
+    # in the distribution tail due to floating point non-associativity.
     # We avoid high p values to avoid this accuracy issue.
     max_p = p.max().item() if p is not None else 0
     if max_k > vocab_size / 10 or max_p > 0.95:
@@ -860,7 +844,7 @@ def apply_top_k_top_p_filtered(
 
     if torch.any(sum_excluded_probs >= p):
         return apply_top_k_top_p(logits, k, p)
- 
+
     logits_sort, sort_indices = filtered_logits.sort(dim=-1, descending=False)
     logits_sort_indices = torch.gather(filtered_indices, -1, sort_indices)
     sorted_probs = torch.gather(filtered_probs, -1, sort_indices)

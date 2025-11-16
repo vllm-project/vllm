@@ -10,7 +10,8 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
+from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -78,18 +79,31 @@ def get_vision_encoder_info(hf_config: VisionLanguageConfig) -> VisionEncoderInf
     raise NotImplementedError(msg)
 
 
-def get_vit_attn_backend(head_size: int, dtype: torch.dtype) -> _Backend:
+def get_vit_attn_backend(
+    head_size: int,
+    dtype: torch.dtype,
+    *,
+    attn_backend_override: AttentionBackendEnum | None = None,
+) -> AttentionBackendEnum:
     """
     Get the available attention backend for Vision Transformer.
     """
+    if attn_backend_override is not None:
+        return attn_backend_override
+
     # Lazy import to avoid circular dependency
     from vllm.attention.selector import get_env_variable_attn_backend
 
-    selected_backend: _Backend | None = get_env_variable_attn_backend()
+    selected_backend: AttentionBackendEnum | None = get_env_variable_attn_backend()
     if selected_backend is not None:
         return selected_backend
 
     return current_platform.get_vit_attn_backend(head_size, dtype)
+
+
+def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
+    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
+    return vllm_config.compilation_config.compile_mm_encoder
 
 
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]

@@ -762,7 +762,7 @@ class MiniCPMO(MiniCPMV2_6):
         for modality in modalities:
             if modality == "audios":
                 audio_input = modalities["audios"]
-                audio_features = self._process_audio_input(audio_input)
-                multimodal_embeddings += tuple(audio_features)
+                audio_embeddings = self._process_audio_input(audio_input)
+                multimodal_embeddings += tuple(audio_embeddings)
 
         return multimodal_embeddings

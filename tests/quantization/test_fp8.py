@@ -18,8 +18,12 @@ from vllm.platforms import current_platform
 
 MODELS = [
     "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
-    "nm-testing/Phi-3-mini-128k-instruct-FP8",
-    "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
+    # The checkpoint below was removed from the HF.
+    # TODO: add a small replacement checkpoint.
+    pytest.param(
+        "nm-testing/Qwen2-0.5B-Instruct-FP8-SkipQKV",
+        marks=pytest.mark.skip(reason="Checkpoint removed from HF."),
+    ),
 ]
 
 
@@ -49,10 +53,19 @@ def test_model_load_and_run(
 
 
 KV_CACHE_MODELS = [
-    # Deprecated AutoFP8 format using .kv_scale
-    "neuralmagic/Meta-Llama-3-8B-Instruct-FP8-KV",
     # AutoFP8 format using separate .k_scale and .v_scale
-    "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+    # The original checkpoint below was removed from the Hub. To unblock CI and
+    # until a small replacement with split K/V scales is found, skip this case.
+    # See PR #27717 for context.
+    pytest.param(
+        "nm-testing/Qwen2-1.5B-Instruct-FP8-K-V",
+        marks=pytest.mark.skip(
+            reason=(
+                "Checkpoint removed from HF; temporarily disabling this "
+                "AutoFP8 split K/V case (PR #27717)."
+            )
+        ),
+    ),
 ]
 
 

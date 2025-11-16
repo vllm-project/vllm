@@ -5,9 +5,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
-    FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -51,7 +53,6 @@ __all__ = [
 
 if HAS_TRITON:
     # import to register the custom ops
-    import vllm.model_executor.layers.fused_moe.fused_marlin_moe  # noqa
     from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )

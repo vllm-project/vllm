@@ -147,9 +147,10 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(hidden_states, q_c, positions, self.rotary_emb)
@@ -160,6 +161,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
+
         return self.o_proj(attn_out)[0]
 
     def forward_cuda(self, *args, **kwargs):

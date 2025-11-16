@@ -27,14 +27,16 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_engine import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.entrypoints.renderer import RenderConfig
-from vllm.entrypoints.utils import get_max_tokens
+from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import EmbedsPrompt, TokensPrompt, is_embeds_prompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import as_list, merge_async_iterators
+from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.collection_utils import as_list
+from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -56,11 +58,15 @@ class OpenAIServingCompletion(OpenAIServing):
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
-            enable_force_include_usage=enable_force_include_usage,
             log_error_stack=log_error_stack,
         )
+
+        # set up logits processors
+        self.logits_processors = self.model_config.logits_processors
+
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        self.enable_force_include_usage = enable_force_include_usage
         if self.default_sampling_params:
             source = self.model_config.generation_config
             source = "model" if source == "auto" else source
@@ -140,6 +146,9 @@ class OpenAIServingCompletion(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        # Extract data_parallel_rank from header (router can inject it)
+        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
@@ -176,6 +185,10 @@ class OpenAIServingCompletion(OpenAIServing):
                         max_tokens,
                         self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
+                    )
+                    validate_logits_processors_parameters(
+                        self.logits_processors,
+                        sampling_params,
                     )
 
                 request_id_item = f"{request_id}-{i}"
@@ -223,6 +236,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         priority=request.priority,
                         prompt_text=prompt_text,
                         tokenization_kwargs=tokenization_kwargs,
+                        data_parallel_rank=data_parallel_rank,
                     )
 
                 generators.append(generator)
@@ -256,7 +270,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 num_prompts=num_prompts,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
-                enable_force_include_usage=self.enable_force_include_usage,
             )
 
         # Non-streaming response
@@ -320,7 +333,6 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompts: int,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
-        enable_force_include_usage: bool,
     ) -> AsyncGenerator[str, None]:
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
@@ -331,13 +343,9 @@ class OpenAIServingCompletion(OpenAIServing):
         first_iteration = True
 
         stream_options = request.stream_options
-        if stream_options:
-            include_usage = stream_options.include_usage or enable_force_include_usage
-            include_continuous_usage = (
-                include_usage and stream_options.continuous_usage_stats
-            )
-        else:
-            include_usage, include_continuous_usage = False, False
+        include_usage, include_continuous_usage = should_include_usage(
+            stream_options, self.enable_force_include_usage
+        )
 
         try:
             async for prompt_idx, res in result_generator:
@@ -404,7 +412,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         # has_echoed[i] is reused here to indicate whether
                         # we have already returned the prompt token IDs.
-                        if not has_echoed[i]:
+                        if not has_echoed[i] and request.return_token_ids:
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 

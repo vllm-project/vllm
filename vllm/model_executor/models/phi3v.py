@@ -56,7 +56,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -70,7 +69,6 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     _merge_multimodal_embeddings,
-    flatten_bn,
     init_vllm_registered_model,
     maybe_prefix,
 )
@@ -564,6 +562,8 @@ class Phi3VMultiModalProcessor(BaseMultiModalProcessor[Phi3VProcessingInfo]):
     dummy_inputs=Phi3VDummyInputsBuilder,
 )
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
+    merge_by_field_config = True
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.wte": "embed_tokens",
@@ -591,7 +591,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            org_num_embeddings=config.vocab_size,
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "model.embed_tokens"),
         )
@@ -631,8 +630,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         if pixel_values is not None:
             return Phi3VImagePixelInputs(
                 type="pixel_values",
-                pixel_values=flatten_bn(pixel_values),
-                image_sizes=flatten_bn(image_sizes, concat=True),
+                pixel_values=pixel_values,
+                image_sizes=image_sizes,
                 resolve_bindings={
                     "h": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
                     "w": CLIP_VIT_LARGE_PATCH14_336_CONFIG.image_size,
@@ -642,7 +641,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         if image_embeds is not None:
             return Phi3VImageEmbeddingInputs(
                 type="image_embeds",
-                data=flatten_bn(image_embeds),
+                data=image_embeds,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -652,19 +651,10 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         image_input: Phi3VImageInputs,
     ) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
-            image_data = image_input["data"]
-            if is_list_of(image_data, torch.Tensor):
-                # it's already a list of tensors
-                return image_data
-            if len(image_data.shape) == 3:
-                # 3D tensor
-                return list(torch.unbind(image_data, dim=0))
-            raise ValueError(
-                "We expect batched 2D tensors; "
-                "this can be either a list of 2D tensors or a single 3D tensor."
-            )
+            return image_input["data"]
 
         assert self.vision_embed_tokens is not None
+
         image_embeds = self.vision_embed_tokens(
             image_input["pixel_values"], image_input["image_sizes"]
         )
@@ -674,14 +664,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
     def get_language_model(self) -> torch.nn.Module:
         return self.language_model
 
-    def get_multimodal_embeddings(self, **kwargs: object) -> MultiModalEmbeddings:
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_input_embeddings(
+    def embed_input_ids(
         self,
         input_ids: torch.Tensor,
         multimodal_embeddings: MultiModalEmbeddings | None = None,
@@ -689,7 +679,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        inputs_embeds = self._get_text_embeddings(
+        inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.embed_tokens,
             is_multimodal=is_multimodal,
@@ -701,7 +691,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
 
         if is_multimodal is None:
             raise ValueError(
-                "`get_input_embeddings` now requires `is_multimodal` arg, "
+                "`embed_input_ids` now requires `is_multimodal` arg, "
                 "please update your model runner according to "
                 "https://github.com/vllm-project/vllm/pull/16229."
             )

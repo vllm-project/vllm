@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -56,7 +57,7 @@ from vllm.model_executor.parameter import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
-from vllm.utils import is_list_of
+from vllm.utils.collection_utils import is_list_of
 
 logger = init_logger(__name__)
 
@@ -481,6 +482,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             self.quant_type = scalar_types.uint8b128
         else:
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
+        self.use_marlin = True
 
     def create_weights(
         self,
@@ -741,8 +743,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fused_experts is None
-
         if enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `GPTQMarlinMoEMethod` yet."
@@ -765,7 +765,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        return torch.ops.vllm.fused_marlin_moe(
+        return fused_marlin_moe(
             x,
             layer.w13_qweight,
             layer.w2_qweight,

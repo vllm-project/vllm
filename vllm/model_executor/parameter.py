@@ -70,7 +70,7 @@ class BasevLLMParameter(Parameter):
         # NOTE(@ksayers) some models such as mamba_mixer2 override the
         # weight loader to support custom loading. In the future, model-specific
         # weight loading should be implemented via Model.load_weights. In the
-        # meantime, support deleting and overriding `weight_loader`` attribute
+        # meantime, support deleting and overriding `weight_loader` attribute
         if self._weight_loader is None:
             raise AttributeError(
                 f"{self.__class__.__name__} weight_loader attribute has been deleted"

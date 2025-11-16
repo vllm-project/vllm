@@ -23,7 +23,8 @@
 # limitations under the License.
 """Inference-only ErineMoE model compatible with HuggingFace weights."""
 
-from collections.abc import Iterable
+import typing
+from collections.abc import Callable, Iterable
 from itertools import islice
 from typing import Any
 
@@ -132,17 +133,17 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         self.moe_num_shared_experts = getattr(config, "moe_num_shared_experts", None)
         self.ep_group = get_ep_group().device_group
-        self.ep_rank = self.ep_group.rank()
+        self.ep_rank = get_ep_group().rank_in_group
         self.ep_size = self.ep_group.size()
         self.n_routed_experts: int = config.moe_num_experts
         self.n_shared_experts: int = self.moe_num_shared_experts
 
         # Load balancing settings.
         vllm_config = get_current_vllm_config()
-        parallel_config = vllm_config.parallel_config
+        eplb_config = vllm_config.parallel_config.eplb_config
         self.enable_eplb = enable_eplb
 
-        self.n_redundant_experts = parallel_config.num_redundant_experts
+        self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
@@ -214,6 +215,8 @@ class Ernie4_5_MoeMoE(nn.Module):
 
         if self.has_shared_experts:
             final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
+        else:
+            final_hidden_states = final_hidden_states[1]
 
         if self.tp_size > 1:
             final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
@@ -426,8 +429,10 @@ class Ernie4_5_MoeModel(nn.Module):
         self.vocab_size = config.vocab_size
         self.config = config
         parallel_config = vllm_config.parallel_config
+        eplb_config = parallel_config.eplb_config
         enable_eplb = parallel_config.enable_eplb
-        self.num_redundant_experts = parallel_config.num_redundant_experts
+
+        self.num_redundant_experts = eplb_config.num_redundant_experts
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -460,7 +465,7 @@ class Ernie4_5_MoeModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
@@ -474,7 +479,7 @@ class Ernie4_5_MoeModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -570,20 +575,27 @@ class Ernie4_5_MoeModel(nn.Module):
 
                     # Skip loading extra bias for GPTQ models.
                     if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
+                        name_mapped.endswith(".bias") or name_mapped.endswith("_bias")
+                    ) and name_mapped not in params_dict:
                         continue
-                    param = params_dict[name]
-
-                    weight_loader = param.weight_loader
-                    weight_loader(
+                    param = params_dict[name_mapped]
+                    # We should ask the weight loader to return success or not
+                    # here since otherwise we may skip experts with other
+                    # available replicas.
+                    weight_loader = typing.cast(
+                        Callable[..., bool], param.weight_loader
+                    )
+                    success = weight_loader(
                         param,
                         loaded_weight,
-                        name,
+                        name_mapped,
                         shard_id=shard_id,
                         expert_id=expert_id,
+                        return_success=True,
                     )
-                    break
+                    if success:
+                        name = name_mapped
+                        break
                 else:
                     if is_expert_weight:
                         # We've checked that this is an expert weight
@@ -697,22 +709,6 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
             self.num_shared_experts = example_moe.n_shared_experts
             self.num_redundant_experts = example_moe.n_redundant_experts
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            # Register the expert weights.
-            self.expert_weights.append(layer.get_expert_weights())
-            layer.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
-
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -730,8 +726,8 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
                 moe.n_redundant_experts = self.num_redundant_experts
                 moe.experts.update_expert_map()
 
-    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,

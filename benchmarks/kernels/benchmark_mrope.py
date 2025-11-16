@@ -39,7 +39,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

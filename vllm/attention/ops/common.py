@@ -53,6 +53,7 @@ def _correct_attn_cp_out_kernel(
     lse = tl.load(lses_ptr + lse_offsets)
     lse = tl.where((lse != lse) | (lse == float("inf")), -float("inf"), lse)
     lse_max = tl.max(lse, axis=0)
+    lse_max = tl.where(lse_max == -float("inf"), 0, lse_max)
     lse -= lse_max
     lse_exp = tl.exp(lse)
     lse_acc = tl.sum(lse_exp, axis=0)
@@ -173,6 +174,7 @@ def cp_lse_ag_out_rs(
     cp_attn_lse: torch.Tensor,
     cp_group: GroupCoordinator,
     ctx: CPTritonContext = None,
+    return_lse=False,
 ):
     """
     cp_attn_out: [ B, H, D ]
@@ -192,8 +194,14 @@ def cp_lse_ag_out_rs(
 
     cp_attn_lse = cp_attn_lse.contiguous()
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
-    out, _ = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
+    out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx)
     out = cp_group.reduce_scatter(out, dim=1)
+
+    if return_lse:
+        cp_num_heads = lse.shape[1] // cp_group.world_size
+        cp_rank = cp_group.rank_in_group
+        lse = lse[:, cp_num_heads * cp_rank : cp_num_heads * (cp_rank + 1)]
+        return out, lse
     return out
 
 
