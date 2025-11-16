@@ -348,11 +348,8 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        zero_expert_num = getattr(layer, "zero_expert_num", 0)
-        zero_expert_type = getattr(layer, "zero_expert_type", None)
-
-        topk_weights, topk_ids, zero_expert_result = layer.select_experts(
+    ) -> torch.Tensor:
+        topk_weights, topk_ids = layer.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -370,9 +367,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             expert_load_view=expert_load_view,
             logical_to_physical_map=logical_to_physical_map,
             logical_replica_count=logical_replica_count,
-            global_num_experts=global_num_experts,
-            zero_expert_num=zero_expert_num,
-            zero_expert_type=zero_expert_type,
             num_fused_shared_experts=layer.num_fused_shared_experts,
         )
 
@@ -412,13 +406,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 expert_map=expert_map,
             )
 
-        if zero_expert_num != 0 and zero_expert_type is not None:
-            assert not isinstance(result, tuple), (
-                "Shared + zero experts are mutually exclusive not yet supported"
-            )
-            return result, zero_expert_result
-        else:
-            return result
+        return result
 
     def forward_cpu(
         self,

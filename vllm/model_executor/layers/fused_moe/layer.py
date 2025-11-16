@@ -31,7 +31,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import zero_experts_compute_triton
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
@@ -319,8 +318,6 @@ class FusedMoE(CustomOp):
         num_redundant_experts: int = 0,
         has_bias: bool = False,
         is_sequence_parallel=False,
-        zero_expert_num: int | None = 0,
-        zero_expert_type: str | None = None,
         expert_mapping: list[tuple[str, str, int, str]] | None = None,
         n_shared_experts: int | None = None,
         routing_method_type: int | None = None,
@@ -374,8 +371,6 @@ class FusedMoE(CustomOp):
 
         self.global_num_experts = num_experts + num_redundant_experts
         self.logical_num_experts = num_experts
-        self.zero_expert_num = zero_expert_num
-        self.zero_expert_type = zero_expert_type
 
         # Expert mapping used in self.load_weights
         self.expert_mapping = expert_mapping
@@ -1322,19 +1317,16 @@ class FusedMoE(CustomOp):
         expert_load_view: torch.Tensor | None = None,
         logical_to_physical_map: torch.Tensor | None = None,
         logical_replica_count: torch.Tensor | None = None,
-        global_num_experts: int | None = None,
-        zero_expert_num: int | None = None,
-        zero_expert_type: str | None = None,
         num_fused_shared_experts: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Route the input hidden states to the top-k experts based on the
         router logits.
 
         Returns:
-                (topk_weights, topk_ids, zero_expert_result)
-                (tuple[torch.Tensor, torch.Tensor, torch.Tensor]):
-                The weights, expert ids, and zero expert computation result.
+                (topk_weights, topk_ids)
+                (tuple[torch.Tensor, torch.Tensor]):
+                The weights and expert ids selected by the router.
 
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
@@ -1426,23 +1418,7 @@ class FusedMoE(CustomOp):
 
         assert topk_ids.dtype == indices_type or indices_type is None
 
-        # Compute zero expert result if needed
-        if (
-            zero_expert_num is not None
-            and zero_expert_num > 0
-            and zero_expert_type is not None
-            and global_num_experts is not None
-        ):
-            zero_expert_result = zero_experts_compute_triton(
-                expert_indices=topk_ids,
-                expert_scales=topk_weights,
-                num_experts=global_num_experts,
-                zero_expert_type=zero_expert_type,
-                hidden_states=hidden_states,
-            )
-        else:
-            zero_expert_result = None
-        return topk_weights, topk_ids, zero_expert_result
+        return topk_weights, topk_ids
 
     def must_reduce_shared_expert_outputs(self) -> bool:
         """
@@ -1506,18 +1482,7 @@ class FusedMoE(CustomOp):
                 fused_output = torch.ops.vllm.moe_forward(
                     hidden_states, router_logits, self.layer_name
                 )
-            if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                if not isinstance(fused_output, tuple):
-                    torch._assert(
-                        False,
-                        "FusedMoE expected (output, zero_expert_result) tuple when zero_expert_num > 0",
-                    )
-                fused_output, zero_expert_result = fused_output
-                return (reduce_output(fused_output) + zero_expert_result)[
-                    ..., :og_hidden_states
-                ]
-            else:
-                return reduce_output(fused_output)[..., :og_hidden_states]
+            return reduce_output(fused_output)[..., :og_hidden_states]
         else:
             if current_platform.is_tpu():
                 # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -1625,13 +1590,6 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
-
-            if self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, tuple)
-                assert self.shared_experts is None
-                final_hidden_states, zero_expert_result = final_hidden_states
-                if zero_expert_result is not None:
-                    final_hidden_states += zero_expert_result
 
             if not skip_result_store:
                 if self.shared_experts is None:
@@ -1804,10 +1762,6 @@ class FusedMoE(CustomOp):
                     shared_output,
                     final_hidden_states,
                 )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, tuple)
-                final_hidden_states, zero_expert_result = final_hidden_states
-
             def combine_output(states: torch.Tensor) -> torch.Tensor:
                 if do_naive_dispatch_combine:
                     states = get_ep_group().combine(states, self.is_sequence_parallel)
@@ -1818,9 +1772,6 @@ class FusedMoE(CustomOp):
                     final_hidden_states[0],
                     combine_output(final_hidden_states[1]),
                 )
-            elif self.zero_expert_num is not None and self.zero_expert_num > 0:
-                assert isinstance(final_hidden_states, torch.Tensor)
-                return (combine_output(final_hidden_states), zero_expert_result)
             else:
                 return combine_output(final_hidden_states)
 

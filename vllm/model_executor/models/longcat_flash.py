@@ -65,6 +65,7 @@ from vllm.model_executor.models.deepseek_v2 import DeepseekV2MLAAttention
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
+from .longcat_zero_expert import zero_experts_compute_triton
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -303,20 +304,60 @@ class LongcatMoe(nn.Module):
             renormalize=False,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
-            zero_expert_num=self.zero_expert_num,
-            zero_expert_type=self.zero_expert_type,
             enable_eplb=self.enable_eplb,
             routed_scaling_factor=config.routed_scaling_factor,
+        )
+
+    def _compute_zero_expert_result(
+        self, hidden_states: torch.Tensor, router_logits: torch.Tensor
+    ) -> torch.Tensor | None:
+        if self.zero_expert_num <= 0 or self.zero_expert_type is None:
+            return None
+
+        topk_weights, topk_ids = self.experts.select_experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            use_grouped_topk=self.experts.use_grouped_topk,
+            top_k=self.experts.top_k,
+            renormalize=self.experts.renormalize,
+            topk_group=self.experts.topk_group,
+            num_expert_group=self.experts.num_expert_group,
+            custom_routing_function=self.experts.custom_routing_function,
+            scoring_func=self.experts.scoring_func,
+            routed_scaling_factor=self.experts.routed_scaling_factor,
+            e_score_correction_bias=self.router.e_score_correction_bias,
+            indices_type=None,
+            enable_eplb=False,
+            expert_map=None,
+            expert_load_view=None,
+            logical_to_physical_map=None,
+            logical_replica_count=None,
+            num_fused_shared_experts=self.experts.num_fused_shared_experts,
+        )
+
+        return zero_experts_compute_triton(
+            expert_indices=topk_ids.clone(),
+            expert_scales=topk_weights.clone(),
+            num_experts=self.experts.logical_num_experts,
+            zero_expert_type=self.zero_expert_type,
+            hidden_states=hidden_states,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        router_logits = self.router(hidden_states.to(self.rounter_params_dtype))
+        router_logits_full = self.router(hidden_states.to(self.rounter_params_dtype))
+        zero_expert_result = self._compute_zero_expert_result(
+            hidden_states, router_logits_full
+        )
+
+        router_logits = router_logits_full[..., : self.experts.logical_num_experts]
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
+        if zero_expert_result is not None:
+            final_hidden_states = final_hidden_states + zero_expert_result
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

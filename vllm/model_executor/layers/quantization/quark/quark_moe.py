@@ -360,7 +360,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 "EPLB not supported for `QuarkW8A8Fp8MoEMethod` yet."
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
@@ -635,7 +635,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 "EPLB not supported for `QuarkOCP_MX_MoEMethod` yet."
             )
 
-        topk_weights, topk_ids, _ = FusedMoE.select_experts(
+        topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
             use_grouped_topk=use_grouped_topk,
