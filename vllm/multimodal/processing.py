@@ -1425,7 +1425,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                         "Instead, please specify dynamic update targets "
                         "in the same prompt update definition by passing "
                         "a function to `PromptUpdate.target`.",
-                        len(prompt_updates),
+                        len(item_prompt_updates),
                         modality,
                         item_idx,
                     )
