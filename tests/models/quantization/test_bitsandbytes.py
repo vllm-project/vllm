@@ -17,7 +17,7 @@ from ..utils import check_embeddings_close, check_logprobs_close
 
 pytestmark = pytest.mark.skipif(
     current_platform.is_rocm() and on_gfx9(),
-    reason="bitsandbytes quantization not supported on Instinct (warp size 64 limitation)",
+    reason="bitsandbytes quantization not supported on gfx9 (warp size 64 limitation)",
 )
 
 models_4bit_to_test = [
