@@ -632,12 +632,22 @@ def estimate_max_model_len(
         The estimated maximum model length that can fit in the available memory.
     """
 
+    original_max_model_len = vllm_config.model_config.max_model_len
+
     # Define a function to check if a given model length fits in memory
     def fits_in_memory(model_len: int) -> bool:
-        # Modify the max_model_len for this calculation
+        # Modify the max_model_len for this calculation and ensure we restore
+        # the previous value so callers do not observe side effects.
+        previous_model_len = vllm_config.model_config.max_model_len
         vllm_config.model_config.max_model_len = model_len
-        # Calculate memory needed for the given model length
-        memory_needed = max_memory_usage_bytes(vllm_config, kv_cache_spec.values())
+        try:
+            # Calculate memory needed for the given model length
+            memory_needed = max_memory_usage_bytes(
+                vllm_config, kv_cache_spec.values()
+            )
+        finally:
+            vllm_config.model_config.max_model_len = previous_model_len
+
         return memory_needed <= available_memory
 
     # Binary search for the maximum model length
@@ -657,6 +667,9 @@ def estimate_max_model_len(
             left = mid + 1
         else:
             right = mid - 1
+    # Restore original max_model_len before returning
+    vllm_config.model_config.max_model_len = original_max_model_len
+
     return result
 
 
