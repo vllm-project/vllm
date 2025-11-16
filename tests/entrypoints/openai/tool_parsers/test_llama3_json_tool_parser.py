@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 import json
+
+import pytest
 
 from vllm.entrypoints.openai.protocol import ExtractedToolCallInformation
 from vllm.entrypoints.openai.tool_parsers.llama_tool_parser import Llama3JsonToolParser
@@ -149,7 +150,7 @@ def test_extract_tool_calls_deeply_nested_json(parser):
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].function.name == "get_current_conditions"
 
-    # Verify the entire parameters object is captured    
+    # Verify the entire parameters object is captured
     args = json.loads(result.tool_calls[0].function.arguments)
     assert "location" in args
     assert args["location"]["city"] == "San Francisco"
