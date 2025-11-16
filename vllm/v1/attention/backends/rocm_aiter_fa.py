@@ -729,7 +729,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     cu_seqlens_k=attn_metadata.prefill_metadata.query_start_loc,
                     max_seqlen_q=attn_metadata.prefill_metadata.max_query_len,
                     max_seqlen_k=attn_metadata.prefill_metadata.max_seq_len,
-                    min_seqlen_q=attn_metadata.prefill_metadata.min_query_len,
+                    min_seqlen_q=1 #attn_metadata.prefill_metadata.min_query_len,
                     dropout_p=0.0,
                     softmax_scale=self.scale,
                     causal=True,
@@ -807,6 +807,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     layer._v_scale,
                     None,
                     _PARTITION_SIZE_ROCM,
+                    sliding_window=self.sliding_window[0] + 1,
                 )
         else:
             raise NotImplementedError(
