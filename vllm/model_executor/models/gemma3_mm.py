@@ -435,11 +435,10 @@ class Gemma3MultiModalProjector(nn.Module):
     def __init__(self, config: Gemma3Config):
         super().__init__()
 
-        # GGUF compatibility: handle text-only configs
-        text_hidden_size = getattr(config, "text_config", config).hidden_size
-
         self.mm_input_projection_weight = nn.Parameter(
-            torch.zeros(config.vision_config.hidden_size, text_hidden_size)
+            torch.zeros(
+                config.vision_config.hidden_size, config.text_config.hidden_size
+            )
         )
 
         self.mm_soft_emb_norm = GemmaRMSNorm(
