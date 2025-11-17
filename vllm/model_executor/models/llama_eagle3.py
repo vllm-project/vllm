@@ -67,7 +67,9 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
         draft_model_config = vllm_config.speculative_config.draft_model_config
-        draft_load_config = vllm_config.load_config
+        draft_load_config = (
+            vllm_config.speculative_config.draft_load_config or vllm_config.load_config
+        )
 
         return (
             VllmConfig.get_quantization_config(draft_model_config, draft_load_config)

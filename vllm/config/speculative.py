@@ -9,6 +9,7 @@ from pydantic import Field, SkipValidation, model_validator
 from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
+from vllm.config import LoadConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -146,6 +147,10 @@ class SpeculativeConfig:
     """The minimum token probability for suffix decoding. Will only speculate
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
+
+    draft_load_config: LoadConfig | None = None
+    """Load config for the draft model. If not specified, will use the load
+    config from the target model."""
 
     def compute_hash(self) -> str:
         """
