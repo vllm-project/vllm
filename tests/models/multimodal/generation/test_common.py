@@ -221,7 +221,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.gemma3_vllm_to_hf_output,
         image_size_factors=[(0.25, 0.5, 1.0)],
         vllm_runner_kwargs={
-            "model_impl": "auto",
+            "model_impl": "transformers",
         },
         marks=[pytest.mark.core_model],
     ),
