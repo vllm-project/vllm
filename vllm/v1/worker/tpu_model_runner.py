@@ -21,7 +21,7 @@ from vllm.attention import Attention
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import MLAAttention
 from vllm.attention.layers.chunked_local_attention import ChunkedLocalAttention
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.compilation.wrapper import TorchCompileWithNoGuardsWrapper
 from vllm.config import (
     ParallelConfig,
     VllmConfig,
@@ -1254,13 +1254,15 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
 
         max_gen_len = selected_token_ids.shape[-1]
         if max_gen_len == 1:
-            valid_sampled_token_ids = selected_token_ids.tolist()
+            valid_sampled_token_ids: list[np.ndarray] = [
+                row for row in selected_token_ids.numpy()
+            ]
 
             # Mask out the sampled tokens that should not be sampled.
             # TODO: Keep in sync with gpu_model_runner.py, in particular
             #       the "else" case here
             for i in discard_sampled_tokens_req_indices:
-                valid_sampled_token_ids[i].clear()
+                valid_sampled_token_ids[i] = np.array([])
 
             # Append sampled tokens
             for i, req_state, seq_len in request_seq_lens:
@@ -1273,7 +1275,7 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             valid_mask = selected_token_ids != INVALID_TOKEN_ID
             gen_lens = valid_mask.sum(dim=1).tolist()
             valid_sampled_token_ids = [
-                seq.tolist() for seq in selected_token_ids[valid_mask].split(gen_lens)
+                seq.numpy() for seq in selected_token_ids[valid_mask].split(gen_lens)
             ]
             self.input_batch.num_tokens[:num_reqs] += gen_lens
             for i, req_state, seq_len in request_seq_lens:
@@ -1895,12 +1897,14 @@ class TPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             compiled_model = self.model.get_language_model().model
         else:
             compiled_model = self.model.model
-        if isinstance(compiled_model, TorchCompileWrapperWithCustomDispatcher):
+        if isinstance(compiled_model, TorchCompileWithNoGuardsWrapper):
             logger.info("Clear dynamo cache and cached dynamo bytecode.")
             torch._dynamo.eval_frame.remove_from_cache(
-                compiled_model.original_code_object
+                compiled_model.original_code_object()
             )
-            compiled_model.compiled_codes.clear()
+            # Reset the wrapper to re-initialize.
+            compiled_model.compiled = False
+            TorchCompileWithNoGuardsWrapper.__init__(compiled_model)
 
     @torch.compile(backend="openxla", fullgraph=True, dynamic=False)
     def select_hidden_states(self, hidden_states, indices_do_sample):
