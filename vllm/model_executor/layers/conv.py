@@ -3,6 +3,7 @@
 """Conv Layer Class."""
 
 import math
+from typing import Literal
 
 import torch
 import torch.nn as nn
@@ -23,11 +24,11 @@ class ConvLayerBase(CustomOp):
         out_channels: int,
         kernel_size: int | tuple[int, ...],
         stride: int | tuple[int, ...] = 1,
-        padding: int | str | tuple[int, ...] = 0,
+        padding: int | tuple[int, ...] | Literal["same", "valid"] = 0,
         dilation: int | tuple[int, ...] = 1,
         groups: int = 1,
         bias: bool = True,
-        padding_mode: str = "zeros",
+        padding_mode: Literal["zeros", "reflect", "replicate", "circular"] = "zeros",
         *,
         params_dtype: torch.dtype | None = None,
     ) -> None:
