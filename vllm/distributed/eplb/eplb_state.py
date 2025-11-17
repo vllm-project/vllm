@@ -33,6 +33,7 @@ physical experts.
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from logging import DEBUG
 
 import torch
 from torch.distributed import ProcessGroup, all_reduce
@@ -583,6 +584,31 @@ class EplbState:
                     .sum(dim=-1)
                     .float()
                 )
+                
+                # Log: Per-rank expert token counts (verify masked ranks get 0)
+                if self.masked_ranks and self.global_step % 10 == 0:
+                    # Sum across all layers for total per-rank counts
+                    rank_loads = num_tokens_per_rank.sum(dim=0)  # Shape: (num_ranks,)
+                    
+                    logger.info(
+                        "[MASKING] Rank=%d Model=%s Step=%d: Per-rank expert token counts: %s. "
+                        "Masked ranks: %s (should have 0 tokens)",
+                        ep_group.rank,
+                        eplb_model_state.model_name,
+                        self.global_step,
+                        rank_loads.tolist(),
+                        sorted(self.masked_ranks),
+                    )
+                    
+                    # Verify masked ranks have zero load
+                    for masked_rank in self.masked_ranks:
+                        if masked_rank < ep_group.size() and rank_loads[masked_rank] > 0:
+                            logger.error(
+                                "[MASKING] ERROR: Masked rank %d received %.0f tokens! "
+                                "Masking is not working correctly.",
+                                masked_rank,
+                                rank_loads[masked_rank].item(),
+                            )
 
                 # Compute balancedness ratio:
                 # for each layer:
@@ -666,6 +692,39 @@ class EplbState:
                 rank_mapping=rank_mapping_to_apply, 
                 is_health_masking=True
             )
+        
+        # Log: Detailed physical_to_logical_map state per rank (controlled by log_stats)
+        if log_stats and self.masked_ranks and self.global_step % 100 == 0:
+            if logger.isEnabledFor(DEBUG):
+                import logging
+                ep_group = get_ep_group().device_group
+                for model_name, eplb_model_state in self.model_states.items():
+                    # Log physical_to_logical_map to show -1 slots
+                    num_layers = eplb_model_state.physical_to_logical_map.shape[0]
+                    for layer_idx in range(num_layers):
+                        p2l_map = eplb_model_state.physical_to_logical_map[layer_idx]
+                        
+                        # Show which physical expert slots are masked
+                        masked_expert_ids = (p2l_map == -1).nonzero(as_tuple=True)[0].tolist()
+                        
+                        # Calculate which ranks these belong to
+                        num_local_experts = len(p2l_map) // ep_group.size()
+                        masked_ranks_for_layer = set()
+                        for expert_id in masked_expert_ids:
+                            rank = expert_id // num_local_experts
+                            masked_ranks_for_layer.add(rank)
+                        
+                        logger.debug(
+                            "[MASKING] Rank=%d Model=%s Layer=%d: "
+                            "Physical experts masked: %s (belong to ranks: %s). "
+                            "physical_to_logical_map shape=%s, -1 count=%d",
+                            ep_group.rank,
+                            model_name, layer_idx,
+                            masked_expert_ids,
+                            sorted(masked_ranks_for_layer),
+                            p2l_map.shape,
+                            len(masked_expert_ids),
+                        )
 
     def _check_mask_out_gpu(self) -> tuple[dict[int, int] | None, bool]:
         """

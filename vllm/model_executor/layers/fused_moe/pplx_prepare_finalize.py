@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from logging import DEBUG
 
 import pplx_kernels as pplx
 import torch
@@ -255,6 +256,21 @@ class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_x_scale: torch.Tensor | None,
         orig_a_scale_block_shape: int | None,
     ) -> mk.PrepareResultType:
+        # Log: All-to-all receive (PPLX backend)
+        if logger.isEnabledFor(DEBUG):
+            expert_counts = expert_num_tokens.tolist() if hasattr(expert_num_tokens, 'tolist') else list(expert_num_tokens)
+            total_received = sum(expert_counts)
+            num_local_experts = len(expert_counts)
+            
+            logger.debug(
+                "[MASKING] All-to-All receive (PPLX): Rank %d received %d tokens for %d local experts. "
+                "Per-expert counts: %s",
+                self.a2a.rank(),
+                total_received,
+                num_local_experts,
+                expert_counts[:10] if len(expert_counts) > 10 else expert_counts,
+            )
+        
         if expert_x_scale is not None:
             expert_x_scale = expert_x_scale[:, :, :orig_a_scale_block_shape]
             assert expert_x_scale.ndim == 3

@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable
+from logging import DEBUG
 from typing import Any
 
 import torch
@@ -1287,6 +1288,32 @@ def select_valid_physical_experts(
     # Check if any selections resulted in -1 (masked)
     masked_selections = physical_ids == -1
     
+    # Log Point: Token routing encountered masked experts
+    if masked_selections.any():
+        num_masked = masked_selections.sum().item()
+        total = masked_selections.numel()
+        
+        # Only log if DEBUG enabled
+        if logger.isEnabledFor(DEBUG):
+            # Get current EP rank
+            from vllm.distributed.parallel_state import get_ep_group
+            ep_rank = get_ep_group().rank
+            
+            # Calculate which logical experts had masked replicas selected
+            masked_positions = masked_selections.nonzero(as_tuple=False)
+            if len(masked_positions) > 0:
+                affected_logical_experts = topk_ids_long[masked_positions[:, 0], masked_positions[:, 1]].unique()
+                
+                logger.debug(
+                    "[MASKING] Rank=%d: Token routing encountered %d masked expert selections "
+                    "out of %d total (%.2f%%). Affected logical experts: %s. Rerouting...",
+                    ep_rank,
+                    num_masked,
+                    total,
+                    100.0 * num_masked / total,
+                    affected_logical_experts.tolist()[:20],  # Limit to first 20
+                )
+    
     # For masked selections, find the next valid replica with wrap-around
     if masked_selections.any():
         # For positions that got -1, search for first valid replica starting from
@@ -1373,6 +1400,38 @@ def eplb_map_to_physical_and_record(
     
     topk_ids = physical_ids
     
+    # Log: Per-rank token distribution after physical selection
+    if logger.isEnabledFor(DEBUG):
+        # Get EP rank and size
+        from vllm.distributed.parallel_state import get_ep_group
+        ep_group = get_ep_group()
+        ep_rank = ep_group.rank
+        ep_size = ep_group.size()
+        
+        # Calculate which experts belong to which ranks
+        # Assuming linear placement: rank = expert_id // num_local_experts
+        num_physical_experts = logical_to_physical_map.shape[0] * logical_to_physical_map.shape[1]
+        num_local_experts = num_physical_experts // ep_size
+        
+        # Count tokens routed to each rank
+        token_counts_per_rank = torch.zeros(ep_size, dtype=torch.int64, device=topk_ids.device)
+        for rank in range(ep_size):
+            rank_expert_start = rank * num_local_experts
+            rank_expert_end = (rank + 1) * num_local_experts
+            # Count how many tokens are routed to this rank's experts
+            tokens_to_rank = (
+                (topk_ids >= rank_expert_start) & (topk_ids < rank_expert_end)
+            ).sum()
+            token_counts_per_rank[rank] = tokens_to_rank
+        
+        logger.debug(
+            "[MASKING] EP rank %d: Token distribution across ranks: %s. "
+            "Total tokens: %d",
+            ep_rank,
+            token_counts_per_rank.tolist(),
+            topk_ids.numel(),
+        )
+    
     # Sanity check: Verify no -1 indices remain after selection
     # If this fails, it means either:
     # (1) All replicas of an expert are masked (invalid system state), or
@@ -1400,11 +1459,40 @@ def eplb_map_to_physical_and_record(
 
     # `torch.bincount` is not compilable, so use `scatter_add_` instead.
     topk_ids_flatten = topk_ids.flatten()
+    
+    # Log: Expert load before recording
+    if logger.isEnabledFor(DEBUG):
+        old_loads = expert_load_view.clone()
+    
     expert_load_view.scatter_add_(
         dim=0,
         index=topk_ids_flatten.long(),
         src=torch.ones_like(topk_ids_flatten).to(expert_load_view),
     )
+    
+    # Log (continued): Expert load after recording
+    if logger.isEnabledFor(DEBUG):
+        load_delta = expert_load_view - old_loads
+        
+        # Get current EP rank
+        from vllm.distributed.parallel_state import get_ep_group
+        ep_rank = get_ep_group().rank
+        
+        # Identify experts with load increase
+        experts_with_tokens = (load_delta > 0).sum().item()
+        experts_idle = (load_delta == 0).sum().item()
+        
+        logger.debug(
+            "[MASKING] Rank=%d: Expert load delta: min=%.1f, max=%.1f, mean=%.1f. "
+            "Experts with tokens: %d/%d (%.1f%% idle)",
+            ep_rank,
+            load_delta.min().item(),
+            load_delta.max().item(),
+            load_delta.mean().item(),
+            experts_with_tokens,
+            expert_load_view.shape[0],
+            100.0 * experts_idle / expert_load_view.shape[0],
+        )
 
     if indices_type is not None:
         topk_ids = topk_ids.to(dtype=indices_type)
