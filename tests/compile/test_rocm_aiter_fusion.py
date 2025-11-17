@@ -181,7 +181,7 @@ def test_fusion_aiter_silu_and_mul_group_fp8_quant(
         if dtype == torch.float16:
             ATOL, RTOL = (5e-3, 5e-3)
         else:
-            ATOL, RTOL = (1e-1, 1e-1)
+            ATOL, RTOL = (5e-2, 5e-2)
 
         torch.testing.assert_close(
             result[0].to(dtype=dtype), result2[0].to(dtype=dtype), atol=ATOL, rtol=RTOL
