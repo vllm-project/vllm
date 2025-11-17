@@ -28,9 +28,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Quant,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    maybe_create_device_identity,
-)
 from vllm.platforms import current_platform
 
 from ..utils import TestFP8Layer, override_cutlass_fp8_supported
@@ -157,7 +154,6 @@ def test_fusion_silu_and_mul_quant(
 
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
-    maybe_create_device_identity()
 
     x = torch.rand(num_tokens, hidden_size * 2)
 

@@ -40,9 +40,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
 )
-from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    maybe_create_device_identity,
-)
 from vllm.platforms import current_platform
 
 from ..utils import TestFP8Layer
@@ -191,7 +188,6 @@ def test_fusion_rmsnorm_quant(
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
     torch.manual_seed(1)
-    maybe_create_device_identity()  # needed for certain non-cutlass fp8 paths
 
     custom_ops = []
     if enable_rms_norm_custom_op:

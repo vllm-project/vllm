@@ -19,7 +19,7 @@ import vllm.envs as envs
 from vllm.compilation.inductor_pass import pass_context
 from vllm.compilation.partition_rules import (
     inductor_partition_rule_context,
-    resolve_defined_ops,
+    should_split,
 )
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
 from vllm.logger import init_logger
@@ -33,6 +33,7 @@ from .compiler_interface import (
     EagerAdaptor,
     InductorAdaptor,
     InductorStandaloneAdaptor,
+    is_compile_cache_enabled,
 )
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
@@ -51,7 +52,9 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
             and hasattr(torch._inductor, "standalone_compile")
         ):
             logger.debug("Using InductorStandaloneAdaptor")
-            return InductorStandaloneAdaptor()
+            return InductorStandaloneAdaptor(
+                compilation_config.compile_cache_save_format
+            )
         else:
             logger.debug("Using InductorAdaptor")
             return InductorAdaptor()
@@ -95,10 +98,9 @@ class CompilerManager:
         compilation (e.g. partition rules, pass context)."""
         with pass_context(runtime_shape):
             if self.compilation_config.use_inductor_graph_partition:
-                inductor_partition_ops = resolve_defined_ops(
+                with inductor_partition_rule_context(
                     self.compilation_config.splitting_ops
-                )
-                with inductor_partition_rule_context(inductor_partition_ops):
+                ):
                     yield
             else:
                 yield
@@ -238,7 +240,7 @@ class CompilerManager:
         assert compiled_graph is not None, "Failed to compile the graph"
 
         # store the artifact in the cache
-        if not envs.VLLM_DISABLE_COMPILE_CACHE and handle is not None:
+        if is_compile_cache_enabled(additional_inductor_config) and handle is not None:
             self.cache[(runtime_shape, graph_index, self.compiler.name)] = handle
             compilation_counter.num_cache_entries_updated += 1
             self.is_cache_updated = True
@@ -301,7 +303,7 @@ class SplitItem:
 
 
 def split_graph(
-    graph: fx.GraphModule, resolved_ops: list[torch._ops.OpOverload]
+    graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
     # split graph by ops
     subgraph_id = 0
@@ -310,12 +312,8 @@ def split_graph(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        # Match node.target against resolved_ops
-        # node.target can be OpOverloadPacket, need to check .default
-        if node.op == "call_function" and (
-            node.target in resolved_ops
-            or (hasattr(node.target, "default") and node.target.default in resolved_ops)
-        ):
+
+        if should_split(node, splitting_ops):
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             split_op_graphs.append(subgraph_id)
@@ -610,7 +608,9 @@ class VllmBackend:
         os.makedirs(local_cache_dir, exist_ok=True)
         self.compilation_config.local_cache_dir = local_cache_dir
 
-        disable_cache = envs.VLLM_DISABLE_COMPILE_CACHE
+        disable_cache = not is_compile_cache_enabled(
+            self.compilation_config.inductor_compile_config
+        )
 
         if disable_cache:
             logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
@@ -649,8 +649,7 @@ class VllmBackend:
         else:
             fx_split_ops = self.compilation_config.splitting_ops or []
 
-        resolved_split_ops = resolve_defined_ops(fx_split_ops)
-        self.split_gm, self.piecewise_graphs = split_graph(graph, resolved_split_ops)
+        self.split_gm, self.piecewise_graphs = split_graph(graph, fx_split_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
 

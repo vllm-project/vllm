@@ -9,8 +9,10 @@ import threading
 import time
 import traceback
 import weakref
+from collections import deque
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, InvalidStateError
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
 from functools import cached_property, partial
@@ -27,6 +29,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
 from vllm.distributed.device_communicators.shm_broadcast import Handle, MessageQueue
+from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
 from vllm.distributed.parallel_state import (
     get_dp_group,
     get_ep_group,
@@ -54,6 +57,35 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 logger = init_logger(__name__)
 
 
+class FutureWrapper(Future):
+    def __init__(
+        self,
+        futures_queue: deque[tuple["FutureWrapper", Callable]],
+        aggregate: Callable = lambda x: x,
+    ):
+        self.futures_queue = futures_queue
+        self.aggregate = aggregate
+        super().__init__()
+
+    def result(self, timeout=None):
+        if timeout is not None:
+            raise RuntimeError("timeout not implemented")
+        # Drain any futures ahead of us in the queue.
+        while not self.done():
+            future, get_response = self.futures_queue.pop()
+            future.wait_for_response(get_response)
+        return super().result()
+
+    def wait_for_response(self, get_response: Callable):
+        try:
+            response = self.aggregate(get_response())
+            with suppress(InvalidStateError):
+                self.set_result(response)
+        except Exception as e:
+            with suppress(InvalidStateError):
+                self.set_exception(e)
+
+
 class MultiprocExecutor(Executor):
     supports_pp: bool = True
 
@@ -64,7 +96,6 @@ class MultiprocExecutor(Executor):
         self.is_failed = False
         self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
-        self.io_thread_pool: ThreadPoolExecutor | None = None
 
         self.world_size = self.parallel_config.world_size
         tensor_parallel_size = self.parallel_config.tensor_parallel_size
@@ -132,15 +163,9 @@ class MultiprocExecutor(Executor):
                         uw.death_writer.close()
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
-        # Note: must use only 1 IO thread to keep dequeue sequence
-        # from the response queue.
-        # _async_aggregate_workers_output also assumes a single IO thread.
-        self.io_thread_pool = ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="mp_exec_io"
-        )
+        self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
 
         self.output_rank = self._get_output_rank()
-        self.has_connector = self.vllm_config.kv_transfer_config is not None
 
     def start_worker_monitor(self):
         workers = self.workers
@@ -179,56 +204,37 @@ class MultiprocExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self._execute_with_aggregation(
-            "execute_model", scheduler_output, non_block=non_block
+        return self.collective_rpc(
+            "execute_model",
+            args=(scheduler_output,),
+            unique_reply_rank=self.output_rank,
+            non_block=non_block,
+            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
         )
 
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False
     ) -> ModelRunnerOutput | Future[ModelRunnerOutput]:
-        return self._execute_with_aggregation(  # type: ignore[return-value]
-            "sample_tokens", grammar_output, non_block=non_block
-        )
-
-    def _execute_with_aggregation(
-        self, method: str, *args, non_block: bool = False
-    ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        if not self.has_connector:
-            # get output only from a single worker (output_rank)
-            (output,) = self.collective_rpc(
-                method,
-                args=args,
-                unique_reply_rank=self.output_rank,
-                non_block=non_block,
-                timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
-            )
-            return output
-
-        # get output from all workers
-        outputs = self.collective_rpc(
-            method,
-            args=args,
+        return self.collective_rpc(
+            "sample_tokens",
+            args=(grammar_output,),
+            unique_reply_rank=self.output_rank,
             non_block=non_block,
             timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            kv_output_aggregator=self.kv_output_aggregator,
         )
-
-        # aggregate all workers output to a single output
-        assert self.kv_output_aggregator is not None
-        if non_block:
-            return self.kv_output_aggregator.async_aggregate(outputs, self.output_rank)
-        return self.kv_output_aggregator.aggregate(outputs, self.output_rank)
 
     def execute_dummy_batch(self) -> None:
         self.collective_rpc("execute_dummy_batch", unique_reply_rank=self.output_rank)
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         # OPTIMIZATION: Get output only from a single worker (output_rank)
-        outputs = self.collective_rpc(
+        return self.collective_rpc(
             "take_draft_token_ids", unique_reply_rank=self.output_rank
         )
-        return outputs[0]
 
-    def collective_rpc(
+    def collective_rpc(  # type: ignore[override]
         self,
         method: str | Callable,
         timeout: float | None = None,
@@ -236,73 +242,69 @@ class MultiprocExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         unique_reply_rank: int | None = None,
-    ) -> list[Any]:
+        kv_output_aggregator: KVOutputAggregator = None,
+    ) -> Any | list[Any] | Future[Any | list[Any]]:
+        """Returns single result if unique_reply_rank and/or kv_output_aggregator
+        is provided, otherwise list."""
+
         if self.is_failed:
             raise RuntimeError("Executor failed.")
 
         deadline = None if timeout is None else time.monotonic() + timeout
         kwargs = kwargs or {}
 
-        # NOTE: If the args are heterogeneous, then we pack them into a list,
-        # and unpack them in the method of every worker, because every worker
-        # knows their own rank.
-        try:
-            if isinstance(method, str):
-                send_method = method
-            else:
-                send_method = cloudpickle.dumps(
-                    method, protocol=pickle.HIGHEST_PROTOCOL
-                )
-            self.rpc_broadcast_mq.enqueue(
-                (send_method, args, kwargs, unique_reply_rank)
+        if kv_output_aggregator is not None:
+            output_rank = None
+            aggregate: Callable[[Any], Any] = partial(
+                kv_output_aggregator.aggregate, output_rank=unique_reply_rank or 0
             )
+        else:
+            output_rank = unique_reply_rank
+            aggregate = lambda x: x
 
-            workers = (
-                (self.workers[unique_reply_rank],)
-                if unique_reply_rank is not None
-                else self.workers
-            )
+        if isinstance(method, str):
+            send_method = method
+        else:
+            send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
+        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+
+        workers = (
+            (self.workers[output_rank],) if output_rank is not None else self.workers
+        )
+
+        shutdown_event = self.shutdown_event
+
+        def get_response():
             responses = []
-
-            def get_response(
-                w: WorkerProcHandle,
-                dequeue_timeout: float | None = None,
-                cancel_event: threading.Event | None = None,
-            ):
-                status, result = w.worker_response_mq.dequeue(
-                    timeout=dequeue_timeout, cancel=cancel_event
+            for w in workers:
+                dequeue_timeout = (
+                    None if deadline is None else (deadline - time.monotonic())
                 )
-
+                try:
+                    status, result = w.worker_response_mq.dequeue(
+                        timeout=dequeue_timeout, cancel=shutdown_event
+                    )
+                except TimeoutError as e:
+                    raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
                         " stack trace above for the root cause"
                     )
-                return result
-
-            for w in workers:
-                dequeue_timeout = (
-                    None if deadline is None else (deadline - time.monotonic())
-                )
-
-                if self.io_thread_pool is not None:
-                    # We must consume worker_response_mq from a single thread.
-                    result = self.io_thread_pool.submit(  # type: ignore
-                        get_response, w, dequeue_timeout, self.shutdown_event
-                    )
-                    if not non_block:
-                        result = result.result()
-                elif not non_block:
-                    result = get_response(w, dequeue_timeout, self.shutdown_event)
-                else:
-                    raise RuntimeError(
-                        "non_block can only be used when max_concurrent_batches > 1"
-                    )
                 responses.append(result)
+            return responses[0] if output_rank is not None else responses
 
-            return responses
-        except TimeoutError as e:
-            raise TimeoutError(f"RPC call to {method} timed out.") from e
+        if non_block:
+            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
+            self.futures_queue.appendleft((future, get_response))
+            return future
+
+        # First drain any pending futures in the queue.
+        while self.futures_queue:
+            future, get_fut_response = self.futures_queue.pop()
+            future.wait_for_response(get_fut_response)
+
+        return aggregate(get_response())
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -348,9 +350,6 @@ class MultiprocExecutor(Executor):
                 self._ensure_worker_termination([w.proc for w in workers])
 
             self.shutdown_event.set()
-            if self.io_thread_pool is not None:
-                self.io_thread_pool.shutdown(wait=False, cancel_futures=True)
-                del self.io_thread_pool
 
         self.rpc_broadcast_mq = None
 

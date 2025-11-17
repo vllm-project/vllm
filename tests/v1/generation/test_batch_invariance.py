@@ -456,7 +456,6 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
         model=model,
         max_num_seqs=1,
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
-        enforce_eager=True,
         gpu_memory_utilization=0.9,
         max_model_len=2048,
         dtype="bfloat16",
@@ -998,7 +997,6 @@ def LLM_with_max_seqs(
         dtype="bfloat16",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
-        enforce_eager=True,
         # Enable for MOE models
         # enable_expert_parallel=True,
     )

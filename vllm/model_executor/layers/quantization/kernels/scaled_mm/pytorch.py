@@ -14,17 +14,6 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearLayerConfig,
 )
 
-# Input scaling factors are no longer optional in _scaled_mm starting
-# from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
-TORCH_DEVICE_IDENTITY = None
-
-
-def maybe_create_device_identity():
-    # Allocate dummy ones tensor for torch._scaled_mm
-    global TORCH_DEVICE_IDENTITY
-    if TORCH_DEVICE_IDENTITY is None:
-        TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
-
 
 def torch_per_tensor_w8a8_scaled_mm(
     *,
@@ -57,8 +46,7 @@ def torch_row_wise_w8a8_scaled_mm(
     bias: torch.Tensor,
     output_shape: list,
 ) -> torch.Tensor:
-    # Note: Callers of this function should check USE_ROWWISE_TORCH_SCALED_MM
-    #  when using it.
+    #  Note:
     #  For now it has only been validated on ROCm platform.
     #  fp8 rowwise scaling in torch._scaled_mm is introduced in
     #  https://github.com/pytorch/pytorch/pull/144432 using
@@ -106,14 +94,18 @@ def torch_channelwise_w8a8_scaled_mm(
     # For the scaled_mm fallback case, we break this down, since it
     # does not support s_w being a vector.
 
+    # Input scaling factors are no longer optional in _scaled_mm starting
+    # from pytorch 2.5. Allocating a dummy tensor to pass as scales
+    dummy_tensor = torch.ones(1, dtype=torch.float32, device=A.device)
+
     # GEMM
     # This computes C = (X * W).
     # Output in fp32 to allow subsequent ops to happen in-place
     output = torch._scaled_mm(
         A,
         B,
-        scale_a=TORCH_DEVICE_IDENTITY,
-        scale_b=TORCH_DEVICE_IDENTITY,
+        scale_a=dummy_tensor,
+        scale_b=dummy_tensor,
         out_dtype=torch.float32,
     )
     # A fix for discrepancy in scaled_mm which returns tuple
@@ -214,18 +206,10 @@ class RowWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
 class ChannelWiseTorchScaledMMLinearKernel(TorchScaledMMLinearKernel):
     @classmethod
     def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        is_static = c.activation_quant_key.scale.static
-
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
         per_tensor_weight_scales = c.weight_quant_key.scale.group_shape.is_per_tensor()
-
-        if not is_static:
-            return (
-                False,
-                "ChannelWiseTorchScaledMMLinearKernel requires static scales",
-            )
 
         if per_tensor_activation_scales and per_tensor_weight_scales:
             return (

@@ -32,12 +32,13 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs, deprecated
 
 import vllm.envs as envs
-from vllm.attention.backends.registry import _Backend
+from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
     CompilationConfig,
     ConfigType,
     DeviceConfig,
+    ECTransferConfig,
     EPLBConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -80,13 +81,12 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.reasoning import ReasoningParserManager
 from vllm.transformers_utils.config import (
     get_model_path,
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.utils import check_gguf_file, is_s3
+from vllm.transformers_utils.utils import check_gguf_file, is_cloud_storage
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
@@ -386,6 +386,7 @@ class EngineArgs:
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
+    dcp_kv_cache_interleave_size: int = ParallelConfig.dcp_kv_cache_interleave_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: int | None = None
     data_parallel_start_rank: int | None = None
@@ -438,8 +439,6 @@ class EngineArgs:
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
-    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
-    rope_theta: float | None = ModelConfig.rope_theta
     hf_token: bool | str | None = ModelConfig.hf_token
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
@@ -464,7 +463,7 @@ class EngineArgs:
         MultiModalConfig.mm_shm_cache_max_object_size_mb
     )
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
-    mm_encoder_attn_backend: _Backend | str | None = (
+    mm_encoder_attn_backend: AttentionBackendEnum | str | None = (
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
@@ -497,7 +496,7 @@ class EngineArgs:
         VllmConfig, "structured_outputs_config"
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
-
+    reasoning_parser_plugin: str | None = None
     # Deprecated guided decoding fields
     guided_decoding_backend: str | None = None
     guided_decoding_disable_fallback: bool | None = None
@@ -516,7 +515,7 @@ class EngineArgs:
         ObservabilityConfig.collect_detailed_traces
     )
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
-    scheduler_cls: str | type[object] = SchedulerConfig.scheduler_cls
+    scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     override_pooler_config: dict | PoolerConfig | None = (
@@ -528,6 +527,8 @@ class EngineArgs:
 
     kv_transfer_config: KVTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
+
+    ec_transfer_config: ECTransferConfig | None = None
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -555,7 +556,7 @@ class EngineArgs:
     )
     """Custom logitproc types"""
 
-    async_scheduling: bool = SchedulerConfig.async_scheduling
+    async_scheduling: bool | None = SchedulerConfig.async_scheduling
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
 
@@ -617,8 +618,6 @@ class EngineArgs:
         )
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
-        model_group.add_argument("--rope-scaling", **model_kwargs["rope_scaling"])
-        model_group.add_argument("--rope-theta", **model_kwargs["rope_theta"])
         model_group.add_argument(
             "--tokenizer-revision", **model_kwargs["tokenizer_revision"]
         )
@@ -711,9 +710,12 @@ class EngineArgs:
         )
         structured_outputs_group.add_argument(
             "--reasoning-parser",
-            # This choice is a special case because it's not static
-            choices=list(ReasoningParserManager.reasoning_parsers),
+            # Choices need to be validated after parsing to include plugins
             **structured_outputs_kwargs["reasoning_parser"],
+        )
+        structured_outputs_group.add_argument(
+            "--reasoning-parser-plugin",
+            **structured_outputs_kwargs["reasoning_parser_plugin"],
         )
         # Deprecated guided decoding arguments
         for arg, type in [
@@ -751,6 +753,10 @@ class EngineArgs:
             "--decode-context-parallel-size",
             "-dcp",
             **parallel_kwargs["decode_context_parallel_size"],
+        )
+        parallel_group.add_argument(
+            "--dcp-kv-cache-interleave-size",
+            **parallel_kwargs["dcp_kv_cache_interleave_size"],
         )
         parallel_group.add_argument(
             "--data-parallel-size", "-dp", **parallel_kwargs["data_parallel_size"]
@@ -1103,6 +1109,9 @@ class EngineArgs:
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument(
+            "--ec-transfer-config", **vllm_kwargs["ec_transfer_config"]
+        )
+        vllm_group.add_argument(
             "--compilation-config", "-O", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
@@ -1184,8 +1193,6 @@ class EngineArgs:
             seed=self.seed,
             revision=self.revision,
             code_revision=self.code_revision,
-            rope_scaling=self.rope_scaling,
-            rope_theta=self.rope_theta,
             hf_token=self.hf_token,
             hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
@@ -1294,15 +1301,7 @@ class EngineArgs:
         """
         Create the VllmConfig.
 
-        NOTE: for autoselection of V0 vs V1 engine, we need to
-        create the ModelConfig first, since ModelConfig's attrs
-        (e.g. the model arch) are needed to make the decision.
-
-        This function set VLLM_USE_V1=X if VLLM_USE_V1 is
-        unspecified by the user.
-
-        If VLLM_USE_V1 is specified by the user but the VllmConfig
-        is incompatible, we raise an error.
+        NOTE: If VllmConfig is incompatible, we raise an error.
         """
         current_platform.pre_register_and_update()
 
@@ -1310,10 +1309,10 @@ class EngineArgs:
 
         # Check if the model is a speculator and override model/tokenizer/config
         # BEFORE creating ModelConfig, so the config is created with the target model
-        # Skip speculator detection for S3 models since HuggingFace cannot load
-        # configs directly from S3 URLs. S3 models can still use speculators with
-        # explicit --speculative-config.
-        if not is_s3(self.model):
+        # Skip speculator detection for cloud storage models (eg: S3, GCS) since
+        # HuggingFace cannot load configs directly from S3 URLs. S3 models can still
+        # use speculators with explicit --speculative-config.
+        if not is_cloud_storage(self.model):
             (self.model, self.tokenizer, self.speculative_config) = (
                 maybe_override_with_speculators(
                     model=self.model,
@@ -1328,22 +1327,7 @@ class EngineArgs:
         self.model = model_config.model
         self.tokenizer = model_config.tokenizer
 
-        # * If VLLM_USE_V1 is unset, we enable V1 for "supported features"
-        #   and fall back to V0 for experimental or unsupported features.
-        # * If VLLM_USE_V1=1, we enable V1 for supported + experimental
-        #   features and raise error for unsupported features.
-        # * If VLLM_USE_V1=0, we disable V1.
-        use_v1 = False
-        try_v1 = envs.VLLM_USE_V1 or not envs.is_set("VLLM_USE_V1")
-        if try_v1 and self._is_v1_supported_oracle(model_config):
-            use_v1 = True
-
-        # If user explicitly set VLLM_USE_V1, sanity check we respect it.
-        if envs.is_set("VLLM_USE_V1"):
-            assert use_v1 == envs.VLLM_USE_V1
-        # Otherwise, set the VLLM_USE_V1 variable globally.
-        else:
-            envs.set_vllm_use_v1(use_v1)
+        self._check_feature_supported(model_config)
 
         # Set default arguments for V1 Engine.
         self._set_default_args(usage_context, model_config)
@@ -1506,20 +1490,6 @@ class EngineArgs:
             else ParallelConfig.data_parallel_rpc_port
         )
 
-        if self.async_scheduling:
-            if self.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "Async scheduling is not supported with pipeline-parallel-size > 1."
-                )
-
-            # Currently, async scheduling does not support speculative decoding.
-            # TODO(woosuk): Support it.
-            if self.speculative_config is not None:
-                raise ValueError(
-                    "Currently, speculative decoding is not supported with "
-                    "async scheduling."
-                )
-
         # Forward the deprecated CLI args to the EPLB config.
         if self.num_redundant_experts is not None:
             self.eplb_config.num_redundant_experts = self.num_redundant_experts
@@ -1559,19 +1529,10 @@ class EngineArgs:
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
             decode_context_parallel_size=self.decode_context_parallel_size,
+            dcp_kv_cache_interleave_size=self.dcp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
         )
-
-        if self.async_scheduling and (
-            parallel_config.distributed_executor_backend
-            not in ("mp", "uni", "external_launcher")
-        ):
-            raise ValueError(
-                "Currently, async scheduling only supports `mp`, `uni` or "
-                "`external_launcher` distributed executor backend, but you choose "
-                f"`{parallel_config.distributed_executor_backend}`."
-            )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
@@ -1625,6 +1586,20 @@ class EngineArgs:
             else None
         )
 
+        if (
+            lora_config is not None
+            and speculative_config is not None
+            and scheduler_config.max_num_batched_tokens
+            < (
+                scheduler_config.max_num_seqs
+                * (speculative_config.num_speculative_tokens + 1)
+            )
+        ):
+            raise ValueError(
+                "Consider increasing max_num_batched_tokens or "
+                "decreasing num_speculative_tokens"
+            )
+
         # bitsandbytes pre-quantized model need a specific model loader
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
@@ -1634,6 +1609,11 @@ class EngineArgs:
         # Pass reasoning_parser into StructuredOutputsConfig
         if self.reasoning_parser:
             self.structured_outputs_config.reasoning_parser = self.reasoning_parser
+
+        if self.reasoning_parser_plugin:
+            self.structured_outputs_config.reasoning_parser_plugin = (
+                self.reasoning_parser_plugin
+            )
 
         # Forward the deprecated CLI args to the StructuredOutputsConfig
         so_config = self.structured_outputs_config
@@ -1702,22 +1682,16 @@ class EngineArgs:
             compilation_config=self.compilation_config,
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
+            ec_transfer_config=self.ec_transfer_config,
             additional_config=self.additional_config,
         )
 
         return config
 
-    def _is_v1_supported_oracle(self, model_config: ModelConfig) -> bool:
-        """Oracle for whether to use V0 or V1 Engine by default."""
-
-        #############################################################
-        # Unsupported Feature Flags on V1.
-
+    def _check_feature_supported(self, model_config: ModelConfig):
+        """Raise an error if the feature is not supported."""
         if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
-            _raise_or_fallback(
-                feature_name="--logits-processor-pattern", recommend_to_remove=False
-            )
-            return False
+            _raise_unsupported_error(feature_name="--logits-processor-pattern")
 
         # No Concurrent Partial Prefills so far.
         if (
@@ -1725,12 +1699,9 @@ class EngineArgs:
             or self.max_long_partial_prefills
             != SchedulerConfig.max_long_partial_prefills
         ):
-            _raise_or_fallback(
-                feature_name="Concurrent Partial Prefill", recommend_to_remove=False
-            )
-            return False
+            _raise_unsupported_error(feature_name="Concurrent Partial Prefill")
 
-        # V1 supports N-gram, Medusa, and Eagle speculative decoding.
+        # N-gram, Medusa, and Eagle are supported for speculative decoding.
         if self.speculative_config is not None:
             # speculative_config could still be a dict at this point
             if isinstance(self.speculative_config, dict):
@@ -1744,35 +1715,6 @@ class EngineArgs:
                     "Please consider using other speculative decoding methods "
                     "such as ngram, medusa, eagle, or mtp."
                 )
-
-        V1_BACKENDS = [
-            "FLASH_ATTN",
-            "PALLAS",
-            "TRITON_ATTN",
-            "TRITON_MLA",
-            "CUTLASS_MLA",
-            "FLASHMLA",
-            "FLASH_ATTN_MLA",
-            "FLASHINFER",
-            "FLASHINFER_MLA",
-            "ROCM_AITER_MLA",
-            "TORCH_SDPA",
-            "FLEX_ATTENTION",
-            "TREE_ATTN",
-            "XFORMERS",
-            "ROCM_ATTN",
-            "ROCM_AITER_UNIFIED_ATTN",
-        ]
-        if (
-            envs.is_set("VLLM_ATTENTION_BACKEND")
-            and envs.VLLM_ATTENTION_BACKEND not in V1_BACKENDS
-        ):
-            name = f"VLLM_ATTENTION_BACKEND={envs.VLLM_ATTENTION_BACKEND}"
-            _raise_or_fallback(feature_name=name, recommend_to_remove=True)
-            return False
-
-        #############################################################
-        # Experimental Features - allow users to opt in.
 
         if self.pipeline_parallel_size > 1:
             supports_pp = getattr(
@@ -1789,18 +1731,7 @@ class EngineArgs:
                     "executor or multiprocessing executor or external "
                     "launcher"
                 )
-                _raise_or_fallback(feature_name=name, recommend_to_remove=False)
-                return False
-
-        if current_platform.is_cpu() and model_config.get_sliding_window() is not None:
-            _raise_or_fallback(
-                feature_name="sliding window (CPU backend)", recommend_to_remove=False
-            )
-            return False
-
-        #############################################################
-
-        return True
+                _raise_unsupported_error(feature_name=name)
 
     def _set_default_args(
         self, usage_context: UsageContext, model_config: ModelConfig
@@ -1999,17 +1930,12 @@ class AsyncEngineArgs(EngineArgs):
         return parser
 
 
-def _raise_or_fallback(feature_name: str, recommend_to_remove: bool):
-    if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
-        raise NotImplementedError(
-            f"VLLM_USE_V1=1 is not supported with {feature_name}."
-        )
-    msg = f"{feature_name} is not supported by the V1 Engine. "
-    msg += "Falling back to V0. "
-    if recommend_to_remove:
-        msg += f"We recommend to remove {feature_name} from your config "
-        msg += "in favor of the V1 Engine."
-    logger.warning(msg)
+def _raise_unsupported_error(feature_name: str):
+    msg = (
+        f"{feature_name} is not supported. We recommend to "
+        f"remove {feature_name} from your config."
+    )
+    raise NotImplementedError(msg)
 
 
 def human_readable_int(value):

@@ -36,6 +36,7 @@ from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.v1.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
@@ -58,20 +59,6 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
-        if not envs.VLLM_USE_V1:
-            raise ValueError(
-                "Using V1 LLMEngine, but envs.VLLM_USE_V1=False. "
-                "This should not happen. As a workaround, try using "
-                "LLMEngine.from_vllm_config(...) or explicitly set "
-                "VLLM_USE_V1=0 or 1 and report this issue on Github."
-            )
-
-        if stat_loggers is not None:
-            raise NotImplementedError(
-                "Passing StatLoggers to LLMEngine in V1 is not yet supported. "
-                "Set VLLM_USE_V1=0 and file and issue on Github."
-            )
-
         self.vllm_config = vllm_config
         self.observability_config = vllm_config.observability_config
         self.model_config = vllm_config.model_config
@@ -294,27 +281,32 @@ class LLMEngine:
             return []
 
         # 1) Get EngineCoreOutput from the EngineCore.
-        outputs = self.engine_core.get_output()
+        with record_function_or_nullcontext("llm_engine step: get_output"):
+            outputs = self.engine_core.get_output()
 
         # 2) Process EngineCoreOutputs.
-        iteration_stats = IterationStats() if self.log_stats else None
-        processed_outputs = self.output_processor.process_outputs(
-            outputs.outputs,
-            engine_core_timestamp=outputs.timestamp,
-            iteration_stats=iteration_stats,
-        )
+        with record_function_or_nullcontext("llm_engine step: process_outputs"):
+            iteration_stats = IterationStats() if self.log_stats else None
+            processed_outputs = self.output_processor.process_outputs(
+                outputs.outputs,
+                engine_core_timestamp=outputs.timestamp,
+                iteration_stats=iteration_stats,
+            )
+            self.output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
         # 3) Abort any reqs that finished due to stop strings.
-        self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
+        with record_function_or_nullcontext("llm_engine step: abort_requests"):
+            self.engine_core.abort_requests(processed_outputs.reqs_to_abort)
 
         # 4) Record stats
-        if self.logger_manager is not None and outputs.scheduler_stats is not None:
-            self.logger_manager.record(
-                scheduler_stats=outputs.scheduler_stats,
-                iteration_stats=iteration_stats,
-                mm_cache_stats=self.processor.stat_mm_cache(),
-            )
-            self.do_log_stats_with_interval()
+        with record_function_or_nullcontext("llm_engine step: record_stats"):
+            if self.logger_manager is not None and outputs.scheduler_stats is not None:
+                self.logger_manager.record(
+                    scheduler_stats=outputs.scheduler_stats,
+                    iteration_stats=iteration_stats,
+                    mm_cache_stats=self.processor.stat_mm_cache(),
+                )
+                self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
 
