@@ -32,7 +32,7 @@ if (NOT triton_kernels_SOURCE_DIR)
 endif()
 
 if (DEFINED ENV{TRITON_KERNELS_SRC_DIR})
-  set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}")
+  set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}/")
 else()
   set(TRITON_KERNELS_PYTHON_DIR "${triton_kernels_SOURCE_DIR}/python/triton_kernels/triton_kernels/")
 endif()
