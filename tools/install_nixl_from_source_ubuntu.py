@@ -175,6 +175,7 @@ def build_and_install_prerequisites(args):
     build_env["LD_LIBRARY_PATH"] = (
         f"{ucx_lib_path}:{ucx_plugin_path}:{existing_ld_path}".strip(":")
     )
+    build_env["LDFLAGS"] = "-Wl,-rpath,$ORIGIN"
     print(f"--> Using LD_LIBRARY_PATH: {build_env['LD_LIBRARY_PATH']}", flush=True)
 
     temp_wheel_dir = os.path.join(ROOT_DIR, "temp_wheelhouse")
