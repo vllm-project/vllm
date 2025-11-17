@@ -322,7 +322,8 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
                     positions = torch.arange(total_tokens, device=q.device)
 
                 # Index rope_cache by positions
-                # freqs_cis shape: [max_seq_len, head_dim*2] (cos and sin concatenated)
+                # freqs_cis shape after convert_freqs_cis_to_real:
+                # [max_seq_len, head_dim] (cos and sin concatenated)
                 positions_flat = positions.flatten()
 
                 # Ensure positions are within bounds
@@ -331,10 +332,16 @@ class TrainableFlashAttention(nn.Module, AttentionLayerBase):
 
                 cos_sin = freqs_cis.index_select(0, positions_flat)
 
-                # Split into cos and sin
-                head_dim = self.head_dim
-                cos = cos_sin[..., :head_dim]
-                sin = cos_sin[..., head_dim:]
+                # Split into cos and sin at half of last dimension
+                # (works for both [*, head_dim] and [*, 2*head_dim] formats)
+                half_dim = cos_sin.shape[-1] // 2
+                cos = cos_sin[..., :half_dim]
+                sin = cos_sin[..., half_dim:]
+
+                # Expand cos/sin to full head_dim by repeating each element
+                # [total_tokens, head_dim//2] -> [total_tokens, head_dim]
+                cos = cos.repeat_interleave(2, dim=-1)
+                sin = sin.repeat_interleave(2, dim=-1)
 
                 # Apply rotary embedding (same as TorchTitan's apply_rotary_emb)
                 def rotate_half(x):
