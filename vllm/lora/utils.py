@@ -166,6 +166,17 @@ def parse_fine_tuned_lora_name(
     raise ValueError(f"{name} is unsupported LoRA weight")
 
 
+def is_base_embeddding_weights(name: str) -> bool:
+    # hardcoded subfixes for input & output embedding weights
+    input_embedding_subfix = ".embed_tokens.base_layer.weight"
+    output_embedding_subfix = ".lm_head.base_layer.weight"
+
+    if name.endswith(input_embedding_subfix) or name.endswith(output_embedding_subfix):
+        return True
+
+    return False
+
+
 def is_regex_target_modules(
     load_modules: str | list[str], expected_lora_modules: list[str]
 ) -> bool:

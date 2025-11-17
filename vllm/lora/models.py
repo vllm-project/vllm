@@ -21,6 +21,7 @@ from vllm.lora.utils import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,
+    is_base_embeddding_weights,
     is_regex_target_modules,
     parse_fine_tuned_lora_name,
     process_packed_modules_mapping,
@@ -118,6 +119,8 @@ class LoRAModel:
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
+            if is_base_embeddding_weights(tensor_name):
+                continue
             module_name, is_lora_a = parse_fine_tuned_lora_name(
                 tensor_name, weights_mapper
             )
@@ -194,6 +197,8 @@ class LoRAModel:
 
         def check_unexpected_modules(modules: dict):
             for lora_module in modules.keys():  # noqa
+                if is_base_embeddding_weights(lora_module):
+                    continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
                 # Handle FSDP file format where experts.base_layer is the
                 # gate_up_proj and experts is the down_proj
