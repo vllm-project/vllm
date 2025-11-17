@@ -28,7 +28,7 @@ else:
 logger = init_logger(__name__)
 
 
-class CompilationMode:
+class CompilationMode(enum.IntEnum):
     """The compilation approach used for torch.compile-based compilation of the
     model."""
 
@@ -115,7 +115,7 @@ class PassConfig:
     """The threshold of the communicated tensor sizes under which
     vllm should use flashinfer fused allreduce. Specified as a
     float in MB.
-    Unspecified will fallback to default values 
+    Unspecified will fallback to default values
     which are compute capability and world size dependent.
         FI_ALLREDUCE_FUSION_MAX_SIZE_MB = {
             90: {
@@ -129,6 +129,8 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
+    enable_qk_norm_rope_fusion: bool = False
+    """Whether to enable the fused Q/K RMSNorm + RoPE pass."""
 
     # TODO(luka) better pass enabling system.
 
@@ -182,6 +184,12 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
                 )
+        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
+            logger.warning_once(
+                "QK Norm + RoPE fusion enabled but the current platform is not "
+                "CUDA or ROCm. The fusion will be disabled."
+            )
+            self.enable_qk_norm_rope_fusion = False
 
 
 @config
@@ -198,7 +206,6 @@ class CompilationConfig:
         - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
         - [`compile_mm_encoder`][vllm.config.CompilationConfig.compile_mm_encoder]
     - CudaGraph capture:
-        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
         - [`cudagraph_mode`][vllm.config.CompilationConfig.cudagraph_mode]
         - [`cudagraph_capture_sizes`]
         [vllm.config.CompilationConfig.cudagraph_capture_sizes]
@@ -208,7 +215,6 @@ class CompilationConfig:
         [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
         - [`cudagraph_copy_inputs`]
         [vllm.config.CompilationConfig.cudagraph_copy_inputs]
-        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
         - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
         - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
@@ -236,7 +242,7 @@ class CompilationConfig:
     Please use mode. Currently all levels are mapped to mode.
     """
     # Top-level Compilation control
-    mode: int | None = None
+    mode: CompilationMode | None = None
     """The compilation approach used for torch.compile-based compilation of the
     model.
 
@@ -314,9 +320,10 @@ class CompilationConfig:
 
     If None, defaults to attention ops for piecewise cudagraphs.
     If empty list [], no ops are excluded (suitable for full cudagraphs)."""
-    compile_mm_encoder: bool = True
+    compile_mm_encoder: bool = False
     """Whether or not to compile the multimodal encoder.
-    Currently, this only works for `Qwen2_5_vl`."""
+    Currently, this only works for `Qwen2_5_vl` on selected platforms. 
+    Disabled by default until more models are supported/tested to work."""
 
     # Inductor capture
     use_inductor: bool | None = None
@@ -369,36 +376,24 @@ class CompilationConfig:
     FULL mode: Capture full cudagraph for all batches. Can be good for small
     models or workloads with small prompts; not supported by many backends.
     Generally for performance FULL_AND_PIECEWISE is better.
-    
+
     FULL_DECODE_ONLY mode: Capture full cudagraph for decode batches only.
     Mixed prefill-decode batches are run without cudagraphs. Can be good for
     decode instances in a P/D setup where prefill is not as important so we
     can save some memory.
-    
+
     FULL_AND_PIECEWISE mode: Capture full cudagraph for decode batches and
     piecewise cudagraph for prefill and mixed prefill-decode batches.
     This is the most performant mode for most models and is the default.
 
     Currently, the cudagraph mode is only used for the v1 engine.
-    Note that the cudagraph logic is generally orthogonal to the 
-    compilation logic. While piecewise cudagraphs require piecewise 
+    Note that the cudagraph logic is generally orthogonal to the
+    compilation logic. While piecewise cudagraphs require piecewise
     compilation (mode=VLLM_COMPILE and non-empty splitting_ops), full
     cudagraphs are supported with and without compilation.
-    
-    Warning: This flag is new and subject to change in addition 
+
+    Warning: This flag is new and subject to change in addition
     more modes may be added.
-    """
-    use_cudagraph: bool = True
-    """Whether to use cudagraph inside compilation:
-
-    - False: cudagraph inside compilation is not used.\n
-    - True: cudagraph inside compilation is used. It requires
-        that all input buffers have fixed addresses, and all
-        splitting ops write their outputs to input buffers.
-
-    Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=FULL_AND
-    _PIECEWISE instead.
     """
     cudagraph_num_of_warmups: int = 0
     """Number of warmup runs for cudagraph.
@@ -414,17 +409,8 @@ class CompilationConfig:
     cudagraph. If the caller can guarantee that the same input buffers
     are always used, it can set this to False. Otherwise, it should
     set this to True, and the compiler will copy the input to an
-    internally managed buffer. Default is False. 
+    internally managed buffer. Default is False.
     Note that this flag is only effective when cudagraph_mode is PIECEWISE.
-    """
-    full_cuda_graph: bool | None = False
-    """whether to use a full cuda graph for the entire forward pass rather than
-    splitting certain operations such as attention into subgraphs. Thus this
-    flag cannot be used together with splitting_ops. This may provide
-    performance benefits for smaller models.
-    Warning: This flag is deprecated and will be removed in the next major or
-    minor release, i.e. v0.11.0 or v1.0.0. Please use cudagraph_mode=
-    FULL_AND_PIECEWISE instead.
     """
     cudagraph_specialize_lora: bool = True
     """Whether to create separate cuda graphs for cases with and without active
@@ -443,7 +429,7 @@ class CompilationConfig:
     outside the partition functions. For a graph with N cudagraph-unsafe ops
     (e.g., Attention), there would be N+1 partitions. To mark an op as
     cudagraph unsafe, we can add `tags=(torch._C.Tag.cudagraph_unsafe)` when
-    register the custom op. 
+    register the custom op.
 
     This config supports both full cudagraph and piecewise cudagraph without
     compiling twice. For piecewise cudagraph, it applies vLLM CUDAGraph wrapper
@@ -460,8 +446,8 @@ class CompilationConfig:
 
     max_cudagraph_capture_size: int | None = field(default=None)
     """The maximum cudagraph capture size.
-    
-    If cudagraph_capture_sizes is specified, this will be set to the largest 
+
+    If cudagraph_capture_sizes is specified, this will be set to the largest
     size in that list (or checked for consistency if specified). If
     cudagraph_capture_sizes is not specified, the list of sizes is generated
     automatically following the pattern:
@@ -470,7 +456,7 @@ class CompilationConfig:
         range(256, max_cudagraph_capture_size + 1, 16))
 
     If not specified, max_cudagraph_capture_size is set to min(max_num_seqs*2,
-    512) by default. This voids OOM in tight memory scenarios with small 
+    512) by default. This voids OOM in tight memory scenarios with small
     max_num_seqs, and prevents capture of many large graphs (>512) that would
     greatly increase startup time with limited performance benefit.
     """
@@ -571,14 +557,41 @@ class CompilationConfig:
 
     __str__ = __repr__
 
+    @field_validator("mode", mode="before")
+    @classmethod
+    def validate_mode_before(cls, value: Any) -> Any:
+        """
+        Enable parsing the `mode` field from string mode names.
+        Accepts both integers (0-3) and string names, like NONE, STOCK_TORCH_COMPILE,
+        DYNAMO_TRACE_ONCE, VLLM_COMPILE.
+        """
+        if isinstance(value, str):
+            # Convert string mode name to integer value
+            mode_name = value.upper()
+
+            if mode_name not in CompilationMode.__members__:
+                raise ValueError(
+                    f"Invalid compilation mode: {value}. "
+                    f"Valid modes are: {', '.join(CompilationMode.__members__.keys())}"
+                )
+
+            return CompilationMode[mode_name]
+        return value
+
     @field_validator("cudagraph_mode", mode="before")
     @classmethod
     def validate_cudagraph_mode_before(cls, value: Any) -> Any:
-        """
-        enable parse the `cudagraph_mode` enum type from string
-        """
+        """Enable parsing of the `cudagraph_mode` enum type from string."""
         if isinstance(value, str):
             return CUDAGraphMode[value.upper()]
+        return value
+
+    @field_validator("pass_config", mode="before")
+    @classmethod
+    def validate_pass_config_before(cls, value: Any) -> Any:
+        """Enable parsing of the `pass_config` field from a dictionary."""
+        if isinstance(value, dict):
+            return PassConfig(**value)
         return value
 
     @field_validator("compile_cache_save_format")
@@ -637,8 +650,10 @@ class CompilationConfig:
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
 
-        if isinstance(self.pass_config, dict):
-            self.pass_config = PassConfig(**self.pass_config)
+        if self.pass_config.enable_qk_norm_rope_fusion:
+            # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
@@ -649,36 +664,6 @@ class CompilationConfig:
             # qk-rope when query and key have different shapes.
             self.inductor_compile_config["combo_kernels"] = True
             self.inductor_compile_config["benchmark_combo_kernel"] = True
-
-        # migrate the deprecated flags
-        if not self.use_cudagraph:
-            logger.warning(
-                "use_cudagraph is deprecated, use cudagraph_mode=NONE instead."
-            )
-            if (
-                self.cudagraph_mode is not None
-                and self.cudagraph_mode != CUDAGraphMode.NONE
-            ):
-                raise ValueError(
-                    "use_cudagraph and cudagraph_mode are mutually"
-                    " exclusive, prefer cudagraph_mode since "
-                    "use_cudagraph is deprecated."
-                )
-            self.cudagraph_mode = CUDAGraphMode.NONE
-        if self.full_cuda_graph:
-            logger.warning(
-                "full_cuda_graph is deprecated, use cudagraph_mode=FULL instead."
-            )
-            if (
-                self.cudagraph_mode is not None
-                and not self.cudagraph_mode.has_full_cudagraphs()
-            ):
-                raise ValueError(
-                    "full_cuda_graph and cudagraph_mode are "
-                    "mutually exclusive, prefer cudagraph_mode "
-                    "since full_cuda_graph is deprecated."
-                )
-            self.cudagraph_mode = CUDAGraphMode.FULL
 
         if self.use_inductor_graph_partition and not is_torch_equal_or_newer(
             "2.9.0.dev"
@@ -857,20 +842,19 @@ class CompilationConfig:
 
     def set_splitting_ops_for_attn_fusion(self):
         assert self.pass_config.enable_attn_fusion
-        # For dynamo-partition (non-inductor) attention fusion,
-        # set splitting_ops to empty to avoid splitting at attention ops
-        self.splitting_ops = []
-        if self.cudagraph_mode.has_piecewise_cudagraphs():
-            logger.warning_once(
-                "enable_attn_fusion is incompatible with piecewise "
-                "cudagraph when use_inductor_graph_partition is off. "
-                "In this case, splitting_ops will be set to empty "
-                "list, and cudagraph_mode will be set to FULL. "
-                "Please ensure you are using attention backends that "
-                "support cudagraph or set cudagraph_mode to NONE "
-                "explicitly if encountering any problems."
-            )
-            self.cudagraph_mode = CUDAGraphMode.FULL
+        if self.splitting_ops is None:
+            self.splitting_ops = []
+            if self.cudagraph_mode.has_piecewise_cudagraphs():
+                logger.warning_once(
+                    "enable_attn_fusion is incompatible with piecewise "
+                    "cudagraph when use_inductor_graph_partition is off. "
+                    "In this case, splitting_ops will be set to empty "
+                    "list, and cudagraph_mode will be set to FULL. "
+                    "Please ensure you are using attention backends that "
+                    "support cudagraph or set cudagraph_mode to NONE "
+                    "explicitly if encountering any problems."
+                )
+                self.cudagraph_mode = CUDAGraphMode.FULL
 
         assert not self.splitting_ops_contain_attention(), (
             "attention ops should not be in splitting_ops "
@@ -891,7 +875,7 @@ class CompilationConfig:
             return self.mode == CompilationMode.VLLM_COMPILE
 
         # Inductor partition case
-        return self.backend == "inductor" and self.mode > CompilationMode.NONE
+        return self.backend == "inductor" and self.mode != CompilationMode.NONE
 
     def custom_op_log_check(self):
         """

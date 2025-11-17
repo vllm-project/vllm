@@ -294,12 +294,6 @@ class Executor(ABC):
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
 
-    def start_profile(self) -> None:
-        self.collective_rpc("start_profile")
-
-    def stop_profile(self) -> None:
-        self.collective_rpc("stop_profile")
-
     def sleep(self, level: int = 1):
         if self.is_sleeping:
             logger.warning("Executor is already sleeping.")

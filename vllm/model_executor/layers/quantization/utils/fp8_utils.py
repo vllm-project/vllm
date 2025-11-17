@@ -34,6 +34,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
     should_use_deepgemm_for_fp8_linear,
+    transform_sf_into_required_layout,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -55,17 +56,13 @@ def cutlass_scaled_mm(
     Bs: torch.Tensor,
     block_size: list[int],
     output_dtype: torch.dtype = torch.float16,
-    is_hopper: bool | None = None,
 ) -> torch.Tensor:
-    if is_hopper is None:
-        is_hopper = current_platform.is_device_capability(90)
     return ops.cutlass_scaled_mm(
         A,
         B.T,
         out_dtype=output_dtype,
         scale_a=As,
-        # SM90 block FP8 requires row-major scale_b, which we do ahead of time
-        scale_b=Bs if block_size is not None and is_hopper else Bs.T,
+        scale_b=Bs.T,
     )
 
 
@@ -119,20 +116,27 @@ def _padded_cutlass(
         dim if dim % pad_multiple == 0 else dim + pad_multiple - (dim % pad_multiple)
     )
 
-    padded_shape = [padded, *qx.shape[1:]]
-    padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
-    padded_qx[0 : qx.shape[0], ...].copy_(qx)
+    has_pad = padded > dim
 
-    padded_x_scale_shape = [*x_scale.shape[1:], padded]
-    padded_x_scale = torch.ones(
-        padded_x_scale_shape, device=x_scale.device, dtype=x_scale.dtype
-    ).permute(-1, -2)
-    padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
+    if has_pad:
+        padded_shape = [padded, *qx.shape[1:]]
+        padded_qx = torch.zeros(padded_shape, device=qx.device, dtype=qx.dtype)
+        padded_qx[0 : qx.shape[0], ...].copy_(qx)
 
-    output = cutlass_scaled_mm(
-        padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype, True
-    )
-    return output[0 : qx.shape[0], ...]
+        padded_x_scale_shape = [*x_scale.shape[1:], padded]
+        padded_x_scale = torch.ones(
+            padded_x_scale_shape, device=x_scale.device, dtype=x_scale.dtype
+        ).permute(-1, -2)
+        padded_x_scale[0 : x_scale.shape[0], ...].copy_(x_scale)
+
+        output = cutlass_scaled_mm(
+            padded_qx, weight, padded_x_scale, weight_scale, block_size, output_dtype
+        )
+        return output[0 : qx.shape[0], ...]
+    else:
+        return cutlass_scaled_mm(
+            qx, weight, x_scale, weight_scale, block_size, output_dtype
+        )
 
 
 def _padded_cutlass_fake(
@@ -303,7 +307,6 @@ class W8A8BlockFp8LinearOp:
                 weight_scale,
                 list(self.weight_group_shape),
                 input_2d.dtype,
-                False,
             )
 
     def _run_aiter(
@@ -325,7 +328,7 @@ class W8A8BlockFp8LinearOp:
         if use_triton:
             gemm_a8w8_blockscale_op = rocm_aiter_ops.triton_gemm_a8w8_blockscale
         else:
-            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_w8a8_blockscale
+            gemm_a8w8_blockscale_op = rocm_aiter_ops.gemm_a8w8_blockscale
 
         if input_scale is not None:
             q_input = input_2d
@@ -339,7 +342,7 @@ class W8A8BlockFp8LinearOp:
             )
         # MI300 uses tuned AITER ASM/C++ kernel
         else:
-            q_input, input_scale = rocm_aiter_ops.per_1x128_fp8_quant(input_2d)
+            q_input, input_scale = rocm_aiter_ops.group_fp8_quant(input_2d)
 
         return gemm_a8w8_blockscale_op(
             q_input,
@@ -927,6 +930,50 @@ def requant_weight_ue8m0_inplace(
         s_old.copy_(s_requant)
 
 
+def deepgemm_post_process_fp8_weight_block(
+    wq: torch.Tensor, ws: torch.Tensor, quant_block_shape: tuple[int], use_e8m0: bool
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert wq.dtype == torch.float8_e4m3fn, (
+        "Expected quantized tensor dtype "
+        f"to be torch.float8_e4m3fn, got {wq.dtype} instead."
+    )
+    assert ws.dtype == torch.float32, (
+        f"Expected tensor scales dtype to be torch.float32, got {ws.dtype} instead"
+    )
+
+    if use_e8m0:
+        requant_weight_ue8m0_inplace(wq, ws, block_size=quant_block_shape)
+
+    original_ndim = wq.ndim
+    if wq.ndim == 2:
+        assert ws.ndim == 2
+        wq = wq.unsqueeze(0)
+        ws = ws.unsqueeze(0)
+
+    # From https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/utils/layout.hpp#L46
+    recipe = (1, 128, 128)
+
+    # Ref : https://github.com/deepseek-ai/DeepGEMM/blob/c9f8b34dcdacc20aa746b786f983492c51072870/csrc/apis/gemm.hpp
+    # DeepGemm uses the `transform_sf_into_required_layout` function to
+    # represent scales in the correct format.
+    dg_ws = transform_sf_into_required_layout(
+        sf=ws,
+        mn=wq.size(1),
+        k=wq.size(2),
+        recipe=recipe,
+        num_groups=wq.size(0),
+        # is the scale factors for A in (Refers to the argument A in A @ B).
+        # Weights are B.
+        is_sfa=False,
+    )
+
+    if original_ndim == 2:
+        wq = wq.squeeze(0)
+        dg_ws = dg_ws.squeeze(0)
+
+    return wq, dg_ws
+
+
 def _maybe_pad_fp8_weight(weight: torch.Tensor) -> torch.Tensor:
     """Pad the weight tensor. This is an optimization on ROCm platform, which
     can benefit from tensors located far enough from one another in memory"""
@@ -1125,9 +1172,7 @@ def process_fp8_weight_block_strategy(
     return weight, weight_scale
 
 
-def maybe_post_process_fp8_weight_block(
-    layer: torch.nn.Module, cutlass_block_fp8_supported: bool
-):
+def maybe_post_process_fp8_weight_block(layer: torch.nn.Module):
     assert layer.weight_block_size is not None
 
     from vllm.utils.deep_gemm import (
@@ -1141,20 +1186,15 @@ def maybe_post_process_fp8_weight_block(
     should_use_deepgemm = should_use_deepgemm_for_fp8_linear(
         layer.orig_dtype, layer.weight
     )
-    if is_deep_gemm_e8m0_used() and should_use_deepgemm:
-        block_sz = tuple(layer.weight_block_size)
-        requant_weight_ue8m0_inplace(
-            layer.weight.data, layer.weight_scale.data, block_sz
+    if should_use_deepgemm:
+        dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
+            wq=layer.weight.data,
+            ws=layer.weight_scale.data,
+            quant_block_shape=tuple(layer.weight_block_size),
+            use_e8m0=is_deep_gemm_e8m0_used(),
         )
-    # SM90 Block FP8 CUTLASS requires row-major weight scales
-    elif (
-        current_platform.is_device_capability(90)
-        and cutlass_block_fp8_supported
-        and not should_use_deepgemm
-    ):
-        layer.weight_scale = torch.nn.Parameter(
-            layer.weight_scale.data.T.contiguous(), requires_grad=False
-        )
+        layer.weight = torch.nn.Parameter(dg_weight, requires_grad=False)
+        layer.weight_scale = torch.nn.Parameter(dg_weight_scale, requires_grad=False)
 
 
 def expert_weight_is_col_major(x: torch.Tensor) -> bool:
