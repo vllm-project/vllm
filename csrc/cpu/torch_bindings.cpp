@@ -100,6 +100,9 @@ void cpu_attention_with_kv_cache(
     const torch::Tensor& scheduler_metadata,
     const std::optional<torch::Tensor>& s_aux);
 
+// Note: just for avoiding importing errors
+void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
+
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
@@ -275,6 +278,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
       "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
+
+  // placeholders
+  ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def("dynamic_scaled_fp8_quant() -> ()", placeholder_op);
+  ops.def("dynamic_per_token_scaled_fp8_quant() -> ()", placeholder_op);
 }
 
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
