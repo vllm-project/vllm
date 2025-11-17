@@ -111,7 +111,11 @@ class CPTritonContext:
 
 
 def correct_attn_out(
-    out: torch.Tensor, lses: torch.Tensor, cp_rank: int, ctx: CPTritonContext, is_lse_base_on_e: bool=True,
+    out: torch.Tensor,
+    lses: torch.Tensor,
+    cp_rank: int,
+    ctx: CPTritonContext,
+    is_lse_base_on_e: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Correct the attention output using the all-gathered lses.
 
@@ -203,7 +207,13 @@ def cp_lse_ag_out_rs(
 
     cp_attn_lse = cp_attn_lse.contiguous()
     lses = cp_group.all_gather(cp_attn_lse, dim=0).view_as(lses)
-    out, lse = correct_attn_out(cp_attn_out, lses, cp_group.rank_in_group, ctx, is_lse_base_on_e=is_lse_base_on_e)
+    out, lse = correct_attn_out(
+        cp_attn_out,
+        lses,
+        cp_group.rank_in_group,
+        ctx,
+        is_lse_base_on_e=is_lse_base_on_e,
+    )
     out = cp_group.reduce_scatter(out, dim=1)
 
     if return_lse:
