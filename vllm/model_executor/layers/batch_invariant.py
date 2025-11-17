@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
-from collections import namedtuple
 from collections.abc import Callable
 from functools import cache
 from typing import Any
@@ -784,13 +783,6 @@ def enable_batch_invariant_mode():
         reduced_precision_val
     )
     torch.backends.cuda.preferred_blas_library(backend="cublaslt")
-
-
-AttentionBlockSize = namedtuple("AttentionBlockSize", ["block_m", "block_n"])
-
-
-def get_batch_invariant_attention_block_size() -> AttentionBlockSize:
-    return AttentionBlockSize(block_m=16, block_n=16)
 
 
 @cache
