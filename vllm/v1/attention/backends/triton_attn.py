@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.math_utils import next_power_of_2
 from vllm.v1.attention.backends.utils import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
@@ -136,7 +137,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                     self.seq_threshold_3D = 0
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
-        headdim_padded = 1 << (self.headdim - 1).bit_length()  # next power of 2 value
+        headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
                 self.seq_threshold_3D,
