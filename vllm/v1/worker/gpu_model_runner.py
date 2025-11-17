@@ -4332,6 +4332,22 @@ class GPUModelRunner(
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
+        # if we have dedicated decode cudagraphs, and spec-decode is enabled,
+        # we need to adjust the cudagraph sizes to be a multiple of the uniform
+        # decode query length to avoid: https://github.com/vllm-project/vllm/issues/28207
+        # temp-fix: https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
+        # Will be removed in the near future when we have seperate cudagraph capture
+        # sizes for decode and mixed prefill-decode.
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and cudagraph_mode.separate_routine()
+            and self.uniform_decode_query_len > 1
+        ):
+            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
+                self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
+            )
+            self.cudagraph_batch_sizes = self.compilation_config.cudagraph_capture_sizes
+
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
