@@ -15,11 +15,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
+    RoutingMethodType,
     fp8_w8a8_moe_quant_config,
     nvfp4_moe_quant_config,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    is_valid_flashinfer_cutlass_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -224,7 +222,10 @@ class ModelOptFp8Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
+        from vllm.attention.layer import (  # Avoid circular import
+            Attention,
+            MLAAttention,
+        )
 
         if isinstance(layer, LinearBase):
             if self.is_layer_excluded(prefix):
@@ -233,7 +234,7 @@ class ModelOptFp8Config(QuantizationConfig):
             if "vision_tower" in prefix or "vision_model" in prefix:
                 return UnquantizedLinearMethod()
             return ModelOptFp8LinearMethod(self)
-        elif isinstance(layer, Attention):
+        elif isinstance(layer, (Attention, MLAAttention)):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
             return ModelOptFp8MoEMethod(self, layer)
@@ -354,12 +355,18 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         self.cutlass_fp8_supported = cutlass_fp8_supported()
         self.flashinfer_moe_backend: FlashinferMoeBackend | None = None
-        if (
-            envs.VLLM_USE_FLASHINFER_MOE_FP8
-            and has_flashinfer_moe()
-            and self.moe.is_act_and_mul
-        ):
+        if envs.VLLM_USE_FLASHINFER_MOE_FP8 and has_flashinfer_moe():
             self.flashinfer_moe_backend = get_flashinfer_moe_backend()
+            if (
+                self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM
+                and not self.moe.is_act_and_mul
+            ):
+                logger.info_once(
+                    "Non-gated MoE is not supported for min-latency mode,"
+                    "falling back to high-throughput mode"
+                )
+                self.flashinfer_moe_backend = FlashinferMoeBackend.CUTLASS
+
             logger.info_once(
                 f"Using FlashInfer {self.flashinfer_moe_backend.value} kernels"
             )
@@ -557,10 +564,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         if self.flashinfer_moe_backend is not None:
-            layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
-            register_moe_scaling_factors(layer)
+            if self.moe.is_act_and_mul:
+                layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
             if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
                 rotate_flashinfer_fp8_moe_weights(layer.w13_weight, layer.w2_weight)
+        register_moe_scaling_factors(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -570,9 +578,13 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         return fp8_w8a8_moe_quant_config(
             w1_scale=layer.w13_weight_scale,
+            g1_alphas=layer.output1_scales_gate_scalar.squeeze(),
             w2_scale=layer.w2_weight_scale,
+            g2_alphas=layer.output2_scales_scalar.squeeze(),
             a1_scale=layer.w13_input_scale,
+            a1_gscale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            a2_gscale=layer.w2_input_scale_inv,
             per_act_token_quant=False,
         )
 
@@ -605,7 +617,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
 
         if self.flashinfer_moe_backend == FlashinferMoeBackend.TENSORRT_LLM:
-            assert self.fused_experts is None
             assert activation == "silu", (
                 f"Expected 'silu' activation but got {activation}"
             )
@@ -638,27 +649,10 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        #
-        # Note: the order here is important. self.fused_experts can override
-        # cutlass or fused_experts.
-        #
-        if self.fused_experts is not None:
-            return self.fused_experts(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
-                inplace=False,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-        elif self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
-            assert not renormalize
-            assert activation == "silu", (
-                f"Expected 'silu' activation but got {activation}"
+        if self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS:
+            assert activation in ("silu", "relu2_no_mul"), (
+                "Expected activation to be in ('silu', 'relu2_no_mul'),"
+                f"but got {activation}"
             )
             return flashinfer_cutlass_moe_fp8(
                 x,
@@ -905,7 +899,10 @@ class ModelOptNvFp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
-        from vllm.attention.layer import Attention  # Avoid circular import
+        from vllm.attention.layer import (  # Avoid circular import
+            Attention,
+            MLAAttention,
+        )
 
         skip_layer = self.is_layer_excluded(prefix)
         if isinstance(layer, LinearBase):
@@ -915,7 +912,7 @@ class ModelOptNvFp4Config(QuantizationConfig):
             if "vision_tower" in prefix or "vision_model" in prefix:
                 return UnquantizedLinearMethod()
             return ModelOptNvFp4LinearMethod(self)
-        elif isinstance(layer, Attention):
+        elif isinstance(layer, (Attention, MLAAttention)):
             return ModelOptFp8KVCacheMethod(self)
         elif isinstance(layer, FusedMoE):
             if skip_layer:
@@ -958,6 +955,9 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         elif envs.VLLM_NVFP4_GEMM_BACKEND.startswith("flashinfer-"):
             self.backend = envs.VLLM_NVFP4_GEMM_BACKEND
             assert has_flashinfer(), f"FlashInfer is required for {self.backend}"
+        elif envs.VLLM_NVFP4_GEMM_BACKEND == "cutlass":
+            self.backend = "cutlass"
+            assert cutlass_fp4_supported(), f"Cutlass is required for {self.backend}"
 
         if self.backend == "none":
             raise ValueError(
@@ -1159,8 +1159,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         moe: FusedMoEConfig,
         layer: torch.nn.Module,
     ) -> None:
-        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (  # noqa: E501
-            detect_nvfp4_moe_support,
+        from vllm.model_executor.layers.quantization.utils.nvfp4_moe_support import (
+            detect_nvfp4_moe_support,  # noqa: E501
         )
 
         super().__init__(moe)
@@ -1647,8 +1647,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
             from vllm.model_executor.models.llama4 import Llama4MoE
 
-            assert self.fused_experts is None
-
             a1_gscale = layer.w13_input_scale_quant
             (hidden_states_fp4, hidden_states_scale_linear_fp4) = (
                 flashinfer.fp4_quantize(
@@ -1660,16 +1658,19 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             use_llama4_routing = (
                 custom_routing_function is Llama4MoE.custom_routing_function
             )
-            routing_method_type = flashinfer.RoutingMethodType.DeepSeekV3
+            routing_method_type = layer.routing_method_type
             if use_llama4_routing:
-                routing_method_type = flashinfer.RoutingMethodType.Llama4
+                routing_method_type = RoutingMethodType.Llama4
+            router_logits = (
+                router_logits.to(torch.float32)
+                if routing_method_type == RoutingMethodType.DeepSeekV3
+                else router_logits
+            )
             routing_bias = e_score_correction_bias
             if routing_bias is not None:
                 routing_bias = routing_bias.to(torch.bfloat16)
             out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
-                routing_logits=router_logits
-                if use_llama4_routing
-                else router_logits.to(torch.float32),
+                routing_logits=router_logits,
                 routing_bias=routing_bias,
                 hidden_states=hidden_states_fp4,
                 hidden_states_scale=hidden_states_scale_linear_fp4.view(
@@ -1693,8 +1694,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 output2_scale_scalar=layer.g2_alphas.data,
                 num_experts=global_num_experts,
                 top_k=top_k,
-                n_group=num_expert_group if num_expert_group is not None else 0,
-                topk_group=topk_group if topk_group is not None else 0,
+                n_group=num_expert_group,
+                topk_group=topk_group,
                 intermediate_size=layer.intermediate_size_per_partition,
                 local_expert_offset=layer.ep_rank * layer.local_num_experts,
                 local_num_experts=layer.local_num_experts,
@@ -1720,13 +1721,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             indices_type=self.topk_indices_dtype,
         )
 
-        #
-        # Note: the order here is important. self.fused_experts can override
-        # flashinfer cutlass, cutlass fp4 or fused_experts but not marlin or
-        # trtllm.
-        #
         if self.use_marlin:
-            assert self.fused_experts is None
             return fused_marlin_moe(
                 x,
                 layer.w13_weight,
@@ -1747,23 +1742,24 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
                 workspace=layer.workspace,
             )
 
-        elif self.fused_experts is not None:
-            assert (
-                self.allow_flashinfer
-                and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        elif (
+            self.allow_flashinfer
+            and self.flashinfer_moe_backend == FlashinferMoeBackend.CUTLASS
+        ):
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (  # noqa: E501
+                flashinfer_cutlass_moe_fp4,
             )
 
-            assert is_valid_flashinfer_cutlass_fused_moe(
-                x, layer.w13_weight, layer.w2_weight
-            ), "Flashinfer CUTLASS Fused MoE not applicable!"
+            assert self.moe_quant_config is not None
 
-            return self.fused_experts(
+            return flashinfer_cutlass_moe_fp4(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
-                inplace=False,  # TODO(shuw): fix later, now output is high prec
+                quant_config=self.moe_quant_config,
+                inplace=False,
                 activation=activation,
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,

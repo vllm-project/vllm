@@ -403,3 +403,9 @@ def has_triton_kernels() -> bool:
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
     return _has_module("tilelang")
+
+
+def has_arctic_inference() -> bool:
+    """Whether the optional `arctic_inference` package is available."""
+
+    return _has_module("arctic_inference")
